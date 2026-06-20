@@ -16,6 +16,7 @@
 
 const fs = require('fs');
 const path = require('path');
+const { generateMermaid } = require('./mindmap');
 
 const ROOT = path.resolve(__dirname, '..');
 const TEMPLATE_PATH = path.join(ROOT, 'templates', 'base.html');
@@ -80,49 +81,106 @@ function renderBooksIndex(completed) {
     ? completed
         .map(
           (item) => `
-        <a href="${item.path.replace(/^books\//, '')}" class="block rounded-xl border border-slate-800 bg-slate-900 p-5 transition hover:border-indigo-500 hover:bg-slate-800">
-          <p class="text-xs uppercase tracking-wide text-indigo-300">${escapeHtml(item.category || 'General')}</p>
-          <h2 class="mt-2 text-lg font-semibold text-white">${escapeHtml(item.title)}</h2>
-          <p class="mt-2 text-sm text-slate-400">Completed: ${escapeHtml(item.completed_at || 'N/A')}</p>
+        <a href="${item.path.replace(/^books\//, '')}" class="block rounded-xl border border-stone-200 bg-white p-6 transition-all duration-200 hover:border-stone-400 hover:shadow-sm">
+          <p class="font-mono text-xs uppercase tracking-wider text-stone-400">${escapeHtml(item.category || 'General')}</p>
+          <h3 class="mt-2 text-lg font-semibold text-stone-800 hover:text-stone-900">${escapeHtml(item.title)}</h3>
+          <div class="mt-4 flex items-center justify-between text-xs text-stone-400 font-mono">
+            <span>Completed: ${escapeHtml(item.completed_at || 'N/A')}</span>
+            <span class="text-stone-300">Read more →</span>
+          </div>
         </a>`
         )
         .join('\n')
     : `
-        <div class="rounded-xl border border-dashed border-slate-700 bg-slate-900/50 p-8 text-center text-slate-400">
+        <div class="rounded-xl border border-dashed border-stone-300 bg-stone-50 p-12 text-center text-stone-500 w-full sm:col-span-2">
           尚無已完成的主題。Agent 完成第一篇後，目錄會自動更新。
         </div>`;
+
+  // Dynamic compilation of the beautiful Mermaid DAG tech tree!
+  const mermaidDiagram = generateMermaid();
 
   const html = `<!DOCTYPE html>
 <html lang="zh-Hant">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>System Design Every Day</title>
+  <title>System Design Every Day | 系統設計學習手冊</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@300;400;500;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
   <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+  <script>
+    mermaid.initialize({
+      startOnLoad: true,
+      theme: 'default',
+      securityLevel: 'loose'
+    });
+  </script>
+  <style>
+    :root {
+      --bg: #ffffff;
+      --bg-soft: #fafaf9;
+      --text: #262a2f;
+      --text-2: #6b7078;
+      --text-3: #9aa0a8;
+      --border: #ecebe8;
+      --border-strong: #dedcd8;
+      --accent: #3f6188;
+      --accent-soft: #eef2f7;
+      --sans: "Noto Sans TC", system-ui, -apple-system, sans-serif;
+      --mono: "JetBrains Mono", monospace;
+    }
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: var(--sans);
+    }
+    .mermaid {
+      background: var(--bg-soft);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 24px;
+    }
+  </style>
 </head>
-<body class="min-h-screen bg-slate-950 text-slate-100">
-  <header class="border-b border-slate-800">
-    <div class="mx-auto max-w-6xl px-6 py-10">
-      <p class="text-sm uppercase tracking-[0.2em] text-indigo-300">Learning Handbook</p>
-      <h1 class="mt-3 text-4xl font-bold text-white">System Design Every Day</h1>
-      <p class="mt-4 max-w-3xl text-slate-400">
-        每日自動更新的 System Design 學習手冊。每篇指南包含概念說明、架構圖與互動式演示。
+<body class="min-h-screen">
+  <header class="border-b border-stone-200 bg-stone-50/50 backdrop-blur">
+    <div class="mx-auto max-w-5xl px-6 py-12">
+      <p class="font-mono text-xs uppercase tracking-[0.2em] text-stone-400">Learning Handbook</p>
+      <h1 class="mt-3 text-4xl font-bold tracking-tight text-stone-800">System Design Every Day</h1>
+      <p class="mt-4 max-w-2xl text-stone-500 font-light leading-relaxed">
+        每日自動更新的 System Design 學習手冊。每篇指南皆包含概念說明、System Design 脈絡、架構圖與可互動的演算法/系統行為演示。
       </p>
     </div>
   </header>
 
-  <main class="mx-auto max-w-6xl px-6 py-10">
-    <div class="mb-6 flex items-center justify-between">
-      <h2 class="text-2xl font-semibold text-white">已完成主題</h2>
-      <span class="text-sm text-slate-400">${completed.length} topic(s)</span>
-    </div>
-    <div class="grid gap-4 md:grid-cols-2">
-      ${cards}
-    </div>
+  <main class="mx-auto max-w-5xl px-6 py-12">
+    <!-- ===================== KNOWLEDGE GRAPH (MINDMAP) ===================== -->
+    <section class="mb-14">
+      <div class="mb-6">
+        <h2 class="text-xl font-semibold text-stone-800">系統設計知識地圖</h2>
+        <p class="text-xs text-stone-400 mt-1 font-mono">Interactive Knowledge Roadmap (綠色代表已完成可點擊閱讀，藍色代表待解鎖)</p>
+      </div>
+      <div class="mermaid">
+${mermaidDiagram}
+      </div>
+    </section>
+
+    <!-- ===================== COMPLETED CARDS ===================== -->
+    <section>
+      <div class="mb-8 flex items-center justify-between">
+        <h2 class="text-xl font-semibold text-stone-800">已完成主題</h2>
+        <span class="font-mono text-xs text-stone-400 bg-stone-100 px-3 py-1 rounded-full">${completed.length} topic(s)</span>
+      </div>
+      <div class="grid gap-6 sm:grid-cols-2">
+        ${cards}
+      </div>
+    </section>
   </main>
 
-  <footer class="border-t border-slate-800 py-8 text-center text-sm text-slate-500">
-    <p>Generated from docs/completed.json</p>
+  <footer class="border-t border-stone-100 py-12 text-center text-xs text-stone-400 font-mono">
+    <p>Generated with 🤍 by System Design Every Day</p>
   </footer>
 </body>
 </html>`;
@@ -138,6 +196,35 @@ function escapeHtml(value) {
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;')
     .replace(/'/g, '&#39;');
+}
+
+/**
+ * Scan content.html for sections to build dynamic TOC links
+ */
+function extractToc(content) {
+  const sections = [];
+  let match;
+  // Regex matches <section id="id"> ... (optionally <span class="sec-num">num</span>) ... <h2>title</h2>
+  const sectionRegex = /<section\s+id="([^"]+)"[^>]*>[\s\S]*?(?:<span\s+class="sec-num">([^<]*)<\/span>\s*)?<h2>([^<]+)<\/h2>/g;
+  
+  while ((match = sectionRegex.exec(content)) !== null) {
+    sections.push({
+      id: match[1],
+      num: match[2] ? match[2].trim() : '',
+      title: match[3].trim()
+    });
+  }
+  
+  if (sections.length === 0) {
+    return '';
+  }
+  
+  return sections
+    .map((s) => {
+      const numSpan = s.num ? `<span class="n">${escapeHtml(s.num)}</span>` : '';
+      return `<a href="#${escapeHtml(s.id)}">${numSpan}${escapeHtml(s.title)}</a>`;
+    })
+    .join('\n        ');
 }
 
 function main() {
@@ -173,8 +260,12 @@ function main() {
   const content = readFileOrDefault(contentPath);
   const script = readFileOrDefault(scriptPath);
 
+  // Extract TOC dynamically from content.html
+  const tocHtml = extractToc(content);
+
   const html = template
     .replace('<!-- TITLE_PLACEHOLDER -->', escapeHtml(title))
+    .replace('<!-- TOC_PLACEHOLDER -->', tocHtml)
     .replace('<!-- CONTENT_PLACEHOLDER -->', content)
     .replace('<!-- SCRIPT_PLACEHOLDER -->', script ? `\n${script}\n` : '');
 
