@@ -264,7 +264,7 @@ function main() {
   const tocHtml = extractToc(content);
 
   const html = template
-    .replace('<!-- TITLE_PLACEHOLDER -->', escapeHtml(title))
+    .replace(/<!-- TITLE_PLACEHOLDER -->/g, escapeHtml(title))
     .replace('<!-- TOC_PLACEHOLDER -->', tocHtml)
     .replace('<!-- CONTENT_PLACEHOLDER -->', content)
     .replace('<!-- SCRIPT_PLACEHOLDER -->', script ? `\n${script}\n` : '');
