@@ -49,6 +49,19 @@ function loadJSON(filePath, fallback = {}) {
 }
 
 /**
+ * Compute prerequisite readiness for a candidate node.
+ * A prerequisite edge { from, to, type:'prerequisite' } means `from` must be learned before `to`.
+ * Returns the list of still-missing prerequisite ids and whether all are satisfied.
+ */
+function computePrereqStatus(nodeId, edges, completedIds) {
+  const missing = edges
+    .filter(edge => edge.to === nodeId && edge.type === 'prerequisite')
+    .map(edge => edge.from)
+    .filter(fromId => !completedIds.has(fromId));
+  return { satisfied: missing.length === 0, missing };
+}
+
+/**
  * Recommend the next topic(s) to write based on the last completed topic and DAG relationships.
  */
 function recommendNext(lastTopicId) {
@@ -127,9 +140,26 @@ function recommendNext(lastTopicId) {
     }
   }
 
+  // Dedupe by topic id (a node may be reachable via several edges), keeping the first reason.
+  const seen = new Set();
+  const deduped = recommendations.filter(rec => {
+    if (seen.has(rec.id)) return false;
+    seen.add(rec.id);
+    return true;
+  });
+
+  // Annotate each candidate with prerequisite readiness, then rank "ready" ones first.
+  // Order within the same readiness bucket is preserved, so selection stays non-deterministic
+  // among equally-ready candidates while never hiding an unmet-prerequisite from the Agent.
+  const annotated = deduped.map(rec => {
+    const { satisfied, missing } = computePrereqStatus(rec.id, mindmap.edges, completedIds);
+    return { ...rec, prerequisites_satisfied: satisfied, missing_prereqs: missing };
+  });
+  annotated.sort((a, b) => Number(b.prerequisites_satisfied) - Number(a.prerequisites_satisfied));
+
   console.log(JSON.stringify({
     last_completed_topic: lastId || 'None',
-    recommendations: recommendations.slice(0, 5)
+    recommendations: annotated.slice(0, 5)
   }, null, 2));
 }
 
