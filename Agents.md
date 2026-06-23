@@ -58,6 +58,23 @@
 
 ---
 
+## 💾 Git Commit Message 規範
+
+為了保持 Git 歷史紀錄的簡潔與一致性，所有 Commit 必須採用**單行（One-liner）描述**，不需額外條列 Bullet Points。並依據改動類型使用對應的標籤（Tag）：
+
+*   **自動化文件生成**：使用 `[automation]` 標籤。
+    *   *格式*：`[automation] Add {topic-id} - {Brief description}`
+    *   *範例*：`[automation] Add data-replication-basics - publish data replication basics handbook`
+*   **功能性更新、修復或一般維護**：使用標準的 `[feat]`、`[fix]`、`[chore]`、`[refactor]` 標籤。
+    *   *格式*：`[tag] {Brief description}`
+    *   *範例*：`[fix] fix a system-level bug in generate.js for TOC title rendering`
+*   **擴充新的心智圖或待辦項目**（前段選題/圖譜維護）：使用 `[explore]` 標籤。
+    *   *格式*：`[explore] {Brief description}`
+    *   *範例*：`[explore] add data-replication-basics and advanced-replication-consistency to todo and mindmap`
+*   **不需添加Co-Author** : 保持提交訊息單行簡潔。
+
+---
+
 ## 📂 相關路徑與工具對照表
 
 | 路徑 / 命令 | 用途 | 權限與異動規範 |
@@ -73,4 +90,5 @@
 | `node scripts/completed-ledger.js` | 完成日誌查詢 CLI | **唯讀查詢** |
 | `node scripts/mindmap.js` | 心智圖推薦與 Mermaid 編譯 CLI | **唯讀查詢與編譯** |
 | `node scripts/generate.js` | 範本組裝、Mermaid 編譯與索引更新編譯器 | **自動化執行** |
+| `node scripts/remove-todo.js` | 從 todo.json 移除已完成主題的 CLI 腳本 | **自動化執行** |
 | `node scripts/validate.js` | 狀態檔一致性驗證 | **改完 JSON 必跑** |

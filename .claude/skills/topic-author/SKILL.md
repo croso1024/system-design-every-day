@@ -28,7 +28,7 @@ description: >-
 - [ ] 2. 撰寫草稿：drafts/<id>/content.html (必填) 與 script.html (互動 JS，可選)
 - [ ] 3. 組裝發佈：node scripts/generate.js --topic <id> --title "..." --category "..."
 - [ ] 4. 品質檢查：用 ReadLints 檢查產出的 books/<id>/index.html 有無 HTML/CSS 錯誤
-- [ ] 5. 收尾：確認狀態同步 → 視需要把該主題移出 todo.json → git commit & push
+- [ ] 5. 收尾：執行 remove-todo.js 移除 todo -> 執行 validate.js 驗證 -> git commit（遵循單行規範）
 ```
 
 ### Step 1：選定主題
@@ -76,8 +76,22 @@ node scripts/generate.js --topic <id> --title "標題" --category "分類"
 ### Step 5：收尾
 
 - 確認 `docs/completed.json` 已新增該主題、`books/index.html` 已渲染出含新節點的可點擊心智圖。
-- **發佈後把該主題從 `docs/todo.json` 移除**（generate.js 不會自動清 todo）。移除後跑 `node scripts/validate.js` 確認一致。
-- `git commit & push`（依使用者指示，不要擅自 push）。
+- **移除待辦項目**：執行以下獨立腳本，將已完成的主題自 `docs/todo.json` 中自動移除：
+  ```bash
+  node scripts/remove-todo.js --topic <id>
+  ```
+- **狀態一致性驗證**：移除後，**必須**執行驗證腳本，確保 `todo.json`、`completed.json` 與 `mindmap.json` 之間的狀態完全一致且無語法錯誤：
+  ```bash
+  node scripts/validate.js
+  ```
+- **Git 提交（嚴格遵循單行規範）**：
+  依據專案規範，Commit Message 必須為**單行（One-liner）描述**，不要條列 Bullet Points。
+  自動化文件生成的 Commit 必須使用 `[automation]` 標籤：
+  ```bash
+  git add .
+  git commit -m "[automation] Add <id> - publish <title> handbook"
+  ```
+  （注意：除非使用者明確要求，否則**不要**擅自 push 到遠端。）
 
 ## 撰稿鐵律（讀者體驗）
 
