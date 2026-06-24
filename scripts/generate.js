@@ -4,24 +4,39 @@
  * Assemble a topic page from templates/base.html and draft content files.
  *
  * Usage:
- *   node scripts/generate.js --topic <topic-id> --title "Topic Title"
+ *   node scripts/generate.js --topic <topic-id> --title "Topic Title" [--category "Category"]
  *
  * Draft files (created by Agent before running this script):
  *   drafts/<topic-id>/content.html   - HTML body content (injected into CONTENT_PLACEHOLDER)
  *   drafts/<topic-id>/script.html    - Optional extra scripts (injected into SCRIPT_PLACEHOLDER)
  *
  * Output:
- *   books/<topic-id>/index.html
+ *   books/<topic-id>/index.html      - the assembled topic page
+ *   docs/completed.json              - upserted (auto-maintained, do not hand-edit)
+ *   books/index.html                 - re-rendered handbook index
+ *
+ * 安全設計：
+ *   1. 先做「TOC 結構守門」——草稿若抽不到任何合法 <section id> + <h2>，直接 exit 1
+ *      且「完全不落任何檔」(零副作用)，避免把壞頁標記成已完成。
+ *   2. 「先全部算好、最後集中原子寫入」：所有檔案寫入都走 temp+rename 原子寫，
+ *      且 completed.json 與 books/index.html 這對互相一致的狀態具回滾保護。
  */
 
 const fs = require('fs');
 const path = require('path');
-const { generateMermaid } = require('./mindmap');
+const {
+  loadCompleted,
+  saveCompleted,
+  upsertCompleted,
+  buildBooksIndexHtml,
+  writeBooksIndex,
+  escapeHtml,
+  ensureDir,
+} = require('./lib/books');
+const { writeFileAtomic } = require('./lib/atomic');
 
 const ROOT = path.resolve(__dirname, '..');
 const TEMPLATE_PATH = path.join(ROOT, 'templates', 'base.html');
-const COMPLETED_PATH = path.join(ROOT, 'docs', 'completed.json');
-const BOOKS_INDEX_PATH = path.join(ROOT, 'books', 'index.html');
 
 function parseArgs(argv) {
   const args = {};
@@ -48,165 +63,16 @@ function readFileOrDefault(filePath, fallback = '') {
   return fs.readFileSync(filePath, 'utf8');
 }
 
-function ensureDir(dirPath) {
-  fs.mkdirSync(dirPath, { recursive: true });
-}
-
-function loadCompleted() {
-  if (!fs.existsSync(COMPLETED_PATH)) {
-    return [];
-  }
-  return JSON.parse(fs.readFileSync(COMPLETED_PATH, 'utf8'));
-}
-
-function saveCompleted(entries) {
-  fs.writeFileSync(COMPLETED_PATH, `${JSON.stringify(entries, null, 2)}\n`, 'utf8');
-}
-
-function upsertCompletedEntry(entry) {
-  const completed = loadCompleted();
-  const index = completed.findIndex((item) => item.id === entry.id);
-  if (index >= 0) {
-    completed[index] = { ...completed[index], ...entry };
-  } else {
-    completed.push(entry);
-  }
-  completed.sort((a, b) => a.title.localeCompare(b.title, 'zh-Hant'));
-  saveCompleted(completed);
-  return completed;
-}
-
-function renderBooksIndex(completed) {
-  const cards = completed.length
-    ? completed
-        .map(
-          (item) => `
-        <a href="${item.path.replace(/^books\//, '')}" class="block rounded-xl border border-stone-200 bg-white p-6 transition-all duration-200 hover:border-stone-400 hover:shadow-sm">
-          <p class="font-mono text-xs uppercase tracking-wider text-stone-400">${escapeHtml(item.category || 'General')}</p>
-          <h3 class="mt-2 text-lg font-semibold text-stone-800 hover:text-stone-900">${escapeHtml(item.title)}</h3>
-          <div class="mt-4 flex items-center justify-between text-xs text-stone-400 font-mono">
-            <span>Completed: ${escapeHtml(item.completed_at || 'N/A')}</span>
-            <span class="text-stone-300">Read more →</span>
-          </div>
-        </a>`
-        )
-        .join('\n')
-    : `
-        <div class="rounded-xl border border-dashed border-stone-300 bg-stone-50 p-12 text-center text-stone-500 w-full sm:col-span-2">
-          尚無已完成的主題。Agent 完成第一篇後，目錄會自動更新。
-        </div>`;
-
-  // Dynamic compilation of the beautiful Mermaid DAG tech tree!
-  const mermaidDiagram = generateMermaid();
-
-  const html = `<!DOCTYPE html>
-<html lang="zh-Hant">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>System Design Every Day | 系統設計學習手冊</title>
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@300;400;500;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
-  <script src="https://cdn.tailwindcss.com"></script>
-  <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
-  <script>
-    mermaid.initialize({
-      startOnLoad: true,
-      theme: 'default',
-      securityLevel: 'loose'
-    });
-  </script>
-  <style>
-    :root {
-      --bg: #ffffff;
-      --bg-soft: #fafaf9;
-      --text: #262a2f;
-      --text-2: #6b7078;
-      --text-3: #9aa0a8;
-      --border: #ecebe8;
-      --border-strong: #dedcd8;
-      --accent: #3f6188;
-      --accent-soft: #eef2f7;
-      --sans: "Noto Sans TC", system-ui, -apple-system, sans-serif;
-      --mono: "JetBrains Mono", monospace;
-    }
-    body {
-      background: var(--bg);
-      color: var(--text);
-      font-family: var(--sans);
-    }
-    .mermaid {
-      background: var(--bg-soft);
-      border: 1px solid var(--border);
-      border-radius: 12px;
-      padding: 24px;
-    }
-  </style>
-</head>
-<body class="min-h-screen">
-  <header class="border-b border-stone-200 bg-stone-50/50 backdrop-blur">
-    <div class="mx-auto max-w-5xl px-6 py-12">
-      <p class="font-mono text-xs uppercase tracking-[0.2em] text-stone-400">Learning Handbook</p>
-      <h1 class="mt-3 text-4xl font-bold tracking-tight text-stone-800">System Design Every Day</h1>
-      <p class="mt-4 max-w-2xl text-stone-500 font-light leading-relaxed">
-        每日自動更新的 System Design 學習手冊。每篇指南皆包含概念說明、System Design 脈絡、架構圖與可互動的演算法/系統行為演示。
-      </p>
-    </div>
-  </header>
-
-  <main class="mx-auto max-w-5xl px-6 py-12">
-    <!-- ===================== KNOWLEDGE GRAPH (MINDMAP) ===================== -->
-    <section class="mb-14">
-      <div class="mb-6">
-        <h2 class="text-xl font-semibold text-stone-800">系統設計知識地圖</h2>
-        <p class="text-xs text-stone-400 mt-1 font-mono">Interactive Knowledge Roadmap (綠色代表已完成可點擊閱讀，藍色代表待解鎖)</p>
-      </div>
-      <div class="mermaid">
-${mermaidDiagram}
-      </div>
-    </section>
-
-    <!-- ===================== COMPLETED CARDS ===================== -->
-    <section>
-      <div class="mb-8 flex items-center justify-between">
-        <h2 class="text-xl font-semibold text-stone-800">已完成主題</h2>
-        <span class="font-mono text-xs text-stone-400 bg-stone-100 px-3 py-1 rounded-full">${completed.length} topic(s)</span>
-      </div>
-      <div class="grid gap-6 sm:grid-cols-2">
-        ${cards}
-      </div>
-    </section>
-  </main>
-
-  <footer class="border-t border-stone-100 py-12 text-center text-xs text-stone-400 font-mono">
-    <p>Generated with 🤍 by System Design Every Day</p>
-  </footer>
-</body>
-</html>`;
-
-  ensureDir(path.dirname(BOOKS_INDEX_PATH));
-  fs.writeFileSync(BOOKS_INDEX_PATH, html, 'utf8');
-}
-
-function escapeHtml(value) {
-  return String(value)
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#39;');
-}
-
 /**
- * Scan content.html for sections to build dynamic TOC links
+ * Scan content.html for sections to build dynamic TOC links.
+ * 回傳空字串代表「找不到任何合法章節」——呼叫端據此守門。
  */
 function extractToc(content) {
   const sections = [];
   let match;
   // Regex matches <section id="id"> ... (optionally <span class="sec-num">num</span>) ... <h2>title</h2>
   const sectionRegex = /<section\s+id="([^"]+)"[^>]*>[\s\S]*?(?:<span\s+class="sec-num">([^<]*)<\/span>\s*)?<h2>([^<]+)<\/h2>/g;
-  
+
   while ((match = sectionRegex.exec(content)) !== null) {
     sections.push({
       id: match[1],
@@ -214,11 +80,11 @@ function extractToc(content) {
       title: match[3].trim()
     });
   }
-  
+
   if (sections.length === 0) {
     return '';
   }
-  
+
   return sections
     .map((s) => {
       const numSpan = s.num ? `<span class="n">${escapeHtml(s.num)}</span>` : '';
@@ -245,11 +111,11 @@ function main() {
   const outputPath = path.join(outputDir, 'index.html');
   const relativeOutputPath = path.posix.join('books', topicId, 'index.html');
 
+  // ---- 守門 1：必要輸入檔存在 (純檢查，無副作用) ----
   if (!fs.existsSync(TEMPLATE_PATH)) {
     console.error(`Template not found: ${TEMPLATE_PATH}`);
     process.exit(1);
   }
-
   if (!fs.existsSync(contentPath)) {
     console.error(`Draft content not found: ${contentPath}`);
     console.error('Create drafts/<topic-id>/content.html before running generate.js');
@@ -260,28 +126,48 @@ function main() {
   const content = readFileOrDefault(contentPath);
   const script = readFileOrDefault(scriptPath);
 
-  // Extract TOC dynamically from content.html
+  // ---- 守門 2：TOC 結構 (必須在任何寫檔之前；失敗則零副作用) ----
   const tocHtml = extractToc(content);
+  if (!tocHtml) {
+    console.error('草稿未含任何合法 <section id="..."> + <h2> 結構，左側 Auto-TOC 將完全無法渲染，拒絕發佈。');
+    console.error(`請依黃金結構公式撰寫 drafts/${topicId}/content.html（見 topic-author SKILL Step 2），再重跑 generate.js。`);
+    process.exit(1);
+  }
 
-  const html = template
+  // ---- 階段一：純計算 (不落任何檔) ----
+  const pageHtml = template
     .replace(/<!-- TITLE_PLACEHOLDER -->/g, escapeHtml(title))
     .replace('<!-- TOC_PLACEHOLDER -->', tocHtml)
     .replace('<!-- CONTENT_PLACEHOLDER -->', content)
     .replace('<!-- SCRIPT_PLACEHOLDER -->', script ? `\n${script}\n` : '');
 
-  ensureDir(outputDir);
-  fs.writeFileSync(outputPath, html, 'utf8');
-
   const completedAt = new Date().toISOString().slice(0, 10);
-  const completed = upsertCompletedEntry({
+  const prevCompleted = loadCompleted();
+  const nextCompleted = upsertCompleted(prevCompleted, {
     id: topicId,
     title,
     category,
     completed_at: completedAt,
     path: relativeOutputPath
   });
+  const booksIndexHtml = buildBooksIndexHtml(nextCompleted); // generateMermaid 也在此一次算完
 
-  renderBooksIndex(completed);
+  // ---- 階段二：集中原子落檔 ----
+  // 順序：主題頁 → completed.json → books/index.html。
+  // completed.json 的 path 欄位指向主題頁，故頁必須先存在 (validate 會檢查 path 是否存在)。
+  ensureDir(outputDir);
+  writeFileAtomic(outputPath, pageHtml);
+
+  saveCompleted(nextCompleted);
+  try {
+    writeBooksIndex(booksIndexHtml);
+  } catch (e) {
+    // 首頁寫入失敗 → 回滾 completed.json 至寫入前，避免「completed 已記錄但首頁未同步」。
+    // 主題頁留存為無害孤兒 (validate 不檢查孤兒)，重跑 generate.js 即可修正。
+    saveCompleted(prevCompleted);
+    console.error(`寫入 books/index.html 失敗，已回滾 docs/completed.json：${e.message}`);
+    process.exit(1);
+  }
 
   console.log(`Generated: ${relativeOutputPath}`);
   console.log(`Updated: docs/completed.json`);

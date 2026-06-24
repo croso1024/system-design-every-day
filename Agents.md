@@ -35,8 +35,8 @@
 
 | 階段 | 由誰負責 | Skill |
 | :--- | :--- | :--- |
-| 決定主題、新增主題到 mindmap/todo、規劃學習順序 | 前段 | `.cursor/skills/topic-explorer/` |
-| 撰寫 `drafts/<id>/`、`generate.js` 發佈、品質檢查、收尾 | 後段 | `.cursor/skills/topic-author/` |
+| 決定主題、新增主題到 mindmap/todo、規劃學習順序 | 前段 | `.claude/skills/topic-explorer/` |
+| 撰寫 `drafts/<id>/`、`generate.js` 發佈、品質檢查、收尾 | 後段 | `.claude/skills/topic-author/` |
 | 視覺與互動元件風格規範 | 撰稿必讀 | `guidelines/style-guide.md` |
 
 > 選題具「非確定性」：`mindmap.js --action next` 回傳最多 5 筆候選，Agent 自發擇一；
@@ -51,8 +51,11 @@
    規模擴大後全量載入會干擾上下文、浪費 token 且易解析錯誤。一律改用 CLI 取得精簡輸出：
    - `node scripts/completed-ledger.js --action status | get-recent --limit <n>`（唯讀查詢）
    - `node scripts/mindmap.js --action next`（唯讀推薦）
-   - 新增主題用 `topic-explorer` skill 內的 `add-topic.js`，不要手拼大型 JSON。
+   - 新增主題用 `node scripts/add-topic.js`，不要手拼大型 JSON。
 2. **改完任何 `docs/*.json` 必跑** `node scripts/validate.js`，未通過不可收工。
+   後段發佈的 fail-safe 不變量：**`validate` 與 `git commit` 一律在 `remove-todo.js` 之後**；
+   切勿在 `generate.js` 與 `remove-todo.js` 之間跑 validate——此時主題同時存在於 todo 與 completed，
+   互斥檢查必然失敗，屬預期的中間狀態（CI 每次 push 都跑 validate，故 commit 快照必須互斥乾淨）。
 3. **Notion 淺色極簡基調為全站視覺底線**：禁止 Dark Mode 樣式與高對比配色，禁止引入大型前端框架。
 4. **不要從零撰寫 HTML 外殼**（header/footer 等），由 `templates/base.html` + `generate.js` 自動組裝。
 
@@ -81,7 +84,7 @@
 | :--- | :--- | :--- |
 | `docs/todo.json` | 待辦主題池 | 由 `topic-explorer` skill 維護（`add-topic.js` 寫入；發佈後由 author 收尾移除） |
 | `docs/mindmap.json` | 全站心智圖 (DAG) | 記錄 Prerequisites / Related 關係；經 `add-topic.js` 寫入，勿手拼 |
-| `docs/completed.json` | 已完成主題 metadata | **自動更新**（由 `generate.js` 維護，勿手動編輯） |
+| `docs/completed.json` | 已完成主題 metadata | **自動維護**：發佈由 `generate.js` 寫入、**撤回**用 `remove-completed.js`；**仍禁止手動編輯本檔** |
 | `guidelines/style-guide.md` | 視覺與互動元件風格規範 | 撰稿前嚴格閱讀遵循 |
 | `templates/base.html` | 全站 HTML 外殼範本 (Notion 淺色版) | 嚴格讀取，不建議手動更改 |
 | `drafts/{topic-id}/` | **撰稿主要工作區** | AI 自由建立與寫入 content.html 和 script.html |
@@ -89,6 +92,8 @@
 | `books/index.html` | 手冊首頁（目錄 + 可點擊心智圖） | **自動生成**（由 `generate.js` 產出，勿手動編輯） |
 | `node scripts/completed-ledger.js` | 完成日誌查詢 CLI | **唯讀查詢** |
 | `node scripts/mindmap.js` | 心智圖推薦與 Mermaid 編譯 CLI | **唯讀查詢與編譯** |
+| `node scripts/add-topic.js` | 新增主題到 mindmap+todo（雙檔原子寫入） | **自動化執行**（前段選題） |
 | `node scripts/generate.js` | 範本組裝、Mermaid 編譯與索引更新編譯器 | **自動化執行** |
 | `node scripts/remove-todo.js` | 從 todo.json 移除已完成主題的 CLI 腳本 | **自動化執行** |
-| `node scripts/validate.js` | 狀態檔一致性驗證 | **改完 JSON 必跑** |
+| `node scripts/remove-completed.js` | 從 completed.json 撤回主題並重繪索引（三檔交易式寫入 + 回滾） | **自動化執行**（撤回/重做用） |
+| `node scripts/validate.js` | 狀態檔一致性驗證（含todo<->completed互斥 + prerequisite 環偵測 + books/index<->completed 卡片同步） | **改完 JSON 必跑** |

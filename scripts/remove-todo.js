@@ -11,6 +11,7 @@
 
 const fs = require('fs');
 const path = require('path');
+const { writeJSONAtomic } = require('./lib/atomic');
 
 const ROOT = path.resolve(__dirname, '..');
 const TODO_PATH = path.join(ROOT, 'docs', 'todo.json');
@@ -67,7 +68,7 @@ function main() {
     console.log(`Topic "${topicId}" was not found in todo.json (already removed or never existed).`);
   } else {
     try {
-      fs.writeFileSync(TODO_PATH, `${JSON.stringify(todoList, null, 2)}\n`, 'utf8');
+      writeJSONAtomic(TODO_PATH, todoList);
       console.log(`Successfully removed "${topicId}" from todo.json.`);
     } catch (e) {
       console.error(`Error writing to todo.json: ${e.message}`);

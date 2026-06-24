@@ -28,7 +28,7 @@ description: >-
 - [ ] 2. 撰寫草稿：drafts/<id>/content.html (必填) 與 script.html (互動 JS，可選)
 - [ ] 3. 組裝發佈：node scripts/generate.js --topic <id> --title "..." --category "..."
 - [ ] 4. 品質檢查：用 ReadLints 檢查產出的 books/<id>/index.html 有無 HTML/CSS 錯誤
-- [ ] 5. 收尾：執行 remove-todo.js 移除 todo -> 執行 validate.js 驗證 -> git commit（遵循單行規範）
+- [ ] 5. 收尾（順序不可顛倒）：remove-todo.js 移除 todo -> validate.js 驗證 -> git commit（單行規範）
 ```
 
 ### Step 1：選定主題
@@ -73,14 +73,27 @@ node scripts/generate.js --topic <id> --title "標題" --category "分類"
 → **自動 upsert `docs/completed.json`** → 重新編譯 Mermaid 並重寫 `books/index.html`。
 （`completed.json` 與 `books/index.html` 皆為自動產物，**勿手動編輯**。）
 
+> **TOC 結構守門**：若草稿抽不到任何合法 `<section id="..."> + <h2>`（TOC 會是空的），
+> `generate.js` 會**直接 `exit 1` 且不寫入任何檔**（completed.json 與頁面都不會產生）。
+> 遇到此情況請回 Step 2 依黃金公式修正結構再重跑。
+> 所有狀態檔寫入皆為 temp+rename 原子寫，且 `completed.json` 與 `books/index.html` 互為一致時具回滾保護
+> （`generate.js` 發佈與 `remove-completed.js` 撤回兩條路徑皆然，任一步寫檔失敗即回滾至動作前的一致快照）。
+
 ### Step 5：收尾
+
+> **fail-safe 不變量（務必遵守順序）**：`remove-todo.js` → `validate.js` → `git commit`。
+> `validate` 與 `commit` 一律在 `remove-todo` **之後**；**切勿**在 `generate.js` 與 `remove-todo.js`
+> 之間跑 validate——此時主題同時在 todo 與 completed，互斥檢查必然失敗（這是預期的中間狀態，
+> 非錯誤）。CI 每次 push 都會跑 validate，遵守此順序即保證 commit 快照互斥乾淨、CI 必綠。
+> 若 Step 4 的 lint 發現問題，因尚未 remove-todo、尚未 commit，可安全回 Step 2 修草稿重跑 `generate.js`。
 
 - 確認 `docs/completed.json` 已新增該主題、`books/index.html` 已渲染出含新節點的可點擊心智圖。
 - **移除待辦項目**：執行以下獨立腳本，將已完成的主題自 `docs/todo.json` 中自動移除：
   ```bash
   node scripts/remove-todo.js --topic <id>
   ```
-- **狀態一致性驗證**：移除後，**必須**執行驗證腳本，確保 `todo.json`、`completed.json` 與 `mindmap.json` 之間的狀態完全一致且無語法錯誤：
+- **狀態一致性驗證**：移除後，**必須**執行驗證腳本，確保 `todo.json`、`completed.json`、`mindmap.json`
+  之間狀態完全一致且無語法錯誤；此腳本亦會比對 `books/index.html` 的主題卡片與 `completed.json` 是否同步：
   ```bash
   node scripts/validate.js
   ```
@@ -92,6 +105,26 @@ node scripts/generate.js --topic <id> --title "標題" --category "分類"
   git commit -m "[automation] Add <id> - publish <title> handbook"
   ```
   （注意：除非使用者明確要求，否則**不要**擅自 push 到遠端。）
+
+## 撤回 / 重做主題（逃生路徑）
+
+發錯主題、要重做或下架時，**不要手改 `docs/completed.json`**（禁止），改用獨立腳本：
+
+```bash
+node scripts/remove-completed.js --topic <id>                 # 移除 completed 條目 + 重繪首頁（頁面預設保留）
+node scripts/remove-completed.js --topic <id> --restore-todo  # 同時把主題退回 todo.json（要重做時用）
+node scripts/remove-completed.js --topic <id> --purge-page    # 連同刪除 books/<id>/ 頁面（不可逆）
+node scripts/remove-completed.js --topic <id> --no-reindex    # 不重繪首頁（見下方注意事項）
+node scripts/remove-completed.js --topic <id> --dry-run       # 先預覽將發生的變更，不落檔
+```
+
+撤回的三步寫入（completed.json → todo.json → books/index.html）為**單一交易**，任一步失敗即逆序回滾至撤回前；`--purge-page` 不可逆故獨立於交易、最後執行。
+
+> **`--no-reindex` 注意事項**：此旗標會**刻意不重繪 `books/index.html`**，使首頁與 `completed.json` 暫時不一致。
+> 由於 `validate.js` 現會比對「首頁卡片 ↔ completed」，**用了 `--no-reindex` 後、跑 `validate` / `git commit` 之前，
+> 務必自行補一次重繪**（重跑一次不帶 `--no-reindex` 的 `remove-completed.js`，或執行 `generate.js`），否則 validate 會失敗。
+
+撤回後一樣要跑 `node scripts/validate.js` 確認一致。本腳本**不動 mindmap**（刪節點屬 `topic-explorer` 職責）。
 
 ## 撰稿鐵律（讀者體驗）
 
@@ -114,4 +147,3 @@ node scripts/generate.js --topic <id> --title "標題" --category "分類"
 ## 補充資源
 
 - 視覺與互動元件完整規範與範例：`guidelines/style-guide.md`
-- 理想成品參考：`DistributedTransactions.html`

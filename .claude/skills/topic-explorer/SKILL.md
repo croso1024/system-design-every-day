@@ -23,7 +23,7 @@ description: >-
 ## 鐵律 (Hard Rules)
 
 1. **嚴禁全量讀寫 `docs/completed.json` 與 `docs/mindmap.json`**。一律用下方 CLI 取得精簡輸出；
-   新增主題用 `add-topic.js`，不要手動拼接大型 JSON。
+   新增主題用 `node scripts/add-topic.js`（雙檔原子寫入 + todo 失敗時回滾 mindmap），不要手動拼接大型 JSON。
 2. **每次改完 JSON 必跑驗證**：`node scripts/validate.js`。未通過不可收工。
 3. **參照完整性**：`todo.json` / `completed.json` 的每個 id **必須**同時是 `mindmap.json` 的 node，
    否則 `validate.js` 會失敗。新增主題時務必同時建立 node。
@@ -66,10 +66,10 @@ node scripts/mindmap.js --action next --last-topic <id>     # 指定基準主題
 
 ## 工作流程 C：寫入圖譜與待辦 (核心寫入動作)
 
-使用 skill 內附腳本，**不要手改 JSON**：
+使用 `scripts/add-topic.js`，**不要手改 JSON**：
 
 ```bash
-node .cursor/skills/topic-explorer/scripts/add-topic.js \
+node scripts/add-topic.js \
   --id consistent-hashing \
   --title "一致性雜湊 (Consistent Hashing)" \
   --category "Caching & Sharding" \
@@ -86,7 +86,7 @@ node .cursor/skills/topic-explorer/scripts/add-topic.js \
 寫入後：
 
 ```bash
-node scripts/validate.js   # 必跑，確認 nodes / edges / todo / completed 一致且無懸空邊
+node scripts/validate.js   # 必跑，確認 nodes / edges / todo / completed 一致、無懸空邊、無 prerequisite 環、todo↔completed 互斥、books/index↔completed 卡片同步
 ```
 
 驗證失敗時：依錯誤訊息修正（多半是缺 node、id 重複、或邊指向不存在節點），再驗證直到通過。
@@ -101,7 +101,7 @@ git commit -m "[explore] add <id> to todo and mindmap"
 ## DAG 衛生準則
 
 - **方向正確**：`prerequisite` 邊一律 `先備 → 進階`（學習依賴方向）。
-- **不可成環**：prerequisite 邊不能形成循環（會讓「解鎖」邏輯失效）。新增前確認新主題不會回指其祖先。
+- **不可成環**：prerequisite 邊不能形成循環（會讓「解鎖」邏輯失效）。**現由 `validate.js` 以 DFS 強制偵測 prerequisite 環**（add-topic 也擋自環）；新增前仍應人工確認新主題不會回指其祖先。
 - **優先掛接**：新節點盡量連到既有圖譜，避免孤島節點；找不到關聯時才作為獨立起點。
 - **prerequisite vs related**：強學習依賴用 `prerequisite`；同層、互補、對照關係用 `related`。
 

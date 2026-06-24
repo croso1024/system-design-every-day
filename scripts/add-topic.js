@@ -1,14 +1,17 @@
 #!/usr/bin/env node
 
 /**
- * add-topic.js — 低風險的「新主題」寫入工具 (Topic Explorer Skill)
+ * add-topic.js — 低風險的「新主題」寫入工具 (前段選題/圖譜維護)
  *
- * 原子化地將一個新主題寫入 docs/mindmap.json (nodes + edges) 與 docs/todo.json，
+ * 將一個新主題寫入 docs/mindmap.json (nodes + edges) 與 docs/todo.json，
  * 避免 Agent 直接全量讀寫大型 JSON 造成的 token 浪費與解析錯誤。
- * 寫入後請務必執行 `node scripts/validate.js` 驗證結構一致性。
+ *
+ * 寫入安全性：每個檔以 temp+rename 做「單檔原子寫入」；對 mindmap + todo 這對「雙檔」
+ * 採「先寫 mindmap、todo 寫入失敗則回滾 mindmap」，達成兩檔「全有或全無」。
+ * 寫入後請務必執行 `node scripts/validate.js` 驗證結構一致性 (含懸空邊與 prerequisite 環)。
  *
  * 用法:
- *   node .cursor/skills/topic-explorer/scripts/add-topic.js \
+ *   node scripts/add-topic.js \
  *     --id <topic-id> --title "標題" --category "分類" \
  *     [--prereq id1,id2] [--related id3,id4] [--no-todo] [--dry-run]
  *
@@ -27,6 +30,9 @@
 
 const fs = require('fs');
 const path = require('path');
+const { writeJSONAtomic } = require('./lib/atomic');
+
+const ROOT = path.resolve(__dirname, '..');
 
 function parseArgs(argv) {
   const args = {};
@@ -45,25 +51,19 @@ function parseArgs(argv) {
   return args;
 }
 
-/** 由腳本位置向上尋找含 docs/mindmap.json 的專案根目錄，避免相對深度寫死。 */
-function findProjectRoot(startDir) {
-  let dir = startDir;
-  for (let i = 0; i < 8; i += 1) {
-    if (fs.existsSync(path.join(dir, 'docs', 'mindmap.json'))) return dir;
-    const parent = path.dirname(dir);
-    if (parent === dir) break;
-    dir = parent;
-  }
-  return null;
+function fail(message) {
+  console.error(`[add-topic] ERROR: ${message}`);
+  process.exit(1);
 }
 
 function readJSON(filePath, fallback) {
   if (!fs.existsSync(filePath)) return fallback;
-  return JSON.parse(fs.readFileSync(filePath, 'utf8'));
-}
-
-function writeJSON(filePath, data) {
-  fs.writeFileSync(filePath, `${JSON.stringify(data, null, 2)}\n`, 'utf8');
+  try {
+    return JSON.parse(fs.readFileSync(filePath, 'utf8'));
+  } catch (e) {
+    fail(`${path.basename(filePath)} 解析失敗（檔案可能損壞）：${e.message}`);
+  }
+  return fallback; // 不會執行到 (fail 會 exit)，純為靜態分析完整性
 }
 
 function splitList(value) {
@@ -72,11 +72,6 @@ function splitList(value) {
     .split(',')
     .map((s) => s.trim())
     .filter(Boolean);
-}
-
-function fail(message) {
-  console.error(`[add-topic] ERROR: ${message}`);
-  process.exit(1);
 }
 
 function main() {
@@ -91,12 +86,9 @@ function main() {
     fail(`id "${id}" 不是合法的 kebab-case (僅允許小寫英數與連字號)。`);
   }
 
-  const root = findProjectRoot(__dirname);
-  if (!root) fail('找不到專案根目錄 (向上找不到 docs/mindmap.json)。');
-
-  const mindmapPath = path.join(root, 'docs', 'mindmap.json');
-  const todoPath = path.join(root, 'docs', 'todo.json');
-  const completedPath = path.join(root, 'docs', 'completed.json');
+  const mindmapPath = path.join(ROOT, 'docs', 'mindmap.json');
+  const todoPath = path.join(ROOT, 'docs', 'todo.json');
+  const completedPath = path.join(ROOT, 'docs', 'completed.json');
 
   const mindmap = readJSON(mindmapPath, { nodes: [], edges: [] });
   const todo = readJSON(todoPath, []);
@@ -135,7 +127,7 @@ function main() {
   if (args['dry-run']) {
     console.log(JSON.stringify({
       dry_run: true,
-      project_root: root,
+      project_root: ROOT,
       add_node: newNode,
       add_edges: newEdges,
       add_to_todo: addTodo ? newNode : null,
@@ -143,13 +135,27 @@ function main() {
     return;
   }
 
+  // ---- 寫入 (雙檔原子 + 回滾) ----
+  // 先記下 mindmap.json 的原始位元組，作為 todo 寫入失敗時的回滾依據。
+  const mindmapBackup = fs.existsSync(mindmapPath) ? fs.readFileSync(mindmapPath, 'utf8') : null;
+
   mindmap.nodes.push(newNode);
   mindmap.edges.push(...newEdges);
-  writeJSON(mindmapPath, mindmap);
+  writeJSONAtomic(mindmapPath, mindmap);
 
   if (addTodo) {
-    todo.push(newNode);
-    writeJSON(todoPath, todo);
+    try {
+      todo.push(newNode);
+      writeJSONAtomic(todoPath, todo);
+    } catch (e) {
+      // todo 寫入失敗 → 還原 mindmap，確保兩檔「全有或全無」。
+      if (mindmapBackup !== null) {
+        fs.writeFileSync(mindmapPath, mindmapBackup, 'utf8');
+      } else if (fs.existsSync(mindmapPath)) {
+        fs.unlinkSync(mindmapPath); // 原本不存在 → 還原為不存在
+      }
+      fail(`寫入 todo.json 失敗，已回滾 mindmap.json：${e.message}`);
+    }
   }
 
   console.log(JSON.stringify({
