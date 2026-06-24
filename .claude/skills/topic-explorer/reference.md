@@ -11,7 +11,7 @@
 { "id": "rate-limiter", "title": "限流器 (Rate Limiter)", "category": "API Design" }
 ```
 
-### docs/completed.json (Array) — 由 generate.js 自動維護，勿手改
+### docs/completed.json (Array) — 由 generate.js 自動維護；撤回用 `scripts/remove-completed.js`，勿手改
 ```json
 {
   "id": "distributed-transactions-handbook",
@@ -104,13 +104,13 @@
 2. 依拓撲序逐一寫入：
 
 ```bash
-node .cursor/skills/topic-explorer/scripts/add-topic.js --id cache-patterns \
+node scripts/add-topic.js --id cache-patterns \
   --title "快取策略 (Cache Patterns)" --category "Caching"
 
-node .cursor/skills/topic-explorer/scripts/add-topic.js --id cache-invalidation \
+node scripts/add-topic.js --id cache-invalidation \
   --title "快取失效與一致性" --category "Caching" --prereq cache-patterns
 
-node .cursor/skills/topic-explorer/scripts/add-topic.js --id cdn \
+node scripts/add-topic.js --id cdn \
   --title "內容傳遞網路 (CDN)" --category "Caching" --related cache-patterns
 ```
 
