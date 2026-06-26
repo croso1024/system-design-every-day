@@ -71,6 +71,15 @@ function recommendNext(lastTopicId) {
 
   const completedIds = new Set(completed.map(item => item.id));
   const todoIds = new Set(todo.map(item => item.id));
+  const todoById = new Map(todo.map(item => [item.id, item]));
+
+  function withBrief(rec) {
+    const todoItem = todoById.get(rec.id);
+    if (todoItem && typeof todoItem.brief === 'string' && todoItem.brief.trim()) {
+      return { ...rec, brief: todoItem.brief };
+    }
+    return rec;
+  }
 
   // Determine actual last completed topic if not provided
   let lastId = lastTopicId;
@@ -153,7 +162,7 @@ function recommendNext(lastTopicId) {
   // among equally-ready candidates while never hiding an unmet-prerequisite from the Agent.
   const annotated = deduped.map(rec => {
     const { satisfied, missing } = computePrereqStatus(rec.id, mindmap.edges, completedIds);
-    return { ...rec, prerequisites_satisfied: satisfied, missing_prereqs: missing };
+    return withBrief({ ...rec, prerequisites_satisfied: satisfied, missing_prereqs: missing });
   });
   annotated.sort((a, b) => Number(b.prerequisites_satisfied) - Number(a.prerequisites_satisfied));
 

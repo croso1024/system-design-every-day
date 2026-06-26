@@ -60,6 +60,12 @@ function validateTodo(todo) {
     if (typeof item.category !== 'string' || !item.category) {
       error(`${label} is missing a valid 'category' (string)`);
     }
+
+    if (item.brief !== undefined) {
+      if (typeof item.brief !== 'string' || !item.brief.trim()) {
+        error(`${label} has invalid 'brief' (must be a non-empty string when present)`);
+      }
+    }
   });
 
   return ids;
