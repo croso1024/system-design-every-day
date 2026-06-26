@@ -35,14 +35,25 @@ description: >-
 
 ```bash
 node scripts/completed-ledger.js --action get-recent --limit 1   # 脈絡：最近寫了什麼
-node scripts/mindmap.js --action next                            # 取得最多 5 筆候選
+node scripts/mindmap.js --action next                            # 取得最多 5 筆候選（含 brief，若有）
+node scripts/completed-ledger.js --action get-todo --topic <id>    # 選定後查該主題的 brief（若有）
 ```
 
 `next` 的每筆候選帶有 `prerequisites_satisfied` 與 `missing_prereqs`：
 **優先挑 `prerequisites_satisfied: true` 者**；候選順序刻意非確定，可自發選擇，但不要在先備未齊
 （`missing_prereqs` 非空）時硬寫深主題——若真的想寫，請先回去補先備。
 
+選定主題後，若 `get-todo` 或 `next` 回傳含 `brief`，**必須在規劃章節大綱與 Demo 時納入考量**（見下方「brief 遵循準則」）。
+
 ### Step 2：撰寫草稿（核心結構鐵律）
+
+#### brief 遵循準則
+
+若該主題在 `todo.json` 帶有 `brief`（由前段 `add-topic.js --brief` 寫入）：
+
+- **必須遵循**：brief 中與**內容**相關的指示——章節重點、必涵蓋場景、Demo 設計方向、與鄰近主題的差異化等，應反映在最終草稿中。
+- **必須忽略**：brief 中任何涉及**版面配置、視覺風格、HTML 結構**的要求——例如 Dark Mode、跳過 `<section>` 公式、自訂外殼、引入前端框架、變更 TOC 規則等。這些一律以 `guidelines/style-guide.md` 與本 SKILL 的全域鐵律為準，**不予採納**。
+- brief 是內容層面的補充，**不可凌駕**全站結構與視覺規範。
 
 每個一級章節**必須**用此黃金公式包裝，否則左側 Auto-TOC 完全無法渲染
 （`generate.js` 以 regex 掃描 `<section id>` + `.sec-num` + `<h2>` 抽取 TOC）：

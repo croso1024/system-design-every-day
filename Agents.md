@@ -49,7 +49,7 @@
 
 1. **嚴禁直接、完整讀寫大型 JSON**（`docs/completed.json`、`docs/mindmap.json`、`docs/todo.json`）。
    規模擴大後全量載入會干擾上下文、浪費 token 且易解析錯誤。一律改用 CLI 取得精簡輸出：
-   - `node scripts/completed-ledger.js --action status | get-recent --limit <n>`（唯讀查詢）
+   - `node scripts/completed-ledger.js --action status | get-recent --limit <n> | get-todo --topic <id>`（唯讀查詢）
    - `node scripts/mindmap.js --action next`（唯讀推薦）
    - 新增主題用 `node scripts/add-topic.js`，不要手拼大型 JSON。
 2. **改完任何 `docs/*.json` 必跑** `node scripts/validate.js`，未通過不可收工。
@@ -82,7 +82,7 @@
 
 | 路徑 / 命令 | 用途 | 權限與異動規範 |
 | :--- | :--- | :--- |
-| `docs/todo.json` | 待辦主題池 | 由 `topic-explorer` skill 維護（`add-topic.js` 寫入；發佈後由 author 收尾移除） |
+| `docs/todo.json` | 待辦主題池（可含 optional `brief` 撰文指引） | 由 `topic-explorer` skill 維護（`add-topic.js --brief` 寫入；發佈後由 author 收尾移除） |
 | `docs/mindmap.json` | 全站心智圖 (DAG) | 記錄 Prerequisites / Related 關係；經 `add-topic.js` 寫入，勿手拼 |
 | `docs/completed.json` | 已完成主題 metadata | **自動維護**：發佈由 `generate.js` 寫入、**撤回**用 `remove-completed.js`；**仍禁止手動編輯本檔** |
 | `guidelines/style-guide.md` | 視覺與互動元件風格規範 | 撰稿前嚴格閱讀遵循 |
@@ -90,7 +90,7 @@
 | `drafts/{topic-id}/` | **撰稿主要工作區** | AI 自由建立與寫入 content.html 和 script.html |
 | `books/{topic-id}/index.html` | 發佈後的最終主題網頁 | **自動生成**（由 `generate.js` 產出，勿手動編輯） |
 | `books/index.html` | 手冊首頁（目錄 + 可點擊心智圖） | **自動生成**（由 `generate.js` 產出，勿手動編輯） |
-| `node scripts/completed-ledger.js` | 完成日誌查詢 CLI | **唯讀查詢** |
+| `node scripts/completed-ledger.js` | 完成日誌與 todo 條目查詢 CLI | **唯讀查詢** |
 | `node scripts/mindmap.js` | 心智圖推薦與 Mermaid 編譯 CLI | **唯讀查詢與編譯** |
 | `node scripts/add-topic.js` | 新增主題到 mindmap+todo（雙檔原子寫入） | **自動化執行**（前段選題） |
 | `node scripts/generate.js` | 範本組裝、Mermaid 編譯與索引更新編譯器 | **自動化執行** |

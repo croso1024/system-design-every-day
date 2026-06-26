@@ -13,7 +13,7 @@
  * 用法:
  *   node scripts/add-topic.js \
  *     --id <topic-id> --title "標題" --category "分類" \
- *     [--prereq id1,id2] [--related id3,id4] [--no-todo] [--dry-run]
+ *     [--prereq id1,id2] [--related id3,id4] [--brief "撰文重點"] [--no-todo] [--dry-run]
  *
  * 旗標說明:
  *   --id        新主題的 kebab-case id (同時作為 drafts/<id>/ 與 books/<id>/ 資料夾名)
@@ -21,6 +21,7 @@
  *   --category  分類 (例: "Distributed Transactions"、"Caching")
  *   --prereq    逗號分隔的「先備主題」node id 清單 → 產生 edge { from: prereq, to: id, type: 'prerequisite' }
  *   --related   逗號分隔的「關聯主題」node id 清單 → 產生 edge { from: id, to: related, type: 'related' }
+ *   --brief     選填。加入 todo 時一併寫入的 per-topic 撰文指引（2-3 句即可）；僅內容取向，不涉及版面格式
  *   --no-todo   只加進 mindmap，不加進 todo.json (預設會同時加入 todo)
  *   --dry-run   只印出將會發生的變更，不實際寫檔
  *
@@ -80,7 +81,7 @@ function main() {
   const category = args.category || 'General';
 
   if (!id || !title) {
-    fail('必填參數缺失。用法: --id <topic-id> --title "標題" [--category "分類"] [--prereq a,b] [--related c,d] [--no-todo] [--dry-run]');
+    fail('必填參數缺失。用法: --id <topic-id> --title "標題" [--category "分類"] [--prereq a,b] [--related c,d] [--brief "撰文重點"] [--no-todo] [--dry-run]');
   }
   if (!/^[a-z0-9]+(-[a-z0-9]+)*$/.test(id)) {
     fail(`id "${id}" 不是合法的 kebab-case (僅允許小寫英數與連字號)。`);
@@ -117,7 +118,13 @@ function main() {
     if (r === id) fail('--related 不可指向自己。');
   }
 
+  const brief = typeof args.brief === 'string' ? args.brief.trim() : '';
+  if (args.brief !== undefined && args.brief !== true && !brief) {
+    fail('--brief 若提供，必須是非空字串。');
+  }
+
   const newNode = { id, title, category };
+  const todoEntry = brief ? { ...newNode, brief } : { ...newNode };
   const newEdges = [
     ...prereqs.map((from) => ({ from, to: id, type: 'prerequisite' })),
     ...relateds.map((to) => ({ from: id, to, type: 'related' })),
@@ -130,7 +137,7 @@ function main() {
       project_root: ROOT,
       add_node: newNode,
       add_edges: newEdges,
-      add_to_todo: addTodo ? newNode : null,
+      add_to_todo: addTodo ? todoEntry : null,
     }, null, 2));
     return;
   }
@@ -145,7 +152,7 @@ function main() {
 
   if (addTodo) {
     try {
-      todo.push(newNode);
+      todo.push(todoEntry);
       writeJSONAtomic(todoPath, todo);
     } catch (e) {
       // todo 寫入失敗 → 還原 mindmap，確保兩檔「全有或全無」。

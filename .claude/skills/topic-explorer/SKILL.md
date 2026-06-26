@@ -74,14 +74,24 @@ node scripts/add-topic.js \
   --title "一致性雜湊 (Consistent Hashing)" \
   --category "Caching & Sharding" \
   --prereq hashing-basics \
-  --related load-balancing,data-partitioning
+  --related load-balancing,data-partitioning \
+  --brief "重點放在 Ring 上的 key 遷移與虛擬節點；Demo 模擬節點上下線。勿重複講 hash 基礎。"
 ```
 
 - `--prereq a,b`：a、b 是新主題的**先備**，產生 `{from:a, to:新主題, type:'prerequisite'}`。
 - `--related c,d`：關聯主題，產生 `{from:新主題, to:c, type:'related'}`。
+- `--brief "..."`：**選填**。寫入 `todo.json` 的 per-topic 撰文指引（通常 2-3 句）。僅在 `add-topic.js` 新增主題時一併寫入，不提供事後補寫。
 - `--prereq` / `--related` 引用的 id 必須是「已存在 node」或「本次新增 id」，否則中止。
 - 先用 `--dry-run` 預覽變更，確認後再正式執行。
 - 預設會同時加入 `todo.json`；若只想建關聯節點不入待辦，加 `--no-todo`。
+
+### `brief` 撰寫準則（寫入 todo 時）
+
+與使用者討論選題後，若決定提供 `brief`，請將討論中**內容取向**的重點濃縮為 2-3 句，透過 `--brief` 寫入：
+
+- **應寫入**：希望強調的概念、必須涵蓋的場景、Demo 方向、與相鄰主題的差異化、面試考點偏好等**內容層面**指示。
+- **嚴禁寫入**：任何會破壞全站版面或違反 `guidelines/style-guide.md` 的要求——例如 Dark Mode、自訂 HTML 外殼、跳過 `<section>` 結構、引入 React/Vue、變更 TOC 規則、非 Notion 淺色配色等。**brief 是內容 overlay，不是格式 override。**
+- 若使用者未提出特別內容要求，**省略 `--brief`** 即可（欄位為 optional）。
 
 寫入後：
 

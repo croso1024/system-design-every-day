@@ -11,6 +11,17 @@
 { "id": "rate-limiter", "title": "限流器 (Rate Limiter)", "category": "API Design" }
 ```
 
+可選欄位 `brief`（string）：per-topic 撰文指引，僅在 `add-topic.js --brief` 新增時寫入 todo；主題發佈後隨 todo 移除。範例：
+
+```json
+{
+  "id": "consistent-hashing",
+  "title": "一致性雜湊 (Consistent Hashing)",
+  "category": "Caching & Sharding",
+  "brief": "重點放在 Ring 上的 key 遷移與虛擬節點；Demo 模擬節點上下線。"
+}
+```
+
 ### docs/completed.json (Array) — 由 generate.js 自動維護；撤回用 `scripts/remove-completed.js`，勿手改
 ```json
 {
