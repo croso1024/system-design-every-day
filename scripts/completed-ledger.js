@@ -9,6 +9,7 @@
  * Usage:
  *   node scripts/completed-ledger.js --action get-recent [--limit 5]
  *   node scripts/completed-ledger.js --action status
+ *   node scripts/completed-ledger.js --action get-todo --topic <topic-id>
  */
 
 const fs = require('fs');
@@ -86,12 +87,43 @@ function getStatus() {
   }, null, 2));
 }
 
+function getTodoItem(topicId) {
+  if (!topicId) {
+    console.error('Usage: node scripts/completed-ledger.js --action get-todo --topic <topic-id>');
+    process.exit(1);
+  }
+
+  const todo = loadJSON(TODO_PATH, []);
+  const item = todo.find((entry) => entry.id === topicId);
+
+  if (!item) {
+    console.log(JSON.stringify({
+      found: false,
+      topic: topicId,
+      message: 'Topic not found in todo.json (may be completed or never added).',
+    }, null, 2));
+    return;
+  }
+
+  const payload = {
+    found: true,
+    id: item.id,
+    title: item.title,
+    category: item.category,
+  };
+  if (typeof item.brief === 'string' && item.brief.trim()) {
+    payload.brief = item.brief;
+  }
+
+  console.log(JSON.stringify(payload, null, 2));
+}
+
 function main() {
   const args = parseArgs(process.argv);
   const action = args.action;
 
   if (!action) {
-    console.error('Usage: node scripts/completed-ledger.js --action <get-recent|status> [--limit <number>]');
+    console.error('Usage: node scripts/completed-ledger.js --action <get-recent|status|get-todo> [--limit <number>] [--topic <topic-id>]');
     process.exit(1);
   }
 
@@ -99,6 +131,8 @@ function main() {
     getRecent(args.limit || 5);
   } else if (action === 'status') {
     getStatus();
+  } else if (action === 'get-todo') {
+    getTodoItem(args.topic);
   } else {
     console.error(`Unknown action: ${action}`);
     process.exit(1);
