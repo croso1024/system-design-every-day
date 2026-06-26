@@ -66,16 +66,23 @@ node scripts/validate.js
    ```bash
    node scripts/generate.js --topic <topic-id> --title "主題名稱" --category "分類名稱"
    ```
-4. **本地驗證**：
+4. **移除待辦**：將已完成主題自 `docs/todo.json` 移除（順序鐵律：必須在 `validate` 之前）：
+   ```bash
+   node scripts/remove-todo.js --topic <topic-id>
+   ```
+5. **本地驗證**：
    ```bash
    node scripts/validate.js
    ```
-5. **提交變更並推送**：
-   將變更 commit 並推送到 GitHub：
+   > **順序不可顛倒**：`generate.js → remove-todo.js → validate.js → commit`。切勿在 `generate` 與 `remove-todo` 之間跑 `validate`——此時主題同時存在於 `todo` 與 `completed`，互斥檢查必然失敗（屬預期的中間狀態，非錯誤）。
+6. **提交並直推 main**：
+   Commit Message 採**單行**並使用 `[automation]` 標籤（與 `topic-author` Skill 一致，**勿用** `feat:` 舊格式）。Cursor Cloud 自動化環境應**直推 `main`、不發起 PR**：
    ```bash
    git add .
-   git commit -m "feat: add topic <topic-id>"
+   git commit -m "[automation] Add <topic-id> - publish <title> handbook"
    git push origin main
    ```
-6. **Actions 自動部署**：
+   **僅當 `git push origin main` 失敗時**（權限不足、非 fast-forward 被拒等），才退而以 PR 方式提交，留待人工處理。
+   > 完整收尾步驟與 fail-safe 不變量以 `.claude/skills/topic-author/SKILL.md` 為單一真相來源；本段僅為部署視角的摘要。
+7. **Actions 自動部署**：
    GitHub Actions 將會在 30 秒內自動驗證、打包並將更新發佈至您的 GitHub Pages。
