@@ -78,6 +78,7 @@
 
 ---
 
+---
 ## 📂 相關路徑與工具對照表
 
 | 路徑 / 命令 | 用途 | 權限與異動規範 |
@@ -108,3 +109,14 @@
 - **Build（產頁）**：先建立 `drafts/<topic-id>/content.html`（內容須含合法 `<section id="..."><h2>...</h2>` 結構，否則 `generate.js` 會零副作用 exit 1），再跑 `node scripts/generate.js --topic <id> --title "..." --category "..."`。`drafts/` 已被 `.gitignore` 忽略。
 - **Run（沒有 dev server）**：產物是 `books/` 下的純靜態 HTML，無後端、無打包。用任意靜態伺服器預覽即可，例如 `python3 -m http.server 8080 --directory books`（或 `npx serve books`），再用瀏覽器開 `http://localhost:8080/index.html`。注意首頁的可點擊技能樹是用 **CDN 載入的 Mermaid** 繪製，故渲染心智圖需要對外網路。
 - **副作用提醒**：`generate.js` 會異動受版控的 `docs/completed.json`、`books/index.html` 與 `books/<id>/index.html`。若只是臨時測試流程，請事後用 git 還原這些檔案，避免把試打的主題誤留進手冊。
+
+## 🚀 Remote Sync Strategy（Only for Cursor Cloud Automation / Headless mode）
+
+當 Agent 是在 **Cursor Cloud 自動化環境**中執行並完成撰文／選題任務時：
+
+- **應主動 `git push origin main`**，將已通過 `validate.js` 的 commit 直接推上主幹，**而不是發起 PR，也不需發起 PR**。
+- CI（`.github/workflows/deploy.yml`）每次 push 到 `main` 都會跑 `validate.js`，未過即擋部署——這是直推 main 的安全網。
+- **僅當直推 `main` 失敗時**（例如權限不足、非 fast-forward 被拒），才退而以 PR 方式提交本次改動，留待人工處理。
+- 直推 main 可消除「PR 未合併 → 狀態追蹤檔（`todo` / `completed` / `mindmap`）漂移」的風險，這正是全自動化流程不可省略的收尾。
+
+> 非 Cursor 自動化環境（如本地人工協作）不在此限：是否 push 由人決定，預設僅 commit。

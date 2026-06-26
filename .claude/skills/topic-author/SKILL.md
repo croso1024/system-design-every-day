@@ -28,7 +28,7 @@ description: >-
 - [ ] 2. 撰寫草稿：drafts/<id>/content.html (必填) 與 script.html (互動 JS，可選)
 - [ ] 3. 組裝發佈：node scripts/generate.js --topic <id> --title "..." --category "..."
 - [ ] 4. 品質檢查：用 ReadLints 檢查產出的 books/<id>/index.html 有無 HTML/CSS 錯誤
-- [ ] 5. 收尾（順序不可顛倒）：remove-todo.js 移除 todo -> validate.js 驗證 -> git commit（單行規範）
+- [ ] 5. 收尾（順序不可顛倒）：remove-todo.js 移除 todo -> validate.js 驗證 -> git commit（單行規範）-> push origin main（僅 Cursor 自動化環境）
 ```
 
 ### Step 1：選定主題
@@ -115,7 +115,14 @@ node scripts/generate.js --topic <id> --title "標題" --category "分類"
   git add .
   git commit -m "[automation] Add <id> - publish <title> handbook"
   ```
-  （注意：除非使用者明確要求，否則**不要**擅自 push 到遠端。）
+- **推送遠端（Cursor 自動化環境的任務結尾）**：
+  若本次撰文是在 **Cursor Cloud 自動化環境**中執行，撰文任務的結尾**必須**嘗試將 commit 直接推上主幹：
+  ```bash
+  git push origin main
+  ```
+  全專案的設計目標是全自動運行（Cursor Automation 每次都從最新的 `main` 啟動），直推 main 可避免「PR 未合併 → 狀態追蹤檔漂移」；CI 會在每次 push 跑 `validate.js` 把關。
+  **僅當 `git push origin main` 失敗時**（權限不足、非 fast-forward 被拒等），才退而改以 PR 方式提交本次改動，留待人工處理。
+  （非 Cursor 自動化的本地人工協作不在此限：是否 push 由使用者決定，預設僅 commit。）
 
 ## 撤回 / 重做主題（逃生路徑）
 
