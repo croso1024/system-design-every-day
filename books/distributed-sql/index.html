@@ -1394,6 +1394,82 @@
     transform: translateY(-1px);
   }
 
+  .sql-node.is-dim {
+    opacity: 0.34;
+    filter: grayscale(0.2);
+    transform: none;
+  }
+
+  .sql-node.is-focus {
+    opacity: 1;
+    filter: none;
+    box-shadow: 0 0 0 2px var(--accent), 0 6px 16px rgba(63, 97, 136, 0.16);
+    transform: translateY(-2px);
+    z-index: 1;
+    position: relative;
+  }
+
+  .sql-node.is-focus.ns-wait,
+  .sql-node.is-focus.ns-lock,
+  .sql-node.is-focus.ns-ok,
+  .sql-node.is-focus.ns-bad {
+    transform: translateY(-2px);
+  }
+
+  .sql-stepbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    margin-bottom: 12px;
+    font-size: 12.5px;
+    color: var(--text-2);
+    font-family: var(--mono);
+  }
+
+  .sql-stepbar b {
+    color: var(--accent);
+    font-weight: 600;
+  }
+
+  .sql-board .flowsteps {
+    margin-top: 0;
+    margin-bottom: 14px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    background: var(--bg-soft);
+    padding: 4px 12px;
+  }
+
+  .sql-board .flowsteps .stepitem {
+    padding: 8px 0;
+  }
+
+  .sql-board .flowsteps .stepitem.cur {
+    background: var(--accent-soft);
+    margin: 0 -12px;
+    padding-left: 12px;
+    padding-right: 12px;
+    border-radius: var(--radius-sm);
+  }
+
+  .sql-actions {
+    display: flex;
+    gap: 8px;
+    margin-top: 14px;
+    flex-wrap: wrap;
+  }
+
+  .sql-log .log-line.cur {
+    border-color: var(--accent-line);
+    background: var(--accent-soft);
+    color: var(--text);
+  }
+
+  .sql-log .log-line.cur b {
+    color: var(--accent);
+  }
+
   .sql-node .node-name {
     font-weight: 700;
     font-size: 13px;
@@ -1687,8 +1763,6 @@
             <button data-mode="follower" aria-pressed="false">Follower Read</button>
             <button data-mode="outage" aria-pressed="false">區域故障</button>
           </div>
-          <button class="btn primary" id="sql-next">下一步</button>
-          <button class="btn" id="sql-reset">Reset</button>
           <div class="legend">
             <span><i class="dot ns-idle"></i>未參與</span>
             <span><i class="dot ns-wait"></i>路由 / 等待</span>
@@ -1699,6 +1773,8 @@
         </div>
 
         <div class="sql-board">
+          <div class="sql-stepbar" id="sql-stepbar"><span>步驟 <b>0</b> / 4</span><span>尚未開始</span></div>
+          <div class="flowsteps" id="sql-steps" aria-label="情境步驟清單"></div>
           <div class="status-line" id="sql-status">選擇情境並按「下一步」，觀察 SQL request 會碰到哪些協調點。</div>
           <div class="sql-nodes" id="sql-nodes">
             <div class="sql-node" data-node="gateway">
@@ -1734,6 +1810,10 @@
           </div>
           <div class="sql-log" id="sql-log">
             <div class="log-line"><b>準備：</b>目前尚未送出 request。</div>
+          </div>
+          <div class="sql-actions">
+            <button class="btn primary" id="sql-next">開始模擬</button>
+            <button class="btn" id="sql-reset">Reset</button>
           </div>
         </div>
       </div>
@@ -1862,30 +1942,62 @@
   var root = document.getElementById("demo-distributed-sql");
   if (!root) return;
 
+  var defaultNotes = {
+    gateway: "等待請求",
+    meta: "查詢分片位置",
+    clock: "產生讀寫時間戳",
+    rangeA: "本地 key range",
+    rangeB: "另一個 key range",
+    replica: "跨區複寫"
+  };
+
   var modes = {
     single: {
       title: "單分片寫入",
       intro: "單分片寫入只需要定位 key range，然後由該 range 的 leaseholder 複製到 Raft majority。",
       steps: [
         {
-          status: "Gateway parse SQL，依 primary key 判斷這是一筆單分片 mutation。",
+          sx: "1",
+          label: "Gateway 解析 SQL，判定為單分片 mutation",
+          status: "<b>Step 1 · Parse & Plan</b>：Gateway 解析 INSERT/UPDATE，確認 predicate 可定位到單一 range。",
+          focus: ["gateway"],
           states: { gateway: ["ns-wait", "parse + plan"] },
-          log: "<b>Step 1:</b> SQL Gateway 解析 INSERT/UPDATE，確認 predicate 可定位到單一 range。"
+          log: "<b>Step 1:</b> SQL Gateway 解析請求，產生單分片執行計畫。"
         },
         {
-          status: "Metadata 回傳 Range A 的 leaseholder，request 不需要碰 Range B。",
-          states: { gateway: ["ns-ok", "plan ready"], meta: ["ns-wait", "lookup Range A"], rangeA: ["ns-wait", "leaseholder selected"] },
-          log: "<b>Step 2:</b> Range map 告訴 Gateway：這筆 key 屬於 Range A。"
+          sx: "2",
+          label: "Metadata 回傳 Range A leaseholder",
+          status: "<b>Step 2 · Route</b>：Range map 告訴 Gateway 這筆 key 屬於 Range A，不需要碰 Range B。",
+          focus: ["gateway", "meta", "rangeA"],
+          states: {
+            gateway: ["ns-ok", "plan ready"],
+            meta: ["ns-wait", "lookup Range A"],
+            rangeA: ["ns-wait", "leaseholder selected"]
+          },
+          log: "<b>Step 2:</b> Metadata 完成 range lookup，request 導向 Range A leaseholder。"
         },
         {
-          status: "Range A 將寫入 append 到 Consensus log，等待 majority ACK。",
-          states: { rangeA: ["ns-lock", "append log"], replica: ["ns-lock", "majority ACK"] },
+          sx: "3",
+          label: "Range A append log，等待 Raft majority",
+          status: "<b>Step 3 · Consensus</b>：寫入 append 到 Consensus log，等待 majority ACK 才算 durable。",
+          focus: ["rangeA", "replica"],
+          states: {
+            rangeA: ["ns-lock", "append log"],
+            replica: ["ns-lock", "majority ACK"]
+          },
           log: "<b>Step 3:</b> 單一 Raft group 達成 majority，寫入具備 durability。"
         },
         {
-          status: "寫入在 Range A committed，Client 收到成功回應。",
-          states: { gateway: ["ns-ok", "return OK"], rangeA: ["ns-ok", "committed"], replica: ["ns-ok", "replicated"] },
-          log: "<b>Step 4:</b> 單分片交易完成；主要成本是一次 Consensus round。"
+          sx: "4",
+          label: "Range A committed，Client 收到 OK",
+          status: "<b>Step 4 · Commit</b>：寫入在 Range A committed；主要成本是一次 Consensus round。",
+          focus: ["gateway", "rangeA", "replica"],
+          states: {
+            gateway: ["ns-ok", "return OK"],
+            rangeA: ["ns-ok", "committed"],
+            replica: ["ns-ok", "replicated"]
+          },
+          log: "<b>Step 4:</b> 單分片交易完成；未穿越第二個 Consensus group。"
         }
       ]
     },
@@ -1894,24 +2006,52 @@
       intro: "跨分片交易會同時碰到 Range A 與 Range B；每個 range 各自有 Consensus，還需要 transaction record 統一 commit。",
       steps: [
         {
-          status: "Gateway 產生分散式執行計畫：訂單與庫存落在不同 key range。",
-          states: { gateway: ["ns-wait", "distributed plan"], meta: ["ns-wait", "lookup A + B"] },
+          sx: "1",
+          label: "Planner 發現需同時更新 Range A + B",
+          status: "<b>Step 1 · Distributed Plan</b>：訂單與庫存落在不同 key range，需要分散式執行計畫。",
+          focus: ["gateway", "meta"],
+          states: {
+            gateway: ["ns-wait", "distributed plan"],
+            meta: ["ns-wait", "lookup A + B"]
+          },
           log: "<b>Step 1:</b> Planner 發現 transaction 需要同時更新兩個 ranges。"
         },
         {
-          status: "Clock / Timestamp 產生交易讀寫時間戳，用來排序 MVCC 版本。",
-          states: { clock: ["ns-wait", "assign ts"], gateway: ["ns-lock", "txn open"] },
+          sx: "2",
+          label: "Clock 產生交易 timestamp，開啟 txn",
+          status: "<b>Step 2 · Timestamp</b>：交易取得 provisional timestamp，用來排序 MVCC 版本；後續可能因衝突 retry。",
+          focus: ["clock", "gateway"],
+          states: {
+            clock: ["ns-wait", "assign ts"],
+            gateway: ["ns-lock", "txn open"]
+          },
           log: "<b>Step 2:</b> 交易取得 provisional timestamp，後續可能因衝突被 push 或 retry。"
         },
         {
-          status: "Range A 與 Range B 寫入 intents，兩邊都要通過各自的 Consensus。",
-          states: { rangeA: ["ns-lock", "intent written"], rangeB: ["ns-lock", "intent written"], replica: ["ns-lock", "two groups ACK"] },
+          sx: "3",
+          label: "兩個 range 寫入 intents，各自走 Consensus",
+          status: "<b>Step 3 · Write Intents</b>：Range A 與 Range B 寫入 provisional intents，兩邊都要通過各自的 Consensus。",
+          focus: ["rangeA", "rangeB", "replica"],
+          states: {
+            rangeA: ["ns-lock", "intent written"],
+            rangeB: ["ns-lock", "intent written"],
+            replica: ["ns-lock", "two groups ACK"]
+          },
           log: "<b>Step 3:</b> 每個 touched range 都要複製 provisional write。"
         },
         {
-          status: "Transaction record committed 後，兩個 range 的 intents 被 resolve。",
-          states: { gateway: ["ns-ok", "commit response"], clock: ["ns-ok", "commit ts"], rangeA: ["ns-ok", "resolved"], rangeB: ["ns-ok", "resolved"], replica: ["ns-ok", "durable"] },
-          log: "<b>Step 4:</b> Atomicity 來自 transaction protocol；Consensus 只保護各分片自己的 log。"
+          sx: "4",
+          label: "Transaction record committed，intents resolved",
+          status: "<b>Step 4 · Atomic Commit</b>：Atomicity 來自 transaction protocol；Consensus 只保護各分片自己的 log。",
+          focus: ["gateway", "clock", "rangeA", "rangeB", "replica"],
+          states: {
+            gateway: ["ns-ok", "commit response"],
+            clock: ["ns-ok", "commit ts"],
+            rangeA: ["ns-ok", "resolved"],
+            rangeB: ["ns-ok", "resolved"],
+            replica: ["ns-ok", "durable"]
+          },
+          log: "<b>Step 4:</b> Transaction record committed 後，兩個 range 的 intents 被 resolve。"
         }
       ]
     },
@@ -1920,23 +2060,47 @@
       intro: "Follower Read 讓讀取在本地副本完成，但必須選擇足夠舊、已確定安全的 MVCC timestamp。",
       steps: [
         {
-          status: "Gateway 收到唯讀查詢，判斷使用者可接受 bounded staleness。",
-          states: { gateway: ["ns-wait", "read-only plan"], clock: ["ns-wait", "safe timestamp"] },
-          log: "<b>Step 1:</b> 系統選擇例如 5 秒前的 safe timestamp。"
+          sx: "1",
+          label: "Gateway 判定可接受 bounded staleness",
+          status: "<b>Step 1 · Read Plan</b>：唯讀查詢可接受例如 5 秒前的 safe timestamp。",
+          focus: ["gateway", "clock"],
+          states: {
+            gateway: ["ns-wait", "read-only plan"],
+            clock: ["ns-wait", "safe timestamp"]
+          },
+          log: "<b>Step 1:</b> 系統選擇 bounded staleness 的 safe timestamp。"
         },
         {
-          status: "Metadata 找到本地 follower replica，不必跨區找 leaseholder。",
-          states: { meta: ["ns-wait", "local replica"], replica: ["ns-wait", "serve snapshot"] },
-          log: "<b>Step 2:</b> Query 被導向近端 follower，降低跨區 RTT。"
+          sx: "2",
+          label: "Metadata 導向本地 follower replica",
+          status: "<b>Step 2 · Local Route</b>：Query 被導向近端 follower，不必跨區找 leaseholder。",
+          focus: ["meta", "replica"],
+          states: {
+            meta: ["ns-wait", "local replica"],
+            replica: ["ns-wait", "serve snapshot"]
+          },
+          log: "<b>Step 2:</b> Metadata 找到本地 follower replica，降低跨區 RTT。"
         },
         {
-          status: "Follower 用 MVCC snapshot 回傳舊但一致的資料版本。",
-          states: { replica: ["ns-ok", "snapshot read"], clock: ["ns-ok", "bounded stale"] },
-          log: "<b>Step 3:</b> 讀到的是安全 snapshot，不保證最新。"
+          sx: "3",
+          label: "Follower 以 MVCC snapshot 回傳舊版本",
+          status: "<b>Step 3 · Snapshot Read</b>：讀到的是安全 snapshot，不保證最新。",
+          focus: ["replica", "clock"],
+          states: {
+            replica: ["ns-ok", "snapshot read"],
+            clock: ["ns-ok", "bounded stale"]
+          },
+          log: "<b>Step 3:</b> Follower 用 MVCC snapshot 回傳舊但一致的資料版本。"
         },
         {
-          status: "Client 快速取得結果；若需要 read-your-writes，必須改走 leaseholder 或 session token。",
-          states: { gateway: ["ns-ok", "fast response"], replica: ["ns-ok", "local read"] },
+          sx: "4",
+          label: "Client 快速取得結果（非 read-your-writes）",
+          status: "<b>Step 4 · Fast Response</b>：Follower Read 是 latency optimization；若要 read-your-writes 需改走 leaseholder。",
+          focus: ["gateway", "replica"],
+          states: {
+            gateway: ["ns-ok", "fast response"],
+            replica: ["ns-ok", "local read"]
+          },
           log: "<b>Step 4:</b> Follower Read 是 latency optimization，語意是 bounded staleness。"
         }
       ]
@@ -1946,24 +2110,52 @@
       intro: "區域故障時，能否繼續讀寫取決於 replica placement、majority 是否仍存在，以及 leaseholder 能否轉移。",
       steps: [
         {
-          status: "Remote region 發生故障，部分 replicas 不可達。",
-          states: { replica: ["ns-bad", "region down"], gateway: ["ns-wait", "reroute"] },
+          sx: "1",
+          label: "Remote region 故障，部分 replicas 不可達",
+          status: "<b>Step 1 · Region Down</b>：跨區副本不可達，cluster 開始重新評估 lease 與 majority。",
+          focus: ["replica", "gateway"],
+          states: {
+            replica: ["ns-bad", "region down"],
+            gateway: ["ns-wait", "reroute"]
+          },
           log: "<b>Step 1:</b> 跨區副本不可達，cluster 開始重新評估 lease 與 majority。"
         },
         {
-          status: "Metadata 嘗試尋找仍有 majority 的 range；若失去 majority，寫入必須停止。",
-          states: { meta: ["ns-wait", "check quorum"], rangeA: ["ns-lock", "majority ok"], rangeB: ["ns-bad", "no majority"] },
+          sx: "2",
+          label: "Metadata 檢查 quorum：A 可寫、B 失去 majority",
+          status: "<b>Step 2 · Quorum Check</b>：Range A 仍可寫；Range B 因 majority 不足只能拒絕強一致寫入。",
+          focus: ["meta", "rangeA", "rangeB"],
+          states: {
+            meta: ["ns-wait", "check quorum"],
+            rangeA: ["ns-lock", "majority ok"],
+            rangeB: ["ns-bad", "no majority"]
+          },
           log: "<b>Step 2:</b> Range A 仍可寫；Range B 因 majority 不足只能拒絕強一致寫入。"
         },
         {
-          status: "Gateway 對可用 range 繼續服務，對不可用 range 回傳 retry / unavailable。",
-          states: { gateway: ["ns-lock", "partial service"], rangeA: ["ns-ok", "serve writes"], rangeB: ["ns-bad", "unavailable"] },
-          log: "<b>Step 3:</b> Distributed SQL 通常寧可拒絕不安全寫入，也不產生 split-brain。"
+          sx: "3",
+          label: "Gateway 對可用 range 繼續服務，其餘 unavailable",
+          status: "<b>Step 3 · Partial Service</b>：Distributed SQL 寧可拒絕不安全寫入，也不產生 split-brain。",
+          focus: ["gateway", "rangeA", "rangeB"],
+          states: {
+            gateway: ["ns-lock", "partial service"],
+            rangeA: ["ns-ok", "serve writes"],
+            rangeB: ["ns-bad", "unavailable"]
+          },
+          log: "<b>Step 3:</b> Gateway 對可用 range 繼續服務，對不可用 range 回傳 retry / unavailable。"
         },
         {
-          status: "故障恢復後 replica 追 log；若設計要求跨區 RPO=0，就必須接受故障時較高 latency 或較低可用性。",
-          states: { gateway: ["ns-ok", "safe result"], rangeA: ["ns-ok", "consistent"], rangeB: ["ns-bad", "retry needed"], replica: ["ns-bad", "catch-up later"] },
-          log: "<b>Step 4:</b> Replica placement 是 availability 與 latency 的核心設計決策。"
+          sx: "4",
+          label: "恢復後追 log；placement 決定 RPO / 可用性",
+          status: "<b>Step 4 · Recovery</b>：Replica placement 是 availability 與 latency 的核心設計決策。",
+          focus: ["gateway", "rangeA", "rangeB", "replica"],
+          states: {
+            gateway: ["ns-ok", "safe result"],
+            rangeA: ["ns-ok", "consistent"],
+            rangeB: ["ns-bad", "retry needed"],
+            replica: ["ns-bad", "catch-up later"]
+          },
+          log: "<b>Step 4:</b> 故障恢復後 replica 追 log；跨區 RPO=0 通常意味著較低可用性。"
         }
       ]
     }
@@ -1977,42 +2169,103 @@
   var buttons = root.querySelectorAll(".seg button");
   var statusEl = document.getElementById("sql-status");
   var logEl = document.getElementById("sql-log");
+  var stepsEl = document.getElementById("sql-steps");
+  var stepbarEl = document.getElementById("sql-stepbar");
   var nextBtn = document.getElementById("sql-next");
   var resetBtn = document.getElementById("sql-reset");
   var mode = "single";
   var stepIndex = 0;
+  var nodeState = {};
+
+  function setNodeState(el, klass, note) {
+    el.classList.remove("ns-idle", "ns-wait", "ns-lock", "ns-ok", "ns-bad");
+    el.classList.add(klass);
+    var noteEl = el.querySelector(".node-note");
+    if (noteEl) noteEl.textContent = note;
+  }
 
   function resetNodes() {
+    nodeState = {};
     Object.keys(nodeEls).forEach(function (key) {
       var el = nodeEls[key];
-      el.classList.remove("ns-idle", "ns-wait", "ns-lock", "ns-ok", "ns-bad");
-      el.classList.add("ns-idle");
-      var note = el.querySelector(".node-note");
-      if (note) note.textContent = "待命";
+      el.classList.remove("is-dim", "is-focus");
+      setNodeState(el, "ns-idle", defaultNotes[key] || "待命");
     });
   }
 
-  function setLog(html) {
-    logEl.innerHTML = '<div class="log-line">' + html + "</div>";
-  }
+  function renderNodeBoard(step) {
+    var focus = step ? step.focus || Object.keys(step.states) : [];
 
-  function applyStates(states) {
-    Object.keys(states).forEach(function (key) {
+    Object.keys(nodeEls).forEach(function (key) {
       var el = nodeEls[key];
-      if (!el) return;
-      el.classList.remove("ns-idle", "ns-wait", "ns-lock", "ns-ok", "ns-bad");
-      el.classList.add(states[key][0]);
-      var note = el.querySelector(".node-note");
-      if (note) note.textContent = states[key][1];
+      el.classList.remove("is-dim", "is-focus");
+
+      var st = nodeState[key];
+      if (st) {
+        setNodeState(el, st[0], st[1]);
+      } else {
+        setNodeState(el, "ns-idle", defaultNotes[key] || "待命");
+      }
+
+      if (!step) {
+        el.classList.add("is-dim");
+        return;
+      }
+
+      if (focus.indexOf(key) >= 0) {
+        el.classList.add("is-focus");
+      } else if (!st || st[0] === "ns-idle") {
+        el.classList.add("is-dim");
+      }
     });
+  }
+
+  function renderSteps() {
+    var scenario = modes[mode];
+    stepsEl.innerHTML = "";
+    scenario.steps.forEach(function (s, i) {
+      var d = document.createElement("div");
+      var cls = "stepitem";
+      if (i < stepIndex) cls += " done";
+      if (i === stepIndex - 1) cls += " cur";
+      d.className = cls;
+      d.innerHTML = '<span class="sx">' + s.sx + '</span><span>' + s.label + '</span>';
+      stepsEl.appendChild(d);
+    });
+  }
+
+  function renderStepbar(label) {
+    var total = modes[mode].steps.length;
+    var current = stepIndex;
+    var right = label || (current === 0 ? "尚未開始" : "進行中");
+    stepbarEl.innerHTML = "<span>步驟 <b>" + current + "</b> / " + total + "</span><span>" + right + "</span>";
+  }
+
+  function setLog(html, append) {
+    if (!append) {
+      logEl.innerHTML = "";
+    }
+    Array.prototype.forEach.call(logEl.querySelectorAll(".log-line.cur"), function (line) {
+      line.classList.remove("cur");
+    });
+    var line = document.createElement("div");
+    line.className = "log-line cur";
+    line.innerHTML = html;
+    logEl.appendChild(line);
+    line.scrollIntoView({ block: "nearest", behavior: "smooth" });
   }
 
   function renderIntro() {
     resetNodes();
     stepIndex = 0;
-    statusEl.innerHTML = "<b>" + modes[mode].title + "：</b>" + modes[mode].intro;
-    setLog("<b>準備：</b>按「下一步」開始模擬 " + modes[mode].title + " 的 request path。");
-    nextBtn.textContent = "下一步";
+    var scenario = modes[mode];
+    statusEl.innerHTML = "<b>" + scenario.title + "：</b>" + scenario.intro;
+    setLog("<b>準備：</b>按「開始模擬」逐步觀察 " + scenario.title + " 的 request path。", false);
+    renderSteps();
+    renderStepbar("按「開始模擬」");
+    renderNodeBoard(null);
+    nextBtn.textContent = "開始模擬";
+    nextBtn.disabled = false;
   }
 
   function setMode(nextMode) {
@@ -2025,17 +2278,28 @@
 
   function nextStep() {
     var scenario = modes[mode];
-    var step = scenario.steps[stepIndex];
-    if (!step) {
+    if (stepIndex >= scenario.steps.length) {
       renderIntro();
       return;
     }
-    if (stepIndex === 0) resetNodes();
-    statusEl.textContent = step.status;
-    applyStates(step.states);
-    setLog(step.log);
+
+    var step = scenario.steps[stepIndex];
+    Object.keys(step.states).forEach(function (key) {
+      nodeState[key] = step.states[key];
+    });
+
     stepIndex += 1;
-    nextBtn.textContent = stepIndex >= scenario.steps.length ? "重播情境" : "下一步";
+    statusEl.innerHTML = step.status;
+    renderNodeBoard(step);
+    setLog(step.log, stepIndex > 1);
+    renderSteps();
+    renderStepbar(step.label);
+
+    if (stepIndex >= scenario.steps.length) {
+      nextBtn.textContent = "重播情境";
+    } else {
+      nextBtn.textContent = "下一步 (" + (stepIndex + 1) + "/" + scenario.steps.length + ")";
+    }
   }
 
   Array.prototype.forEach.call(buttons, function (btn) {
