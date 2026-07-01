@@ -107,6 +107,7 @@
 
 - **Lint / Test 檢查（唯一品質閘門）**：`node scripts/validate.js`。專案沒有單元測試框架、也沒有獨立 linter；CI（`.github/workflows/deploy.yml`）每次 push 到 `main` 都只跑這支驗證，通過後才部署。改完任何 `docs/*.json` 必跑。
 - **Build（產頁）**：先建立 `drafts/<topic-id>/content.html`（內容須含合法 `<section id="..."><h2>...</h2>` 結構，否則 `generate.js` 會零副作用 exit 1），再跑 `node scripts/generate.js --topic <id> --title "..." --category "..."`。`drafts/` 已被 `.gitignore` 忽略。
+  > **Draft 生命週期**：draft 是**暫時性建置輸入**（gitignore、`generate.js` 只讀不刪、流程也無清理步驟），故只會殘留在「實際撰稿的那台機器」；雲端排程主題的 draft 僅存在於即拋的 runner，不會落地。**推論**：模板類回溯改動無法靠「重跑 `generate.js`」重生舊頁，應改用一次性冪等 patch 腳本（範例：`scripts/add-fullscreen.js`）。
 - **Run（沒有 dev server）**：產物是 `books/` 下的純靜態 HTML，無後端、無打包。用任意靜態伺服器預覽即可，例如 `python3 -m http.server 8080 --directory books`（或 `npx serve books`），再用瀏覽器開 `http://localhost:8080/index.html`。注意首頁的可點擊技能樹是用 **CDN 載入的 Mermaid** 繪製，故渲染心智圖需要對外網路。
 - **副作用提醒**：`generate.js` 會異動受版控的 `docs/completed.json`、`books/index.html` 與 `books/<id>/index.html`。若只是臨時測試流程，請事後用 git 還原這些檔案，避免把試打的主題誤留進手冊。
 
