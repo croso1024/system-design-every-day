@@ -1,0 +1,2005 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>寬列儲存 (Wide-column Store) | System Design Every Day</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@300;400;500;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+  <script>
+    mermaid.initialize({
+      startOnLoad: true,
+      theme: 'default',
+      securityLevel: 'loose'
+    });
+  </script>
+  <style>
+    :root {
+      --bg: #ffffff;
+      --bg-soft: #fafaf9;
+      --text: #262a2f;
+      --text-2: #6b7078;
+      --text-3: #9aa0a8;
+      --border: #ecebe8;
+      --border-strong: #dedcd8;
+      --code-bg: #f6f5f3;
+      --accent: #3f6188;
+      --accent-soft: #eef2f7;
+      --accent-line: #cdd9e6;
+      --ok: #4d7d68;
+      --ok-soft: #eef4f1;
+      --warn: #a3743e;
+      --warn-soft: #f6f0e7;
+      --bad: #a8554f;
+      --bad-soft: #f6ecea;
+      --radius: 10px;
+      --radius-sm: 7px;
+      --maxw: 760px;
+      --sans: "Noto Sans TC", system-ui, -apple-system, "Segoe UI", sans-serif;
+      --mono: "JetBrains Mono", "SFMono-Regular", Menlo, Consolas, monospace;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    html {
+      scroll-behavior: smooth;
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      html {
+        scroll-behavior: auto;
+      }
+      * {
+        animation-duration: .001ms !important;
+        transition-duration: .001ms !important;
+      }
+    }
+
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font-family: var(--sans);
+      font-weight: 400;
+      font-size: 16px;
+      line-height: 1.78;
+      -webkit-font-smoothing: antialiased;
+      letter-spacing: .005em;
+    }
+
+    ::selection {
+      background: var(--accent-soft);
+    }
+
+    /* ---------- layout ---------- */
+    .wrap {
+      display: flex;
+      max-width: 1180px;
+      margin: 0 auto;
+      gap: 0;
+    }
+
+    .toc {
+      width: 248px;
+      flex: 0 0 248px;
+      position: sticky;
+      top: 0;
+      height: 100vh;
+      padding: 54px 22px 40px 28px;
+      overflow-y: auto;
+      border-right: 1px solid var(--border);
+    }
+
+    .toc-kicker {
+      font-family: var(--mono);
+      font-size: 11px;
+      letter-spacing: .14em;
+      text-transform: uppercase;
+      color: var(--text-3);
+      margin-bottom: 20px;
+    }
+
+    .toc-kicker a {
+      color: var(--text-3);
+      text-decoration: none;
+      border-bottom: none;
+      transition: color .15s;
+    }
+
+    .toc-kicker a:hover {
+      color: var(--text);
+    }
+
+    .toc-title {
+      font-size: 15px;
+      font-weight: 700;
+      line-height: 1.4;
+      margin: 0 0 24px;
+    }
+
+    .toc a {
+      display: flex;
+      gap: 10px;
+      align-items: baseline;
+      text-decoration: none;
+      color: var(--text-2);
+      font-size: 13.5px;
+      padding: 6px 10px;
+      border-radius: 6px;
+      line-height: 1.45;
+      transition: background .15s, color .15s;
+      border-bottom: none;
+    }
+
+    .toc a:hover {
+      background: var(--bg-soft);
+      color: var(--text);
+      border-bottom: none;
+    }
+
+    .toc a.active {
+      color: var(--accent);
+      background: var(--accent-soft);
+      font-weight: 500;
+      border-bottom: none;
+    }
+
+    .toc a .n {
+      font-family: var(--mono);
+      font-size: 11px;
+      color: var(--text-3);
+      flex: 0 0 18px;
+    }
+
+    .toc a.active .n {
+      color: var(--accent);
+    }
+
+    main {
+      flex: 1 1 auto;
+      min-width: 0;
+      padding: 0 40px;
+    }
+
+    .inner {
+      max-width: var(--maxw);
+      margin: 0 auto;
+      padding: 72px 0 140px;
+    }
+
+    /* ---------- hero ---------- */
+    .hero {
+      margin-bottom: 64px;
+    }
+
+    .hero .eyebrow {
+      font-family: var(--mono);
+      font-size: 12px;
+      letter-spacing: .16em;
+      text-transform: uppercase;
+      color: var(--accent);
+      margin-bottom: 18px;
+    }
+
+    .hero h1 {
+      font-size: 40px;
+      line-height: 1.18;
+      font-weight: 700;
+      margin: 0 0 18px;
+      letter-spacing: -.01em;
+    }
+
+    .hero .lede {
+      font-size: 18px;
+      line-height: 1.7;
+      color: var(--text-2);
+      font-weight: 300;
+      margin: 0;
+      max-width: 620px;
+    }
+
+    .hero .meta {
+      margin-top: 28px;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+
+    .tag {
+      font-family: var(--mono);
+      font-size: 12px;
+      color: var(--text-2);
+      border: 1px solid var(--border-strong);
+      padding: 4px 11px;
+      border-radius: 999px;
+      background: var(--bg-soft);
+    }
+
+    /* ---------- sections ---------- */
+    section {
+      padding-top: 30px;
+      scroll-margin-top: 24px;
+    }
+
+    .sec-head {
+      display: flex;
+      align-items: baseline;
+      gap: 14px;
+      margin: 0 0 8px;
+    }
+
+    .sec-num {
+      font-family: var(--mono);
+      font-size: 13px;
+      color: var(--text-3);
+      font-weight: 500;
+      padding-top: 6px;
+      flex: 0 0 auto;
+    }
+
+    h2 {
+      font-size: 27px;
+      font-weight: 700;
+      line-height: 1.3;
+      margin: 0;
+      letter-spacing: -.01em;
+    }
+
+    .sec-sub {
+      color: var(--text-2);
+      font-size: 15px;
+      margin: 2px 0 28px 0;
+      font-weight: 300;
+    }
+
+    h3 {
+      font-size: 18.5px;
+      font-weight: 700;
+      margin: 38px 0 12px;
+      line-height: 1.45;
+    }
+
+    h4 {
+      font-size: 15.5px;
+      font-weight: 700;
+      margin: 26px 0 8px;
+      color: var(--text);
+    }
+
+    p {
+      margin: 0 0 16px;
+    }
+
+    a {
+      color: var(--accent);
+      text-decoration: none;
+      border-bottom: 1px solid var(--accent-line);
+      transition: border-color .15s;
+    }
+
+    a:hover {
+      border-color: var(--accent);
+    }
+
+    strong {
+      font-weight: 700;
+    }
+
+    em {
+      font-style: normal;
+      background: var(--accent-soft);
+      padding: 0 4px;
+      border-radius: 4px;
+      font-weight: 500;
+      color: #2f4d6e;
+    }
+
+    hr.div {
+      border: none;
+      border-top: 1px solid var(--border);
+      margin: 46px 0;
+    }
+
+    ul, ol {
+      margin: 0 0 18px;
+      padding-left: 22px;
+    }
+
+    li {
+      margin: 7px 0;
+      padding-left: 4px;
+    }
+
+    li::marker {
+      color: var(--text-3);
+    }
+
+    code {
+      font-family: var(--mono);
+      font-size: .86em;
+      background: var(--code-bg);
+      padding: 2px 6px;
+      border-radius: 5px;
+      color: #43494f;
+    }
+
+    pre {
+      background: var(--code-bg);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 16px 18px;
+      overflow-x: auto;
+      margin: 0 0 20px;
+      line-height: 1.6;
+    }
+
+    pre code {
+      background: none;
+      padding: 0;
+      font-size: 13px;
+    }
+
+    /* ---------- math notation ---------- */
+    /* 行內數學變數，如 W、R、N。本站不載入 MathJax/KaTeX，請勿使用 $...$ 或 \[...\] LaTeX 分隔符。 */
+    var {
+      font-family: var(--mono);
+      font-style: normal;
+      font-weight: 500;
+      color: var(--accent);
+    }
+
+    /* 區塊數學公式，置中等寬呈現，記得將 > < & 轉義為 &gt; &lt; &amp;。 */
+    .formula {
+      font-family: var(--mono);
+      font-size: 15px;
+      text-align: center;
+      background: var(--bg-soft);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      padding: 14px 18px;
+      margin: 0 0 20px;
+      color: var(--text);
+      letter-spacing: .03em;
+      overflow-x: auto;
+    }
+
+    /* ---------- callouts ---------- */
+    .callout {
+      border: 1px solid var(--border);
+      border-left: 3px solid var(--border-strong);
+      background: var(--bg-soft);
+      border-radius: var(--radius-sm);
+      padding: 15px 18px;
+      margin: 0 0 22px;
+      font-size: 14.5px;
+    }
+
+    .callout .c-title {
+      font-weight: 700;
+      font-size: 13px;
+      letter-spacing: .02em;
+      margin-bottom: 5px;
+      display: flex;
+      gap: 7px;
+      align-items: center;
+    }
+
+    .callout p:last-child {
+      margin-bottom: 0;
+    }
+
+    .callout.accent {
+      border-left-color: var(--accent);
+      background: var(--accent-soft);
+    }
+
+    .callout.accent .c-title {
+      color: #2f4d6e;
+    }
+
+    .callout.warn {
+      border-left-color: var(--warn);
+      background: var(--warn-soft);
+    }
+
+    .callout.warn .c-title {
+      color: var(--warn);
+    }
+
+    .callout .ic {
+      font-family: var(--mono);
+      font-size: 11px;
+      border: 1px solid currentColor;
+      border-radius: 4px;
+      padding: 0 4px;
+      line-height: 1.5;
+      opacity: .8;
+    }
+
+    .oneliner {
+      border: 1px dashed var(--accent-line);
+      border-radius: var(--radius-sm);
+      padding: 13px 16px;
+      margin: 0 0 22px;
+      font-size: 14.5px;
+      background: #fbfcfd;
+    }
+
+    .oneliner b {
+      font-family: var(--mono);
+      font-size: 11px;
+      letter-spacing: .08em;
+      color: var(--accent);
+      display: block;
+      margin-bottom: 4px;
+      text-transform: uppercase;
+    }
+
+    /* ---------- tables ---------- */
+    .tbl-wrap {
+      overflow-x: auto;
+      margin: 0 0 24px;
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+    }
+
+    table {
+      border-collapse: collapse;
+      width: 100%;
+      font-size: 14px;
+      min-width: 520px;
+    }
+
+    th, td {
+      text-align: left;
+      padding: 11px 14px;
+      border-bottom: 1px solid var(--border);
+      vertical-align: top;
+    }
+
+    th {
+      font-weight: 700;
+      background: var(--bg-soft);
+      font-size: 12.5px;
+      letter-spacing: .02em;
+      color: var(--text-2);
+      position: sticky;
+      top: 0;
+    }
+
+    tr:last-child td {
+      border-bottom: none;
+    }
+
+    td.hl {
+      background: var(--accent-soft);
+    }
+
+    .cap {
+      font-size: 12.5px;
+      color: var(--text-3);
+      margin: -12px 0 26px;
+      font-family: var(--mono);
+    }
+
+    /* ---------- interactive shell ---------- */
+    .demo {
+      border: 1px solid var(--border-strong);
+      border-radius: var(--radius);
+      background: var(--bg);
+      margin: 24px 0 26px;
+      overflow: hidden;
+    }
+
+    .demo-bar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      flex-wrap: wrap;
+      padding: 13px 16px;
+      border-bottom: 1px solid var(--border);
+      background: var(--bg-soft);
+    }
+
+    .demo-bar .label {
+      font-family: var(--mono);
+      font-size: 11px;
+      letter-spacing: .1em;
+      text-transform: uppercase;
+      color: var(--text-3);
+    }
+
+    .demo-body {
+      padding: 20px 18px;
+    }
+
+    .seg {
+      display: inline-flex;
+      border: 1px solid var(--border-strong);
+      border-radius: 999px;
+      overflow: hidden;
+      background: var(--bg);
+    }
+
+    .seg button {
+      border: none;
+      background: none;
+      font-family: var(--sans);
+      font-size: 12.5px;
+      color: var(--text-2);
+      padding: 6px 14px;
+      cursor: pointer;
+      transition: background .15s, color .15s;
+    }
+
+    .seg button:hover {
+      color: var(--text);
+    }
+
+    .seg button[aria-pressed="true"] {
+      background: var(--accent);
+      color: #fff;
+    }
+
+    .btn {
+      font-family: var(--sans);
+      font-size: 13px;
+      border: 1px solid var(--border-strong);
+      background: var(--bg);
+      color: var(--text);
+      padding: 7px 16px;
+      border-radius: 7px;
+      cursor: pointer;
+      transition: background .15s, border-color .15s;
+    }
+
+    .btn:hover {
+      background: var(--bg-soft);
+      border-color: var(--text-3);
+    }
+
+    .btn.primary {
+      background: var(--accent);
+      color: #fff;
+      border-color: var(--accent);
+    }
+
+    .btn.primary:hover {
+      background: #365578;
+    }
+
+    .btn:disabled {
+      opacity: .4;
+      cursor: not-allowed;
+    }
+
+    .btn:focus-visible, .seg button:focus-visible, .toc a:focus-visible, a:focus-visible,
+    summary:focus-visible {
+      outline: 2px solid var(--accent);
+      outline-offset: 2px;
+      border-radius: 4px;
+    }
+
+    .status-line {
+      font-size: 13.5px;
+      color: var(--text-2);
+      min-height: 42px;
+      margin-top: 14px;
+      background: var(--bg-soft);
+      border-radius: var(--radius-sm);
+      padding: 10px 13px;
+      border: 1px solid var(--border);
+    }
+
+    .status-line b {
+      color: var(--text);
+    }
+
+    .legend {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 14px;
+      font-size: 11.5px;
+      color: var(--text-2);
+      margin-top: 14px;
+      font-family: var(--mono);
+    }
+
+    .legend span {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .dot {
+      width: 9px;
+      height: 9px;
+      border-radius: 3px;
+      display: inline-block;
+      border: 1px solid rgba(0, 0, 0, .08);
+    }
+
+    /* node states used across diagrams */
+    .nstate-idle {
+      fill: #fff;
+      stroke: var(--border-strong);
+    }
+
+    .ns-idle {
+      background: #fff;
+      border-color: var(--border-strong);
+    }
+
+    .ns-lock {
+      background: var(--warn-soft);
+      border-color: var(--warn);
+    }
+
+    .ns-ok {
+      background: var(--ok-soft);
+      border-color: var(--ok);
+    }
+
+    .ns-bad {
+      background: var(--bad-soft);
+      border-color: var(--bad);
+    }
+
+    .ns-wait {
+      background: var(--accent-soft);
+      border-color: var(--accent);
+    }
+
+    /* spectrum */
+    .spectrum {
+      position: relative;
+      margin: 26px 6px 10px;
+    }
+
+    .spec-track {
+      height: 4px;
+      border-radius: 2px;
+      background: linear-gradient(90deg, #9fb6cf, #e7e5e1 50%, #c9d8c9);
+      position: relative;
+    }
+
+    .spec-ends {
+      display: flex;
+      justify-content: space-between;
+      font-family: var(--mono);
+      font-size: 11px;
+      color: var(--text-2);
+      margin-top: 10px;
+    }
+
+    .spec-mark {
+      position: absolute;
+      top: -12px;
+      transform: translateX(-50%);
+      cursor: pointer;
+      text-align: center;
+      background: none;
+      border: none;
+      padding: 0;
+    }
+
+    .spec-mark .pin {
+      width: 18px;
+      height: 18px;
+      border-radius: 50%;
+      background: #fff;
+      border: 2px solid var(--border-strong);
+      margin: 0 auto;
+      transition: border-color .15s, transform .15s, box-shadow .15s;
+      display: block;
+    }
+
+    .spec-mark .pn {
+      font-family: var(--mono);
+      font-size: 12px;
+      margin-top: 8px;
+      color: var(--text-2);
+      font-weight: 500;
+      white-space: nowrap;
+      display: block;
+    }
+
+    .spec-mark[aria-pressed="true"] .pin {
+      border-color: var(--accent);
+      transform: scale(1.18);
+      box-shadow: 0 0 0 4px var(--accent-soft);
+    }
+
+    .spec-mark[aria-pressed="true"] .pn {
+      color: var(--accent);
+    }
+
+    .spec-panel {
+      margin-top: 34px;
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 18px;
+      background: var(--bg-soft);
+    }
+
+    .spec-panel h4 {
+      margin: 0 0 4px;
+    }
+
+    .spec-panel .pmeta {
+      font-family: var(--mono);
+      font-size: 12px;
+      color: var(--text-3);
+      margin-bottom: 14px;
+    }
+
+    .bars {
+      display: grid;
+      grid-template-columns: 78px 1fr 56px;
+      gap: 9px 12px;
+      align-items: center;
+    }
+
+    .bars .blabel {
+      font-size: 13px;
+      color: var(--text-2);
+    }
+
+    .bars .btrack {
+      height: 8px;
+      background: #e9e7e3;
+      border-radius: 4px;
+      overflow: hidden;
+    }
+
+    .bars .bfill {
+      height: 100%;
+      border-radius: 4px;
+      background: var(--accent);
+      transition: width .4s ease;
+    }
+
+    .bars .bval {
+      font-family: var(--mono);
+      font-size: 11px;
+      color: var(--text-2);
+      text-align: right;
+    }
+
+    /* generic actor diagram */
+    .actors {
+      display: flex;
+      gap: 12px;
+      flex-wrap: wrap;
+    }
+
+    .actor {
+      flex: 1 1 0;
+      min-width: 96px;
+      border: 1.5px solid var(--border-strong);
+      border-radius: var(--radius-sm);
+      padding: 11px 10px;
+      text-align: center;
+      background: #fff;
+      transition: background .25s, border-color .25s;
+    }
+
+    .actor .aname {
+      font-weight: 700;
+      font-size: 13px;
+    }
+
+    .actor .arole {
+      font-family: var(--mono);
+      font-size: 10.5px;
+      color: var(--text-3);
+      margin-top: 2px;
+    }
+
+    .actor .astate {
+      font-size: 11.5px;
+      margin-top: 8px;
+      font-family: var(--mono);
+      color: var(--text-2);
+      min-height: 16px;
+    }
+
+    .coordinator {
+      border-style: dashed;
+    }
+
+    .flowsteps {
+      margin-top: 16px;
+    }
+
+    .stepitem {
+      display: flex;
+      gap: 11px;
+      font-size: 13.5px;
+      padding: 7px 0;
+      color: var(--text-3);
+      border-top: 1px solid var(--border);
+    }
+
+    .stepitem:first-child {
+      border-top: none;
+    }
+
+    .stepitem.done {
+      color: var(--text);
+    }
+
+    .stepitem.cur {
+      color: var(--text);
+      font-weight: 500;
+    }
+
+    .stepitem .sx {
+      font-family: var(--mono);
+      font-size: 11px;
+      flex: 0 0 26px;
+      color: var(--text-3);
+      padding-top: 2px;
+    }
+
+    .stepitem.cur .sx {
+      color: var(--accent);
+    }
+
+    /* timeline lab (TCC) */
+    .tl-scenarios {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      margin-bottom: 6px;
+    }
+
+    .tl-opt {
+      display: flex;
+      gap: 11px;
+      align-items: flex-start;
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      padding: 10px 13px;
+      cursor: pointer;
+      background: #fff;
+      transition: border-color .15s, background .15s;
+    }
+
+    .tl-opt:hover {
+      background: var(--bg-soft);
+    }
+
+    .tl-opt[aria-pressed="true"] {
+      border-color: var(--accent);
+      background: var(--accent-soft);
+    }
+
+    .tl-opt .tlname {
+      font-weight: 700;
+      font-size: 13.5px;
+    }
+
+    .tl-opt .tldesc {
+      font-size: 12.5px;
+      color: var(--text-2);
+      margin-top: 2px;
+    }
+
+    .tl-opt .tlbadge {
+      font-family: var(--mono);
+      font-size: 10px;
+      border: 1px solid var(--border-strong);
+      border-radius: 4px;
+      padding: 1px 5px;
+      color: var(--text-3);
+      flex: 0 0 auto;
+      margin-top: 1px;
+    }
+
+    .tl-result {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
+      margin-top: 16px;
+    }
+
+    @media (max-width: 560px) {
+      .tl-result {
+        grid-template-columns: 1fr;
+      }
+    }
+
+    .tl-card {
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      padding: 13px 14px;
+      font-size: 13px;
+    }
+
+    .tl-card .tch {
+      font-family: var(--mono);
+      font-size: 11px;
+      letter-spacing: .06em;
+      text-transform: uppercase;
+      margin-bottom: 8px;
+      color: var(--text-3);
+    }
+
+    .tl-card.naive {
+      border-left: 3px solid var(--bad);
+    }
+
+    .tl-card.fixed {
+      border-left: 3px solid var(--ok);
+    }
+
+    .tl-card .verdict {
+      font-weight: 700;
+      margin-top: 8px;
+      font-size: 13px;
+    }
+
+    .tl-card.naive .verdict {
+      color: var(--bad);
+    }
+
+    .tl-card.fixed .verdict {
+      color: var(--ok);
+    }
+
+    /* saga chain */
+    .saga-chain {
+      display: flex;
+      flex-direction: column;
+      gap: 0;
+      margin-top: 8px;
+    }
+
+    .saga-step {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .saga-box {
+      flex: 1 1 auto;
+      border: 1.5px solid var(--border-strong);
+      border-radius: var(--radius-sm);
+      padding: 10px 13px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      background: #fff;
+      transition: .25s;
+    }
+
+    .saga-box .sgn {
+      font-weight: 600;
+      font-size: 13.5px;
+    }
+
+    .saga-box .sgs {
+      font-family: var(--mono);
+      font-size: 11px;
+      color: var(--text-3);
+    }
+
+    .saga-arrow {
+      height: 18px;
+      width: 2px;
+      background: var(--border-strong);
+      margin-left: 18px;
+    }
+
+    .saga-pick {
+      font-size: 12.5px;
+      color: var(--text-2);
+      margin: 4px 0 10px;
+    }
+
+    .saga-pick select {
+      font-family: var(--sans);
+      font-size: 13px;
+      padding: 5px 8px;
+      border: 1px solid var(--border-strong);
+      border-radius: 6px;
+      background: #fff;
+      color: var(--text);
+    }
+
+    /* outbox toggle */
+    .ob-stage {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      margin-top: 8px;
+    }
+
+    .ob-row {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      font-size: 13px;
+    }
+
+    .ob-chip {
+      border: 1.5px solid var(--border-strong);
+      border-radius: var(--radius-sm);
+      padding: 9px 12px;
+      background: #fff;
+      font-size: 13px;
+      transition: .25s;
+      flex: 0 0 auto;
+    }
+
+    .ob-chip .obt {
+      font-weight: 600;
+    }
+
+    .ob-chip .obs {
+      font-family: var(--mono);
+      font-size: 10.5px;
+      color: var(--text-3);
+    }
+
+    .ob-flow {
+      font-family: var(--mono);
+      font-size: 11px;
+      color: var(--text-3);
+    }
+
+    /* wizard */
+    .wiz-q {
+      margin-bottom: 16px;
+    }
+
+    .wiz-q .wq {
+      font-size: 14px;
+      font-weight: 600;
+      margin-bottom: 8px;
+    }
+
+    .wiz-opts {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+
+    .wiz-opts button {
+      font-family: var(--sans);
+      font-size: 13px;
+      border: 1px solid var(--border-strong);
+      background: #fff;
+      color: var(--text-2);
+      padding: 7px 14px;
+      border-radius: 7px;
+      cursor: pointer;
+      transition: .15s;
+    }
+
+    .wiz-opts button:hover {
+      border-color: var(--text-3);
+      color: var(--text);
+    }
+
+    .wiz-opts button[aria-pressed="true"] {
+      background: var(--accent);
+      color: #fff;
+      border-color: var(--accent);
+    }
+
+    .wiz-result {
+      margin-top: 18px;
+      border: 1px solid var(--accent-line);
+      border-radius: var(--radius);
+      padding: 16px 18px;
+      background: var(--accent-soft);
+      font-size: 14px;
+      display: none;
+    }
+
+    .wiz-result.show {
+      display: block;
+    }
+
+    .wiz-result .wr-pick {
+      font-size: 17px;
+      font-weight: 700;
+      color: #2f4d6e;
+      margin-bottom: 6px;
+    }
+
+    .wiz-result .wr-why {
+      color: #3a5572;
+    }
+
+    /* FAQ */
+    details.faq {
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      margin-bottom: 10px;
+      background: #fff;
+      overflow: hidden;
+    }
+
+    details.faq summary {
+      cursor: pointer;
+      padding: 14px 16px;
+      font-weight: 600;
+      font-size: 14.5px;
+      list-style: none;
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      align-items: center;
+    }
+
+    details.faq summary::-webkit-details-marker {
+      display: none;
+    }
+
+    details.faq summary .q {
+      font-family: var(--mono);
+      font-size: 11px;
+      color: var(--accent);
+      flex: 0 0 auto;
+    }
+
+    details.faq summary .chev {
+      transition: transform .2s;
+      color: var(--text-3);
+      flex: 0 0 auto;
+      font-size: 13px;
+    }
+
+    details.faq[open] summary .chev {
+      transform: rotate(90deg);
+    }
+
+    details.faq .ans {
+      padding: 0 16px 16px;
+      font-size: 14px;
+      color: var(--text-2);
+    }
+
+    details.faq .ans p {
+      margin: 0 0 10px;
+    }
+
+    details.faq .ans p:last-child {
+      margin: 0;
+    }
+
+    .trap {
+      display: flex;
+      gap: 10px;
+      font-size: 14px;
+      margin: 9px 0;
+    }
+
+    .trap .tn {
+      font-family: var(--mono);
+      font-size: 11px;
+      color: var(--bad);
+      flex: 0 0 auto;
+      border: 1px solid var(--bad-soft);
+      background: var(--bad-soft);
+      border-radius: 4px;
+      padding: 1px 6px;
+      height: fit-content;
+      margin-top: 2px;
+    }
+
+    /* mobile responsive */
+    .toc-toggle {
+      display: none;
+    }
+
+    @media (max-width: 920px) {
+      .wrap {
+        flex-direction: column;
+      }
+      .toc {
+        position: static;
+        width: auto;
+        height: auto;
+        border-right: none;
+        border-bottom: 1px solid var(--border);
+        padding: 18px 22px;
+      }
+      .toc-title {
+        margin-bottom: 0;
+      }
+      .toc-kicker {
+        margin-bottom: 10px;
+      }
+      .toc-nav {
+        display: none;
+        margin-top: 16px;
+      }
+      .toc-nav.open {
+        display: block;
+      }
+      .toc-toggle {
+        display: inline-block;
+        margin-top: 10px;
+      }
+      main {
+        padding: 0 22px;
+      }
+      .inner {
+        padding: 40px 0 100px;
+      }
+      .hero h1 {
+        font-size: 31px;
+      }
+    }
+
+    @media (max-width: 480px) {
+      body {
+        font-size: 15px;
+      }
+      .hero h1 {
+        font-size: 27px;
+      }
+      h2 {
+        font-size: 23px;
+      }
+      .demo-body {
+        padding: 16px 13px;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <!-- ===================== TOC SIDEBAR ===================== -->
+    <nav class="toc" aria-label="目錄">
+      <div class="toc-kicker"><a href="../index.html">← 返回目錄</a></div>
+      <div class="toc-title">寬列儲存 (Wide-column Store)</div>
+      <button class="btn toc-toggle" aria-expanded="false">目錄 ▾</button>
+      <div class="toc-nav">
+        <a href="#s1"><span class="n">01</span>總覽與定位</a>
+        <a href="#s2"><span class="n">02</span>核心資料模型：Partition Key 與 Clustering Key</a>
+        <a href="#s3"><span class="n">03</span>Cassandra 架構：Masterless Ring 與最終一致</a>
+        <a href="#s4"><span class="n">04</span>HBase 對照：Master-based 與強一致路徑</a>
+        <a href="#s5"><span class="n">05</span>依查詢設計資料模型</a>
+        <a href="#s6"><span class="n">06</span>互動演示：Partition Key 與查詢路由</a>
+      </div>
+    </nav>
+
+    <!-- ===================== MAIN CONTENT ===================== -->
+    <main>
+      <div class="inner">
+        <section id="s1">
+  <div class="sec-head">
+    <span class="sec-num">01</span>
+    <h2>總覽與定位</h2>
+  </div>
+  <p class="sec-sub">Wide-column Store 是什麼、解決什麼痛、與關聯式 / KV / Document DB 在系統設計版圖中的座標。</p>
+
+  <p><strong>寬列儲存（Wide-column Store）</strong>是一種以<strong>稀疏、可變欄位</strong>組織資料的 NoSQL 模型：每列由 <strong>Row Key</strong> 唯一識別，底下可掛多個 <strong>Column Family</strong>，每個 family 內又有動態的 column qualifier 與 timestamp 版本。它不像關聯式用固定 schema 的 table，也不像純 KV 只存 blob——而是<strong>在單一 partition 內支援範圍掃描與多版本</strong>，專為<strong>海量寫入、水平擴展、時間序列與事件流</strong>而生。</p>
+
+  <p>面試與實務上，<strong>Cassandra</strong> 是最常被問的 wide-column 代表（masterless ring、最終一致、CQL）；<strong>HBase</strong> 則是 Hadoop 生態的對照組（HMaster + RegionServer、強一致讀寫路徑）。兩者共享「partition + 範圍排序」的思維，但<strong>一致性模型與運維拓樸截然不同</strong>。</p>
+
+  <div class="callout accent">
+    <div class="c-title"><span class="ic">座標</span>Wide-column vs 其他儲存模型</div>
+    <p>
+      • <strong>關聯式（PostgreSQL）</strong>：JOIN、正規化、任意 ad-hoc 查詢——靈活但垂直擴展有上限。
+      <br>• <strong>Document（MongoDB）</strong>：JSON 文件、靈活 schema，單文件讀寫強，跨文件 JOIN 弱。
+      <br>• <strong>KV（Redis / DynamoDB 純 KV 模式）</strong>：極簡 key → value，延遲低，複雜查詢需應用層拼裝。
+      <br>• <strong>Wide-column（Cassandra / HBase）</strong>：依 partition key 水平切分、clustering key 範圍排序，<strong>為已知查詢模式優化</strong>，換取 PB 級寫入吞吐。
+    </p>
+  </div>
+
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>維度</th>
+          <th>Cassandra</th>
+          <th>HBase</th>
+          <th>PostgreSQL</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><strong>拓樸</strong></td>
+          <td class="hl">Masterless P2P ring</td>
+          <td class="hl">HMaster + RegionServer</td>
+          <td>Primary + Replica</td>
+        </tr>
+        <tr>
+          <td><strong>一致性</strong></td>
+          <td>可調（預設最終一致）</td>
+          <td>單 Region 內強一致</td>
+          <td>強一致（單主）</td>
+        </tr>
+        <tr>
+          <td><strong>查詢語言</strong></td>
+          <td>CQL（類 SQL）</td>
+          <td>API / Phoenix SQL</td>
+          <td>完整 SQL</td>
+        </tr>
+        <tr>
+          <td><strong>設計思維</strong></td>
+          <td>依查詢設計 table</td>
+          <td>依 Row Key 設計</td>
+          <td>依實體正規化</td>
+        </tr>
+        <tr>
+          <td><strong>典型場景</strong></td>
+          <td>IoT 時序、訊息收件箱、產品目錄</td>
+          <td>Hadoop 批次分析、離線特徵庫</td>
+          <td>交易 SoT、複雜報表</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="cap">面試高分：能說出 wide-column 不是「沒 schema 的 SQL」，而是<strong>用 partition key 換取寫入擴展</strong>，查詢必須帶 partition key 才高效。</p>
+
+  <div class="oneliner">
+    <b>一句話答法</b>Wide-column Store 用 Row Key 切 partition、clustering column 做範圍排序，專為海量寫入與已知查詢模式設計；Cassandra 走 masterless 最終一致，HBase 走 master-based 強一致，兩者都比關聯式更強調「先想查詢再建模」。
+  </div>
+</section>
+
+<hr class="div">
+
+<section id="s2">
+  <div class="sec-head">
+    <span class="sec-num">02</span>
+    <h2>核心資料模型：Partition Key 與 Clustering Key</h2>
+  </div>
+  <p class="sec-sub">Cassandra CQL 的 PRIMARY KEY 語意、稀疏欄位、以及一筆 row 在磁碟上如何被定位。</p>
+
+  <p>在 Cassandra 的 CQL 裡，<strong>PRIMARY KEY</strong> 決定資料如何分片與排序，這是 wide-column 與關聯式最大的語意差異：</p>
+  <ul>
+    <li><strong>Partition Key</strong>：決定這列落在哪個節點（透過 consistent hashing）。同一 partition key 的所有列<strong>必定在同一 replica set</strong>。</li>
+    <li><strong>Clustering Key</strong>：在 partition 內決定<strong>排序與範圍掃描</strong>順序，支援 <code>WHERE pk = ? AND ck &gt; ?</code> 這類區間查詢。</li>
+    <li><strong>Static columns</strong>：屬於整個 partition 的共用欄位（例如某使用者的 display name），不隨 clustering row 重複。</li>
+  </ul>
+
+  <pre><code>-- 訊息收件箱：依 user_id 分 partition，依 message_id 排序
+CREATE TABLE inbox_by_user (
+  user_id       UUID,
+  message_id    TIMEUUID,
+  sender        TEXT,
+  subject       TEXT,
+  body          TEXT,
+  PRIMARY KEY (user_id, message_id)
+) WITH CLUSTERING ORDER BY (message_id DESC);
+
+-- 查詢必須帶 partition key
+SELECT * FROM inbox_by_user
+WHERE user_id = ? AND message_id &gt; ?
+LIMIT 50;</code></pre>
+
+  <p>HBase 用不同術語表達同一概念：<strong>Row Key</strong> 同時承擔 partition 與排序職責（可人工設計 salt / reverse timestamp），<strong>Column Family</strong> 是物理儲存單元，<strong>Column Qualifier</strong> 是動態欄位名，每個 cell 帶 <strong>timestamp 版本</strong>。</p>
+
+  <div class="callout warn">
+    <div class="c-title"><span class="ic">陷阱</span>把 Cassandra 當 PostgreSQL 用</div>
+    <p>沒有 partition key 的 <code>WHERE</code> 會觸發<strong>全叢集 scatter-gather</strong>，每個節點掃自己的資料再合併——延遲與負載隨節點數線性成長。<code>ALLOW FILTERING</code> 不是救命稻草，是生產環境的紅燈。設計時先列出<strong>Top 5 查詢</strong>，再反推 table schema。</p>
+  </div>
+
+  <div class="callout accent">
+    <div class="c-title"><span class="ic">關鍵</span>稀疏性與多版本</div>
+    <p>同一 table 中，row A 可能有 3 個 column，row B 有 50 個——schema 不需預先宣告所有欄位。HBase 每個 cell 可存多個 timestamp 版本，適合「只保留最近 N 版」的時序或變更追蹤；Cassandra 透過 <code>TTL</code> 與 <code>USING TIMESTAMP</code> 達成類似效果。</p>
+  </div>
+
+  <div class="oneliner">
+    <b>一句話答法</b>Partition key 決定資料落在哪台機器；clustering key 決定 partition 內怎麼排與怎麼掃——沒帶 partition key 的查詢在 wide-column 世界裡等同全表掃描。
+  </div>
+</section>
+
+<hr class="div">
+
+<section id="s3">
+  <div class="sec-head">
+    <span class="sec-num">03</span>
+    <h2>Cassandra 架構：Masterless Ring 與最終一致</h2>
+  </div>
+  <p class="sec-sub">Gossip、Replication Factor、Quorum 讀寫、以及為何能無單點寫入擴展。</p>
+
+  <p>Cassandra 採用<strong>對等節點 ring</strong>，沒有 central master。每個節點透過 <strong>Gossip</strong> 交換 cluster 狀態（誰活著、token 範圍、schema 版本），client 可用 <strong>any node as coordinator</strong> 發起請求。</p>
+
+  <h3>寫入路徑（簡化）</h3>
+  <ol>
+    <li>Client 送寫入到任一 coordinator。</li>
+    <li>Coordinator 依 partition key 算出 token，找出負責的 <strong>replica nodes</strong>（由 Replication Factor <var>RF</var> 決定副本數）。</li>
+    <li>Coordinator 將寫入<strong>並行推送</strong>到 replicas；依 <code>Consistency Level</code> 等待足夠節點回應（例如 <code>QUORUM</code> = 過半副本確認）。</li>
+    <li>背景 <strong>hinted handoff</strong> / <strong>anti-entropy repair</strong> 修復暫時不一致的副本。</li>
+  </ol>
+
+  <div class="formula">W + R &gt; RF  →  強一致讀寫（在無失敗節點時）</div>
+
+  <p>其中 <var>W</var> 為寫入一致性所需確認數、<var>R</var> 為讀取一致性所需確認數、<var>RF</var> 為副本數。預設常見 <var>RF</var>=3、<code>ONE</code> 讀寫——吞吐高但可能讀到舊值；金融級場景才調高到 <code>QUORUM</code> / <code>LOCAL_QUORUM</code>。</p>
+
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>Consistency Level</th>
+          <th>行為</th>
+          <th>適用</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><code>ONE</code></td>
+          <td>任一副本回應即成功</td>
+          <td>高吞吐寫入、可容忍短暫 stale read</td>
+        </tr>
+        <tr>
+          <td><code>QUORUM</code></td>
+          <td>過半副本確認</td>
+          <td>需要較新資料、跨 DC 需注意延遲</td>
+        </tr>
+        <tr>
+          <td><code>LOCAL_QUORUM</code></td>
+          <td>本地 DC 內過半副本</td>
+          <td>多 DC 部署，避免跨洋 quorum 延遲</td>
+        </tr>
+        <tr>
+          <td><code>ALL</code></td>
+          <td>全部副本確認</td>
+          <td>極少使用；任一節點掛掉即寫入失敗</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="callout accent">
+    <div class="c-title"><span class="ic">實務</span>多 DC 與 <code>NetworkTopologyStrategy</code></div>
+    <p>生產環境用 <code>NetworkTopologyStrategy</code> 把副本分散到不同 rack / DC，搭配 <code>LOCAL_QUORUM</code> 讓讀寫在本地 DC 完成，跨 DC 靠 async replication 與 repair 追平。這是 Cassandra 在全域部署時的標準打法。</p>
+  </div>
+
+  <div class="oneliner">
+    <b>一句話答法</b>Cassandra 無 master，coordinator 依 token 找 replica 並行寫入；一致性由 CL 與 <var>RF</var> 共同決定，預設偏可用性與吞吐，需主動調高 quorum 才接近強一致。
+  </div>
+</section>
+
+<hr class="div">
+
+<section id="s4">
+  <div class="sec-head">
+    <span class="sec-num">04</span>
+    <h2>HBase 對照：Master-based 與強一致路徑</h2>
+  </div>
+  <p class="sec-sub">HMaster、Region、WAL、MemStore——以及與 Cassandra 在一致性與運維上的取捨。</p>
+
+  <p><strong>HBase</strong> 建立在 HDFS 之上，架構明確分層：</p>
+  <ul>
+    <li><strong>HMaster</strong>：管理 Region 分配、schema 變更、failover（<strong>不是資料路徑上的單點</strong>，但 metadata 操作依賴它）。</li>
+    <li><strong>RegionServer</strong>：實際服務讀寫，每個 Region 是連續 row key 範圍的 shard。</li>
+    <li><strong>ZooKeeper</strong>：協調 master 選舉與 region 狀態。</li>
+  </ul>
+
+  <h3>寫入路徑</h3>
+  <p>寫入先 append 到 <strong>WAL（Write-Ahead Log）</strong>，再進 <strong>MemStore</strong>；MemStore 滿了 flush 成 HDFS 上的 <strong>HFile</strong>。讀取需合併 MemStore + 多個 HFile（類 LSM-Tree），背景 <strong>Compaction</strong> 合併小檔。單 Region 內讀寫走同一 RegionServer，語意上接近<strong>強一致</strong>。</p>
+
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>對比維度</th>
+          <th>Cassandra</th>
+          <th>HBase</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><strong>控制平面</strong></td>
+          <td>無中心 master（Gossip）</td>
+          <td>HMaster + ZK</td>
+        </tr>
+        <tr>
+          <td><strong>儲存底層</strong></td>
+          <td>本地 SSTable（自建）</td>
+          <td>HDFS HFile</td>
+        </tr>
+        <tr>
+          <td><strong>預設一致性</strong></td>
+          <td>最終一致（可調）</td>
+          <td>單 Region 強一致</td>
+        </tr>
+        <tr>
+          <td><strong>最佳場景</strong></td>
+          <td>線上服務、低延遲寫入</td>
+          <td>與 Hadoop 批次共存的離線/近線</td>
+        </tr>
+        <tr>
+          <td><strong>擴展痛點</strong></td>
+          <td>hot partition、repair 成本</td>
+          <td>Region split、Major compaction IO</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="callout warn">
+    <div class="c-title"><span class="ic">陷阱</span>以為 HBase 適合低延遲 OLTP</div>
+    <p>HBase 為<strong>高吞吐批次寫入 + 大範圍 scan</strong> 優化，單筆隨機讀寫延遲通常高於 Cassandra。若你要毫秒級線上 API 且無 Hadoop 依賴，Cassandra / Scylla 更常見；HBase 適合「寫入特徵庫、MapReduce 讀、離線訓練」這類路徑。</p>
+  </div>
+
+  <div class="oneliner">
+    <b>一句話答法</b>HBase 是 master-based + HDFS 的強一致 wide-column，擅長與 Hadoop 批次共存；Cassandra 是 masterless 最終一致，擅長線上服務的水平寫入擴展——選誰看你是 OLTP 還是離線分析。
+  </div>
+</section>
+
+<hr class="div">
+
+<section id="s5">
+  <div class="sec-head">
+    <span class="sec-num">05</span>
+    <h2>依查詢設計資料模型</h2>
+  </div>
+  <p class="sec-sub">從 access pattern 反推 schema、反正規化、多表物化——與關聯式「先正規化再優化」的思維翻轉。</p>
+
+  <p>關聯式教科書教的是：<strong>消除冗餘 → 正規化 → 需要時再 denormalize</strong>。Wide-column 幾乎反過來：<strong>先列出所有讀寫查詢，再為每條查詢設計一張（或一種）table</strong>。Cassandra 不支援跨 partition JOIN，Document DB 的 <code>$lookup</code> 在這裡也不存在。</p>
+
+  <h3>實戰範例：電商訂單</h3>
+  <p>需求：</p>
+  <ul>
+    <li>Q1：依 <code>user_id</code> 查最近訂單列表</li>
+    <li>Q2：依 <code>order_id</code> 查單筆訂單詳情</li>
+    <li>Q3：依 <code>product_id</code> 查某商品的近期訂單（營運報表）</li>
+  </ul>
+
+  <p>關聯式一張 <code>orders</code> table + 索引搞定；Cassandra 需要<strong>至少兩張物化視角</strong>：</p>
+
+  <pre><code>-- Q1：收件箱模式
+CREATE TABLE orders_by_user (
+  user_id UUID, order_id TIMEUUID, total DECIMAL, status TEXT,
+  PRIMARY KEY (user_id, order_id)
+) WITH CLUSTERING ORDER BY (order_id DESC);
+
+-- Q2：直接 lookup（order_id 作 partition key）
+CREATE TABLE orders_by_id (
+  order_id UUID PRIMARY KEY,
+  user_id UUID, total DECIMAL, status TEXT, items TEXT
+);
+
+-- Q3 若流量大，再建 orders_by_product；否則用批次工具從 Q2 匯出</code></pre>
+
+  <div class="callout accent">
+    <div class="c-title"><span class="ic">關鍵</span>寫入放大是可接受的 Trade-off</div>
+    <p>建立訂單時可能需<strong>同時寫入多張 table</strong>（dual write 或 async fan-out）。在關聯式這是冗餘；在 Cassandra 這是<strong>為讀取效能付的設計代價</strong>。面試要主動講出這個 trade-off，並提到可用 Kafka / CDC 做 eventual 同步降低雙寫風險。</p>
+  </div>
+
+  <h3>避免 Hot Partition</h3>
+  <p>若 partition key 選錯（例如全用同一個 <code>tenant_id</code> 下的單調遞增 ID），所有寫入會打到同一節點。解法：<strong>複合 partition key</strong>（<code>((user_id, bucket)), message_id</code>，bucket = hash % 16）、<strong>reverse timestamp</strong>、或 <strong>random salt</strong>（讀取時需 scatter-gather 多 partition）。</p>
+
+  <div class="callout warn">
+    <div class="c-title"><span class="ic">陷阱</span>Secondary Index 濫用</div>
+    <p>Cassandra 的 secondary index 在<strong>高基數欄位</strong>上效能極差（需掃描所有節點）。正確做法是<strong>用查詢驅動的物化 table</strong>，或引入 <strong>Elasticsearch / Sai index</strong> 做搜尋側車。</p>
+  </div>
+
+  <div class="oneliner">
+    <b>一句話答法</b>Wide-column 建模是「一個查詢一張表」的物化思維：用寫入放大與反正規化換取 partition-local 讀取，絕不指望 ad-hoc JOIN。
+  </div>
+</section>
+
+<hr class="div">
+
+<section id="s6">
+  <div class="sec-head">
+    <span class="sec-num">06</span>
+    <h2>互動演示：Partition Key 與查詢路由</h2>
+  </div>
+  <p class="sec-sub">切換資料模型與查詢模式，觀察 coordinator 命中哪些節點、是否觸發 scatter-gather 全叢集掃描。</p>
+
+  <p>下方模擬 4 節點 Cassandra ring。選擇<strong>資料模型</strong>（partition key 設計）與<strong>查詢模式</strong>，執行查詢後觀察：命中節點數、延遲等級、以及是否為高效 partition-local 讀取。</p>
+
+  <div class="demo" id="demo-wide-column">
+    <div class="demo-bar">
+      <span class="label">互動 · Partition Key 查詢路由</span>
+      <span class="label" style="text-transform:none;font-family:var(--sans);font-size:12px;color:var(--text-2)">切換模型與查詢，觀察 ring 節點命中與 scatter-gather</span>
+    </div>
+    <div class="demo-body">
+      <div style="display:flex;flex-wrap:wrap;gap:12px;align-items:center;margin-bottom:14px">
+        <div class="seg" role="group" aria-label="資料模型">
+          <button data-model="inbox" aria-pressed="true">收件箱 (user_id, msg_id)</button>
+          <button data-model="orders" aria-pressed="false">訂單 (order_id)</button>
+          <button data-model="bad" aria-pressed="false">錯誤設計 (status)</button>
+        </div>
+      </div>
+
+      <div style="display:flex;flex-wrap:wrap;gap:12px;align-items:center;margin-bottom:14px">
+        <div class="seg" role="group" aria-label="查詢模式">
+          <button data-query="pk" aria-pressed="true">帶 Partition Key</button>
+          <button data-query="range" aria-pressed="false">Partition + 範圍</button>
+          <button data-query="scan" aria-pressed="false">無 PK 全表掃描</button>
+        </div>
+        <button class="btn primary" id="btn-run" type="button">執行查詢</button>
+        <button class="btn" id="btn-reset" type="button">Reset</button>
+      </div>
+
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:14px">
+        <div style="border:1px solid var(--border);border-radius:var(--radius-sm);padding:14px;background:var(--bg-soft);min-height:180px">
+          <div style="font-family:var(--mono);font-size:11px;color:var(--text-3);margin-bottom:8px">RING TOPOLOGY (4 NODES)</div>
+          <div id="wc-ring" style="font-size:13px;line-height:2.2"></div>
+        </div>
+        <div style="border:1px solid var(--border);border-radius:var(--radius-sm);padding:14px;background:#ffffff;min-height:180px">
+          <div style="font-family:var(--mono);font-size:11px;color:var(--text-3);margin-bottom:8px">QUERY PLAN</div>
+          <div id="wc-plan" style="font-family:var(--mono);font-size:12px;line-height:1.8"></div>
+        </div>
+      </div>
+
+      <div style="border:1px solid var(--border);border-radius:var(--radius-sm);padding:12px;background:#ffffff;margin-bottom:14px">
+        <div style="font-family:var(--mono);font-size:11px;color:var(--text-3);margin-bottom:8px">METRICS</div>
+        <div id="wc-metrics" style="display:flex;flex-wrap:wrap;gap:16px;font-size:13px"></div>
+      </div>
+
+      <div class="status-line" id="wc-status">
+        選擇資料模型與查詢模式，按「執行查詢」觀察路由行為。
+      </div>
+
+      <div class="legend">
+        <span><i class="dot ns-idle"></i>閒置節點</span>
+        <span><i class="dot ns-wait"></i>Coordinator</span>
+        <span><i class="dot ns-ok"></i>Replica 命中</span>
+        <span><i class="dot ns-bad"></i>Scatter-gather</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="oneliner">
+    <b>一句話答法</b>高效 wide-column 查詢 = partition key 精準命中少數 replica；無 PK 或低基數 PK 設計會把一次讀取變成 N 節點 scatter-gather——建模階段就要擋掉。
+  </div>
+</section>
+
+      </div>
+    </main>
+  </div>
+
+  <script>
+    "use strict";
+    document.addEventListener("DOMContentLoaded", function () {
+      /* ===== TOC scrollspy & mobile toggle ===== */
+      (function () {
+        var links = Array.prototype.slice.call(document.querySelectorAll(".toc-nav a"));
+        var map = {};
+        links.forEach(function (a) {
+          var href = a.getAttribute("href");
+          if (href && href.startsWith("#")) {
+            map[href.slice(1)] = a;
+          }
+        });
+        var secs = links.map(function (a) {
+          var href = a.getAttribute("href");
+          return href && href.startsWith("#") ? document.getElementById(href.slice(1)) : null;
+        }).filter(Boolean);
+
+        if (secs.length > 0 && typeof IntersectionObserver !== "undefined") {
+          var obs = new IntersectionObserver(function (entries) {
+            entries.forEach(function (e) {
+              if (e.isIntersecting) {
+                links.forEach(function (l) { l.classList.remove("active"); });
+                var act = map[e.target.id];
+                if (act) act.classList.add("active");
+              }
+            });
+          }, { rootMargin: "-20% 0px -70% 0px", threshold: 0 });
+          secs.forEach(function (s) { obs.observe(s); });
+        }
+
+        var toggle = document.querySelector(".toc-toggle");
+        var nav = document.querySelector(".toc-nav");
+        if (toggle && nav) {
+          toggle.addEventListener("click", function () {
+            var open = nav.classList.toggle("open");
+            toggle.setAttribute("aria-expanded", open ? "true" : "false");
+          });
+          nav.addEventListener("click", function (e) {
+            if (e.target.closest("a") && window.innerWidth <= 920) {
+              nav.classList.remove("open");
+              toggle.setAttribute("aria-expanded", "false");
+            }
+          });
+        }
+      })();
+    });
+  </script>
+
+  
+<script>
+(function () {
+  var model = 'inbox';
+  var query = 'pk';
+  var nodes = ['N1', 'N2', 'N3', 'N4'];
+  var runCount = 0;
+
+  var elRing = document.getElementById('wc-ring');
+  var elPlan = document.getElementById('wc-plan');
+  var elMetrics = document.getElementById('wc-metrics');
+  var elStatus = document.getElementById('wc-status');
+  var modelBtns = document.querySelectorAll('[data-model]');
+  var queryBtns = document.querySelectorAll('[data-query]');
+
+  var scenarios = {
+    inbox: {
+      label: 'inbox_by_user (PK: user_id, CK: message_id)',
+      pk: 'user_id = alice-42',
+      range: 'user_id = alice-42 AND message_id > t-100',
+      scan: 'WHERE sender = "bob"  — 無 partition key'
+    },
+    orders: {
+      label: 'orders_by_id (PK: order_id)',
+      pk: 'order_id = ord-9f3a',
+      range: 'order_id = ord-9f3a  — 單列 lookup',
+      scan: 'WHERE status = "pending"  — 無 partition key'
+    },
+    bad: {
+      label: 'orders_by_status (PK: status)  ⚠ hot partition',
+      pk: 'status = "pending"',
+      range: 'status = "pending" AND order_id > x',
+      scan: 'SELECT *  — 全表掃描'
+    }
+  };
+
+  function dot(cls) {
+    return '<span style="display:inline-block;width:9px;height:9px;border-radius:2px;margin-right:6px;vertical-align:middle" class="' + cls + '"></span>';
+  }
+
+  function hashPartition(key) {
+    var h = 0;
+    for (var i = 0; i < key.length; i++) h = ((h << 5) - h + key.charCodeAt(i)) | 0;
+    return Math.abs(h) % 4;
+  }
+
+  function computeRoute() {
+    var hit = [];
+    var scatter = false;
+    var coord = 0;
+    var latency = 'low';
+    var replicas = 1;
+    var plan = [];
+
+    if (query === 'scan' || (model === 'bad' && query !== 'pk')) {
+      scatter = true;
+      hit = [0, 1, 2, 3];
+      coord = 1;
+      latency = 'critical';
+      replicas = 4;
+      plan.push('① Client → Node-' + nodes[coord] + ' (coordinator)');
+      plan.push('② Scatter-gather：廣播至全部 4 nodes');
+      plan.push('③ 各節點本地掃描 SSTable');
+      plan.push('④ Coordinator 合併結果 → 高延遲');
+      elStatus.textContent = '危險：無有效 partition key，觸發全叢集 scatter-gather！生產環境應禁止此查詢。';
+      return { hit: hit, scatter: scatter, coord: coord, latency: latency, replicas: replicas, plan: plan };
+    }
+
+    var pkValue = model === 'inbox' ? 'alice-42' : model === 'orders' ? 'ord-9f3a' : 'pending';
+    var partIdx = hashPartition(pkValue);
+    hit = [partIdx];
+    coord = (partIdx + 1) % 4;
+    replicas = 3;
+    latency = query === 'range' ? 'low' : 'minimal';
+
+    plan.push('① Client → Node-' + nodes[coord] + ' (coordinator)');
+    plan.push('② token(' + pkValue + ') → partition on ' + nodes[partIdx]);
+    if (query === 'range' && model === 'inbox') {
+      plan.push('③ Partition-local range scan (clustering key)');
+      plan.push('④ 回傳排序後前 50 列');
+      elStatus.textContent = '理想路徑：partition key 命中單一節點，clustering key 做範圍掃描——Cassandra 最擅長的查詢型態。';
+    } else if (model === 'bad') {
+      plan.push('③ 命中 Node-' + nodes[partIdx] + ' 但 status 基數極低');
+      plan.push('④ 幾乎所有「pending」訂單擠在同一 partition → hot spot');
+      latency = 'high';
+      elStatus.textContent = 'Hot partition：低基數 partition key 讓大量寫入打到同一節點，P99 延遲飆升。';
+    } else {
+      plan.push('③ 直接讀取 ' + nodes[partIdx] + ' 上的單列 / 少數 replica');
+      plan.push('④ Partition-local point lookup 完成');
+      elStatus.textContent = '高效：partition key 精準路由到單一節點，延遲最低。';
+    }
+
+    return { hit: hit, scatter: scatter, coord: coord, latency: latency, replicas: replicas, plan: plan };
+  }
+
+  function renderIdle() {
+    var ring = '';
+    nodes.forEach(function (n, i) {
+      ring += dot('ns-idle') + 'Node-' + n + '  [token range ' + (i * 25) + '–' + ((i + 1) * 25 - 1) + ']<br>';
+    });
+    elRing.innerHTML = ring;
+    elPlan.innerHTML = '<span style="color:var(--text-3)">等待執行查詢…</span>';
+    elMetrics.innerHTML =
+      '<span><strong>Model</strong>：' + scenarios[model].label + '</span>' +
+      '<span><strong>Query</strong>：' + scenarios[model][query] + '</span>';
+  }
+
+  function renderResult(route) {
+    var ring = '';
+    nodes.forEach(function (n, i) {
+      var cls = 'ns-idle';
+      if (i === route.coord) cls = 'ns-wait';
+      else if (route.hit.indexOf(i) >= 0) cls = route.scatter ? 'ns-bad' : 'ns-ok';
+      ring += dot(cls) + 'Node-' + n;
+      if (i === route.coord) ring += '  ← coordinator';
+      if (route.hit.indexOf(i) >= 0 && i !== route.coord) ring += '  ← replica';
+      ring += '<br>';
+    });
+    elRing.innerHTML = ring;
+
+    var planHtml = '';
+    route.plan.forEach(function (line) {
+      planHtml += dot('ns-wait') + line + '<br>';
+    });
+    elPlan.innerHTML = planHtml;
+
+    var latCls = route.latency === 'minimal' ? 'ns-ok' : route.latency === 'low' ? 'ns-ok' : route.latency === 'high' ? 'ns-lock' : 'ns-bad';
+    elMetrics.innerHTML =
+      '<span><strong>Nodes hit</strong>：' + route.hit.length + ' / 4</span>' +
+      '<span><strong>RF contacted</strong>：' + route.replicas + '</span>' +
+      '<span><strong>Latency</strong>：' + dot(latCls) + route.latency + '</span>' +
+      '<span><strong>Runs</strong>：' + runCount + '</span>';
+  }
+
+  function setModel(m) {
+    model = m;
+    modelBtns.forEach(function (b) {
+      b.setAttribute('aria-pressed', b.getAttribute('data-model') === m ? 'true' : 'false');
+    });
+    renderIdle();
+    elStatus.textContent = '已切換模型：' + scenarios[m].label + '。選擇查詢後按「執行查詢」。';
+  }
+
+  function setQuery(q) {
+    query = q;
+    queryBtns.forEach(function (b) {
+      b.setAttribute('aria-pressed', b.getAttribute('data-query') === q ? 'true' : 'false');
+    });
+    renderIdle();
+  }
+
+  function runQuery() {
+    runCount++;
+    var route = computeRoute();
+    renderResult(route);
+  }
+
+  function reset() {
+    runCount = 0;
+    renderIdle();
+    elStatus.textContent = '已重置。選擇資料模型與查詢模式，按「執行查詢」觀察路由行為。';
+  }
+
+  modelBtns.forEach(function (b) {
+    b.addEventListener('click', function () { setModel(b.getAttribute('data-model')); });
+  });
+  queryBtns.forEach(function (b) {
+    b.addEventListener('click', function () { setQuery(b.getAttribute('data-query')); });
+  });
+  document.getElementById('btn-run').addEventListener('click', runQuery);
+  document.getElementById('btn-reset').addEventListener('click', reset);
+
+  renderIdle();
+})();
+</script>
+
+
+<!-- FULLSCREEN-FEATURE:START -->
+<style>
+  .fs-toggle {
+    position: fixed;
+    top: 18px;
+    right: 18px;
+    z-index: 1000;
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    font-family: var(--sans, system-ui, -apple-system, "Segoe UI", sans-serif);
+    font-size: 12.5px;
+    line-height: 1;
+    color: var(--text-2, #6b7078);
+    background: var(--bg, #ffffff);
+    border: 1px solid var(--border-strong, #dedcd8);
+    border-radius: 999px;
+    padding: 7px 13px 7px 11px;
+    cursor: pointer;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, .06), 0 4px 12px rgba(0, 0, 0, .04);
+    transition: background .15s, border-color .15s, color .15s;
+  }
+
+  .fs-toggle:hover {
+    background: var(--bg-soft, #fafaf9);
+    color: var(--text, #262a2f);
+    border-color: var(--text-3, #9aa0a8);
+  }
+
+  .fs-toggle:focus-visible {
+    outline: 2px solid var(--accent, #3f6188);
+    outline-offset: 2px;
+  }
+
+  .fs-toggle[aria-pressed="true"] {
+    background: var(--accent, #3f6188);
+    color: #fff;
+    border-color: var(--accent, #3f6188);
+  }
+
+  .fs-toggle .fs-ic {
+    flex: 0 0 auto;
+    display: block;
+  }
+
+  @media print {
+    .fs-toggle { display: none !important; }
+  }
+
+  @media (max-width: 480px) {
+    .fs-toggle { padding: 8px; }
+    .fs-toggle .fs-label { display: none; }
+  }
+</style>
+<button id="fs-toggle-btn" class="fs-toggle" type="button" aria-pressed="false"
+        aria-label="切換全螢幕檢視 (快捷鍵 F)" title="全螢幕檢視 (F)">
+  <svg class="fs-ic fs-ic-expand" viewBox="0 0 24 24" width="15" height="15" fill="none"
+       stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+    <path d="M8 3H5a2 2 0 0 0-2 2v3m18 0V5a2 2 0 0 0-2-2h-3m0 18h3a2 2 0 0 0 2-2v-3M3 16v3a2 2 0 0 0 2 2h3"/>
+  </svg>
+  <svg class="fs-ic fs-ic-compress" viewBox="0 0 24 24" width="15" height="15" fill="none"
+       stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="display:none">
+    <path d="M8 3v3a2 2 0 0 1-2 2H3m18 0h-3a2 2 0 0 1-2-2V3m0 18v-3a2 2 0 0 1 2-2h3M3 16h3a2 2 0 0 1 2 2v3"/>
+  </svg>
+  <span class="fs-label">全螢幕</span>
+</button>
+<script>
+  "use strict";
+  (function () {
+    var btn = document.getElementById("fs-toggle-btn");
+    if (!btn) return;
+    var docEl = document.documentElement;
+    var canFs = !!(docEl.requestFullscreen || docEl.webkitRequestFullscreen);
+    // 不支援 Fullscreen API (如 iPhone Safari) → 隱藏按鈕，避免壞掉的 UI
+    if (!canFs) { btn.style.display = "none"; return; }
+
+    var expandIc = btn.querySelector(".fs-ic-expand");
+    var compressIc = btn.querySelector(".fs-ic-compress");
+    var label = btn.querySelector(".fs-label");
+
+    function isFs() {
+      return !!(document.fullscreenElement || document.webkitFullscreenElement);
+    }
+    function enter() {
+      if (docEl.requestFullscreen) docEl.requestFullscreen();
+      else if (docEl.webkitRequestFullscreen) docEl.webkitRequestFullscreen();
+    }
+    function exit() {
+      if (document.exitFullscreen) document.exitFullscreen();
+      else if (document.webkitExitFullscreen) document.webkitExitFullscreen();
+    }
+    function toggle() { isFs() ? exit() : enter(); }
+    function sync() {
+      var on = isFs();
+      btn.setAttribute("aria-pressed", on ? "true" : "false");
+      if (label) label.textContent = on ? "離開全螢幕" : "全螢幕";
+      if (expandIc) expandIc.style.display = on ? "none" : "block";
+      if (compressIc) compressIc.style.display = on ? "block" : "none";
+    }
+
+    btn.addEventListener("click", toggle);
+    document.addEventListener("fullscreenchange", sync);
+    document.addEventListener("webkitfullscreenchange", sync);
+    document.addEventListener("keydown", function (e) {
+      if (e.key !== "f" && e.key !== "F") return;
+      if (e.metaKey || e.ctrlKey || e.altKey) return;
+      var t = e.target;
+      var tag = t && t.tagName ? t.tagName.toUpperCase() : "";
+      if (tag === "INPUT" || tag === "TEXTAREA" || (t && t.isContentEditable)) return;
+      e.preventDefault();
+      toggle();
+    });
+    sync();
+  })();
+</script>
+<!-- FULLSCREEN-FEATURE:END -->
+</body>
+</html>
