@@ -183,6 +183,51 @@ function validateBooksIndexConsistency(completed) {
 }
 
 /**
+ * books/index.html 心智圖節點狀態 ↔ completed.json 一致性檢查。
+ * 過去刻意不驗 mermaid 節點狀態（假設它與卡片「同源於 completed」），但該假設曾被打破：
+ * generateMermaid 早期無條件從磁碟重讀 completed.json，在「尚未 saveCompleted」的呼叫端會把
+ * 最新主題節點畫成 :::pending（off-by-one lag），卡片卻已正確——兩者短暫不同源。修正後兩者
+ * 同源，本檢查作為安全網，確保此類節點落後 / 殘留完成態不再靜默溜過品質閘門。
+ * 只有「同時是 mindmap 節點」的已完成主題才會出現在圖上；非節點者由 validateMindmap 負責。
+ */
+function validateBooksIndexMermaidConsistency(completed, mindmap) {
+  if (!fs.existsSync(BOOKS_INDEX_PATH)) return; // 「首頁不存在」已由卡片檢查涵蓋
+
+  const nodeIds = new Set(
+    (mindmap && Array.isArray(mindmap.nodes) ? mindmap.nodes : [])
+      .filter((n) => n && typeof n.id === 'string')
+      .map((n) => n.id)
+  );
+  const expectedCompleted = new Set(
+    completed
+      .filter((item) => item && typeof item.id === 'string' && nodeIds.has(item.id))
+      .map((item) => item.id)
+  );
+
+  const html = fs.readFileSync(BOOKS_INDEX_PATH, 'utf8');
+  const mermaidCompleted = new Set();
+  // 匹配 generateMermaid 產生的節點行：`  <id>["label"]:::completed`
+  const nodeRegex = /^\s{2,}([A-Za-z0-9_-]+)\[".*?"\]:::completed\s*$/gm;
+  let match;
+  while ((match = nodeRegex.exec(html)) !== null) {
+    mermaidCompleted.add(match[1]);
+  }
+
+  // completed 有、圖上非 :::completed → 節點狀態落後（mermaid off-by-one lag 的特徵）。
+  expectedCompleted.forEach((id) => {
+    if (!mermaidCompleted.has(id)) {
+      error(`books/index.html 心智圖節點 "${id}" 未標記為 :::completed，但其在 completed.json（mermaid 節點狀態落後，請重跑 generate.js / rebuild-all.js 重繪首頁）。`);
+    }
+  });
+  // 圖上 :::completed、但不在 completed → 殘留已撤回主題的完成態。
+  mermaidCompleted.forEach((id) => {
+    if (!expectedCompleted.has(id)) {
+      error(`books/index.html 心智圖節點 "${id}" 標記為 :::completed，但其不在 completed.json（首頁殘留過時完成態，請重繪首頁）。`);
+    }
+  });
+}
+
+/**
  * prerequisite 邊環偵測 (DFS 三色法)。
  * 只取 type==='prerequisite' 的邊建圖——related 邊方向是任意的，納入會大量誤報。
  * 顏色：undefined=未訪、1=訪問中(在遞迴堆疊)、2=完成。
@@ -329,6 +374,7 @@ function main() {
   validateMindmap(mindmap, todoIds, completedIds);
   validateMutualExclusion(todoIds, completedIds);
   validateBooksIndexConsistency(completed);
+  validateBooksIndexMermaidConsistency(completed, mindmap);
 
   if (hasError) {
     console.error('\nValidation FAILED. Please fix the errors above.');

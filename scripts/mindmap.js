@@ -174,11 +174,16 @@ function recommendNext(lastTopicId) {
 
 /**
  * Compile the Mindmap DAG + Completed topics into an interactive, beautifully styled Mermaid diagram.
+ *
+ * @param {Array} [completedList] 已完成主題清單。呼叫端（buildBooksIndexHtml）應傳入手上那份
+ *   in-memory 清單，讓節點狀態與卡片同源、與存檔時機解耦。省略時（如 CLI）才 fallback 讀磁碟。
+ *   ── 這是修正「發佈當下 mermaid 節點落後成 pending」off-by-one bug 的關鍵：舊版無條件讀磁碟，
+ *      而 generate.js 在 saveCompleted 之前就呼叫，導致最新主題節點讀到尚未存入的舊狀態。
  */
-function generateMermaid() {
+function generateMermaid(completedList) {
   const mindmap = loadJSON(MINDMAP_PATH, { nodes: [], edges: [] });
-  const completed = loadJSON(COMPLETED_PATH, []);
-  
+  const completed = completedList !== undefined ? completedList : loadJSON(COMPLETED_PATH, []);
+
   const completedIds = new Set(completed.map(item => item.id));
 
   let mermaidCode = 'flowchart TD\n';
