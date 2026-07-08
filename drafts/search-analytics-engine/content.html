@@ -85,6 +85,89 @@
     <li><strong>Document</strong>：JSON 文件，含 <code>_id</code> 與 mapping 定義的 fields。</li>
   </ul>
 
+  <h3>四個層次的包含關係</h3>
+  <p>關鍵在於這四者<strong>不是平級，而是層層包含</strong>：一個 Index 水平切成多個 Shard，每個 Shard 是一份獨立的 Lucene index、內部由多個不可變 Segment 疊成，Segment 裡才真正存放各 Document 的倒排索引。</p>
+
+  <div style="border:1.5px solid var(--border-strong);border-radius:var(--radius-sm);padding:14px;background:var(--accent-soft);margin:10px 0 14px" role="img" aria-label="Index 包含 Shard、Shard 包含 Segment、Segment 包含 Document 的巢狀關係圖">
+    <div style="font-family:var(--mono);font-size:11px;color:var(--text-2);margin-bottom:10px"><b>INDEX</b> · <code>products</code> — 邏輯命名空間，查詢與寫入的目標</div>
+    <div style="display:flex;flex-wrap:wrap;gap:12px">
+      <div style="flex:1 1 240px;border:1.5px solid var(--border-strong);border-radius:var(--radius-sm);padding:11px;background:var(--bg)">
+        <div style="font-family:var(--mono);font-size:10.5px;color:var(--text-3);margin-bottom:8px"><b style="color:var(--text-2)">SHARD 0</b> · primary — 獨立 Lucene index</div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap">
+          <div style="flex:1 1 90px;border:1px solid var(--border);border-radius:6px;padding:7px 8px;background:var(--bg-soft)">
+            <div style="font-family:var(--mono);font-size:10px;color:var(--text-3);margin-bottom:5px">segment · immutable</div>
+            <div style="display:flex;gap:5px;flex-wrap:wrap">
+              <span style="padding:2px 6px;border:1px solid var(--border-strong);border-radius:5px;background:var(--bg);font-family:var(--mono);font-size:10.5px">📄 doc1</span>
+              <span style="padding:2px 6px;border:1px solid var(--border-strong);border-radius:5px;background:var(--bg);font-family:var(--mono);font-size:10.5px">📄 doc4</span>
+            </div>
+          </div>
+          <div style="flex:1 1 90px;border:1px solid var(--border);border-radius:6px;padding:7px 8px;background:var(--bg-soft)">
+            <div style="font-family:var(--mono);font-size:10px;color:var(--text-3);margin-bottom:5px">segment · immutable</div>
+            <div style="display:flex;gap:5px;flex-wrap:wrap">
+              <span style="padding:2px 6px;border:1px solid var(--border-strong);border-radius:5px;background:var(--bg);font-family:var(--mono);font-size:10.5px">📄 doc7</span>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div style="flex:1 1 240px;border:1.5px solid var(--border-strong);border-radius:var(--radius-sm);padding:11px;background:var(--bg)">
+        <div style="font-family:var(--mono);font-size:10.5px;color:var(--text-3);margin-bottom:8px"><b style="color:var(--text-2)">SHARD 1</b> · primary — 獨立 Lucene index</div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap">
+          <div style="flex:1 1 90px;border:1px solid var(--border);border-radius:6px;padding:7px 8px;background:var(--bg-soft)">
+            <div style="font-family:var(--mono);font-size:10px;color:var(--text-3);margin-bottom:5px">segment · immutable</div>
+            <div style="display:flex;gap:5px;flex-wrap:wrap">
+              <span style="padding:2px 6px;border:1px solid var(--border-strong);border-radius:5px;background:var(--bg);font-family:var(--mono);font-size:10.5px">📄 doc2</span>
+              <span style="padding:2px 6px;border:1px solid var(--border-strong);border-radius:5px;background:var(--bg);font-family:var(--mono);font-size:10.5px">📄 doc5</span>
+            </div>
+          </div>
+          <div style="flex:1 1 90px;border:1px solid var(--border);border-radius:6px;padding:7px 8px;background:var(--bg-soft)">
+            <div style="font-family:var(--mono);font-size:10px;color:var(--text-3);margin-bottom:5px">segment · immutable</div>
+            <div style="display:flex;gap:5px;flex-wrap:wrap">
+              <span style="padding:2px 6px;border:1px solid var(--border-strong);border-radius:5px;background:var(--bg);font-family:var(--mono);font-size:10.5px">📄 doc9</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div style="margin-top:12px;border:1.5px dashed var(--border-strong);border-radius:var(--radius-sm);padding:9px 12px;background:transparent;font-size:12px;color:var(--text-3)">
+      <b style="font-family:var(--mono);font-size:10.5px;color:var(--text-2)">SHARD 0 · replica</b> — primary 的副本（結構相同，以虛線表示），落在其他節點，提升讀吞吐與 HA。
+    </div>
+  </div>
+
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>ES 術語</th>
+          <th>關聯式 DB 類比</th>
+          <th>一句話職責</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><code>Index</code></td>
+          <td>Database / Table</td>
+          <td>邏輯命名空間；查詢的目標，本身不直接存資料</td>
+        </tr>
+        <tr>
+          <td><code>Shard</code></td>
+          <td>水平分片（Partition）</td>
+          <td class="hl">分散式與擴展的單位；每個是獨立 Lucene index</td>
+        </tr>
+        <tr>
+          <td><code>Segment</code></td>
+          <td>（無直接對應）不可變索引檔</td>
+          <td>倒排索引實際落地處；refresh 生成、merge 合併</td>
+        </tr>
+        <tr>
+          <td><code>Document</code></td>
+          <td>Row</td>
+          <td>一筆 JSON 文件，含 <code>_id</code> 與 mapping fields</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="cap">巢狀關係 Index ⊃ Shard ⊃ Segment ⊃ Document：搜尋時 coordinating node 把 query 扇出到各 shard，各 shard 在自己的 segment 上查倒排索引，再彙整結果。</p>
+
   <div class="callout accent">
     <div class="c-title"><span class="ic">白話</span>為什麼 Segment 不可變？</div>
     <p>Lucene 的 segment 一旦寫入磁碟就不修改——更新 = 標記舊 doc 為 deleted + 寫入新 doc 到新 segment。這讓<strong>並發讀取無鎖</strong>、合併（merge）可背景執行。代價是磁碟佔用與 merge I/O；Production 需監控 segment 數量與 merge 壓力。</p>
@@ -196,6 +279,63 @@
   <h3>Index Analyzer vs Search Analyzer</h3>
   <p>寫入時用 <strong>index analyzer</strong>，查詢時用 <strong>search analyzer</strong>。兩者可以不同（例如 index 用 <code>ik_max_word</code> 提高 recall，search 用 <code>ik_smart</code> 提高 precision），但<strong>必須在設計時成對定義</strong>，否則 query term 與 index term 對不上會零結果。</p>
 
+  <h3>端到端追蹤：一個 term 如何從寫入走到命中</h3>
+  <p>以中文欄位示範這條「刻意不對稱」的鏈：index 端用 <code>ik_max_word</code> 切到最細粒度以<strong>拉高 recall</strong>（存下最多可能被查到的 term），search 端用 <code>ik_smart</code> 切得保守以<strong>拉高 precision</strong>——兩條管線不同，但共享的 term 讓查詢仍能命中。</p>
+
+  <div style="border:1px solid var(--border);border-radius:var(--radius-sm);padding:16px;background:var(--bg-soft);margin:8px 0 14px">
+    <div style="font-family:var(--mono);font-size:10.5px;color:var(--accent);margin-bottom:9px"><b>① INDEX-TIME</b> · 寫入 doc 時 · analyzer = <code>ik_max_word</code></div>
+    <div style="display:flex;align-items:center;gap:9px;flex-wrap:wrap;margin-bottom:9px">
+      <span style="padding:5px 10px;border:1px solid var(--border-strong);border-radius:6px;background:var(--bg);font-size:12.5px">內文「<b>分散式系統</b>」</span>
+      <span style="color:var(--text-3);font-family:var(--mono);font-size:13px">→</span>
+      <span style="padding:6px 10px;border:1px solid var(--border);border-radius:6px;background:var(--bg);font-size:12px;text-align:center;line-height:1.35">Char Filter<br><span style="font-family:var(--mono);font-size:9.5px;color:var(--text-3)">正規化（無變化）</span></span>
+      <span style="color:var(--text-3);font-family:var(--mono);font-size:13px">→</span>
+      <span style="padding:6px 10px;border:1px solid var(--border);border-radius:6px;background:var(--bg);font-size:12px;text-align:center;line-height:1.35">Tokenizer<br><span style="font-family:var(--mono);font-size:9.5px;color:var(--text-3)">ik_max_word 最大粒度</span></span>
+      <span style="color:var(--text-3);font-family:var(--mono);font-size:13px">→</span>
+      <span style="padding:6px 10px;border:1px solid var(--border);border-radius:6px;background:var(--bg);font-size:12px;text-align:center;line-height:1.35">Token Filter<br><span style="font-family:var(--mono);font-size:9.5px;color:var(--text-3)">lowercase / 同義詞</span></span>
+    </div>
+    <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">
+      <span style="font-family:var(--mono);font-size:10.5px;color:var(--text-3)">存入 6 個 term →</span>
+      <span style="padding:3px 9px;border:1px solid var(--border-strong);border-radius:5px;background:var(--bg);font-family:var(--mono);font-size:11.5px">分散式</span>
+      <span style="padding:3px 9px;border:1px solid var(--ok);border-radius:5px;background:var(--ok-soft);color:var(--ok);font-family:var(--mono);font-size:11.5px;font-weight:600">分散</span>
+      <span style="padding:3px 9px;border:1px solid var(--border-strong);border-radius:5px;background:var(--bg);font-family:var(--mono);font-size:11.5px">式</span>
+      <span style="padding:3px 9px;border:1px solid var(--border-strong);border-radius:5px;background:var(--bg);font-family:var(--mono);font-size:11.5px">系統</span>
+      <span style="padding:3px 9px;border:1px solid var(--border-strong);border-radius:5px;background:var(--bg);font-family:var(--mono);font-size:11.5px">系</span>
+      <span style="padding:3px 9px;border:1px solid var(--border-strong);border-radius:5px;background:var(--bg);font-family:var(--mono);font-size:11.5px">統</span>
+    </div>
+
+    <div style="text-align:center;margin:13px 0 12px;font-family:var(--mono);font-size:10.5px;color:var(--text-3);border-top:1px dashed var(--border-strong);padding-top:12px">▼ 這些 term 寫進 INVERTED INDEX，等待被查 ▼</div>
+
+    <div style="font-family:var(--mono);font-size:10.5px;color:var(--accent);margin-bottom:9px"><b>② SEARCH-TIME</b> · 使用者查詢時 · analyzer = <code>ik_smart</code></div>
+    <div style="display:flex;align-items:center;gap:9px;flex-wrap:wrap;margin-bottom:2px">
+      <span style="padding:5px 10px;border:1px solid var(--border-strong);border-radius:6px;background:var(--bg);font-size:12.5px">查詢「<b>分散</b>」</span>
+      <span style="color:var(--text-3);font-family:var(--mono);font-size:13px">→</span>
+      <span style="padding:6px 10px;border:1px solid var(--border);border-radius:6px;background:var(--bg);font-size:12px">Char Filter</span>
+      <span style="color:var(--text-3);font-family:var(--mono);font-size:13px">→</span>
+      <span style="padding:6px 10px;border:1px solid var(--border);border-radius:6px;background:var(--bg);font-size:12px;text-align:center;line-height:1.35">Tokenizer<br><span style="font-family:var(--mono);font-size:9.5px;color:var(--text-3)">ik_smart 保守粒度</span></span>
+      <span style="color:var(--text-3);font-family:var(--mono);font-size:13px">→</span>
+      <span style="font-family:var(--mono);font-size:10.5px;color:var(--text-3)">query term →</span>
+      <span style="padding:3px 9px;border:1px solid var(--ok);border-radius:5px;background:var(--ok-soft);color:var(--ok);font-family:var(--mono);font-size:11.5px;font-weight:600">分散</span>
+    </div>
+
+    <div style="margin-top:13px;padding:10px 13px;border:1px solid var(--ok);border-radius:6px;background:var(--ok-soft);font-size:13px;color:var(--text)">
+      ✅ query term <code>分散</code> 命中 index 中的同名 term（它來自 <code>ik_max_word</code> 對「分散式系統」的細粒度切分）→ 該 doc 進入候選並參與 BM25 計分。<strong>兩端 analyzer 不同，卻在 <code>分散</code> 這個 term 上會合。</strong>
+    </div>
+  </div>
+
+  <div style="border:1px solid var(--bad);border-radius:var(--radius-sm);padding:13px 15px;background:var(--bad-soft);margin:0 0 14px">
+    <div style="font-weight:600;font-size:13.5px;margin-bottom:7px">✗ 反例：兩端「非故意地」不一致 → 0 結果</div>
+    <div style="font-size:13px;color:var(--text)">
+      寫入 <code>Elasticsearch</code> 時 index analyzer 帶 lowercase filter，存成 term <code>elasticsearch</code>；若 search analyzer 漏了 lowercase，查詢 <code>Elasticsearch</code> 產生的 query term 仍是 <code>Elasticsearch</code>：
+      <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:9px;font-family:var(--mono);font-size:11.5px">
+        <span style="padding:3px 8px;border:1px solid var(--border-strong);border-radius:5px;background:var(--bg)">index term: elasticsearch</span>
+        <span style="color:var(--bad);font-weight:700">≠</span>
+        <span style="padding:3px 8px;border:1px solid var(--border-strong);border-radius:5px;background:var(--bg)">query term: Elasticsearch</span>
+        <span style="color:var(--bad)">→ 對不上，0 hits</span>
+      </div>
+      <div style="margin-top:9px;font-size:12.5px;color:var(--text-2)">重點：analyzer 可以刻意不同（如上方 ik 範例），但每個處理步驟造成的 term 形態，兩端<strong>必須能對得上</strong>——這才是「成對設計」的真義。</div>
+    </div>
+  </div>
+
   <div class="callout warn">
     <div class="c-title"><span class="ic">陷阱</span>改 Analyzer 不會自動重建索引</div>
     <p>修改 field 的 analyzer 只影響<strong>新寫入</strong>的文件。舊 doc 仍用舊 term 索引——需 reindex（新 index + alias 切換）才能生效。Production 變更 analyzer 必須規劃 reindex SOP 與 alias 零 downtime 切換。</p>
@@ -304,18 +444,18 @@
   </div>
   <p class="sec-sub">模擬 Analyzer 分詞、posting list 交集、以及 refresh 前後的可搜尋性。</p>
 
-  <p>下方內建三份技術文章摘要。選擇 Analyzer 模式、輸入查詢詞，觀察 term 如何映射到 posting list 與 BM25 近似分數。切換「Refresh 狀態」可感受 NRT 延遲——未 refresh 的新 doc 不會出現在結果中。</p>
+  <p>下方內建三份技術文章摘要。輸入查詢後，<strong>QUERY PIPELINE</strong> 會一步步演出「查詢字串 → 分詞 → 逐 term 查 posting list → 依操作符合併 docId → BM25 排序」的完整鏈條。切換 <code>OR</code> / <code>AND</code> 操作符可直接看到 posting list 取<strong>聯集</strong>還是<strong>交集</strong>；「寫入新 Doc」+「Refresh」則呈現 NRT 可見性——未 refresh 的 doc 不會出現在結果中。</p>
 
   <div class="demo" id="demo-search">
     <div class="demo-bar">
       <span class="label">互動 · 倒排索引 &amp; BM25</span>
-      <span class="label" style="text-transform:none;font-family:var(--sans);font-size:12px;color:var(--text-2)">調整 Analyzer / 查詢 / Refresh</span>
+      <span class="label" style="text-transform:none;font-family:var(--sans);font-size:12px;color:var(--text-2)">調整操作符 / 查詢 / Refresh</span>
     </div>
     <div class="demo-body">
       <div style="display:flex;flex-wrap:wrap;gap:12px;align-items:center;margin-bottom:14px">
-        <div class="seg" role="group" aria-label="Analyzer 模式">
-          <button data-analyzer="standard" aria-pressed="true">Standard</button>
-          <button data-analyzer="keyword" aria-pressed="false">Keyword</button>
+        <div class="seg" role="group" aria-label="Match 操作符">
+          <button data-op="or" aria-pressed="true">match · OR（任一 term）</button>
+          <button data-op="and" aria-pressed="false">match · AND（所有 term）</button>
         </div>
         <input type="text" id="search-query" placeholder="輸入查詢，如：分散式 交易" style="flex:1;min-width:180px;font-family:var(--sans);font-size:13px;padding:7px 12px;border:1px solid var(--border-strong);border-radius:7px;background:var(--bg)">
         <button class="btn primary" id="btn-search" type="button">搜尋</button>
@@ -336,6 +476,11 @@
       </div>
 
       <div style="border:1px solid var(--border);border-radius:var(--radius-sm);padding:12px;margin-bottom:14px">
+        <div style="font-family:var(--mono);font-size:11px;color:var(--text-3);margin-bottom:10px">QUERY PIPELINE（查詢如何一步步命中）</div>
+        <div id="demo-pipeline"></div>
+      </div>
+
+      <div style="border:1px solid var(--border);border-radius:var(--radius-sm);padding:12px;margin-bottom:14px">
         <div style="font-family:var(--mono);font-size:11px;color:var(--text-3);margin-bottom:8px">SEARCH RESULTS（BM25 近似分數）</div>
         <div id="demo-results"></div>
       </div>
@@ -343,16 +488,16 @@
       <div class="legend">
         <span><i class="dot ns-idle"></i>已索引可搜</span>
         <span><i class="dot ns-wait"></i>Buffer 未 Refresh</span>
-        <span><i class="dot ns-ok"></i>命中 / 高分</span>
-        <span><i class="dot ns-lock"></i>Analyzer 模式</span>
+        <span><i class="dot ns-ok"></i>命中 / 最高分</span>
+        <span><i class="dot ns-bad"></i>此 term 無 posting</span>
       </div>
 
       <div class="status-line" id="demo-status">
-        就緒：選 Analyzer → 輸入查詢 → 搜尋。觀察 posting list 交集與 BM25 排序。
+        就緒：輸入查詢 → 搜尋。觀察 QUERY PIPELINE 的分詞、posting list 查找與 AND/OR 合併，以及 BM25 排序。
       </div>
     </div>
   </div>
-  <p class="cap">Demo 簡化真實 BM25（無 field norm 飽和曲線），但保留 TF×IDF 直覺與 refresh 可見性語意。</p>
+  <p class="cap">Demo 簡化真實 BM25（無 field norm 飽和曲線），但保留 term 分詞 → posting list 合併（OR 聯集 / AND 交集）→ TF×IDF 排序的完整直覺與 refresh 可見性語意。</p>
 
   <div class="oneliner">
     <b>一句話答法</b>互動演示倒排索引查詢 = term 分詞 → posting list 查找 → BM25 計分排序；未 refresh 的 doc 對搜尋不可見。
