@@ -58,6 +58,7 @@
    互斥檢查必然失敗，屬預期的中間狀態（CI 每次 push 都跑 validate，故 commit 快照必須互斥乾淨）。
 3. **Notion 淺色極簡基調為全站視覺底線**：禁止 Dark Mode 樣式與高對比配色，禁止引入大型前端框架。
 4. **不要從零撰寫 HTML 外殼**（header/footer 等），由 `templates/base.html` + `generate.js` 自動組裝。
+5. **`drafts/` 是內容原始碼**：draft (`content.html` / `script.html`) 是產物頁面的內容真相來源，隨產物一起 commit。內容改動改 draft、模板改動改 `templates/base.html`，兩者都靠重跑 `generate.js` 產頁；不要直接手改 `books/`。
 
 ---
 
@@ -88,7 +89,7 @@
 | `docs/completed.json` | 已完成主題 metadata | **自動維護**：發佈由 `generate.js` 寫入、**撤回**用 `remove-completed.js`；**仍禁止手動編輯本檔** |
 | `guidelines/style-guide.md` | 視覺與互動元件風格規範 | 撰稿前嚴格閱讀遵循 |
 | `templates/base.html` | 全站 HTML 外殼範本 (Notion 淺色版) | 嚴格讀取，不建議手動更改 |
-| `drafts/{topic-id}/` | **撰稿主要工作區** | AI 自由建立與寫入 content.html 和 script.html |
+| `drafts/{topic-id}/` | **撰稿主要工作區（內容原始碼）** | AI 建立與寫入 content.html 和 script.html，隨產物一起提交 |
 | `books/{topic-id}/index.html` | 發佈後的最終主題網頁 | **自動生成**（由 `generate.js` 產出，勿手動編輯） |
 | `books/index.html` | 手冊首頁（目錄 + 可點擊心智圖） | **自動生成**（由 `generate.js` 產出，勿手動編輯） |
 | `node scripts/completed-ledger.js` | 完成日誌與 todo 條目查詢 CLI | **唯讀查詢** |
@@ -106,8 +107,7 @@
 本專案是**零依賴的純 Node.js 靜態網站產生器**——沒有 `package.json`、沒有 `node_modules`，所有腳本只用 Node 內建模組（`fs`、`path`）。因此**不需要任何套件安裝步驟**（startup update script 為 no-op 的 `node --version` 健檢即可），有 Node 18+ 即可運作（CI 用 Node 24，本機驗證過 v22）。
 
 - **Lint / Test 檢查（唯一品質閘門）**：`node scripts/validate.js`。專案沒有單元測試框架、也沒有獨立 linter；CI（`.github/workflows/deploy.yml`）每次 push 到 `main` 都只跑這支驗證，通過後才部署。改完任何 `docs/*.json` 必跑。
-- **Build（產頁）**：先建立 `drafts/<topic-id>/content.html`（內容須含合法 `<section id="..."><h2>...</h2>` 結構，否則 `generate.js` 會零副作用 exit 1），再跑 `node scripts/generate.js --topic <id> --title "..." --category "..."`。`drafts/` 已被 `.gitignore` 忽略。
-  > **Draft 生命週期**：draft 是**暫時性建置輸入**（gitignore、`generate.js` 只讀不刪、流程也無清理步驟），故只會殘留在「實際撰稿的那台機器」；雲端排程主題的 draft 僅存在於即拋的 runner，不會落地。**推論**：模板類回溯改動無法靠「重跑 `generate.js`」重生舊頁，應改用一次性冪等 patch 腳本（範例：`scripts/add-fullscreen.js`）。
+- **Build（產頁）**：先建立 `drafts/<topic-id>/content.html`（內容須含合法 `<section id="..."><h2>...</h2>` 結構，否則 `generate.js` 會零副作用 exit 1），再跑 `node scripts/generate.js --topic <id> --title "..." --category "..."`。draft 是產物的內容原始碼，`generate.js` 只讀不刪，隨產物一起提交。
 - **Run（沒有 dev server）**：產物是 `books/` 下的純靜態 HTML，無後端、無打包。用任意靜態伺服器預覽即可，例如 `python3 -m http.server 8080 --directory books`（或 `npx serve books`），再用瀏覽器開 `http://localhost:8080/index.html`。注意首頁的可點擊技能樹是用 **CDN 載入的 Mermaid** 繪製，故渲染心智圖需要對外網路。
 - **副作用提醒**：`generate.js` 會異動受版控的 `docs/completed.json`、`books/index.html` 與 `books/<id>/index.html`。若只是臨時測試流程，請事後用 git 還原這些檔案，避免把試打的主題誤留進手冊。
 
