@@ -1,0 +1,416 @@
+<script>
+(function () {
+  'use strict';
+
+  var K = 5;
+  var NUM_POINTS = 200;
+  var IVF_LIST = 8;
+
+  var canvas, ctx;
+  var points = [];
+  var query = { x: 0.5, y: 0.5 };
+  var indexType = 'hnsw';
+  var param = 10;
+  var ivfCentroids = [];
+  var ivfAssignments = [];
+
+  function $(id) { return document.getElementById(id); }
+
+  function rand() { return Math.random(); }
+
+  function dist(a, b) {
+    var dx = a.x - b.x;
+    var dy = a.y - b.y;
+    return Math.sqrt(dx * dx + dy * dy);
+  }
+
+  function distSq(a, b) {
+    var dx = a.x - b.x;
+    var dy = a.y - b.y;
+    return dx * dx + dy * dy;
+  }
+
+  function genPoints() {
+    points = [];
+    for (var i = 0; i < NUM_POINTS; i++) {
+      points.push({
+        id: 'v' + (i + 1),
+        x: 0.05 + rand() * 0.9,
+        y: 0.05 + rand() * 0.9
+      });
+    }
+  }
+
+  function buildIVF() {
+    ivfCentroids = [];
+    for (var c = 0; c < IVF_LIST; c++) {
+      ivfCentroids.push({
+        x: 0.1 + rand() * 0.8,
+        y: 0.1 + rand() * 0.8
+      });
+    }
+    for (var iter = 0; iter < 12; iter++) {
+      var sums = [];
+      var counts = [];
+      for (var s = 0; s < IVF_LIST; s++) {
+        sums.push({ x: 0, y: 0 });
+        counts.push(0);
+      }
+      points.forEach(function (p) {
+        var best = 0;
+        var bestD = Infinity;
+        for (var ci = 0; ci < IVF_LIST; ci++) {
+          var d = distSq(p, ivfCentroids[ci]);
+          if (d < bestD) { bestD = d; best = ci; }
+        }
+        sums[best].x += p.x;
+        sums[best].y += p.y;
+        counts[best]++;
+      });
+      for (var u = 0; u < IVF_LIST; u++) {
+        if (counts[u] > 0) {
+          ivfCentroids[u].x = sums[u].x / counts[u];
+          ivfCentroids[u].y = sums[u].y / counts[u];
+        }
+      }
+    }
+    ivfAssignments = points.map(function (p) {
+      var best = 0;
+      var bestD = Infinity;
+      for (var ci = 0; ci < IVF_LIST; ci++) {
+        var d = distSq(p, ivfCentroids[ci]);
+        if (d < bestD) { bestD = d; best = ci; }
+      }
+      return best;
+    });
+  }
+
+  function bruteForce(q) {
+    return points.slice().sort(function (a, b) {
+      return dist(a, q) - dist(b, q);
+    }).slice(0, K);
+  }
+
+  function hnswSearch(q, ef) {
+    var entry = points[0];
+    var bestDist = dist(entry, q);
+    for (var i = 1; i < Math.min(20, points.length); i++) {
+      var d = dist(points[i], q);
+      if (d < bestDist) { bestDist = d; entry = points[i]; }
+    }
+
+    var visited = {};
+    visited[entry.id] = true;
+    var candidates = [{ p: entry, d: bestDist }];
+    var results = [{ p: entry, d: bestDist }];
+    var steps = 0;
+    var maxSteps = ef * 3;
+
+    while (candidates.length && steps < maxSteps) {
+      candidates.sort(function (a, b) { return a.d - b.d; });
+      var curr = candidates.shift();
+      steps++;
+
+      var neighbors = points
+        .map(function (p) { return { p: p, d: dist(p, q) }; })
+        .sort(function (a, b) { return a.d - b.d; })
+        .slice(0, Math.max(4, Math.floor(ef / 3)));
+
+      neighbors.forEach(function (n) {
+        if (visited[n.p.id]) return;
+        visited[n.p.id] = true;
+        if (results.length < ef || n.d < results[results.length - 1].d) {
+          candidates.push(n);
+          results.push(n);
+          results.sort(function (a, b) { return a.d - b.d; });
+          if (results.length > ef) results = results.slice(0, ef);
+        }
+      });
+    }
+
+    return results.slice(0, K).map(function (r) { return r.p; });
+  }
+
+  function ivfSearch(q, nprobe) {
+    var ranked = ivfCentroids.map(function (c, i) {
+      return { idx: i, d: dist(c, q) };
+    }).sort(function (a, b) { return a.d - b.d; });
+
+    var probeCount = Math.min(nprobe, IVF_LIST);
+    var probeSet = {};
+    for (var i = 0; i < probeCount; i++) {
+      probeSet[ranked[i].idx] = true;
+    }
+
+    var candidates = points.filter(function (p, idx) {
+      return probeSet[ivfAssignments[idx]];
+    });
+
+    if (!candidates.length) candidates = points.slice();
+
+    return candidates.sort(function (a, b) {
+      return dist(a, q) - dist(b, q);
+    }).slice(0, K);
+  }
+
+  function simulateLatency(type, p) {
+    if (type === 'brute') return 80 + NUM_POINTS * 0.4;
+    if (type === 'hnsw') return 3 + p * 1.2 + Math.random() * 2;
+    return 2 + p * 0.8 + Math.random() * 1.5;
+  }
+
+  function recallAtK(ann, gt) {
+    var gtIds = {};
+    gt.forEach(function (p) { gtIds[p.id] = true; });
+    var hit = 0;
+    ann.forEach(function (p) {
+      if (gtIds[p.id]) hit++;
+    });
+    return hit / K;
+  }
+
+  function runQuery() {
+    var gt = bruteForce(query);
+    var ann;
+    var latency;
+
+    if (indexType === 'brute') {
+      ann = gt;
+      latency = simulateLatency('brute', 0);
+    } else if (indexType === 'hnsw') {
+      ann = hnswSearch(query, param);
+      latency = simulateLatency('hnsw', param);
+    } else {
+      ann = ivfSearch(query, param);
+      latency = simulateLatency('ivf', param);
+    }
+
+    var rec = recallAtK(ann, gt);
+    renderCanvas(gt, ann);
+    renderLists(gt, ann, rec, latency);
+    setStatus(
+      'Index=' + indexType.toUpperCase() +
+      ' · param=' + param +
+      ' · recall@' + K + '=' + (rec * 100).toFixed(0) + '%' +
+      ' · latency≈' + latency.toFixed(1) + 'ms (simulated)'
+    );
+  }
+
+  function renderLists(gt, ann, rec, latency) {
+    var gtEl = $('ann-gt');
+    var resEl = $('ann-result');
+    var metEl = $('ann-metrics');
+    if (!gtEl || !resEl || !metEl) return;
+
+    var annIds = {};
+    ann.forEach(function (p) { annIds[p.id] = true; });
+
+    gtEl.innerHTML = gt.map(function (p, i) {
+      var hit = annIds[p.id];
+      var cls = hit ? 'color:var(--ok)' : 'color:var(--text-2)';
+      return '<div style="' + cls + '">#' + (i + 1) + ' ' + p.id + ' d=' + dist(p, query).toFixed(3) + '</div>';
+    }).join('');
+
+    resEl.innerHTML = ann.map(function (p, i) {
+      var inGt = gt.some(function (g) { return g.id === p.id; });
+      var cls = inGt ? 'color:var(--ok)' : 'color:var(--bad)';
+      return '<div style="' + cls + '">#' + (i + 1) + ' ' + p.id + ' d=' + dist(p, query).toFixed(3) + '</div>';
+    }).join('');
+
+    var recPct = (rec * 100).toFixed(0);
+    var recCls = rec >= 0.95 ? 'var(--ok)' : rec >= 0.6 ? 'var(--warn)' : 'var(--bad)';
+    metEl.innerHTML =
+      '<div><b>Recall@' + K + '</b>: <span style="color:' + recCls + ';font-weight:600">' + recPct + '%</span></div>' +
+      '<div><b>Latency</b>: ' + latency.toFixed(1) + ' ms</div>' +
+      '<div><b>Index</b>: ' + indexType.toUpperCase() + '</div>' +
+      '<div><b>Param</b>: ' + param + (indexType === 'hnsw' ? ' (ef)' : indexType === 'ivf' ? ' (nprobe)' : '') + '</div>';
+  }
+
+  function renderCanvas(gt, ann) {
+    if (!canvas || !ctx) return;
+    var w = canvas.width;
+    var h = canvas.height;
+    var pad = 24;
+
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0, 0, w, h);
+
+    ctx.strokeStyle = '#ecebe8';
+    ctx.lineWidth = 1;
+    for (var g = 0; g <= 10; g++) {
+      var gx = pad + (w - 2 * pad) * g / 10;
+      var gy = pad + (h - 2 * pad) * g / 10;
+      ctx.beginPath();
+      ctx.moveTo(gx, pad);
+      ctx.lineTo(gx, h - pad);
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.moveTo(pad, gy);
+      ctx.lineTo(w - pad, gy);
+      ctx.stroke();
+    }
+
+    if (indexType === 'ivf') {
+      ivfCentroids.forEach(function (c, i) {
+        var cx = pad + c.x * (w - 2 * pad);
+        var cy = pad + c.y * (h - 2 * pad);
+        ctx.strokeStyle = '#cdd9e6';
+        ctx.setLineDash([4, 4]);
+        ctx.beginPath();
+        ctx.arc(cx, cy, 28, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.setLineDash([]);
+        ctx.fillStyle = '#9aa0a8';
+        ctx.font = '10px JetBrains Mono, monospace';
+        ctx.fillText('C' + i, cx - 8, cy + 4);
+      });
+    }
+
+    var gtIds = {};
+    gt.forEach(function (p) { gtIds[p.id] = true; });
+    var annIds = {};
+    ann.forEach(function (p) { annIds[p.id] = true; });
+
+    points.forEach(function (p) {
+      var px = pad + p.x * (w - 2 * pad);
+      var py = pad + p.y * (h - 2 * pad);
+      var isHit = annIds[p.id] && gtIds[p.id];
+      var isMiss = annIds[p.id] && !gtIds[p.id];
+
+      ctx.beginPath();
+      ctx.arc(px, py, isHit || isMiss ? 5 : 3, 0, Math.PI * 2);
+      if (isHit) {
+        ctx.fillStyle = '#4d7d68';
+      } else if (isMiss) {
+        ctx.fillStyle = '#a8554f';
+      } else {
+        ctx.fillStyle = '#dedcd8';
+      }
+      ctx.fill();
+    });
+
+    gt.forEach(function (p) {
+      if (!annIds[p.id]) {
+        var px = pad + p.x * (w - 2 * pad);
+        var py = pad + p.y * (h - 2 * pad);
+        ctx.beginPath();
+        ctx.arc(px, py, 7, 0, Math.PI * 2);
+        ctx.strokeStyle = '#a3743e';
+        ctx.lineWidth = 2;
+        ctx.stroke();
+      }
+    });
+
+    var qx = pad + query.x * (w - 2 * pad);
+    var qy = pad + query.y * (h - 2 * pad);
+    ctx.fillStyle = '#3f6188';
+    ctx.beginPath();
+    ctx.moveTo(qx, qy - 10);
+    ctx.lineTo(qx + 8, qy + 6);
+    ctx.lineTo(qx - 8, qy + 6);
+    ctx.closePath();
+    ctx.fill();
+    ctx.strokeStyle = '#3f6188';
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+
+    ctx.fillStyle = '#6b7078';
+    ctx.font = '11px JetBrains Mono, monospace';
+    ctx.fillText('QUERY ★', qx + 10, qy - 4);
+  }
+
+  function setStatus(msg) {
+    var el = $('ann-status');
+    if (el) el.textContent = msg;
+  }
+
+  function randomQuery() {
+    query = { x: 0.08 + rand() * 0.84, y: 0.08 + rand() * 0.84 };
+    runQuery();
+  }
+
+  function resetDemo() {
+    genPoints();
+    buildIVF();
+    query = { x: 0.55, y: 0.45 };
+    indexType = 'hnsw';
+    param = 10;
+    document.querySelectorAll('[data-idx]').forEach(function (btn) {
+      btn.setAttribute('aria-pressed', btn.getAttribute('data-idx') === 'hnsw' ? 'true' : 'false');
+    });
+    var slider = $('ann-param');
+    if (slider) { slider.value = 10; slider.min = 1; slider.max = 50; }
+    var pv = $('ann-param-val');
+    if (pv) pv.textContent = '10';
+    runQuery();
+    setStatus('已重置：200 個 2D 向量，HNSW ef=10。調高 ef 觀察 recall 上升、延遲增加。');
+  }
+
+  function bindSeg() {
+    document.querySelectorAll('[data-idx]').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        document.querySelectorAll('[data-idx]').forEach(function (b) {
+          b.setAttribute('aria-pressed', 'false');
+        });
+        btn.setAttribute('aria-pressed', 'true');
+        indexType = btn.getAttribute('data-idx');
+        var slider = $('ann-param');
+        if (slider) {
+          if (indexType === 'brute') {
+            slider.disabled = true;
+          } else {
+            slider.disabled = false;
+            slider.max = indexType === 'ivf' ? String(IVF_LIST) : '50';
+          }
+        }
+        runQuery();
+      });
+    });
+  }
+
+  function init() {
+    canvas = $('ann-canvas');
+    if (canvas) ctx = canvas.getContext('2d');
+
+    bindSeg();
+
+    var slider = $('ann-param');
+    if (slider) {
+      slider.addEventListener('input', function () {
+        param = parseInt(slider.value, 10);
+        var pv = $('ann-param-val');
+        if (pv) pv.textContent = String(param);
+        runQuery();
+      });
+    }
+
+    if ($('btn-query')) $('btn-query').addEventListener('click', runQuery);
+    if ($('btn-random-q')) $('btn-random-q').addEventListener('click', randomQuery);
+    if ($('btn-reset')) $('btn-reset').addEventListener('click', resetDemo);
+
+    if (canvas) {
+      canvas.addEventListener('click', function (e) {
+        var rect = canvas.getBoundingClientRect();
+        var scaleX = canvas.width / rect.width;
+        var scaleY = canvas.height / rect.height;
+        var pad = 24;
+        var w = canvas.width;
+        var h = canvas.height;
+        var cx = (e.clientX - rect.left) * scaleX;
+        var cy = (e.clientY - rect.top) * scaleY;
+        query.x = Math.max(0, Math.min(1, (cx - pad) / (w - 2 * pad)));
+        query.y = Math.max(0, Math.min(1, (cy - pad) / (h - 2 * pad)));
+        runQuery();
+      });
+    }
+
+    resetDemo();
+  }
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', init);
+  } else {
+    init();
+  }
+})();
+</script>

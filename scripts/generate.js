@@ -30,9 +30,9 @@ const {
   upsertCompleted,
   buildBooksIndexHtml,
   writeBooksIndex,
-  escapeHtml,
   ensureDir,
 } = require('./lib/books');
+const { buildTocHtml, assemblePageHtml } = require('./lib/assemble');
 const { writeFileAtomic } = require('./lib/atomic');
 
 const ROOT = path.resolve(__dirname, '..');
@@ -61,36 +61,6 @@ function readFileOrDefault(filePath, fallback = '') {
     return fallback;
   }
   return fs.readFileSync(filePath, 'utf8');
-}
-
-/**
- * Scan content.html for sections to build dynamic TOC links.
- * 回傳空字串代表「找不到任何合法章節」——呼叫端據此守門。
- */
-function extractToc(content) {
-  const sections = [];
-  let match;
-  // Regex matches <section id="id"> ... (optionally <span class="sec-num">num</span>) ... <h2>title</h2>
-  const sectionRegex = /<section\s+id="([^"]+)"[^>]*>[\s\S]*?(?:<span\s+class="sec-num">([^<]*)<\/span>\s*)?<h2>([^<]+)<\/h2>/g;
-
-  while ((match = sectionRegex.exec(content)) !== null) {
-    sections.push({
-      id: match[1],
-      num: match[2] ? match[2].trim() : '',
-      title: match[3].trim()
-    });
-  }
-
-  if (sections.length === 0) {
-    return '';
-  }
-
-  return sections
-    .map((s) => {
-      const numSpan = s.num ? `<span class="n">${escapeHtml(s.num)}</span>` : '';
-      return `<a href="#${escapeHtml(s.id)}">${numSpan}${escapeHtml(s.title)}</a>`;
-    })
-    .join('\n        ');
 }
 
 function main() {
@@ -127,7 +97,7 @@ function main() {
   const script = readFileOrDefault(scriptPath);
 
   // ---- 守門 2：TOC 結構 (必須在任何寫檔之前；失敗則零副作用) ----
-  const tocHtml = extractToc(content);
+  const tocHtml = buildTocHtml(content);
   if (!tocHtml) {
     console.error('草稿未含任何合法 <section id="..."> + <h2> 結構，左側 Auto-TOC 將完全無法渲染，拒絕發佈。');
     console.error(`請依黃金結構公式撰寫 drafts/${topicId}/content.html（見 topic-author SKILL Step 2），再重跑 generate.js。`);
@@ -135,11 +105,7 @@ function main() {
   }
 
   // ---- 階段一：純計算 (不落任何檔) ----
-  const pageHtml = template
-    .replace(/<!-- TITLE_PLACEHOLDER -->/g, escapeHtml(title))
-    .replace('<!-- TOC_PLACEHOLDER -->', tocHtml)
-    .replace('<!-- CONTENT_PLACEHOLDER -->', content)
-    .replace('<!-- SCRIPT_PLACEHOLDER -->', script ? `\n${script}\n` : '');
+  const pageHtml = assemblePageHtml(template, { title, tocHtml, content, script });
 
   const completedAt = new Date().toISOString().slice(0, 10);
   const prevCompleted = loadCompleted();

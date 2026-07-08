@@ -1,0 +1,450 @@
+<script>
+"use strict";
+document.addEventListener("DOMContentLoaded", function(){
+
+  /* ===== 02 spectrum ===== */
+  (function(){
+    var DATA = {
+      "2pc":{ name:"2PC 兩階段提交", meta:"偏 CP · 協調者主導 · 同步阻塞",
+        bars:{ "一致性":[95,"強一致"], "可用性":[35,"低"], "資源鎖定":[90,"長/鎖死"], "吞吐":[30,"低"] } },
+      "tcc":{ name:"TCC", meta:"準強一致 · 業務層資源預留",
+        bars:{ "一致性":[78,"較強"], "可用性":[62,"中"], "資源鎖定":[45,"短/軟凍結"], "吞吐":[60,"中"] } },
+      "saga":{ name:"Saga", meta:"偏 AP · 本地交易 + 補償 · 無鎖",
+        bars:{ "一致性":[40,"最終一致"], "可用性":[90,"高"], "資源鎖定":[8,"無"], "吞吐":[88,"高"] } }
+    };
+    var marks = document.querySelectorAll("#demo-spec .spec-mark");
+    var nameEl = document.getElementById("sp-name");
+    var metaEl = document.getElementById("sp-meta");
+    var barsEl = document.getElementById("sp-bars");
+    function render(key){
+      var d = DATA[key];
+      marks.forEach(function(m){ m.setAttribute("aria-pressed", m.dataset.key===key ? "true":"false"); });
+      nameEl.textContent = d.name;
+      metaEl.textContent = d.meta;
+      barsEl.innerHTML = "";
+      Object.keys(d.bars).forEach(function(k){
+        var v = d.bars[k];
+        var label = document.createElement("div"); label.className="blabel"; label.textContent=k;
+        var track = document.createElement("div"); track.className="btrack";
+        var fill = document.createElement("div"); fill.className="bfill"; fill.style.width="0%";
+        track.appendChild(fill);
+        var val = document.createElement("div"); val.className="bval"; val.textContent=v[1];
+        barsEl.appendChild(label); barsEl.appendChild(track); barsEl.appendChild(val);
+        requestAnimationFrame(function(){ fill.style.width = v[0] + "%"; });
+      });
+    }
+    marks.forEach(function(m){ m.addEventListener("click", function(){ render(m.dataset.key); }); });
+    render("2pc");
+  })();
+
+  /* ===== 03 2PC flow ===== */
+  (function(){
+    var root = document.getElementById("demo-2pc");
+    var stateEls = {
+      tc: root.querySelector('[data-id="tc"] [data-state]'),
+      p1: root.querySelector('[data-id="p1"] [data-state]'),
+      p2: root.querySelector('[data-id="p2"] [data-state]')
+    };
+    var actorEls = {
+      tc: root.querySelector('[data-id="tc"]'),
+      p1: root.querySelector('[data-id="p1"]'),
+      p2: root.querySelector('[data-id="p2"]')
+    };
+    var stepsEl = document.getElementById("p2-steps");
+    var statusEl = document.getElementById("p2-status");
+    var nextBtn = document.getElementById("p2-next");
+    var resetBtn = document.getElementById("p2-reset");
+    var segBtns = root.querySelectorAll(".seg button");
+    var scenario = "ok";
+    var idx = 0;
+
+    // each step: {label, status, apply()}
+    function scenarioSteps(){
+      if(scenario==="ok"){
+        return [
+          {sx:"1", label:"Prepare：TC 詢問所有參與者是否可提交",
+           apply:function(){ cls("tc","ns-wait","詢問中"); cls("p1","ns-lock","已鎖定·回 Yes"); cls("p2","ns-lock","已鎖定·回 Yes");
+             status("<b>Prepare 階段</b>：兩個參與者都執行了操作、鎖住資源但<b>尚未提交</b>，回覆 Yes。"); }},
+          {sx:"2", label:"全部回 Yes → TC 決議 Commit",
+           apply:function(){ cls("tc","ns-wait","下令 Commit"); status("所有參與者皆同意，TC 把「Commit」決議持久化後，下令全體提交。"); }},
+          {sx:"3", label:"Commit：參與者提交並釋放資源",
+           apply:function(){ cls("tc","ns-ok","完成"); cls("p1","ns-ok","已提交·解鎖"); cls("p2","ns-ok","已提交·解鎖");
+             status("<b>Commit 階段</b>：兩者皆提交、釋放鎖，全域交易成功。這是 2PC 順利時的強一致結果。"); }}
+        ];
+      } else {
+        return [
+          {sx:"1", label:"Prepare：TC 詢問，參與者鎖定並回 Yes",
+           apply:function(){ cls("tc","ns-wait","詢問中"); cls("p1","ns-lock","已鎖定·回 Yes"); cls("p2","ns-lock","已鎖定·回 Yes");
+             status("<b>Prepare 階段</b>：參與者鎖住資源、回 Yes，等待 TC 的最終指令。"); }},
+          {sx:"2", label:"TC 在送出 Commit 前崩潰 ✕",
+           apply:function(){ cls("tc","ns-bad","✕ 崩潰"); status("<b>協調者單點故障</b>：TC 在下達 Commit 前掛掉，指令沒送出。"); }},
+          {sx:"3", label:"參與者阻塞：鎖死、無法決定 Commit / Rollback",
+           apply:function(){ cls("p1","ns-bad","阻塞·鎖死"); cls("p2","ns-bad","阻塞·鎖死");
+             status("<b>同步阻塞</b>：參與者已鎖定卻收不到指令，既不敢提交也不敢回滾，資源持續鎖死直到 TC 恢復。這正是 2PC 最致命的缺陷。"); }}
+        ];
+      }
+    }
+    var steps = scenarioSteps();
+
+    function cls(id, klass, text){
+      var el = actorEls[id];
+      el.classList.remove("ns-idle","ns-lock","ns-ok","ns-bad","ns-wait");
+      // keep base border via inline class on actor
+      el.style.borderColor = ""; 
+      el.classList.add(klass);
+      // map class to actor bg colors using same palette
+      var bg = {"ns-idle":"#fff","ns-lock":"var(--warn-soft)","ns-ok":"var(--ok-soft)","ns-bad":"var(--bad-soft)","ns-wait":"var(--accent-soft)"}[klass];
+      var bc = {"ns-idle":"var(--border-strong)","ns-lock":"var(--warn)","ns-ok":"var(--ok)","ns-bad":"var(--bad)","ns-wait":"var(--accent)"}[klass];
+      el.style.background = bg; el.style.borderColor = bc;
+      stateEls[id].textContent = text;
+    }
+    function status(html){ statusEl.innerHTML = html; }
+    function renderSteps(){
+      stepsEl.innerHTML = "";
+      steps.forEach(function(s,i){
+        var d = document.createElement("div");
+        d.className = "stepitem" + (i<idx?" done":"") + (i===idx-1?" cur":"");
+        d.innerHTML = '<span class="sx">'+s.sx+'</span><span>'+s.label+'</span>';
+        stepsEl.appendChild(d);
+      });
+    }
+    function reset(){
+      idx = 0;
+      steps = scenarioSteps();
+      cls("tc","ns-idle","待命");
+      cls("p1","ns-idle","idle");
+      cls("p2","ns-idle","idle");
+      status(scenario==="ok" ? "按「下一步」開始走兩階段流程。" : "情境：協調者將在 Commit 前崩潰。按「下一步」觀察阻塞如何發生。");
+      nextBtn.disabled = false;
+      renderSteps();
+    }
+    nextBtn.addEventListener("click", function(){
+      if(idx >= steps.length) return;
+      steps[idx].apply();
+      idx++;
+      renderSteps();
+      if(idx >= steps.length){ nextBtn.disabled = true; }
+    });
+    resetBtn.addEventListener("click", reset);
+    segBtns.forEach(function(b){
+      b.addEventListener("click", function(){
+        segBtns.forEach(function(x){ x.setAttribute("aria-pressed","false"); });
+        b.setAttribute("aria-pressed","true");
+        scenario = b.dataset.sc;
+        reset();
+      });
+    });
+    reset();
+  })();
+
+  /* ===== 04 TCC timeline lab ===== */
+  (function(){
+    var SC = {
+      normal:{
+        naive:{ steps:["Try 抵達：凍結資源 ✓","Cancel 抵達：釋放凍結 ✓"], verdict:"資源正確釋放（此情形天真版剛好沒事）", ok:true },
+        fixed:{ steps:["Try：寫入控制表 tried，凍結資源","Cancel：查表見 tried → 釋放，標記 cancelled"], verdict:"正確且可重入", ok:true }
+      },
+      empty:{
+        naive:{ steps:["（Try 在網路上遺失，從未抵達）","Cancel 抵達：嘗試釋放一筆不存在的凍結 ✕"], verdict:"空回滾未處理：誤動作 / 報錯，狀態混亂", ok:false },
+        fixed:{ steps:["（無 Try 紀錄）","Cancel：查表查無 tried → 判定空回滾，直接標記 cancelled、什麼都不做"], verdict:"空回滾被正確攔下", ok:true }
+      },
+      hang:{
+        naive:{ steps:["Cancel 先抵達：以為要回滾（其實無事可回）","延遲的 Try 後到：照樣凍結資源 ✕"], verdict:"懸掛：凍結了一筆永遠不會被收尾的資源", ok:false },
+        fixed:{ steps:["Cancel 先到：標記 cancelled（空回滾）","延遲 Try 後到：查表見已 cancelled → 拒絕凍結"], verdict:"懸掛被正確防止", ok:true }
+      }
+    };
+    var opts = document.querySelectorAll("#tl-scenarios .tl-opt");
+    var nb = document.getElementById("tl-naive-body");
+    var nv = document.getElementById("tl-naive-verdict");
+    var fb = document.getElementById("tl-fixed-body");
+    var fv = document.getElementById("tl-fixed-verdict");
+    function list(arr){
+      return "<ol style='margin:0;padding-left:18px'>"+arr.map(function(s){return "<li style='margin:4px 0'>"+s+"</li>";}).join("")+"</ol>";
+    }
+    function render(key){
+      var d = SC[key];
+      opts.forEach(function(o){ o.setAttribute("aria-pressed", o.dataset.sc===key?"true":"false"); });
+      nb.innerHTML = list(d.naive.steps); nv.textContent = (d.naive.ok?"✓ ":"✕ ")+d.naive.verdict;
+      fb.innerHTML = list(d.fixed.steps); fv.textContent = (d.fixed.ok?"✓ ":"✕ ")+d.fixed.verdict;
+    }
+    opts.forEach(function(o){ o.addEventListener("click", function(){ render(o.dataset.sc); }); });
+    render("normal");
+  })();
+
+  /* ===== 05 Saga chain ===== */
+  (function(){
+    var STEPS = [
+      {n:"建立訂單", comp:"取消訂單"},
+      {n:"扣款", comp:"退款"},
+      {n:"扣庫存", comp:"回補庫存"},
+      {n:"安排出貨", comp:"取消出貨"}
+    ];
+    var chainEl = document.getElementById("saga-chain");
+    var statusEl = document.getElementById("saga-status");
+    var modeNote = document.getElementById("saga-mode-note");
+    var failSel = document.getElementById("saga-fail");
+    var runBtn = document.getElementById("saga-run");
+    var resetBtn = document.getElementById("saga-reset");
+    var segBtns = document.querySelectorAll("#demo-saga .seg button");
+    var mode = "orch";
+    var boxes = [];
+
+    function build(){
+      chainEl.innerHTML = ""; boxes = [];
+      STEPS.forEach(function(s,i){
+        var row = document.createElement("div"); row.className="saga-step";
+        var box = document.createElement("div"); box.className="saga-box";
+        box.innerHTML = '<span class="sgn">'+(i+1)+'. '+s.n+'</span><span class="sgs" data-s>未執行</span>';
+        row.appendChild(box); chainEl.appendChild(row);
+        boxes.push(box);
+        if(i<STEPS.length-1){ var ar=document.createElement("div"); ar.className="saga-arrow"; chainEl.appendChild(ar); }
+      });
+      setModeNote();
+    }
+    function setBox(i, klass, text){
+      var b = boxes[i];
+      b.classList.remove("ns-idle","ns-lock","ns-ok","ns-bad");
+      var bg={"ns-idle":"#fff","ns-lock":"var(--warn-soft)","ns-ok":"var(--ok-soft)","ns-bad":"var(--bad-soft)"}[klass];
+      var bc={"ns-idle":"var(--border-strong)","ns-lock":"var(--warn)","ns-ok":"var(--ok)","ns-bad":"var(--bad)"}[klass];
+      b.style.background=bg; b.style.borderColor=bc;
+      b.querySelector("[data-s]").textContent = text;
+    }
+    function setModeNote(){
+      modeNote.innerHTML = mode==="orch"
+        ? "<b>Orchestration（編排）</b>：一個中央協調器逐步呼叫每個服務、並在失敗時主導補償。流程集中、好追蹤與監控。"
+        : "<b>Choreography（編舞）</b>：無中央協調器，每個服務完成後發出事件、下一個服務監聽接手；失敗時靠補償事件反向傳遞。耦合低，但流程分散、較難追蹤。";
+    }
+    function reset(){
+      build();
+      STEPS.forEach(function(_,i){ setBox(i,"ns-idle","未執行"); });
+      statusEl.textContent = "選好失敗點後按「執行」，觀看正向推進與反向補償。";
+      runBtn.disabled = false;
+    }
+    function delay(ms){ return new Promise(function(r){ setTimeout(r,ms); }); }
+    var reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    var gap = reduce ? 0 : 520;
+
+    async function run(){
+      runBtn.disabled = true;
+      reset(); runBtn.disabled = true;
+      var failAt = parseInt(failSel.value,10); // 0-based index, -1 = none
+      var committed = [];
+      var driver = mode==="orch" ? "協調器" : "事件鏈";
+      for(var i=0;i<STEPS.length;i++){
+        await delay(gap);
+        if(i===failAt){
+          setBox(i,"ns-bad","失敗 ✕");
+          statusEl.innerHTML = "<b>第 "+(i+1)+" 步「"+STEPS[i].n+"」失敗</b>（本地已回滾）。"+driver+"開始<b>反向補償</b>已提交的步驟…";
+          // compensate committed in reverse
+          for(var j=committed.length-1;j>=0;j--){
+            await delay(gap);
+            var k = committed[j];
+            setBox(k,"ns-lock","已補償·"+STEPS[k].comp);
+          }
+          await delay(gap);
+          statusEl.innerHTML = "<b>Saga 回滾完成</b>：失敗步自身本地回滾，先前已提交的 "+committed.length+" 步依<b>反向順序</b>補償撤銷，系統回到最終一致。";
+          return;
+        }
+        setBox(i,"ns-ok","已提交 ✓");
+        committed.push(i);
+      }
+      statusEl.innerHTML = "<b>全部成功</b>：四個本地交易依序提交，無需補償。";
+    }
+    runBtn.addEventListener("click", run);
+    resetBtn.addEventListener("click", reset);
+    segBtns.forEach(function(b){
+      b.addEventListener("click", function(){
+        segBtns.forEach(function(x){ x.setAttribute("aria-pressed","false"); });
+        b.setAttribute("aria-pressed","true");
+        mode = b.dataset.mode; reset();
+      });
+    });
+    reset();
+  })();
+
+  /* ===== 06 Outbox ===== */
+  (function(){
+    var stage = document.getElementById("ob-stage");
+    var statusEl = document.getElementById("ob-status");
+    var runBtn = document.getElementById("ob-run");
+    var crashBtn = document.getElementById("ob-crash");
+    var resetBtn = document.getElementById("ob-reset");
+    var segBtns = document.querySelectorAll("#demo-outbox .seg button");
+    var mode = "naive";
+    var reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    var gap = reduce ? 0 : 600;
+    function delay(ms){ return new Promise(function(r){ setTimeout(r,ms); }); }
+
+    function chips(){
+      if(mode==="naive"){
+        return [
+          {id:"db", t:"業務 DB", s:"UPDATE order ..."},
+          {id:"mq", t:"訊息佇列 MQ", s:"publish(event)"},
+          {id:"down", t:"下游服務", s:"consume(event)"}
+        ];
+      }
+      return [
+        {id:"db", t:"業務 DB + Outbox 表", s:"同一交易寫入 order + outbox"},
+        {id:"relay", t:"背景 Relay", s:"poll outbox → publish"},
+        {id:"mq", t:"訊息佇列 MQ", s:""},
+        {id:"down", t:"下游服務", s:"consume(event)"}
+      ];
+    }
+    var els = {};
+    function build(){
+      stage.innerHTML = ""; els = {};
+      var cs = chips();
+      cs.forEach(function(c,i){
+        var row = document.createElement("div"); row.className="ob-row";
+        var chip = document.createElement("div"); chip.className="ob-chip";
+        chip.innerHTML = '<div class="obt">'+c.t+'</div>'+(c.s?'<div class="obs">'+c.s+'</div>':'');
+        chip.style.borderColor="var(--border-strong)"; chip.style.background="#fff";
+        row.appendChild(chip);
+        if(i<cs.length-1){ var f=document.createElement("span"); f.className="ob-flow"; f.textContent="→"; row.appendChild(f); }
+        stage.appendChild(row);
+        els[c.id]=chip;
+      });
+    }
+    function paint(id,klass){
+      var bg={"ok":"var(--ok-soft)","bad":"var(--bad-soft)","wait":"var(--accent-soft)","idle":"#fff"}[klass];
+      var bc={"ok":"var(--ok)","bad":"var(--bad)","wait":"var(--accent)","idle":"var(--border-strong)"}[klass];
+      els[id].style.background=bg; els[id].style.borderColor=bc;
+    }
+    function reset(){
+      build();
+      statusEl.textContent = mode==="naive"
+        ? "天真版：DB 與 MQ 是兩個獨立動作。按「執行」看正常流程，或按崩潰按鈕看雙寫問題。"
+        : "Outbox 版：訊息與業務資料寫進同一交易。按崩潰按鈕，看訊息為何不會遺失。";
+      runBtn.disabled=false; crashBtn.disabled=false;
+    }
+    async function run(){
+      reset(); runBtn.disabled=true; crashBtn.disabled=true;
+      if(mode==="naive"){
+        await delay(gap); paint("db","ok"); statusEl.textContent="① 業務 DB 已提交。";
+        await delay(gap); paint("mq","ok"); statusEl.textContent="② 訊息已發到 MQ。";
+        await delay(gap); paint("down","ok"); statusEl.innerHTML="③ 下游消費成功。<b>順利時兩者都成功</b>——但這依賴「中間不崩潰」的運氣。";
+      } else {
+        await delay(gap); paint("db","ok"); statusEl.textContent="① 業務資料 + outbox 紀錄寫進「同一個本地交易」並提交。";
+        await delay(gap); paint("relay","wait"); statusEl.textContent="② 背景 Relay 輪詢 outbox，取出待發訊息。";
+        await delay(gap); paint("mq","ok"); statusEl.textContent="③ Relay 投遞到 MQ。";
+        await delay(gap); paint("down","ok"); statusEl.innerHTML="④ 下游消費成功，Relay 標記 outbox 該筆已發送。<b>最終一致達成</b>。";
+      }
+      runBtn.disabled=false; crashBtn.disabled=false;
+    }
+    async function crash(){
+      reset(); runBtn.disabled=true; crashBtn.disabled=true;
+      if(mode==="naive"){
+        await delay(gap); paint("db","ok"); statusEl.textContent="① 業務 DB 已提交…";
+        await delay(gap); paint("db","ok"); statusEl.innerHTML="② <b>進程在發 MQ 之前崩潰 ✕</b>";
+        await delay(gap); paint("mq","bad"); paint("down","bad");
+        statusEl.innerHTML="<b>雙寫問題</b>：DB 已改、訊息卻永遠遺失，下游收不到通知 → 資料不一致。問題根源是「寫 DB」與「發 MQ」不是原子的。";
+      } else {
+        await delay(gap); paint("db","ok"); statusEl.textContent="① 業務資料 + outbox 在同一交易提交…";
+        await delay(gap); paint("relay","bad"); statusEl.innerHTML="② <b>進程在 Relay 投遞前崩潰 ✕</b>——但 outbox 紀錄已隨業務交易落地。";
+        await delay(gap); paint("relay","wait"); statusEl.textContent="③ 服務重啟，Relay 重新輪詢，發現未發送的 outbox 紀錄。";
+        await delay(gap); paint("mq","ok"); paint("down","ok");
+        statusEl.innerHTML="④ 訊息補投成功。<b>崩潰也不丟訊息</b>——因為它和業務資料同生共死於一個交易。";
+      }
+      runBtn.disabled=false; crashBtn.disabled=false;
+    }
+    runBtn.addEventListener("click", run);
+    crashBtn.addEventListener("click", crash);
+    resetBtn.addEventListener("click", reset);
+    segBtns.forEach(function(b){
+      b.addEventListener("click", function(){
+        segBtns.forEach(function(x){ x.setAttribute("aria-pressed","false"); });
+        b.setAttribute("aria-pressed","true");
+        mode=b.dataset.mode; reset();
+      });
+    });
+    reset();
+  })();
+
+  /* ===== 07 comparison hover + wizard ===== */
+  (function(){
+    var table = document.getElementById("cmp-table");
+    var cells = table.querySelectorAll("td, th");
+    function colIndex(cell){ return cell.cellIndex; }
+    table.addEventListener("mouseover", function(e){
+      var c = e.target.closest("td,th"); if(!c) return;
+      var ci = colIndex(c); if(ci===0) { clear(); return; }
+      clear();
+      table.querySelectorAll("tr").forEach(function(tr){
+        var cell = tr.children[ci]; if(cell && cell.tagName==="TD") cell.classList.add("hl");
+      });
+    });
+    table.addEventListener("mouseleave", clear);
+    function clear(){ table.querySelectorAll(".hl").forEach(function(x){ x.classList.remove("hl"); }); }
+  })();
+
+  (function(){
+    var answers = { length:null, consistency:null, scope:null };
+    var qs = document.querySelectorAll("#demo-wiz .wiz-q");
+    var resBox = document.getElementById("wiz-result");
+    var pickEl = document.getElementById("wiz-pick");
+    var whyEl = document.getElementById("wiz-why");
+
+    qs.forEach(function(q){
+      var key = q.dataset.q;
+      q.querySelectorAll(".wiz-opts button").forEach(function(b){
+        b.addEventListener("click", function(){
+          q.querySelectorAll(".wiz-opts button").forEach(function(x){ x.setAttribute("aria-pressed","false"); });
+          b.setAttribute("aria-pressed","true");
+          answers[key] = b.dataset.v;
+          evaluate();
+        });
+      });
+    });
+
+    function decide(a){
+      // returns {pick, why}
+      if(!a.length || !a.consistency || !a.scope) return null;
+
+      // payment/account is the canonical TCC case
+      if(a.scope==="payment"){
+        return { pick:"TCC",
+          why:"支付 / 帳務扣款需要較強一致又不能忍受 2PC 長鎖，TCC 的 Try 資源預留正是為這類場景設計。記得處理冪等、空回滾、懸掛。" };
+      }
+      // cross-service + eventual + long => Saga
+      if(a.scope==="cross-svc"){
+        if(a.consistency==="strong"){
+          return { pick:"TCC（跨服務若仍要求強一致）",
+            why:"跨多服務又堅持強一致，Saga 的可見中間態不符需求；可考慮 TCC 在業務層做預留。但要評估三介面的開發成本，多數團隊會重新審視「是否真的需要強一致」。" };
+        }
+        return { pick:"Saga + Transactional Outbox",
+          why:"跨多微服務的長流程、可接受最終一致——Saga（建議 Orchestration）負責流程與補償，Outbox 確保事件可靠發出。這是微服務下最平衡的主流組合。" };
+      }
+      // same-org / XA —— 強一致絕不導向 Saga（避免與「必須強一致」矛盾）
+      if(a.scope==="same-org"){
+        if(a.consistency==="strong"){
+          if(a.length==="short"){
+            return { pick:"2PC（XA）",
+              why:"同組織、跨庫、可用 XA，且流程短又要求強一致——2PC 對業務無侵入、行為最接近單庫 commit。前提是併發量不大，能容忍同步阻塞。" };
+          }
+          // long + strong：本質上是衝突的需求，誠實點出張力
+          return { pick:"TCC（並重新審視「長 + 強一致」的張力）",
+            why:"流程長又堅持強一致是天生衝突的需求：2PC 的長鎖在長流程上代價過重，純 Saga 又只有最終一致、不符強一致。較務實是用 TCC 在業務層做資源預留，但 TCC 本身偏短～中流程，若流程真的很長，建議重新評估「是否每一步都需要強一致」。" };
+        }
+        // same-org + eventual
+        return { pick:"Saga + Outbox",
+          why:"同組織但可接受最終一致時，2PC 的同步阻塞代價不划算，改用 Saga（+ Outbox 確保事件可靠）在可用性與吞吐上更好。" };
+      }
+      // fallback（理論上不會走到，保底傾向最終一致家族）
+      return { pick:"Saga + Outbox（預設傾向）",
+        why:"在沒有強一致硬需求時，微服務通常傾向最終一致家族：Saga 負責流程與補償、Outbox 負責可靠事件，兼顧可用性與可維護性。" };
+    }
+
+    function evaluate(){
+      var r = decide(answers);
+      if(!r){ resBox.classList.remove("show"); return; }
+      pickEl.textContent = "建議：" + r.pick;
+      whyEl.textContent = r.why;
+      resBox.classList.add("show");
+    }
+    // expose for self-test
+    window.__wizDecide = decide;
+  })();
+
+
+});
+</script>

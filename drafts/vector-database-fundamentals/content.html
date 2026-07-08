@@ -1,0 +1,486 @@
+<!-- ============ 01 總覽與定位 ============ -->
+<section id="s1">
+  <div class="sec-head">
+    <span class="sec-num">01</span>
+    <h2>總覽與定位</h2>
+  </div>
+  <p class="sec-sub">向量資料庫解決什麼痛？與全文檢索、OLTP 在 RAG / 語意搜尋版圖中的座標。</p>
+
+  <p>當使用者問「有沒有跟這段描述很像的文件？」或「找一張長得像這張貓的照片」，傳統 B-Tree 或倒排索引無法比對<strong>語意相似度</strong>——你需要把文字 / 圖片先轉成<strong>高維向量（Embedding）</strong>，再用<strong>近似最近鄰（ANN, Approximate Nearest Neighbor）</strong>在毫秒內從數百萬～數十億筆向量中找出 Top-K 最相近的結果。</p>
+
+  <p><strong>向量資料庫（Vector Database）</strong>的核心使命，是以 ANN 索引結構承擔<strong>高維相似度搜尋</strong>，常見於 RAG 知識庫檢索、推薦系統、以圖搜圖、異常偵測等場景。它與上一篇的<strong>全文檢索引擎（Elasticsearch）</strong>互補：ES 擅長 keyword / BM25 精確匹配，向量搜尋擅長<strong>語意近似</strong>——現代 AI 應用常兩者並用（Hybrid Search）。</p>
+
+  <div class="callout accent">
+    <div class="c-title"><span class="ic">座標</span>Vector DB vs Search Engine vs OLTP</div>
+    <p>
+      • <strong>OLTP</strong>：point lookup、transaction，不擅長高維 cosine / L2 相似度掃描。
+      <br>• <strong>Search Engine（ES）</strong>：倒排索引 + BM25，keyword / 全文匹配，可疊加 dense_vector 但非原生強項。
+      <br>• <strong>Vector DB（Milvus / pgvector）</strong>：ANN 索引（HNSW / IVF）專為高維向量 Top-K 優化，recall 與 latency 可調。
+      <br>實務常見：<code>PostgreSQL (metadata) + pgvector (小規模) → Milvus (億級向量)</code>，或 <code>ES hybrid = BM25 + kNN</code>。
+    </p>
+  </div>
+
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>維度</th>
+          <th>OLTP</th>
+          <th>Search Engine</th>
+          <th>Vector DB</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><strong>索引結構</strong></td>
+          <td>B-Tree / Hash</td>
+          <td>Inverted Index</td>
+          <td class="hl">HNSW / IVF / DiskANN</td>
+        </tr>
+        <tr>
+          <td><strong>典型查詢</strong></td>
+          <td><code>WHERE id = ?</code></td>
+          <td><code>match "關鍵字"</code></td>
+          <td><code>Top-K ANN(query_vec)</code></td>
+        </tr>
+        <tr>
+          <td><strong>相似度度量</strong></td>
+          <td>等值比對</td>
+          <td>BM25 / TF-IDF</td>
+          <td>Cosine / L2 / Inner Product</td>
+        </tr>
+        <tr>
+          <td><strong>延遲目標</strong></td>
+          <td>毫秒級 point lookup</td>
+          <td>毫秒～百毫秒</td>
+          <td>毫秒～十毫秒（視 ANN 參數）</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="cap">面試高分：能說清楚「為什麼不能 brute-force 掃全表」以及向量搜尋在 RAG pipeline 中的位置。</p>
+
+  <div class="oneliner">
+    <b>一句話答法</b>向量 DB 以 ANN 索引承擔高維語意相似度 Top-K 搜尋，是 RAG 檢索層的核心；與 ES 的 keyword 搜尋互補而非取代。
+  </div>
+</section>
+
+<hr class="div">
+
+<!-- ============ 02 Embedding 管線 ============ -->
+<section id="s2">
+  <div class="sec-head">
+    <span class="sec-num">02</span>
+    <h2>Embedding 管線：從原始資料到可搜尋向量</h2>
+  </div>
+  <p class="sec-sub">重點在「向量如何進索引、如何被查詢」，而非選哪個 embedding 模型。</p>
+
+  <p>向量搜尋的資料流可拆成四步：<strong>Chunk → Embed → Index → Query Embed → ANN Retrieve</strong>。System Design 面試中，考官更關心索引與檢索折衷，而非模型細節——但以下管線概念必須能畫出來。</p>
+
+  <ol>
+    <li><strong>Chunking</strong>：長文件切分成固定長度片段（如 512 tokens），每 chunk 獨立 embedding。Chunk 策略影響 recall——切太細語意破碎，切太粗檢索粒度太粗。</li>
+    <li><strong>Embedding</strong>：呼叫 embedding API（OpenAI <code>text-embedding-3</code>、Cohere、開源 BGE 等）將 chunk 轉成 <var>d</var> 維浮點向量（常見 <var>d</var>=768～1536）。<strong>Index 與 Query 必須用同一模型、同一維度</strong>。</li>
+    <li><strong>Metadata 附帶</strong>：向量通常與 <code>doc_id</code>、<code>source</code>、<code>timestamp</code>、<code>tenant_id</code> 等 scalar 欄位一起儲存，供 pre-filter（先過濾再 ANN）或 post-filter（ANN 後再過濾）。</li>
+    <li><strong>Query Path</strong>：使用者問題同樣 embed 成 query vector，送入 ANN 索引取 Top-K，再將 chunk 文本餵給 LLM 做 RAG 生成。</li>
+  </ol>
+
+  <div class="callout accent">
+    <div class="c-title"><span class="ic">白話</span>為什麼維度與模型不能混用？</div>
+    <p>768 維 OpenAI embedding 與 1024 維 BGE 向量<strong>不在同一語意空間</strong>——混用會導致相似度毫無意義。Production 變更 embedding 模型 = <strong>全量 re-embed + 重建 ANN 索引</strong>，需規劃 alias 切換與雙寫過渡期。</p>
+  </div>
+
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>管線階段</th>
+          <th>常見痛點</th>
+          <th>設計對策</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>Chunking</td>
+          <td>表格 / 程式碼被切斷</td>
+          <td>結構感知切分、重疊窗口（overlap 10～20%）</td>
+        </tr>
+        <tr>
+          <td>Embed 吞吐</td>
+          <td>億級文件 embed 慢</td>
+          <td>批次 API、GPU worker pool、增量 CDC embed</td>
+        </tr>
+        <tr>
+          <td>Index 更新</td>
+          <td>新 doc 何時可搜</td>
+          <td>近即時 upsert vs 批次 rebuild（類 ES refresh）</td>
+        </tr>
+        <tr>
+          <td>Query</td>
+          <td>語意對但 keyword 漏掉</td>
+          <td class="hl">Hybrid：BM25 + vector fusion（RRF）</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="cap">本手冊不深入 embedding 模型選型；面試聚焦「管線怎麼接、索引怎麼維護」。</p>
+
+  <div class="callout warn">
+    <div class="c-title"><span class="ic">陷阱</span>以為「embed 完就完事」</div>
+    <p>向量品質取決於 chunk 品質、metadata filter 設計、以及 ANN 的 recall@K。RAG 幻覺常來自<strong>檢索漏掉正確 chunk</strong>（低 recall），而非 LLM 本身——調 ANN 參數與 hybrid 往往比換更大模型更有效。</p>
+  </div>
+
+  <div class="oneliner">
+    <b>一句話答法</b>Embedding 管線 = Chunk → Embed → Index → Query Embed → ANN；index/query 必須同模型同維度，變更模型需全量 re-embed + 重建索引。
+  </div>
+</section>
+
+<hr class="div">
+
+<!-- ============ 03 ANN 索引 ============ -->
+<section id="s3">
+  <div class="sec-head">
+    <span class="sec-num">03</span>
+    <h2>ANN 索引：HNSW、IVF 與 Recall / Latency 取捨</h2>
+  </div>
+  <p class="sec-sub">Brute-force 精確 kNN 在億級向量不可行——ANN 用近似換速度，參數決定 recall 與延遲。</p>
+
+  <p>給定 query vector <var>q</var> 與資料集 <var>N</var> 個 <var>d</var> 維向量，精確 kNN 需計算 <var>N</var> 次距離——<var>O(N·d)</var>，億級向量單次查詢需數秒。ANN 索引透過<strong>資料結構剪枝</strong>，將複雜度降到 sub-linear，以<strong>略降 recall</strong>換<strong>毫秒級延遲</strong>。</p>
+
+  <h3>主流 ANN 索引</h3>
+
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>索引</th>
+          <th>原理</th>
+          <th>建索引成本</th>
+          <th>查詢特性</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><strong>Flat / Brute-force</strong></td>
+          <td>全表掃描，100% recall</td>
+          <td>低（無索引結構）</td>
+          <td>小資料量基準線；大資料不可行</td>
+        </tr>
+        <tr>
+          <td><strong>HNSW</strong></td>
+          <td>分層 navigable small world 圖，貪婪圖遍歷</td>
+          <td>高（記憶體密集）</td>
+          <td class="hl">高 recall、低 latency；Milvus / pgvector 預設首選</td>
+        </tr>
+        <tr>
+          <td><strong>IVF (Inverted File)</strong></td>
+          <td>K-means 分 <var>nlist</var> 個 cluster，查詢只搜 <var>nprobe</var> 個</td>
+          <td>中</td>
+          <td><var>nprobe</var>↑ recall↑ latency↑；億級常 IVF + PQ 壓記憶體</td>
+        </tr>
+        <tr>
+          <td><strong>DiskANN</strong></td>
+          <td>圖索引存 SSD，減少 RAM 壓力</td>
+          <td>高</td>
+          <td>十億級向量、記憶體受限場景</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="cap">HNSW 參數 <code>M</code>（每節點邊數）、<code>efConstruction</code>（建索引寬度）影響索引品質；查詢時 <code>ef</code> 越大 recall 越高、延遲越高。</p>
+
+  <h3>相似度度量</h3>
+  <ul>
+    <li><strong>Cosine Similarity</strong>：方向相似，text embedding 最常用；向量常先 L2 normalize。</li>
+    <li><strong>L2 (Euclidean) Distance</strong>：絕對距離，圖像 embedding 常見。</li>
+    <li><strong>Inner Product (IP)</strong>：normalize 後等價 cosine；未 normalize 時有量級差異。</li>
+  </ul>
+
+  <div class="callout accent">
+    <div class="c-title"><span class="ic">關鍵</span>Recall@K vs Latency 曲線</div>
+    <p>Production 需用<strong>離線 benchmark</strong>畫 recall-latency 曲線：固定 query set，掃描 <code>ef</code> / <code>nprobe</code> 參數，找到業務可接受 recall（如 95%）對應的 P99 latency。面試常問：「如何在不換硬體下提升 recall？」→ 調高 <code>ef</code>、增大 <code>M</code>、或 hybrid 補漏。</p>
+  </div>
+
+  <div class="callout warn">
+    <div class="c-title"><span class="ic">陷阱</span>只看 latency 不看 recall</div>
+    <p>把 <code>ef=16</code> 壓到 1ms 很炫，但 recall@10 可能只有 70%——RAG 漏掉 30% 正確 chunk 直接傷害回答品質。SLA 應定義<strong>recall@K ≥ X% 且 P99 ≤ Y ms</strong>，兩者缺一不可。</p>
+  </div>
+
+  <div class="oneliner">
+    <b>一句話答法</b>ANN 用 HNSW / IVF 等結構剪枝換速度；HNSW 的 ef/M 參數控制 recall-latency 曲線，Production 需離線 benchmark 定 SLA。
+  </div>
+</section>
+
+<hr class="div">
+
+<!-- ============ 04 pgvector vs Milvus ============ -->
+<section id="s4">
+  <div class="sec-head">
+    <span class="sec-num">04</span>
+    <h2>pgvector vs Milvus：何時先別急著上專用 DB？</h2>
+  </div>
+  <p class="sec-sub">PostgreSQL 擴充 pgvector 夠用時不必引入新基礎設施；億級向量才需要原生 Vector DB 的分散式 ANN。</p>
+
+  <h3>pgvector：PostgreSQL 上的向量擴充</h3>
+  <p><strong>pgvector</strong> 是 PostgreSQL extension，在既有 PG 表加 <code>vector(d)</code> 欄位，支援 HNSW / IVFFlat 索引與 SQL 混合查詢（metadata filter + ANN 一條 SQL 搞定）。</p>
+
+  <ul>
+    <li><strong>優勢</strong>：零新基礎設施、ACID transaction、JOIN metadata、團隊已會 PG、百萬級向量足夠。</li>
+    <li><strong>限制</strong>：單機 PG 記憶體 / CPU 天花板；HNSW 全在 RAM，十億向量撐不住；寫入吞吐受 PG WAL 限制；無原生 shard 水平擴展。</li>
+    <li><strong>典型場景</strong>：MVP RAG、&lt; 500 萬 chunk、metadata 複雜 filter、小團隊快速上線。</li>
+  </ul>
+
+  <pre><code>-- pgvector 典型 DDL
+CREATE EXTENSION vector;
+CREATE TABLE doc_chunks (
+  id BIGSERIAL PRIMARY KEY,
+  doc_id UUID NOT NULL,
+  content TEXT,
+  embedding vector(1536),
+  tenant_id INT
+);
+CREATE INDEX ON doc_chunks
+  USING hnsw (embedding vector_cosine_ops)
+  WITH (m = 16, ef_construction = 64);
+
+-- 混合 filter + ANN
+SELECT id, content, embedding &lt;=&gt; $1 AS dist
+FROM doc_chunks
+WHERE tenant_id = 42
+ORDER BY embedding &lt;=&gt; $1
+LIMIT 10;</code></pre>
+
+  <h3>Milvus：原生向量資料庫</h3>
+  <p><strong>Milvus</strong> 是專為向量搜尋設計的分散式 DB，Collection → Partition → Segment 層次，內建 HNSW / IVF_FLAT / IVF_PQ / DiskANN，支援<strong>水平 shard、副本、專用 query node</strong>。</p>
+
+  <ul>
+    <li><strong>優勢</strong>：億～十億向量、寫入 / 查詢水平擴展、多種索引與量化（PQ 壓記憶體）、雲託管（Zilliz Cloud）。</li>
+    <li><strong>限制</strong>：額外運維成本、metadata 不如 PG 靈活（需 scalar field + expression filter）、 eventual consistency 語意需理解。</li>
+    <li><strong>典型場景</strong>：電商以圖搜圖、大規模 RAG、推薦召回、多 tenant 億級向量。</li>
+  </ul>
+
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>決策維度</th>
+          <th>pgvector</th>
+          <th>Milvus</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><strong>向量規模</strong></td>
+          <td>&lt; 500 萬 chunk 舒適</td>
+          <td class="hl">億級+ 原生設計</td>
+        </tr>
+        <tr>
+          <td><strong>Metadata 查詢</strong></td>
+          <td>SQL JOIN / WHERE 最強</td>
+          <td>Scalar filter expression</td>
+        </tr>
+        <tr>
+          <td><strong>Transaction</strong></td>
+          <td>PG ACID</td>
+          <td>無跨 collection ACID</td>
+        </tr>
+        <tr>
+          <td><strong>運維成本</strong></td>
+          <td>已有 PG 則極低</td>
+          <td>需專用叢集 / 託管</td>
+        </tr>
+        <tr>
+          <td><strong>索引選擇</strong></td>
+          <td>HNSW / IVFFlat</td>
+          <td>HNSW / IVF / PQ / DiskANN</td>
+        </tr>
+        <tr>
+          <td><strong>遷移路徑</strong></td>
+          <td>MVP 起點</td>
+          <td>pgvector 瓶頸後遷移</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="cap">面試高分：「先用 pgvector 驗證產品，QPS / 向量量 / recall SLA 觸頂再遷 Milvus」——展現漸進式架構而非過早優化。</p>
+
+  <div class="callout accent">
+    <div class="c-title"><span class="ic">實務</span>遷移 pgvector → Milvus 的 SOP</div>
+    <p>
+      1. 雙寫：新 chunk 同時寫 PG + Milvus（CDC 或 application dual-write）。
+      <br>2. 離線 benchmark：同一 query set 比對 recall@K 與 P99 latency。
+      <br>3. 讀流量灰度：10% → 50% → 100% 切換 ANN 查詢到 Milvus。
+      <br>4. PG 保留 metadata source of truth，Milvus 專職向量檢索。
+    </p>
+  </div>
+
+  <div class="callout warn">
+    <div class="c-title"><span class="ic">陷阱</span>Day 1 就上 Milvus</div>
+    <p>10 萬 chunk 的內部知識庫引入 Milvus 叢集——運維、監控、版本升級成本遠超收益。先用 pgvector 或託管向量服務（Pinecone / Zilliz Serverless）驗證，量級到了再自建。</p>
+  </div>
+
+  <div class="oneliner">
+    <b>一句話答法</b>pgvector 適合百萬級、已有 PG、metadata 複雜的 MVP；Milvus 適合億級向量、需水平擴展與多種 ANN 索引的 Production 規模。
+  </div>
+</section>
+
+<hr class="div">
+
+<!-- ============ 05 互動 Demo ============ -->
+<section id="s5">
+  <div class="sec-head">
+    <span class="sec-num">05</span>
+    <h2>互動 Demo：ANN Recall / Latency 取捨</h2>
+  </div>
+  <p class="sec-sub">在 2D 向量空間模擬 Brute-force、HNSW、IVF 三種索引，觀察 ef / nprobe 如何影響 recall 與查詢延遲。</p>
+
+  <p>下方在 200 個隨機 2D 向量中插入 query 點（★），比較三種 ANN 策略的 Top-5 結果與 ground truth（brute-force）的 recall，以及模擬延遲。調整 <code>ef</code>（HNSW）或 <code>nprobe</code>（IVF）觀察 recall-latency 曲線的直覺。</p>
+
+  <div class="demo" id="demo-ann">
+    <div class="demo-bar">
+      <span class="label">互動 · ANN Recall / Latency</span>
+      <span class="label" style="text-transform:none;font-family:var(--sans);font-size:12px;color:var(--text-2)">切換索引類型與搜尋參數</span>
+    </div>
+    <div class="demo-body">
+      <div style="display:flex;flex-wrap:wrap;gap:12px;align-items:center;margin-bottom:14px">
+        <div class="seg" role="group" aria-label="索引類型">
+          <button data-idx="brute" aria-pressed="false">Flat (Exact)</button>
+          <button data-idx="hnsw" aria-pressed="true">HNSW</button>
+          <button data-idx="ivf" aria-pressed="false">IVF</button>
+        </div>
+        <label style="font-size:13px;color:var(--text-2);display:flex;align-items:center;gap:8px">
+          ef / nprobe:
+          <input type="range" id="ann-param" min="1" max="50" value="10" style="width:120px">
+          <span id="ann-param-val" style="font-family:var(--mono);font-size:12px;color:var(--accent);min-width:24px">10</span>
+        </label>
+        <button class="btn primary" id="btn-query" type="button">執行 ANN 查詢</button>
+        <button class="btn" id="btn-random-q" type="button">隨機 Query</button>
+        <button class="btn" id="btn-reset" type="button">Reset</button>
+      </div>
+
+      <div style="border:1px solid var(--border);border-radius:var(--radius-sm);background:#ffffff;margin-bottom:14px;overflow:hidden">
+        <canvas id="ann-canvas" width="680" height="320" style="display:block;width:100%;max-width:680px;height:auto;cursor:crosshair"></canvas>
+      </div>
+
+      <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;margin-bottom:14px">
+        <div style="border:1px solid var(--border);border-radius:var(--radius-sm);padding:12px;background:var(--bg-soft)">
+          <div style="font-family:var(--mono);font-size:11px;color:var(--text-3);margin-bottom:6px">GROUND TRUTH (Top-5)</div>
+          <div id="ann-gt" style="font-family:var(--mono);font-size:12px;line-height:1.7"></div>
+        </div>
+        <div style="border:1px solid var(--border);border-radius:var(--radius-sm);padding:12px;background:var(--bg-soft)">
+          <div style="font-family:var(--mono);font-size:11px;color:var(--text-3);margin-bottom:6px">ANN RESULT (Top-5)</div>
+          <div id="ann-result" style="font-family:var(--mono);font-size:12px;line-height:1.7"></div>
+        </div>
+        <div style="border:1px solid var(--border);border-radius:var(--radius-sm);padding:12px;background:var(--bg-soft)">
+          <div style="font-family:var(--mono);font-size:11px;color:var(--text-3);margin-bottom:6px">METRICS</div>
+          <div id="ann-metrics" style="font-size:13px;line-height:1.8"></div>
+        </div>
+      </div>
+
+      <div class="legend">
+        <span><i class="dot ns-idle"></i>資料向量</span>
+        <span><i class="dot ns-wait"></i>Query ★</span>
+        <span><i class="dot ns-ok"></i>命中 Top-5</span>
+        <span><i class="dot ns-bad"></i>漏檢 (Miss)</span>
+      </div>
+
+      <div class="status-line" id="ann-status">
+        就緒：選索引類型 → 調 ef/nprobe → 執行查詢。HNSW ef 越大 recall 越高但延遲上升。
+      </div>
+    </div>
+  </div>
+  <p class="cap">Demo 在 2D 空間簡化 HNSW / IVF 行為；真實高維空間 recall-latency 曲線更陡，需離線 benchmark 定參。</p>
+
+  <div class="oneliner">
+    <b>一句話答法</b>互動演示 ANN 核心折衷：調高 ef / nprobe 提升 recall@K 但增加延遲；Production 用 benchmark 找 SLA 甜蜜點。
+  </div>
+</section>
+
+<hr class="div">
+
+<!-- ============ 06 面試考點與架構折衷 ============ -->
+<section id="s6">
+  <div class="sec-head">
+    <span class="sec-num">06</span>
+    <h2>面試考點與架構折衷</h2>
+  </div>
+  <p class="sec-sub">RAG 檢索層怎麼設計？Hybrid Search 怎麼做？什麼時候該從 pgvector 遷到 Milvus？</p>
+
+  <h3>RAG 檢索層架構</h3>
+  <ul>
+    <li><strong>Ingestion</strong>：文件 → chunk → embed → upsert vector DB（+ metadata）。</li>
+    <li><strong>Retrieval</strong>：query embed → ANN Top-K →（optional）reranker 精排 → 餵 LLM context。</li>
+    <li><strong>Hybrid</strong>：BM25（ES）+ Vector（Milvus）各取 Top-K，用 <strong>RRF（Reciprocal Rank Fusion）</strong> 合併——keyword 精確 + 語意近似互補。</li>
+    <li><strong>Pre-filter vs Post-filter</strong>：tenant / ACL filter 在 ANN 前（效率高但索引需支援）或 ANN 後（簡單但 recall 可能漏）。</li>
+  </ul>
+
+  <div class="callout accent">
+    <div class="c-title"><span class="ic">考點 1</span>「RAG 檢索效果不好，怎麼排查？」</div>
+    <p><strong>回答框架</strong>：
+      <br>1. 量 recall@K：用標注 query-chunk pair 離線評估。
+      <br>2. 低 recall → 調 ANN ef/nprobe、檢查 chunk 策略、試 hybrid BM25+vector。
+      <br>3. 高 recall 但 LLM 仍錯 → reranker（cross-encoder）或 prompt 問題。
+      <br>4. 延遲高 → 減 K、用 PQ 量化、或 query node 水平擴展。</p>
+  </div>
+
+  <div class="callout accent">
+    <div class="c-title"><span class="ic">考點 2</span>「pgvector 夠用嗎？什麼時候換 Milvus？」</div>
+    <p>• 向量 &lt; 500 萬、QPS &lt; 數百、metadata 需 SQL JOIN → pgvector 通常夠。
+      <br>• 觸頂信號：PG CPU / 記憶體飽和、HNSW 建索引超時、P99 &gt; SLA、需跨機 shard。
+      <br>• 遷移策略：雙寫 + 灰度讀 + PG 保留 metadata SoT。</p>
+  </div>
+
+  <div class="callout warn">
+    <div class="c-title"><span class="ic">陷阱</span>忽略向量索引的更新成本</div>
+    <p>HNSW 不擅長頻繁刪改——大量 delete 後圖結構退化，需 periodic rebuild 或改用 IVF（對寫入友善但 recall 略低）。Milvus 的 segment compaction 與 pgvector 的 <code>REINDEX</code> 都需納入 SOP。</p>
+  </div>
+
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>Trade-off</th>
+          <th>選 A</th>
+          <th>選 B</th>
+          <th>決策線索</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>儲存</td>
+          <td>pgvector (PG)</td>
+          <td>Milvus 專用</td>
+          <td>百萬級 MVP vs 億級 Production</td>
+        </tr>
+        <tr>
+          <td>索引</td>
+          <td>HNSW 高 recall</td>
+          <td>IVF+PQ 省記憶體</td>
+          <td>RAM 充足 vs 十億向量</td>
+        </tr>
+        <tr>
+          <td>搜尋模式</td>
+          <td>Pure vector ANN</td>
+          <td>Hybrid BM25+vector</td>
+          <td class="hl">專有名詞多 → hybrid；純語意 → vector</td>
+        </tr>
+        <tr>
+          <td>Filter</td>
+          <td>Pre-filter</td>
+          <td>Post-filter</td>
+          <td>filter 選擇性高 → pre-filter</td>
+        </tr>
+        <tr>
+          <td>SLA</td>
+          <td>recall@10 ≥ 95%</td>
+          <td>P99 ≤ 50ms</td>
+          <td>兩者都要，用 benchmark 找平衡點</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="cap">向量 DB + ES hybrid + LLM 三層是現代 RAG 應用的標準檢索生成分層。</p>
+
+  <div class="oneliner">
+    <b>一句話答法</b>向量 DB 是 RAG 檢索核心：pgvector 做 MVP、Milvus 做億級；ANN 參數定 recall-latency SLA，檢索差先調索引與 hybrid 再怪 LLM。
+  </div>
+</section>

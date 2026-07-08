@@ -1,0 +1,448 @@
+<!-- ============ 01 總覽與定位 ============ -->
+<section id="s1">
+  <div class="sec-head">
+    <span class="sec-num">01</span>
+    <h2>總覽與定位</h2>
+  </div>
+  <p class="sec-sub">全文檢索引擎解決什麼痛？與 OLTP / OLAP 資料庫在 System Design 版圖中的座標。</p>
+
+  <p>當使用者輸入「分散式 交易 一致性」這類模糊關鍵字，期望在毫秒內從數十億文件中找到最相關結果時，傳統 B-Tree 索引的 <code>LIKE '%keyword%'</code> 或全表掃描完全無法承受。<strong>搜尋與分析引擎（Search &amp; Analytics Engine）</strong>的核心使命，是以<strong>倒排索引（Inverted Index）</strong>為基礎，提供<strong>全文檢索、相關性排序、聚合分析</strong>能力。</p>
+
+  <p>以 <strong>Elasticsearch（ES）</strong> 為代表的全文檢索引擎，在現代架構中幾乎總是<strong>旁路索引（Sidecar Index）</strong>：authoritative data 仍存於 PostgreSQL / MongoDB 等 OLTP，透過 CDC 或雙寫同步到 ES 承擔跨 shard 搜尋；而 ClickHouse / BigQuery 等 OLAP 則負責大規模聚合報表。三者職責不重疊。</p>
+
+  <div class="callout accent">
+    <div class="c-title"><span class="ic">座標</span>Search Engine vs OLTP vs OLAP</div>
+    <p>
+      • <strong>OLTP</strong>：強一致、point lookup / 小範圍 transaction，不擅長模糊全文搜尋。
+      <br>• <strong>Search Engine（ES）</strong>：倒排索引 + 相關性評分，近即時可搜，最終一致。
+      <br>• <strong>OLAP</strong>：Columnar 儲存、大 scan 聚合，延遲秒～分鐘級，不適合互動式搜尋框。
+      <br>實務常見模式：<code>MySQL (source of truth) → Debezium CDC → Elasticsearch (search) + ClickHouse (analytics)</code>。
+    </p>
+  </div>
+
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>維度</th>
+          <th>OLTP（如 PostgreSQL）</th>
+          <th>Search Engine（如 Elasticsearch）</th>
+          <th>OLAP（如 ClickHouse）</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><strong>索引結構</strong></td>
+          <td>B-Tree / Hash</td>
+          <td class="hl">Inverted Index + Doc Values</td>
+          <td>Columnar + Sparse Index</td>
+        </tr>
+        <tr>
+          <td><strong>典型查詢</strong></td>
+          <td><code>WHERE id = ?</code></td>
+          <td><code>match "分散式 交易"</code></td>
+          <td><code>GROUP BY date, SUM(revenue)</code></td>
+        </tr>
+        <tr>
+          <td><strong>一致性</strong></td>
+          <td>強一致（ACID）</td>
+          <td>近即時、最終一致</td>
+          <td>批次 / 準即時</td>
+        </tr>
+        <tr>
+          <td><strong>延遲目標</strong></td>
+          <td>毫秒級 point lookup</td>
+          <td>毫秒～百毫秒級搜尋</td>
+          <td>秒～分鐘級聚合</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="cap">面試高分：能說清楚「為什麼搜尋不直接打 OLTP」以及 ES 在資料流中的位置。</p>
+
+  <div class="oneliner">
+    <b>一句話答法</b>全文檢索引擎以倒排索引承擔模糊搜尋與相關性排序，通常作為 OLTP 的旁路索引；OLAP 負責大聚合，三者分工而非互相取代。
+  </div>
+</section>
+
+<hr class="div">
+
+<!-- ============ 02 倒排索引 ============ -->
+<section id="s2">
+  <div class="sec-head">
+    <span class="sec-num">02</span>
+    <h2>倒排索引（Inverted Index）</h2>
+  </div>
+  <p class="sec-sub">從「文件 → 詞彙」翻轉為「詞彙 → 文件列表」——全文檢索的資料結構基石。</p>
+
+  <p>正排索引（Forward Index）記錄「每份文件包含哪些詞」；<strong>倒排索引</strong>則反過來：每個 <strong>term（詞項）</strong> 對應一個 <strong>posting list（倒排列表）</strong>，列出包含該 term 的所有 document ID，並附帶<strong>詞頻（TF）、位置（position）</strong>等 metadata 供評分與短語匹配使用。</p>
+
+  <h3>ES 中的索引層次</h3>
+  <ul>
+    <li><strong>Index</strong>：邏輯命名空間（類似 database），如 <code>products</code>。</li>
+    <li><strong>Shard</strong>：Index 的水平切分，每個 shard 是獨立的 Lucene index，支援分散式搜尋與寫入。</li>
+    <li><strong>Segment</strong>：Shard 內不可變（immutable）的 Lucene 片段；寫入先進 memory buffer，<code>refresh</code> 後 flush 成新 segment。</li>
+    <li><strong>Document</strong>：JSON 文件，含 <code>_id</code> 與 mapping 定義的 fields。</li>
+  </ul>
+
+  <div class="callout accent">
+    <div class="c-title"><span class="ic">白話</span>為什麼 Segment 不可變？</div>
+    <p>Lucene 的 segment 一旦寫入磁碟就不修改——更新 = 標記舊 doc 為 deleted + 寫入新 doc 到新 segment。這讓<strong>並發讀取無鎖</strong>、合併（merge）可背景執行。代價是磁碟佔用與 merge I/O；Production 需監控 segment 數量與 merge 壓力。</p>
+  </div>
+
+  <h3>Posting List 結構示意</h3>
+  <p>假設三份文件經 Analyzer 後得到 term，倒排索引大致如下：</p>
+
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>Term</th>
+          <th>Posting List（docId : TF）</th>
+          <th>DF（Document Frequency）</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><code>分散式</code></td>
+          <td>doc1:2, doc3:1</td>
+          <td>2</td>
+        </tr>
+        <tr>
+          <td><code>交易</code></td>
+          <td>doc1:1, doc2:3</td>
+          <td>2</td>
+        </tr>
+        <tr>
+          <td><code>一致性</code></td>
+          <td>doc1:1, doc2:1, doc3:2</td>
+          <td class="hl">3</td>
+        </tr>
+        <tr>
+          <td><code>雜湊</code></td>
+          <td>doc3:1</td>
+          <td>1</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="cap">查詢「分散式 交易」= 取各 term 的 posting list 做交集（AND）或聯集（OR），再依評分排序。</p>
+
+  <div class="callout warn">
+    <div class="c-title"><span class="ic">陷阱</span>倒排索引不擅長什麼？</div>
+    <p>• <strong>Range scan 全表</strong>：numeric range 可用 BKD-tree（doc values），但不如 columnar OLAP 高效。
+      <br>• <strong>高基數唯一值 point lookup</strong>：用 <code>_id</code> 或 routing key 查單 doc 可以，但 ES 不是 OLTP 替代品。
+      <br>• <strong>頻繁更新同一 doc</strong>：每次更新產生新 segment + 標記刪除，merge 成本上升。</p>
+  </div>
+
+  <div class="oneliner">
+    <b>一句話答法</b>倒排索引 = term → posting list（docId + TF）；ES 的 shard/segment 不可變設計換取無鎖讀，更新靠 delete + reindex + background merge。
+  </div>
+</section>
+
+<hr class="div">
+
+<!-- ============ 03 Analyzer 與 Tokenizer ============ -->
+<section id="s3">
+  <div class="sec-head">
+    <span class="sec-num">03</span>
+    <h2>Analyzer 與 Tokenizer</h2>
+  </div>
+  <p class="sec-sub">文字如何變成 term？Index-time 與 Search-time 的分析管線必須一致。</p>
+
+  <p>使用者看到的「分散式系統」在寫入索引前，會經過 <strong>Analyzer 管線</strong>拆解成可索引的 term。ES 的 Analyzer 由三部分組成：</p>
+
+  <ol>
+    <li><strong>Character Filters</strong>：預處理字元流（如 HTML strip、正規化全形半形）。</li>
+    <li><strong>Tokenizer</strong>：切分 token 流（如 standard 依標點切、ik_max_word 中文分詞）。</li>
+    <li><strong>Token Filters</strong>：後處理 token（lowercase、stop words、stemming、同義詞）。</li>
+  </ol>
+
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>Analyzer 類型</th>
+          <th>行為</th>
+          <th>典型用途</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><code>standard</code></td>
+          <td>Unicode 分詞 + lowercase</td>
+          <td>英文混合、通用預設</td>
+        </tr>
+        <tr>
+          <td><code>keyword</code></td>
+          <td>整段文字當單一 term</td>
+          <td>SKU、UUID、enum 精確匹配</td>
+        </tr>
+        <tr>
+          <td><code>ik_max_word</code>（外掛）</td>
+          <td>中文最大粒度分詞</td>
+          <td class="hl">中文全文檢索（索引側）</td>
+        </tr>
+        <tr>
+          <td><code>ik_smart</code>（外掛）</td>
+          <td>中文最細粒度分詞</td>
+          <td>中文搜尋側（較少過切）</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="cap">Mapping 中常見：<code>title</code> 用 <code>text</code> + analyzer；<code>status</code> 用 <code>keyword</code> 做 filter/aggregation。</p>
+
+  <h3>Index Analyzer vs Search Analyzer</h3>
+  <p>寫入時用 <strong>index analyzer</strong>，查詢時用 <strong>search analyzer</strong>。兩者可以不同（例如 index 用 <code>ik_max_word</code> 提高 recall，search 用 <code>ik_smart</code> 提高 precision），但<strong>必須在設計時成對定義</strong>，否則 query term 與 index term 對不上會零結果。</p>
+
+  <div class="callout warn">
+    <div class="c-title"><span class="ic">陷阱</span>改 Analyzer 不會自動重建索引</div>
+    <p>修改 field 的 analyzer 只影響<strong>新寫入</strong>的文件。舊 doc 仍用舊 term 索引——需 reindex（新 index + alias 切換）才能生效。Production 變更 analyzer 必須規劃 reindex SOP 與 alias 零 downtime 切換。</p>
+  </div>
+
+  <div class="callout accent">
+    <div class="c-title"><span class="ic">實務</span><code>text</code> vs <code>keyword</code> 多欄位（Multi-field）</div>
+    <p>同一欄位常同時需要全文搜尋與精確排序/聚合，用 multi-field：
+      <br><code>"title": { "type": "text", "fields": { "raw": { "type": "keyword" } } }</code>
+      <br>搜尋打 <code>title</code>，排序 / terms agg 打 <code>title.raw</code>。</p>
+  </div>
+
+  <div class="oneliner">
+    <b>一句話答法</b>Analyzer = Character Filter → Tokenizer → Token Filter；index/search analyzer 成對設計，改 analyzer 需 reindex，text 做全文、keyword 做精確 filter/agg。
+  </div>
+</section>
+
+<hr class="div">
+
+<!-- ============ 04 Refresh 與相關性評分 ============ -->
+<section id="s4">
+  <div class="sec-head">
+    <span class="sec-num">04</span>
+    <h2>Refresh 與相關性評分</h2>
+  </div>
+  <p class="sec-sub">Near Real-time 的可搜尋性窗口，以及 BM25 如何把 posting list 變成排序分數。</p>
+
+  <h3>Refresh：為什麼寫入後不能立刻搜到？</h3>
+  <p>新 document 先寫入 shard 的 <strong>memory buffer（Indexing Buffer）</strong>，此時對搜尋不可見。<strong>Refresh</strong> 將 buffer flush 成新的 Lucene segment，並開放給搜尋——這就是 ES「近即時（Near Real-time, NRT）」的來源。</p>
+  <ul>
+    <li>預設 <code>index.refresh_interval = 1s</code>：最多約 1 秒延遲可搜。</li>
+    <li>大量 bulk 寫入時可暫設 <code>-1</code> 關閉自動 refresh，寫完再手動 refresh，避免每秒建 segment 拖垮 merge。</li>
+    <li><code>refresh=wait_for</code>：寫入 API 阻塞直到下次 refresh，適合「寫完立刻讀」但會拉高寫入延遲。</li>
+  </ul>
+
+  <div class="callout accent">
+    <div class="c-title"><span class="ic">區分</span>Refresh vs Flush vs fsync</div>
+    <p>
+      • <strong>Refresh</strong>：memory → 新 segment，<strong>可搜尋</strong>，資料可能仍在 OS cache。
+      <br>• <strong>Flush</strong>：commit translog、fsync segment 到磁碟，<strong>持久化</strong>保證。
+      <br>面試常混淆：refresh 管「搜尋可見性」，flush 管「宕機不丟資料」。</p>
+  </div>
+
+  <h3>Relevance Scoring：BM25</h3>
+  <p>ES 預設使用 <strong>BM25</strong>（Best Matching 25）計算 query 與 document 的相關性。核心直覺：</p>
+  <ul>
+    <li><strong>TF（Term Frequency）</strong>：term 在 doc 中出現越多次，分數越高（但有飽和，避免堆砌關鍵字）。</li>
+    <li><strong>IDF（Inverse Document Frequency）</strong>：越稀有的 term 權重越高——「的」到處都有，「Raft」很稀有。</li>
+    <li><strong>Field Length Norm</strong>：短欄位（如 title）中命中 term 比長欄位（body）更有價值。</li>
+  </ul>
+
+  <p>實務調參常用 <strong>boost</strong>：title 權重 ×3、tags ×2、body ×1。<code>function_score</code> 可疊加業務因子（銷量、距離、新鮮度 decay）。</p>
+
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>機制</th>
+          <th>作用</th>
+          <th>面試一句話</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><code>match</code></td>
+          <td>全文分詞匹配 + BM25</td>
+          <td>預設搜尋，OR 語意（可設 operator AND）</td>
+        </tr>
+        <tr>
+          <td><code>term</code></td>
+          <td>精確 term 匹配，不評分</td>
+          <td>filter context，可 cache</td>
+        </tr>
+        <tr>
+          <td><code>bool</code></td>
+          <td>must / should / filter / must_not 組合</td>
+          <td class="hl">filter 不計分但可 cache；must 計分</td>
+        </tr>
+        <tr>
+          <td><code>function_score</code></td>
+          <td>自訂函數調整分數</td>
+          <td>電商：相關性 × 銷量 × 距離 decay</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="cap">Query context（計分）vs Filter context（yes/no + cache）是 ES 查詢優化的核心分界。</p>
+
+  <div class="callout warn">
+    <div class="c-title"><span class="ic">陷阱</span>深分頁（Deep Pagination）</div>
+    <p><code>from=10000&size=10</code> 需每 shard 收集 10010 筆再排序——記憶體與 CPU 爆炸。解法：<code>search_after</code>（cursor 分頁）、<code>scroll</code>（批次匯出，非即時 UI）、或 <code>collapse</code> 去重。</p>
+  </div>
+
+  <div class="oneliner">
+    <b>一句話答法</b>Refresh 決定 NRT 可搜窗口（預設 1s）；BM25 用 TF×IDF×欄位長度 norm 排序；filter 不計分可 cache，深分頁用 search_after。
+  </div>
+</section>
+
+<hr class="div">
+
+<!-- ============ 05 互動 Demo ============ -->
+<section id="s5">
+  <div class="sec-head">
+    <span class="sec-num">05</span>
+    <h2>互動 Demo：倒排索引與 BM25 評分</h2>
+  </div>
+  <p class="sec-sub">模擬 Analyzer 分詞、posting list 交集、以及 refresh 前後的可搜尋性。</p>
+
+  <p>下方內建三份技術文章摘要。選擇 Analyzer 模式、輸入查詢詞，觀察 term 如何映射到 posting list 與 BM25 近似分數。切換「Refresh 狀態」可感受 NRT 延遲——未 refresh 的新 doc 不會出現在結果中。</p>
+
+  <div class="demo" id="demo-search">
+    <div class="demo-bar">
+      <span class="label">互動 · 倒排索引 &amp; BM25</span>
+      <span class="label" style="text-transform:none;font-family:var(--sans);font-size:12px;color:var(--text-2)">調整 Analyzer / 查詢 / Refresh</span>
+    </div>
+    <div class="demo-body">
+      <div style="display:flex;flex-wrap:wrap;gap:12px;align-items:center;margin-bottom:14px">
+        <div class="seg" role="group" aria-label="Analyzer 模式">
+          <button data-analyzer="standard" aria-pressed="true">Standard</button>
+          <button data-analyzer="keyword" aria-pressed="false">Keyword</button>
+        </div>
+        <input type="text" id="search-query" placeholder="輸入查詢，如：分散式 交易" style="flex:1;min-width:180px;font-family:var(--sans);font-size:13px;padding:7px 12px;border:1px solid var(--border-strong);border-radius:7px;background:var(--bg)">
+        <button class="btn primary" id="btn-search" type="button">搜尋</button>
+        <button class="btn" id="btn-index-new" type="button">寫入新 Doc</button>
+        <button class="btn" id="btn-refresh" type="button">Refresh</button>
+        <button class="btn" id="btn-reset" type="button">Reset</button>
+      </div>
+
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:14px">
+        <div style="border:1px solid var(--border);border-radius:var(--radius-sm);padding:12px;background:var(--bg-soft)">
+          <div style="font-family:var(--mono);font-size:11px;color:var(--text-3);margin-bottom:8px">CORPUS（已索引文件）</div>
+          <div id="demo-corpus"></div>
+        </div>
+        <div style="border:1px solid var(--border);border-radius:var(--radius-sm);padding:12px;background:var(--bg-soft)">
+          <div style="font-family:var(--mono);font-size:11px;color:var(--text-3);margin-bottom:8px">INVERTED INDEX（Posting Lists）</div>
+          <div id="demo-index" style="font-family:var(--mono);font-size:12px;line-height:1.6;max-height:160px;overflow-y:auto"></div>
+        </div>
+      </div>
+
+      <div style="border:1px solid var(--border);border-radius:var(--radius-sm);padding:12px;margin-bottom:14px">
+        <div style="font-family:var(--mono);font-size:11px;color:var(--text-3);margin-bottom:8px">SEARCH RESULTS（BM25 近似分數）</div>
+        <div id="demo-results"></div>
+      </div>
+
+      <div class="legend">
+        <span><i class="dot ns-idle"></i>已索引可搜</span>
+        <span><i class="dot ns-wait"></i>Buffer 未 Refresh</span>
+        <span><i class="dot ns-ok"></i>命中 / 高分</span>
+        <span><i class="dot ns-lock"></i>Analyzer 模式</span>
+      </div>
+
+      <div class="status-line" id="demo-status">
+        就緒：選 Analyzer → 輸入查詢 → 搜尋。觀察 posting list 交集與 BM25 排序。
+      </div>
+    </div>
+  </div>
+  <p class="cap">Demo 簡化真實 BM25（無 field norm 飽和曲線），但保留 TF×IDF 直覺與 refresh 可見性語意。</p>
+
+  <div class="oneliner">
+    <b>一句話答法</b>互動演示倒排索引查詢 = term 分詞 → posting list 查找 → BM25 計分排序；未 refresh 的 doc 對搜尋不可見。
+  </div>
+</section>
+
+<hr class="div">
+
+<!-- ============ 06 面試考點與架構折衷 ============ -->
+<section id="s6">
+  <div class="sec-head">
+    <span class="sec-num">06</span>
+    <h2>面試考點與架構折衷</h2>
+  </div>
+  <p class="sec-sub">ES 叢集怎麼設計？與 OLTP 如何同步？什麼時候不該用 Elasticsearch？</p>
+
+  <h3>Elasticsearch 叢集核心概念</h3>
+  <ul>
+    <li><strong>Master-eligible nodes</strong>：叢集狀態管理（index/shard 分配），奇數節點防 split-brain（ES 7+ 用 quorum 選主）。</li>
+    <li><strong>Data nodes</strong>：持有 shard 資料，執行 indexing / search。</li>
+    <li><strong>Coordinating node</strong>：Scatter-gather——把查詢分發到各 shard，合併結果（query then fetch 兩階段）。</li>
+    <li><strong>Replica</strong>：shard 副本，提升讀吞吐與 HA；寫入需 primary + replica 確認（依 <code>wait_for_active_shards</code>）。</li>
+  </ul>
+
+  <div class="callout accent">
+    <div class="c-title"><span class="ic">考點 1</span>「MySQL 已有資料，如何加上全文搜尋？」</div>
+    <p><strong>回答框架</strong>：
+      <br>1. MySQL 保持 source of truth（ACID 寫入）。
+      <br>2. CDC（Debezium / Maxwell）或應用雙寫同步到 ES。
+      <br>3. ES 建 inverted index 承擔 <code>match</code> 查詢；精確 <code>id</code> lookup 仍走 MySQL 或 ES <code>ids</code> query。
+      <br>4. 接受 eventual consistency；必要時 write → <code>refresh=wait_for</code> 或 read-your-writes 路由。
+      <br>5. 全量 reindex SOP + alias 切換（<code>products_v2</code> → alias <code>products</code>）。</p>
+  </div>
+
+  <div class="callout accent">
+    <div class="c-title"><span class="ic">考點 2</span>「Shard 數量怎麼估？」</div>
+    <p>• 單 shard 建議 10～50 GB（視 heap 與查詢複雜度）。
+      <br>• Shard 過多 → 每 query 扇出過大、cluster state 膨脹；過少 → 無法水平擴展。
+      <br>• <strong>開始偏少、用 split / reindex 擴</strong>；Production 常預留 2～3 倍容量。
+      <br>• Routing key（如 <code>user_id</code>）讓相關 doc 共 shard，減少 fan-out。</p>
+  </div>
+
+  <div class="callout warn">
+    <div class="c-title"><span class="ic">陷阱</span>什麼時候不該用 ES？</div>
+    <p>• 強一致 transaction、頻繁 row-level update → 用 OLTP。
+      <br>• 大規模 GROUP BY / 報表 → 用 OLAP（ClickHouse / BigQuery）。
+      <br>• 小資料量（&lt; 百萬 row）簡單搜尋 → PostgreSQL <code>tsvector</code> / SQLite FTS 可能足夠，不必引入 ES 運維成本。</p>
+  </div>
+
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>Trade-off</th>
+          <th>選 A</th>
+          <th>選 B</th>
+          <th>決策線索</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>一致性</td>
+          <td>CDC 異步</td>
+          <td>雙寫 + 補償</td>
+          <td>可接受秒級 lag → CDC；需強保證 → 雙寫 + outbox</td>
+        </tr>
+        <tr>
+          <td>Refresh</td>
+          <td>1s 預設</td>
+          <td>-1 bulk 後手動</td>
+          <td>互動搜尋 vs 大量 ETL</td>
+        </tr>
+        <tr>
+          <td>評分</td>
+          <td>BM25 預設</td>
+          <td>Learned to Rank</td>
+          <td>有點擊日志 + ML 團隊 → LTR；否則 BM25 + boost</td>
+        </tr>
+        <tr>
+          <td>同步 vs 分析</td>
+          <td>ES 搜尋</td>
+          <td>ClickHouse 分析</td>
+          <td class="hl">搜尋框 vs BI 報表，常並存</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="cap">ES + OLTP + OLAP 三層是大型電商 / SaaS 的標準搜尋分析分層。</p>
+
+  <div class="oneliner">
+    <b>一句話答法</b>ES 作旁路全文索引：CDC 同步、shard 按容量規劃、NRT refresh 換寫入吞吐、BM25 + boost 做排序；強一致與大聚合交還 OLTP / OLAP。
+  </div>
+</section>

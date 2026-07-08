@@ -1,0 +1,288 @@
+<div class="hero">
+  <div class="eyebrow">Sharding &amp; Hashing</div>
+  <h1>一致性雜湊：讓節點上下線只搬必要的資料</h1>
+  <p class="lede">Consistent Hashing 把節點與資料鍵放到同一個 hash ring 上，讓擴容、縮容、節點故障時只重新分配相鄰區間，而不是讓整個叢集大洗牌。它是 cache cluster、distributed storage、load balancer 與 sharded database 中最常見的資料分派基礎。</p>
+  <div class="meta">
+    <span class="tag">Consistent Hashing</span>
+    <span class="tag">Virtual Nodes</span>
+    <span class="tag">Key Remapping</span>
+  </div>
+</div>
+
+<!-- ============ 01 總覽與定位 ============ -->
+<section id="s1">
+  <div class="sec-head">
+    <span class="sec-num">01</span>
+    <h2>總覽與定位</h2>
+  </div>
+  <p class="sec-sub">為什麼普通 modulo sharding 在擴縮容時會失控，而 hash ring 可以把搬遷限制在局部。</p>
+
+  <p>最直覺的 sharding 做法是把資料鍵做 hash，再用節點數取餘數：<code>hash(key) % N</code>。問題在於 <var>N</var> 一變，幾乎每個 key 的目標節點都會改變。對 cache 來說這會造成大量 miss；對 storage 來說這代表昂貴的 data migration；對 online service 來說，擴容本來是為了降載，卻可能先製造一波重分片風暴。</p>
+
+  <div class="callout accent">
+    <div class="c-title"><span class="ic">核心</span>一致性雜湊把「節點數」移出路由公式</div>
+    <p>資料不再依賴 <code>% N</code>，而是被映射到固定大小的環上。key 往順時針找到的第一個節點就是 owner；新增或移除節點時，只會影響該節點前一段區間。</p>
+  </div>
+
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>策略</th>
+          <th>路由方式</th>
+          <th>節點數變動時</th>
+          <th>典型用途</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>Modulo Hashing</td>
+          <td><code>hash(key) % N</code></td>
+          <td>大多數 key 重新指派</td>
+          <td>固定節點數、離線批次分桶</td>
+        </tr>
+        <tr>
+          <td class="hl">Consistent Hashing</td>
+          <td>hash ring 順時針找 successor</td>
+          <td>只搬受影響的相鄰區間</td>
+          <td>Cache、storage node、動態 shard pool</td>
+        </tr>
+        <tr>
+          <td>Rendezvous Hashing</td>
+          <td>key 對所有節點打分取最高</td>
+          <td>只影響加入或移除節點相關 key</td>
+          <td>節點數中小、需要簡潔實作的 client-side routing</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="cap">一致性雜湊不是讓資料永不移動，而是讓移動範圍與變動節點相關，而非與整個叢集規模相關。</p>
+
+  <div class="oneliner">
+    <b>一句話答法</b>Consistent Hashing 用固定 hash ring 取代 <code>% N</code>，因此節點上下線時只重分配局部區間，降低 cache miss 與資料搬遷成本。
+  </div>
+</section>
+
+<!-- ============ 02 Ring 演算法 ============ -->
+<section id="s2">
+  <div class="sec-head">
+    <span class="sec-num">02</span>
+    <h2>Ring 演算法</h2>
+  </div>
+  <p class="sec-sub">把節點與 key 映射到同一個環，使用 successor rule 決定 owner。</p>
+
+  <p>一致性雜湊通常把 hash space 視為一個首尾相連的範圍，例如 <code>0..359</code> 或 <code>0..2^32-1</code>。每台節點先用 node id 做 hash 放上 ring；每個資料鍵也做 hash 放上 ring。查詢時從 key 的位置順時針走，遇到的第一個節點就是負責該 key 的 owner。</p>
+
+  <div class="formula">owner(key) = first node clockwise from hash(key)</div>
+
+  <p>當新增節點 <code>D</code> 時，它只會接手自己與前一個節點之間的 key；當節點 <code>B</code> 掛掉時，原本屬於 <code>B</code> 的 key 會順時針交給下一個節點。其他 ring 區間不需要搬動。</p>
+
+  <div class="callout warn">
+    <div class="c-title"><span class="ic">陷阱</span>hash ring 不等於完全平均</div>
+    <p>若只有少量實體節點，每台機器在 ring 上的位置可能剛好很近或很遠，導致負載不均。Production 實作幾乎都會搭配 virtual nodes 或 weighted replicas。</p>
+  </div>
+
+  <pre><code>function lookup(key, sortedRing) {
+  const point = hash(key);
+  const owner = sortedRing.find(node =&gt; node.point &gt;= point);
+  return owner || sortedRing[0]; // wrap around
+}</code></pre>
+
+  <div class="oneliner">
+    <b>一句話答法</b>查 key 時不問「有幾台節點」，只問「key 在 ring 上順時針遇到誰」，因此節點集合變動只影響相鄰切片。
+  </div>
+</section>
+
+<!-- ============ 03 Virtual Nodes ============ -->
+<section id="s3">
+  <div class="sec-head">
+    <span class="sec-num">03</span>
+    <h2>Virtual Nodes</h2>
+  </div>
+  <p class="sec-sub">用多個虛擬節點攤平負載，也讓不同容量的機器可以用權重參與分配。</p>
+
+  <p>Virtual Node（vnode）是把一台實體節點映射成多個 ring 上的位置，例如 <code>A#1</code>、<code>A#2</code>、<code>A#3</code>。key lookup 仍然找到第一個 vnode，但實際請求會送到該 vnode 背後的實體節點。vnode 越多，隨機 hash 造成的不均就越容易被平均掉。</p>
+
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>設計點</th>
+          <th>沒有 vnode</th>
+          <th>有 vnode</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>負載平衡</td>
+          <td>少量節點時容易偏斜</td>
+          <td class="hl">每台節點散布多段區間，分配更平滑</td>
+        </tr>
+        <tr>
+          <td>異質容量</td>
+          <td>所有節點大致同權</td>
+          <td>大機器給更多 vnode，小機器給較少 vnode</td>
+        </tr>
+        <tr>
+          <td>搬遷粒度</td>
+          <td>一次搬一大段連續區間</td>
+          <td>拆成多個小區間，可逐步搬遷與節流</td>
+        </tr>
+        <tr>
+          <td>維運成本</td>
+          <td>metadata 少</td>
+          <td>ring metadata 較多，需要一致發布</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>vnode 數不是越多越好。太少會負載不均；太多會增加 routing table、membership gossip、rebalance plan 的成本。常見做法是按服務規模選一個足以平滑分布的 vnode 數，再用容量權重微調。</p>
+
+  <div class="oneliner">
+    <b>一句話答法</b>Virtual nodes 用「多點代表一台機器」平滑 hash ring，也讓容量大的節點自然承接更多 key range。
+  </div>
+</section>
+
+<!-- ============ 04 擴縮容與故障 ============ -->
+<section id="s4">
+  <div class="sec-head">
+    <span class="sec-num">04</span>
+    <h2>擴縮容與故障</h2>
+  </div>
+  <p class="sec-sub">一致性雜湊降低 remapping，但 production 還要處理資料搬遷、複本與 membership 一致性。</p>
+
+  <p>在真實系統裡，ring 變更不是單純把節點加入陣列。資料或 cache entry 需要搬遷，client 需要拿到同一版 ring，replica placement 不能把多個複本放在同一故障域，否則一次 rack failure 仍然可能打掉多份資料。</p>
+
+  <ol>
+    <li><b>Membership change</b>：控制面確認節點健康、容量與版本，再產生新的 ring version。</li>
+    <li><b>Data movement</b>：新 owner 從舊 owner backfill key range；過程中可能需要 dual read 或 forwarding。</li>
+    <li><b>Traffic cutover</b>：client 或 gateway 切到新 ring version，必要時保留短暫相容窗口。</li>
+    <li><b>Replica awareness</b>：第二、第三複本通常取後續不同 failure domain 的節點，而不是只看下一個 vnode。</li>
+  </ol>
+
+  <div class="callout accent">
+    <div class="c-title"><span class="ic">實務</span>一致性雜湊解的是 routing churn，不是完整 rebalance 系統</div>
+    <p>它讓「哪些 key 需要搬」變少，但仍需要流量節流、背景複製、健康檢查、ring version 管理與監控告警，才能安全地在 production 擴縮容。</p>
+  </div>
+
+  <div class="oneliner">
+    <b>一句話答法</b>節點變動時只搬相鄰 range，但 production 必須把 ring 變更包進 membership、backfill、cutover 與 replica placement 流程。
+  </div>
+</section>
+
+<!-- ============ 05 互動 Demo ============ -->
+<section id="s5">
+  <div class="sec-head">
+    <span class="sec-num">05</span>
+    <h2>互動 Demo</h2>
+  </div>
+  <p class="sec-sub">切換情境，觀察新增或移除節點時哪些 key 真的需要 remap。</p>
+
+  <p>下方模擬器用簡化的 <code>0..359</code> ring 展示 4 個實體節點與 12 個 key。切換情境後，受影響的 key 會被標記出來；你可以直觀看到一致性雜湊的核心價值：不是零搬遷，而是只搬必要的一小段。</p>
+
+  <div class="demo" id="demo-consistent-hashing">
+    <div class="demo-bar">
+      <span class="label">互動 · Consistent Hashing Ring</span>
+      <span class="label" style="text-transform:none;font-family:var(--sans);font-size:12px;color:var(--text-2)">切換節點變動情境</span>
+    </div>
+    <div class="demo-body">
+      <div class="ch-controls">
+        <div class="seg" role="group" aria-label="節點變動情境">
+          <button data-scenario="stable" aria-pressed="true">穩定狀態</button>
+          <button data-scenario="add" aria-pressed="false">新增節點 D</button>
+          <button data-scenario="remove" aria-pressed="false">移除節點 B</button>
+        </div>
+        <button class="btn" id="ch-reset" type="button">Reset</button>
+      </div>
+
+      <div class="ch-canvas" aria-label="一致性雜湊環視覺化">
+        <svg id="ch-ring" viewBox="0 0 420 420" role="img" aria-labelledby="ch-ring-title">
+          <title id="ch-ring-title">Consistent hashing ring with keys and nodes</title>
+        </svg>
+      </div>
+
+      <div class="legend">
+        <span><i class="dot ns-idle"></i>原 owner</span>
+        <span><i class="dot ns-wait"></i>新增節點</span>
+        <span><i class="dot ns-bad"></i>移除節點</span>
+        <span><i class="dot ns-lock"></i>需要 remap 的 key</span>
+        <span><i class="dot ns-ok"></i>不受影響的 key</span>
+      </div>
+
+      <div class="status-line" id="ch-status">穩定狀態：所有 key 依順時針 successor rule 指派給 A、B、C。</div>
+      <div class="tbl-wrap ch-table-wrap">
+        <table id="ch-table">
+          <thead>
+            <tr>
+              <th>Key</th>
+              <th>Hash point</th>
+              <th>原 owner</th>
+              <th>新 owner</th>
+              <th>狀態</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <div class="oneliner">
+    <b>一句話答法</b>看 remap 數量時要問「變動節點接手或釋放哪段 ring range」，不是問整個 cluster 有多少 key。
+  </div>
+</section>
+
+<!-- ============ 06 面試取捨與設計檢查表 ============ -->
+<section id="s6">
+  <div class="sec-head">
+    <span class="sec-num">06</span>
+    <h2>面試取捨與設計檢查表</h2>
+  </div>
+  <p class="sec-sub">回答題目時要把 ring、vnode、replica 與 operational safety 一起講清楚。</p>
+
+  <p>面試中提到一致性雜湊時，不要只畫一個環。更完整的回答應該說明它解決了什麼、沒有解決什麼，以及你如何把它放進可運維的系統裡。</p>
+
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>面向</th>
+          <th>應該說清楚</th>
+          <th>常見追問</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>Correctness</td>
+          <td>所有 client 需要使用同一版 ring，否則同一 key 可能被送到不同 owner。</td>
+          <td>ring version 如何發布？舊版本請求如何相容？</td>
+        </tr>
+        <tr>
+          <td>Load Balance</td>
+          <td>少量實體節點會偏斜，需使用 vnode 與容量權重。</td>
+          <td>如何避免 hot key 打爆單一 node？</td>
+        </tr>
+        <tr>
+          <td>Availability</td>
+          <td>故障節點的 range 要轉交 successor，但資料系統還需要 replica。</td>
+          <td>副本如何避開同 rack / zone？</td>
+        </tr>
+        <tr>
+          <td>Operations</td>
+          <td>擴縮容要節流搬遷，避免 backfill 與 foreground traffic 互相干擾。</td>
+          <td>如何監控 remap rate、rebalance lag、cache miss？</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="callout warn">
+    <div class="c-title"><span class="ic">風險</span>一致性雜湊無法自動解決 hot key</div>
+    <p>若某個 key 本身流量巨大，不管它被分到哪個節點都可能形成 hotspot。此時需要 request coalescing、local cache、key splitting、replication read fanout 或應用層降載。</p>
+  </div>
+
+  <div class="oneliner">
+    <b>一句話答法</b>高分答案要從「少搬資料」延伸到 vnode 平衡、ring version 一致、replica failure domain 與 rebalance 節流。
+  </div>
+</section>

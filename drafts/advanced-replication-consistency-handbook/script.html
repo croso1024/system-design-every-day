@@ -1,0 +1,258 @@
+<script>
+(function () {
+  "use strict";
+
+  var root = document.getElementById("demo-quorum");
+  if (!root) return;
+
+  var modes = {
+    fast: {
+      name: "快速最終一致",
+      n: 5,
+      w: 1,
+      r: 1,
+      writeSet: [0],
+      readSet: [4],
+      downSet: [],
+      note: "W=1、R=1 追求最低 latency，但讀寫集合沒有交集，讀取很可能落到舊副本。"
+    },
+    majority: {
+      name: "平衡 Majority",
+      n: 5,
+      w: 3,
+      r: 3,
+      writeSet: [0, 1, 2],
+      readSet: [2, 3, 4],
+      downSet: [],
+      note: "W=3、R=3 滿足 W+R>N，讀取集合必定與寫入集合相交，能遇到最新版本並修復落後副本。"
+    },
+    readheavy: {
+      name: "讀取嚴格",
+      n: 5,
+      w: 1,
+      r: 5,
+      writeSet: [0],
+      readSet: [0, 1, 2, 3, 4],
+      downSet: [],
+      note: "寫入只等一個 ACK，但讀取查詢全部副本；讀取較慢，卻能在讀取時校驗並修復。"
+    },
+    failure: {
+      name: "故障壓力",
+      n: 5,
+      w: 3,
+      r: 3,
+      writeSet: [0, 1, 2],
+      readSet: [2, 3, 4],
+      downSet: [3],
+      note: "理論上是 Majority，但讀取集合中有副本不可達，若回應數不足 R，系統應拒絕而不是假裝成功。"
+    }
+  };
+
+  var state = {
+    mode: "fast",
+    versions: ["v1", "v1", "v1", "v1", "v1"],
+    phase: "idle",
+    lastRead: []
+  };
+
+  var modeButtons = Array.prototype.slice.call(root.querySelectorAll(".seg button"));
+  var metricsEl = root.querySelector("#q-metrics");
+  var nodesEl = root.querySelector("#q-nodes");
+  var logEl = root.querySelector("#q-log");
+  var statusEl = root.querySelector("#q-status");
+  var writeBtn = root.querySelector("#q-write");
+  var readBtn = root.querySelector("#q-read");
+  var repairBtn = root.querySelector("#q-repair");
+  var resetBtn = root.querySelector("#q-reset");
+
+  function currentMode() {
+    return modes[state.mode];
+  }
+
+  function includes(list, value) {
+    return list.indexOf(value) !== -1;
+  }
+
+  function reset(modeKey) {
+    state.mode = modeKey || state.mode;
+    state.versions = ["v1", "v1", "v1", "v1", "v1"];
+    state.phase = "idle";
+    state.lastRead = [];
+    render([
+      "<b>等待操作：</b>先按「寫入 v2」，再按「讀取」。",
+      "<b>模式提示：</b>" + currentMode().note
+    ]);
+  }
+
+  function render(logs) {
+    var mode = currentMode();
+    modeButtons.forEach(function (button) {
+      button.setAttribute("aria-pressed", button.getAttribute("data-mode") === state.mode ? "true" : "false");
+    });
+
+    metricsEl.innerHTML = [
+      metric("N", mode.n + " replicas"),
+      metric("W / R", mode.w + " / " + mode.r),
+      metric("交集", mode.w + mode.r > mode.n ? "W+R>N 成立" : "W+R>N 不成立")
+    ].join("");
+
+    nodesEl.innerHTML = state.versions.map(function (version, index) {
+      var isDown = includes(mode.downSet, index);
+      var wasRead = includes(state.lastRead, index);
+      var cls = "q-node ";
+      var note = "idle";
+
+      if (isDown) {
+        cls += "ns-bad";
+        note = "unreachable";
+      } else if (wasRead) {
+        cls += "ns-wait";
+        note = "read quorum";
+      } else if (version === "v2") {
+        cls += "ns-ok";
+        note = "latest";
+      } else {
+        cls += "ns-idle";
+      }
+
+      return [
+        '<div class="' + cls + '">',
+        '  <div class="node-name">Replica ' + (index + 1) + "</div>",
+        '  <div class="node-value">' + (isDown ? "down" : version) + "</div>",
+        '  <div class="node-note">' + note + "</div>",
+        "</div>"
+      ].join("");
+    }).join("");
+
+    logEl.innerHTML = logs.map(function (line) {
+      return '<div class="log-line">' + line + "</div>";
+    }).join("");
+  }
+
+  function metric(label, value) {
+    return [
+      '<div class="q-metric">',
+      '  <span class="label">' + label + "</span>",
+      '  <span class="value">' + value + "</span>",
+      "</div>"
+    ].join("");
+  }
+
+  function performWrite() {
+    var mode = currentMode();
+    state.lastRead = [];
+    mode.writeSet.forEach(function (idx) {
+      if (!includes(mode.downSet, idx)) {
+        state.versions[idx] = "v2";
+      }
+    });
+    state.phase = "written";
+    statusEl.innerHTML = "寫入 v2 已取得 <b>" + mode.writeSet.length + "</b> 個 ACK；接著讀取會依 R 選出副本集合。";
+    render([
+      "<b>寫入：</b>Client 將 v2 寫到 Replica " + mode.writeSet.map(function (idx) { return idx + 1; }).join(", ") + "。",
+      "<b>判斷：</b>" + mode.note
+    ]);
+  }
+
+  function performRead() {
+    var mode = currentMode();
+    if (state.phase === "idle") {
+      statusEl.innerHTML = "請先執行寫入，才能觀察讀取是否遇到最新版本。";
+      render(["<b>尚未寫入：</b>所有副本仍是 v1，因此讀取結果沒有比較意義。"]);
+      return;
+    }
+
+    state.lastRead = mode.readSet.slice();
+    var reachable = mode.readSet.filter(function (idx) {
+      return !includes(mode.downSet, idx);
+    });
+    var hasQuorum = reachable.length >= mode.r;
+    var hasLatest = reachable.some(function (idx) {
+      return state.versions[idx] === "v2";
+    });
+    var versions = reachable.map(function (idx) {
+      return "R" + (idx + 1) + "=" + state.versions[idx];
+    }).join(", ");
+
+    state.phase = "read";
+
+    if (!hasQuorum) {
+      statusEl.innerHTML = "讀取只收到 <b>" + reachable.length + "</b> 個回應，未達 R=" + mode.r + "；正確行為是拒絕或重試。";
+      render([
+        "<b>讀取集合：</b>Replica " + mode.readSet.map(function (idx) { return idx + 1; }).join(", ") + "。",
+        "<b>回應：</b>" + (versions || "無可用副本") + "。",
+        "<b>結果：</b>Quorum 不足，不能回傳一個看似成功但可能錯誤的值。"
+      ]);
+      return;
+    }
+
+    if (hasLatest) {
+      statusEl.innerHTML = "讀取集合遇到 <b>v2</b>；系統可選出最新版本，並在下一步用 Read Repair 補齊落後副本。";
+      render([
+        "<b>讀取集合：</b>Replica " + mode.readSet.map(function (idx) { return idx + 1; }).join(", ") + "。",
+        "<b>回應：</b>" + versions + "。",
+        "<b>結果：</b>至少一個回應帶有 v2，版本比較後回傳最新值。"
+      ]);
+    } else {
+      statusEl.innerHTML = "讀取集合全部停在 <b>v1</b>；這是 Stale Read，代表低 R/W 設定沒有遇到最新寫入。";
+      render([
+        "<b>讀取集合：</b>Replica " + mode.readSet.map(function (idx) { return idx + 1; }).join(", ") + "。",
+        "<b>回應：</b>" + versions + "。",
+        "<b>結果：</b>沒有交集保證時，即使寫入成功，讀取仍可能回到舊值。"
+      ]);
+    }
+  }
+
+  function performRepair() {
+    var mode = currentMode();
+    if (state.phase !== "read") {
+      statusEl.innerHTML = "請先執行讀取；Read Repair 需要讀取集合中的版本差異作為依據。";
+      render(["<b>尚未讀取：</b>沒有版本差異可以修復。"]);
+      return;
+    }
+
+    var reachable = state.lastRead.filter(function (idx) {
+      return !includes(mode.downSet, idx);
+    });
+    var hasLatest = reachable.some(function (idx) {
+      return state.versions[idx] === "v2";
+    });
+
+    if (!hasLatest) {
+      statusEl.innerHTML = "讀取集合沒有任何 v2，因此 Read Repair 無法推導出新版本；必須等待背景同步或更高 R 的讀取。";
+      render([
+        "<b>修復失敗：</b>本次讀取只看到舊版本，沒有安全依據覆寫副本。",
+        "<b>設計含意：</b>低 R/W 設定必須依賴 Anti-entropy 或後續讀取修復。"
+      ]);
+      return;
+    }
+
+    reachable.forEach(function (idx) {
+      state.versions[idx] = "v2";
+    });
+    state.phase = "repaired";
+    statusEl.innerHTML = "Read Repair 已把本次可達讀取集合補成 <b>v2</b>；未參與讀取的舊副本仍需背景 Anti-entropy 收斂。";
+    render([
+      "<b>Read Repair：</b>把讀取集合中落後的可達副本更新為 v2。",
+      "<b>注意：</b>未被讀取、或不可達的副本不會在這一步被修復。"
+    ]);
+  }
+
+  modeButtons.forEach(function (button) {
+    button.addEventListener("click", function () {
+      reset(button.getAttribute("data-mode"));
+      statusEl.innerHTML = "已切換到「" + currentMode().name + "」。" + currentMode().note;
+    });
+  });
+
+  writeBtn.addEventListener("click", performWrite);
+  readBtn.addEventListener("click", performRead);
+  repairBtn.addEventListener("click", performRepair);
+  resetBtn.addEventListener("click", function () {
+    reset();
+    statusEl.innerHTML = "已重置目前模式。所有副本回到 v1。";
+  });
+
+  reset("fast");
+})();
+</script>

@@ -1,0 +1,307 @@
+<section id="s1">
+  <div class="sec-head"><span class="sec-num">01</span><h2>總覽與定位</h2></div>
+  <p class="sec-sub">IP 位址是網路層的「門牌號」；子網路遮罩決定哪些位元是「街道」、哪些是「房號」。</p>
+
+  <p>上一篇我們建立了 TCP/IP 分層心智模型，知道<strong>網路層（Internet Layer）</strong>用 IP 位址回答「封包要送到哪一台主機」。但光有 32 位元的數字還不夠——你必須知道：</p>
+  <ul>
+    <li>這台主機跟我是<strong>同一個子網路</strong>嗎？（同網段可直接 ARP，跨網段要丟給 Gateway）</li>
+    <li>這個子網路<strong>從哪到哪</strong>？（網路位址、廣播位址、可用主機範圍）</li>
+    <li>機房新上架一台伺服器，<strong>IP、遮罩、Gateway 該填什麼</strong>？</li>
+  </ul>
+
+  <p>本篇聚焦 <strong>IPv4 定址</strong>與<strong>子網路劃分（Subnetting）</strong>——這是後續「區域網路與設備」「NAT／Port Forwarding」的先備地基。貫穿情境：<strong>新機房上架一台伺服器，你要手動設定固定 IP、子網路遮罩與預設閘道</strong>。</p>
+
+  <div class="callout accent">
+    <div class="c-title"><span class="ic">座標</span>這篇在系列中的位置</div>
+    <p>承接「TCP/IP 分層模型」的<strong>網路層（L3）</strong>細節。上一篇說 IP 負責跨網路定址與路由；本篇回答「IP 位址本身怎麼解讀、子網路遮罩到底在算什麼」。與「區域網路與設備」的差異化：本篇講<strong>邏輯定址與子網路劃分</strong>，不深入 Switch／MAC／ARP 的實體接線。</p>
+  </div>
+
+  <div class="oneliner">
+    <b>一句話答法</b>IPv4 是 32 位元門牌號；子網路遮罩把位址切成「網路前綴＋主機號」，決定同網段判斷、可用主機範圍與 Gateway 該指向哪；CIDR 用斜線前綴簡寫遮罩長度。
+  </div>
+</section>
+
+<hr class="div">
+
+<section id="s2">
+  <div class="sec-head"><span class="sec-num">02</span><h2>IPv4 位址結構</h2></div>
+  <p class="sec-sub">32 位元、四組八位元、點分十進位——看懂這三個數字就能讀懂任何 IP。</p>
+
+  <p>IPv4 位址是 <strong>32 位元（bit）</strong>的整數，慣例切成四段、每段 8 bit，用<strong>點分十進位（dotted decimal）</strong>書寫，例如 <code>192.168.1.10</code>。每一段範圍 0–255，因為 <var>2<sup>8</sup> = 256</var>。</p>
+
+  <p>在還沒劃分子網路之前，早期 IP 用<strong>類別定址（Classful）</strong>：A 類前 8 bit 是網路、B 類前 16 bit、C 類前 24 bit。但這太僵化——一個 C 類網段固定 254 台主機，小公司浪費、大公司不夠。現代網路全面改用<strong>無類別定址（Classless）</strong>，靠<strong>子網路遮罩長度</strong>彈性切分，也就是 CIDR。</p>
+
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr><th>表示法</th><th>範例</th><th>說明</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>點分十進位</td><td><code>192.168.1.10</code></td><td>人類可讀，設定檔最常見</td></tr>
+        <tr><td>二進位</td><td><code>11000000.10101000.00000001.00001010</code></td><td>子網路運算的本質形式</td></tr>
+        <tr><td>32 位元整數</td><td><code>3232235786</code></td><td>程式內部常用 <code>inet_aton</code> 轉換</td></tr>
+        <tr><td>CIDR 前綴</td><td><code>192.168.1.10/24</code></td><td>IP ＋ 遮罩長度，路由表標準寫法</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="cap">面試常考：把 <code>10.0.0.0/8</code> 翻成二進位，前 8 bit 是網路、後 24 bit 是主機——可用主機數 <var>2<sup>24</sup> − 2</var>（扣網路位址與廣播位址）。</p>
+
+  <div class="callout warn">
+    <div class="c-title"><span class="ic">陷阱</span>特殊位址別拿來配給主機</div>
+    <p><code>0.0.0.0</code>（本機未指定）、<code>127.0.0.0/8</code>（loopback）、<code>255.255.255.255</code>（有限廣播）、以及每個子網路的<strong>網路位址（全 0 主機段）</strong>與<strong>廣播位址（全 1 主機段）</strong>都不可指派給一般主機。</p>
+  </div>
+
+  <div class="oneliner">
+    <b>一句話答法</b>IPv4 是 32 bit，切成四段八位元用點分十進位表示；現代用無類別 CIDR 取代僵化的 A/B/C 類，彈性決定網路與主機各佔幾 bit。
+  </div>
+</section>
+
+<hr class="div">
+
+<section id="s3">
+  <div class="sec-head"><span class="sec-num">03</span><h2>子網路遮罩：到底在算什麼</h2></div>
+  <p class="sec-sub">遮罩是一面「篩子」——跟 IP 做 AND，網路位元留下、主機位元歸零，就得到網路位址。</p>
+
+  <p>子網路遮罩（Subnet Mask）跟 IP 位址等長（32 bit），由連續的 <strong>1</strong>（網路部分）與連續的 <strong>0</strong>（主機部分）組成。核心運算只有一個：<strong>網路位址 = IP AND Mask</strong>。</p>
+
+  <p>以 <code>192.168.1.10</code> 搭配遮罩 <code>255.255.255.0</code>（即 <code>/24</code>，前 24 bit 為 1）為例：</p>
+
+  <div class="formula">Network = IP &amp; Mask → 192.168.1.0</div>
+
+  <p>遮罩告訴你三件實務上最重要的事：</p>
+  <ul>
+    <li><strong>同網段判斷</strong>：兩台主機的 IP 分別 AND 同一遮罩，結果相同 → 同子網路，可直接 L2 通訊；不同 → 封包要交給 Gateway 轉發。</li>
+    <li><strong>可用主機範圍</strong>：主機段全 0 是網路位址、全 1 是廣播位址，中間才是可指派給主機的位址。</li>
+    <li><strong>子網路大小</strong>：主機 bit 數 <var>h</var>，可用主機數 = <var>2<sup>h</sup> − 2</var>（IPv4 慣例扣掉網路與廣播）。</li>
+  </ul>
+
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr><th>遮罩（點分）</th><th>CIDR</th><th>主機 bit 數</th><th>可用主機數</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><code>255.255.255.0</code></td><td>/24</td><td>8</td><td>254</td></tr>
+        <tr><td><code>255.255.255.128</code></td><td>/25</td><td>7</td><td>126</td></tr>
+        <tr><td><code>255.255.255.192</code></td><td>/26</td><td>6</td><td>62</td></tr>
+        <tr><td><code>255.255.0.0</code></td><td>/16</td><td>16</td><td>65534</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="cap">機房情境：若機房給你 <code>10.20.30.0/26</code>，代表整段只有 62 台可用主機——規劃 IP 時別超出範圍。</p>
+
+  <div class="callout accent">
+    <div class="c-title"><span class="ic">關鍵</span>廣播位址怎麼算</div>
+    <p>廣播位址 = 網路位址 OR（遮罩的反碼）。以 <code>192.168.1.0/24</code> 為例，廣播是 <code>192.168.1.255</code>。往這個位址送的封包，子網路內所有主機都會收到。</p>
+  </div>
+
+  <div class="oneliner">
+    <b>一句話答法</b>子網路遮罩用連續 1 標記網路前綴；IP AND Mask 得網路位址，決定同網段與路由；主機 bit 全 0／全 1 分別是網路位址與廣播位址，中間才可配給主機。
+  </div>
+</section>
+
+<hr class="div">
+
+<section id="s4">
+  <div class="sec-head"><span class="sec-num">04</span><h2>CIDR 表示法</h2></div>
+  <p class="sec-sub">斜線後的數字就是「前面幾個 bit 是網路」——路由表、防火牆、雲端 VPC 都這樣寫。</p>
+
+  <p><strong>CIDR（Classless Inter-Domain Routing）</strong>把 IP 與遮罩長度寫在一起：<code>10.20.30.0/26</code> 表示前 26 bit 是網路前綴、後 6 bit 是主機。好處是簡潔、無歧義，路由聚合（route summarization）也靠它把多條小網段合成一條。</p>
+
+  <p>常見對照：</p>
+  <ul>
+    <li><code>/32</code> → 單一主機（host route），遮罩 <code>255.255.255.255</code></li>
+    <li><code>/24</code> → 典型區網，254 台主機</li>
+    <li><code>/16</code> → B 類等效，65534 台主機</li>
+    <li><code>/8</code> → A 類等效，16777214 台主機</li>
+  </ul>
+
+  <div class="callout warn">
+    <div class="c-title"><span class="ic">陷阱</span>遮罩必須是「左連續 1」</div>
+    <p>合法遮罩的二進位必須是 <code>111…1100…00</code> 的形式，例如 <code>255.255.255.240</code>（/28）合法，<code>255.255.255.129</code> 不合法——中間不能出現 0 夾在 1 之間。設定錯誤的遮罩會導致主機無法判斷同網段。</p>
+  </div>
+
+  <div class="oneliner">
+    <b>一句話答法</b>CIDR 在 IP 後加斜線前綴長度（如 /24），一眼看出網路佔幾 bit；路由表與雲端安全群組規則普遍採用此寫法。
+  </div>
+</section>
+
+<hr class="div">
+
+<section id="s5">
+  <div class="sec-head"><span class="sec-num">05</span><h2>Gateway 與預設閘道</h2></div>
+  <p class="sec-sub">同網段直送、跨網段交給 Gateway——它是子網路通往外界的「出口路由器」。</p>
+
+  <p>當主機要送封包給另一個 IP，作業系統先做<strong>同網段判斷</strong>：</p>
+  <ol>
+    <li>目的 IP AND 子網路遮罩，跟自己的 IP AND 遮罩比較。</li>
+    <li><strong>相同</strong> → 目的在同子網路，用 ARP 找對方 MAC，直接 L2 送達。</li>
+    <li><strong>不同</strong> → 封包交給<strong>預設閘道（Default Gateway）</strong>，通常是子網路內某台路由器的介面 IP。</li>
+  </ol>
+
+  <p>機房上架伺服器時，網管通常會給你三個值：</p>
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr><th>設定項</th><th>範例</th><th>角色</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>IP Address</td><td><code>10.20.30.15</code></td><td>這台主機在子網路內的門牌</td></tr>
+        <tr><td>Subnet Mask</td><td><code>255.255.255.192</code>（/26）</td><td>界定同網段範圍</td></tr>
+        <tr><td>Default Gateway</td><td><code>10.20.30.1</code></td><td>子網路出口，通常是 .1 或 .254</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="cap">Gateway 必須跟主機在同一子網路內——你把 Gateway 設成不同網段的 IP，主機永遠找不到它。</p>
+
+  <div class="callout accent">
+    <div class="c-title"><span class="ic">實務</span>為什麼 Gateway 常是 .1？</div>
+    <p>純粹慣例，不是協定規定。很多機房把路由器介面設在子網路的第一個可用位址（如 <code>x.x.x.1</code>），方便記憶與文件化。重點是<strong>它必須落在你的可用主機範圍內，且確實有一台路由器在聽</strong>。</p>
+  </div>
+
+  <div class="oneliner">
+    <b>一句話答法</b>預設閘道是子網路的出口路由器 IP；同網段直送、跨網段把封包交給 Gateway，Gateway 必須與主機同子網路且位在可用主機範圍內。
+  </div>
+</section>
+
+<hr class="div">
+
+<section id="s6">
+  <div class="sec-head"><span class="sec-num">06</span><h2>靜態 IP vs DHCP</h2></div>
+  <p class="sec-sub">伺服器、印表機、網路設備要固定；筆電、訪客 Wi-Fi 要自動——依角色取捨。</p>
+
+  <p><strong>DHCP（Dynamic Host Configuration Protocol）</strong>讓主機開機時自動向 DHCP Server 索取 IP、遮罩、Gateway、DNS，省去手動設定。家用路由器、企業區網、雲端 VPC 的 DHCP 都是同一原理。</p>
+
+  <p><strong>靜態 IP（Static）</strong>則是手動寫死三件套（IP／Mask／Gateway），或透過 DHCP Reservation 把特定 MAC 綁定固定 IP——效果一樣：位址不變。</p>
+
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr><th>面向</th><th>靜態 IP</th><th>DHCP</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>適用對象</td><td>伺服器、DB、路由器、印表機、監控</td><td>筆電、手機、訪客、一般辦公 PC</td></tr>
+        <tr><td>可預測性</td><td class="hl">高——位址固定，防火牆／DNS 好管理</td><td>租約到期可能換 IP（除非 Reservation）</td></tr>
+        <tr><td>維運成本</td><td>需手動規劃、避免衝突</td><td>集中管理，但需維護 DHCP Server</td></tr>
+        <tr><td>故障排查</td><td>設定錯誤就是錯，不會自動修正</td><td>DHCP 掛掉 → 新主機拿不到 IP</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="callout warn">
+    <div class="c-title"><span class="ic">陷阱</span>靜態 IP 衝突（IP Conflict）</div>
+    <p>兩台主機設了相同 IP，後開機的會偵測到衝突而無法正常通訊。機房規劃時應維護 IP 清冊，或把伺服器 MAC 登記到 DHCP Reservation，避免人工填錯。</p>
+  </div>
+
+  <div class="oneliner">
+    <b>一句話答法</b>伺服器與基礎設施用靜態 IP 或 DHCP Reservation 確保位址固定；終端裝置用 DHCP 降低維運負擔；靜態設定要防 IP 衝突。
+  </div>
+</section>
+
+<hr class="div">
+
+<section id="s7">
+  <div class="sec-head"><span class="sec-num">07</span><h2>互動 · 子網路計算器</h2></div>
+  <p class="sec-sub">輸入 IP 與遮罩，即時算出網段、廣播位址與可用主機數——模擬機房上架填表情境。</p>
+
+  <p>假設機房交付你一個網段，你要為新伺服器挑一個合法 IP 並填好 Gateway。用下面的計算器驗證你的設定是否落在正確範圍內：</p>
+
+  <div class="demo" id="demo-subnet">
+    <div class="demo-bar">
+      <span class="label">互動 · 子網路計算器</span>
+      <span class="label" style="text-transform:none;font-family:var(--sans);font-size:12px;color:var(--text-2)">輸入 IP + 遮罩，即時計算網段資訊</span>
+    </div>
+    <div class="demo-body">
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:14px;">
+        <div>
+          <label style="font-size:12px;color:var(--text-2);display:block;margin-bottom:4px;">IP 位址</label>
+          <input type="text" id="sub-ip" value="192.168.1.10" style="width:100%;padding:8px 10px;border:1px solid var(--border-strong);border-radius:var(--radius-sm);font-family:var(--mono);font-size:13px;background:var(--bg);">
+        </div>
+        <div>
+          <label style="font-size:12px;color:var(--text-2);display:block;margin-bottom:4px;">子網路遮罩 或 CIDR</label>
+          <input type="text" id="sub-mask" value="/24" style="width:100%;padding:8px 10px;border:1px solid var(--border-strong);border-radius:var(--radius-sm);font-family:var(--mono);font-size:13px;background:var(--bg);">
+        </div>
+      </div>
+      <div class="seg" role="group" aria-label="預設情境" style="margin-bottom:14px;">
+        <button data-preset="home" aria-pressed="false">家用 /24</button>
+        <button data-preset="dc26" aria-pressed="false">機房 /26</button>
+        <button data-preset="point" aria-pressed="false">點對點 /30</button>
+      </div>
+      <div class="tbl-wrap">
+        <table id="sub-result">
+          <tbody>
+            <tr><td>網路位址</td><td id="r-network" class="hl">—</td></tr>
+            <tr><td>廣播位址</td><td id="r-broadcast">—</td></tr>
+            <tr><td>第一個可用主機</td><td id="r-first">—</td></tr>
+            <tr><td>最後一個可用主機</td><td id="r-last">—</td></tr>
+            <tr><td>可用主機數</td><td id="r-hosts">—</td></tr>
+            <tr><td>CIDR 表示</td><td id="r-cidr">—</td></tr>
+            <tr><td>同網段判斷</td><td id="r-same">—</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="status-line" id="sub-status">輸入 IP 與遮罩後自動計算。支援 <code>255.255.255.0</code> 或 <code>/24</code> 格式。</div>
+      <div style="margin-top:14px;display:flex;gap:8px;flex-wrap:wrap;">
+        <button class="btn primary" id="sub-calc">重新計算</button>
+        <button class="btn" id="sub-reset">重置</button>
+      </div>
+      <div class="legend">
+        <span><i class="dot ns-ok"></i>合法主機位址</span>
+        <span><i class="dot ns-lock"></i>網路／廣播（不可配）</span>
+        <span><i class="dot ns-bad"></i>輸入錯誤</span>
+      </div>
+    </div>
+  </div>
+  <p class="cap">試試把 IP 改成 <code>10.20.30.15</code>、遮罩改成 <code>/26</code>，觀察可用範圍如何縮小到 62 台——這就是機房劃分子網的實際影響。</p>
+
+  <div class="oneliner">
+    <b>一句話答法</b>子網路計算四步：IP AND Mask 得網路位址、OR 反碼得廣播、首尾各跳過一個、中間即可用主機；/30 常見於點對點鏈路只剩 2 台可用。
+  </div>
+</section>
+
+<hr class="div">
+
+<section id="s8">
+  <div class="sec-head"><span class="sec-num">08</span><h2>面試與常見誤區速查</h2></div>
+  <p class="sec-sub">高頻子網路題、易混清單、一句話收尾。</p>
+
+  <h3>高頻問答（點擊展開）</h3>
+
+  <details class="faq">
+    <summary><span style="flex:1"><span class="q">Q1</span> /24 子網路有幾個可用 IP？</span><span class="chev">▸</span></summary>
+    <div class="ans"><p>主機 bit = 32 − 24 = 8，理論 <var>2<sup>8</sup> = 256</var> 個位址，扣掉網路位址（.0）與廣播位址（.255），<strong>可用 254 個</strong>。面試記公式：<var>2<sup>h</sup> − 2</var>，<var>h</var> 是主機 bit 數。</p></div>
+  </details>
+
+  <details class="faq">
+    <summary><span style="flex:1"><span class="q">Q2</span> 怎麼判斷兩台主機是否同網段？</span><span class="chev">▸</span></summary>
+    <div class="ans"><p>兩台 IP 分別與<strong>同一子網路遮罩</strong>做 AND，結果相同即同網段。例如 <code>192.168.1.10/24</code> 與 <code>192.168.1.200/24</code> 的網路位址都是 <code>192.168.1.0</code>，同網段；若一方是 <code>/25</code> 則可能不同。</p></div>
+  </details>
+
+  <details class="faq">
+    <summary><span style="flex:1"><span class="q">Q3</span> Gateway 可以設成網路位址或廣播位址嗎？</span><span class="chev">▸</span></summary>
+    <div class="ans"><p><strong>不行。</strong>Gateway 必須是可用主機範圍內的一個合法單播位址。設成 <code>x.x.x.0</code>（網路位址）或 <code>x.x.x.255</code>（廣播位址）會導致無法正常轉發。</p></div>
+  </details>
+
+  <details class="faq">
+    <summary><span style="flex:1"><span class="q">Q4</span> /30 和 /31 有什麼差別？為什麼點對點常用 /30？</span><span class="chev">▸</span></summary>
+    <div class="ans"><p><code>/30</code> 有 4 個位址、扣掉網路與廣播剩 <strong>2 個可用</strong>——剛好路由器兩端各一。傳統上 <code>/31</code>（RFC 3021）在點對點鏈路可省略網路與廣播，兩個位址都當主機用，但面試與實務題仍以 /30 最常見。</p></div>
+  </details>
+
+  <details class="faq">
+    <summary><span style="flex:1"><span class="q">Q5</span> 靜態 IP 和 DHCP Reservation 有什麼不同？</span><span class="chev">▸</span></summary>
+    <div class="ans"><p>效果都是「這台機器永遠拿到同一個 IP」。<strong>靜態</strong>是在主機本機手動填；<strong>Reservation</strong> 是在 DHCP Server 把 MAC 綁定 IP，主機仍走 DHCP 流程但每次都拿到保留位址。伺服器推薦 Reservation 或靜態，方便集中管理又不失去可預測性。</p></div>
+  </details>
+
+  <h3>易混與陷阱清單</h3>
+  <div class="trap"><span class="tn">坑</span><span>以為遮罩可以任意填——必須是左連續 1，<code>255.255.255.129</code> 這類不合法。</span></div>
+  <div class="trap"><span class="tn">坑</span><span>忘記扣網路與廣播位址，說 /24 有 256 個可用 IP（正確是 254）。</span></div>
+  <div class="trap"><span class="tn">坑</span><span>Gateway 設在不同子網路——主機 ARP 不到，對外全斷。</span></div>
+  <div class="trap"><span class="tn">坑</span><span>把 CIDR 前綴與子網路遮罩搞混——/24 等價於 255.255.255.0，不是 255.255.0.0。</span></div>
+  <div class="trap"><span class="tn">坑</span><span>靜態 IP 重複指派——兩台同 IP 會衝突，症狀是間歇性斷線或 ARP 飄移。</span></div>
+
+  <h3>一句話收尾</h3>
+  <div class="oneliner"><b>IPv4</b>32 bit 門牌，CIDR 用 /N 標記網路前綴長度。</div>
+  <div class="oneliner"><b>遮罩</b>IP AND Mask 得網路位址；同網段直送、跨網段走 Gateway。</div>
+  <div class="oneliner"><b>可用主機</b><var>2<sup>h</sup> − 2</var>，扣網路位址與廣播位址。</div>
+  <div class="oneliner"><b>機房上架</b>填 IP／Mask／Gateway 三件套，伺服器用靜態或 DHCP Reservation。</div>
+</section>

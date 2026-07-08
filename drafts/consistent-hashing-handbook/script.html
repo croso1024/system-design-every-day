@@ -1,0 +1,286 @@
+<style>
+  .ch-controls {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    flex-wrap: wrap;
+    margin-bottom: 16px;
+  }
+
+  .ch-canvas {
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: #ffffff;
+    padding: 12px;
+  }
+
+  .ch-canvas svg {
+    display: block;
+    width: 100%;
+    max-width: 520px;
+    margin: 0 auto;
+    height: auto;
+  }
+
+  .ch-node-label {
+    font-family: var(--mono);
+    font-size: 12px;
+    font-weight: 700;
+    fill: var(--text);
+  }
+
+  .ch-key-label {
+    font-family: var(--mono);
+    font-size: 10px;
+    fill: var(--text-2);
+  }
+
+  .ch-table-wrap {
+    margin-top: 14px;
+    margin-bottom: 0;
+  }
+
+  .ch-table-wrap table {
+    min-width: 600px;
+  }
+
+  .ch-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-family: var(--mono);
+    font-size: 11px;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    padding: 2px 8px;
+    background: var(--bg-soft);
+    white-space: nowrap;
+  }
+
+  .ch-badge.remap {
+    border-color: var(--warn);
+    background: var(--warn-soft);
+    color: var(--warn);
+  }
+
+  .ch-badge.stable {
+    border-color: var(--ok);
+    background: var(--ok-soft);
+    color: var(--ok);
+  }
+</style>
+
+<script>
+(function () {
+  const demo = document.getElementById('demo-consistent-hashing');
+  if (!demo) return;
+
+  const svg = demo.querySelector('#ch-ring');
+  const status = demo.querySelector('#ch-status');
+  const tbody = demo.querySelector('#ch-table tbody');
+  const buttons = Array.from(demo.querySelectorAll('[data-scenario]'));
+  const reset = demo.querySelector('#ch-reset');
+  const svgNS = 'http://www.w3.org/2000/svg';
+
+  const center = { x: 210, y: 210 };
+  const radius = 138;
+
+  const baseNodes = [
+    { id: 'A', point: 35 },
+    { id: 'B', point: 135 },
+    { id: 'C', point: 265 }
+  ];
+
+  const scenarios = {
+    stable: {
+      nodes: baseNodes,
+      removed: [],
+      message: '穩定狀態：所有 key 依順時針 successor rule 指派給 A、B、C。'
+    },
+    add: {
+      nodes: [
+        { id: 'A', point: 35 },
+        { id: 'D', point: 92, isNew: true },
+        { id: 'B', point: 135 },
+        { id: 'C', point: 265 }
+      ],
+      removed: [],
+      message: '新增 D：只有 A 到 D 之間的 key 從 B 改交給 D，其他區間維持原 owner。'
+    },
+    remove: {
+      nodes: [
+        { id: 'A', point: 35 },
+        { id: 'C', point: 265 }
+      ],
+      removed: [{ id: 'B', point: 135 }],
+      message: '移除 B：原本由 B 負責的 key 順時針交給 C，其餘 key 不需要搬遷。'
+    }
+  };
+
+  const keys = [
+    { id: 'k01', point: 18 },
+    { id: 'k02', point: 42 },
+    { id: 'k03', point: 76 },
+    { id: 'k04', point: 84 },
+    { id: 'k05', point: 112 },
+    { id: 'k06', point: 128 },
+    { id: 'k07', point: 148 },
+    { id: 'k08', point: 190 },
+    { id: 'k09', point: 238 },
+    { id: 'k10', point: 272 },
+    { id: 'k11', point: 306 },
+    { id: 'k12', point: 340 }
+  ];
+
+  function sortNodes(nodes) {
+    return nodes.slice().sort((a, b) => a.point - b.point);
+  }
+
+  function ownerFor(point, nodes) {
+    const sorted = sortNodes(nodes);
+    return sorted.find(node => node.point >= point) || sorted[0];
+  }
+
+  function polar(point, extraRadius) {
+    const angle = ((point - 90) * Math.PI) / 180;
+    const r = radius + (extraRadius || 0);
+    return {
+      x: center.x + Math.cos(angle) * r,
+      y: center.y + Math.sin(angle) * r
+    };
+  }
+
+  function el(name, attrs) {
+    const node = document.createElementNS(svgNS, name);
+    Object.entries(attrs || {}).forEach(([key, value]) => {
+      node.setAttribute(key, String(value));
+    });
+    return node;
+  }
+
+  function text(name, attrs, value) {
+    const node = el(name, attrs);
+    node.textContent = value;
+    return node;
+  }
+
+  function nodeColors(node, removed) {
+    if (removed) return { fill: 'var(--bad-soft)', stroke: 'var(--bad)' };
+    if (node.isNew) return { fill: 'var(--accent-soft)', stroke: 'var(--accent)' };
+    return { fill: '#ffffff', stroke: 'var(--border-strong)' };
+  }
+
+  function renderRing(scenarioName) {
+    const scenario = scenarios[scenarioName];
+    const baseOwners = keys.map(key => ownerFor(key.point, baseNodes).id);
+    const nextOwners = keys.map(key => ownerFor(key.point, scenario.nodes).id);
+    const affected = nextOwners.filter((owner, index) => owner !== baseOwners[index]).length;
+    const affectedPct = Math.round((affected / keys.length) * 100);
+
+    svg.innerHTML = '';
+    svg.appendChild(el('circle', {
+      cx: center.x,
+      cy: center.y,
+      r: radius,
+      fill: 'none',
+      stroke: 'var(--border-strong)',
+      'stroke-width': 2
+    }));
+    svg.appendChild(el('circle', {
+      cx: center.x,
+      cy: center.y,
+      r: 4,
+      fill: 'var(--text-3)'
+    }));
+
+    keys.forEach((key, index) => {
+      const before = baseOwners[index];
+      const after = nextOwners[index];
+      const remapped = before !== after;
+      const pos = polar(key.point, -6);
+      const label = polar(key.point, -31);
+      svg.appendChild(el('circle', {
+        cx: pos.x,
+        cy: pos.y,
+        r: remapped ? 6 : 4,
+        fill: remapped ? 'var(--warn-soft)' : 'var(--ok-soft)',
+        stroke: remapped ? 'var(--warn)' : 'var(--ok)',
+        'stroke-width': remapped ? 2 : 1
+      }));
+      svg.appendChild(text('text', {
+        x: label.x,
+        y: label.y,
+        'text-anchor': 'middle',
+        'dominant-baseline': 'middle',
+        class: 'ch-key-label'
+      }, key.id.replace('k', '')));
+    });
+
+    scenario.removed.forEach(node => drawNode(node, true));
+    scenario.nodes.forEach(node => drawNode(node, false));
+
+    status.innerHTML = '<b>' + scenario.message + '</b><br>本情境中 ' + affected + ' / ' + keys.length + ' 個 key 需要 remap，約 ' + affectedPct + '%。';
+    renderTable(baseOwners, nextOwners);
+  }
+
+  function drawNode(node, removed) {
+    const pos = polar(node.point, 0);
+    const label = polar(node.point, 28);
+    const colors = nodeColors(node, removed);
+    svg.appendChild(el('circle', {
+      cx: pos.x,
+      cy: pos.y,
+      r: 14,
+      fill: colors.fill,
+      stroke: colors.stroke,
+      'stroke-width': 2
+    }));
+    svg.appendChild(text('text', {
+      x: pos.x,
+      y: pos.y + 1,
+      'text-anchor': 'middle',
+      'dominant-baseline': 'middle',
+      class: 'ch-node-label'
+    }, node.id));
+    svg.appendChild(text('text', {
+      x: label.x,
+      y: label.y,
+      'text-anchor': 'middle',
+      'dominant-baseline': 'middle',
+      class: 'ch-key-label'
+    }, String(node.point)));
+  }
+
+  function renderTable(baseOwners, nextOwners) {
+    tbody.innerHTML = '';
+    keys.forEach((key, index) => {
+      const remapped = baseOwners[index] !== nextOwners[index];
+      const row = document.createElement('tr');
+      row.innerHTML = [
+        '<td><code>' + key.id + '</code></td>',
+        '<td>' + key.point + '</td>',
+        '<td>' + baseOwners[index] + '</td>',
+        '<td class="' + (remapped ? 'hl' : '') + '">' + nextOwners[index] + '</td>',
+        '<td><span class="ch-badge ' + (remapped ? 'remap' : 'stable') + '">' + (remapped ? 'remap' : 'stable') + '</span></td>'
+      ].join('');
+      tbody.appendChild(row);
+    });
+  }
+
+  function setScenario(name) {
+    buttons.forEach(button => {
+      button.setAttribute('aria-pressed', String(button.dataset.scenario === name));
+    });
+    renderRing(name);
+  }
+
+  buttons.forEach(button => {
+    button.addEventListener('click', () => setScenario(button.dataset.scenario));
+  });
+
+  reset.addEventListener('click', () => setScenario('stable'));
+
+  setScenario('stable');
+})();
+</script>

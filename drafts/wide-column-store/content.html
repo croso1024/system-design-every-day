@@ -1,0 +1,376 @@
+<section id="s1">
+  <div class="sec-head">
+    <span class="sec-num">01</span>
+    <h2>總覽與定位</h2>
+  </div>
+  <p class="sec-sub">Wide-column Store 是什麼、解決什麼痛、與關聯式 / KV / Document DB 在系統設計版圖中的座標。</p>
+
+  <p><strong>寬列儲存（Wide-column Store）</strong>是一種以<strong>稀疏、可變欄位</strong>組織資料的 NoSQL 模型：每列由 <strong>Row Key</strong> 唯一識別，底下可掛多個 <strong>Column Family</strong>，每個 family 內又有動態的 column qualifier 與 timestamp 版本。它不像關聯式用固定 schema 的 table，也不像純 KV 只存 blob——而是<strong>在單一 partition 內支援範圍掃描與多版本</strong>，專為<strong>海量寫入、水平擴展、時間序列與事件流</strong>而生。</p>
+
+  <p>面試與實務上，<strong>Cassandra</strong> 是最常被問的 wide-column 代表（masterless ring、最終一致、CQL）；<strong>HBase</strong> 則是 Hadoop 生態的對照組（HMaster + RegionServer、強一致讀寫路徑）。兩者共享「partition + 範圍排序」的思維，但<strong>一致性模型與運維拓樸截然不同</strong>。</p>
+
+  <div class="callout accent">
+    <div class="c-title"><span class="ic">座標</span>Wide-column vs 其他儲存模型</div>
+    <p>
+      • <strong>關聯式（PostgreSQL）</strong>：JOIN、正規化、任意 ad-hoc 查詢——靈活但垂直擴展有上限。
+      <br>• <strong>Document（MongoDB）</strong>：JSON 文件、靈活 schema，單文件讀寫強，跨文件 JOIN 弱。
+      <br>• <strong>KV（Redis / DynamoDB 純 KV 模式）</strong>：極簡 key → value，延遲低，複雜查詢需應用層拼裝。
+      <br>• <strong>Wide-column（Cassandra / HBase）</strong>：依 partition key 水平切分、clustering key 範圍排序，<strong>為已知查詢模式優化</strong>，換取 PB 級寫入吞吐。
+    </p>
+  </div>
+
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>維度</th>
+          <th>Cassandra</th>
+          <th>HBase</th>
+          <th>PostgreSQL</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><strong>拓樸</strong></td>
+          <td class="hl">Masterless P2P ring</td>
+          <td class="hl">HMaster + RegionServer</td>
+          <td>Primary + Replica</td>
+        </tr>
+        <tr>
+          <td><strong>一致性</strong></td>
+          <td>可調（預設最終一致）</td>
+          <td>單 Region 內強一致</td>
+          <td>強一致（單主）</td>
+        </tr>
+        <tr>
+          <td><strong>查詢語言</strong></td>
+          <td>CQL（類 SQL）</td>
+          <td>API / Phoenix SQL</td>
+          <td>完整 SQL</td>
+        </tr>
+        <tr>
+          <td><strong>設計思維</strong></td>
+          <td>依查詢設計 table</td>
+          <td>依 Row Key 設計</td>
+          <td>依實體正規化</td>
+        </tr>
+        <tr>
+          <td><strong>典型場景</strong></td>
+          <td>IoT 時序、訊息收件箱、產品目錄</td>
+          <td>Hadoop 批次分析、離線特徵庫</td>
+          <td>交易 SoT、複雜報表</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="cap">面試高分：能說出 wide-column 不是「沒 schema 的 SQL」，而是<strong>用 partition key 換取寫入擴展</strong>，查詢必須帶 partition key 才高效。</p>
+
+  <div class="oneliner">
+    <b>一句話答法</b>Wide-column Store 用 Row Key 切 partition、clustering column 做範圍排序，專為海量寫入與已知查詢模式設計；Cassandra 走 masterless 最終一致，HBase 走 master-based 強一致，兩者都比關聯式更強調「先想查詢再建模」。
+  </div>
+</section>
+
+<hr class="div">
+
+<section id="s2">
+  <div class="sec-head">
+    <span class="sec-num">02</span>
+    <h2>核心資料模型：Partition Key 與 Clustering Key</h2>
+  </div>
+  <p class="sec-sub">Cassandra CQL 的 PRIMARY KEY 語意、稀疏欄位、以及一筆 row 在磁碟上如何被定位。</p>
+
+  <p>在 Cassandra 的 CQL 裡，<strong>PRIMARY KEY</strong> 決定資料如何分片與排序，這是 wide-column 與關聯式最大的語意差異：</p>
+  <ul>
+    <li><strong>Partition Key</strong>：決定這列落在哪個節點（透過 consistent hashing）。同一 partition key 的所有列<strong>必定在同一 replica set</strong>。</li>
+    <li><strong>Clustering Key</strong>：在 partition 內決定<strong>排序與範圍掃描</strong>順序，支援 <code>WHERE pk = ? AND ck &gt; ?</code> 這類區間查詢。</li>
+    <li><strong>Static columns</strong>：屬於整個 partition 的共用欄位（例如某使用者的 display name），不隨 clustering row 重複。</li>
+  </ul>
+
+  <pre><code>-- 訊息收件箱：依 user_id 分 partition，依 message_id 排序
+CREATE TABLE inbox_by_user (
+  user_id       UUID,
+  message_id    TIMEUUID,
+  sender        TEXT,
+  subject       TEXT,
+  body          TEXT,
+  PRIMARY KEY (user_id, message_id)
+) WITH CLUSTERING ORDER BY (message_id DESC);
+
+-- 查詢必須帶 partition key
+SELECT * FROM inbox_by_user
+WHERE user_id = ? AND message_id &gt; ?
+LIMIT 50;</code></pre>
+
+  <p>HBase 用不同術語表達同一概念：<strong>Row Key</strong> 同時承擔 partition 與排序職責（可人工設計 salt / reverse timestamp），<strong>Column Family</strong> 是物理儲存單元，<strong>Column Qualifier</strong> 是動態欄位名，每個 cell 帶 <strong>timestamp 版本</strong>。</p>
+
+  <div class="callout warn">
+    <div class="c-title"><span class="ic">陷阱</span>把 Cassandra 當 PostgreSQL 用</div>
+    <p>沒有 partition key 的 <code>WHERE</code> 會觸發<strong>全叢集 scatter-gather</strong>，每個節點掃自己的資料再合併——延遲與負載隨節點數線性成長。<code>ALLOW FILTERING</code> 不是救命稻草，是生產環境的紅燈。設計時先列出<strong>Top 5 查詢</strong>，再反推 table schema。</p>
+  </div>
+
+  <div class="callout accent">
+    <div class="c-title"><span class="ic">關鍵</span>稀疏性與多版本</div>
+    <p>同一 table 中，row A 可能有 3 個 column，row B 有 50 個——schema 不需預先宣告所有欄位。HBase 每個 cell 可存多個 timestamp 版本，適合「只保留最近 N 版」的時序或變更追蹤；Cassandra 透過 <code>TTL</code> 與 <code>USING TIMESTAMP</code> 達成類似效果。</p>
+  </div>
+
+  <div class="oneliner">
+    <b>一句話答法</b>Partition key 決定資料落在哪台機器；clustering key 決定 partition 內怎麼排與怎麼掃——沒帶 partition key 的查詢在 wide-column 世界裡等同全表掃描。
+  </div>
+</section>
+
+<hr class="div">
+
+<section id="s3">
+  <div class="sec-head">
+    <span class="sec-num">03</span>
+    <h2>Cassandra 架構：Masterless Ring 與最終一致</h2>
+  </div>
+  <p class="sec-sub">Gossip、Replication Factor、Quorum 讀寫、以及為何能無單點寫入擴展。</p>
+
+  <p>Cassandra 採用<strong>對等節點 ring</strong>，沒有 central master。每個節點透過 <strong>Gossip</strong> 交換 cluster 狀態（誰活著、token 範圍、schema 版本），client 可用 <strong>any node as coordinator</strong> 發起請求。</p>
+
+  <h3>寫入路徑（簡化）</h3>
+  <ol>
+    <li>Client 送寫入到任一 coordinator。</li>
+    <li>Coordinator 依 partition key 算出 token，找出負責的 <strong>replica nodes</strong>（由 Replication Factor <var>RF</var> 決定副本數）。</li>
+    <li>Coordinator 將寫入<strong>並行推送</strong>到 replicas；依 <code>Consistency Level</code> 等待足夠節點回應（例如 <code>QUORUM</code> = 過半副本確認）。</li>
+    <li>背景 <strong>hinted handoff</strong> / <strong>anti-entropy repair</strong> 修復暫時不一致的副本。</li>
+  </ol>
+
+  <div class="formula">W + R &gt; RF  →  強一致讀寫（在無失敗節點時）</div>
+
+  <p>其中 <var>W</var> 為寫入一致性所需確認數、<var>R</var> 為讀取一致性所需確認數、<var>RF</var> 為副本數。預設常見 <var>RF</var>=3、<code>ONE</code> 讀寫——吞吐高但可能讀到舊值；金融級場景才調高到 <code>QUORUM</code> / <code>LOCAL_QUORUM</code>。</p>
+
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>Consistency Level</th>
+          <th>行為</th>
+          <th>適用</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><code>ONE</code></td>
+          <td>任一副本回應即成功</td>
+          <td>高吞吐寫入、可容忍短暫 stale read</td>
+        </tr>
+        <tr>
+          <td><code>QUORUM</code></td>
+          <td>過半副本確認</td>
+          <td>需要較新資料、跨 DC 需注意延遲</td>
+        </tr>
+        <tr>
+          <td><code>LOCAL_QUORUM</code></td>
+          <td>本地 DC 內過半副本</td>
+          <td>多 DC 部署，避免跨洋 quorum 延遲</td>
+        </tr>
+        <tr>
+          <td><code>ALL</code></td>
+          <td>全部副本確認</td>
+          <td>極少使用；任一節點掛掉即寫入失敗</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="callout accent">
+    <div class="c-title"><span class="ic">實務</span>多 DC 與 <code>NetworkTopologyStrategy</code></div>
+    <p>生產環境用 <code>NetworkTopologyStrategy</code> 把副本分散到不同 rack / DC，搭配 <code>LOCAL_QUORUM</code> 讓讀寫在本地 DC 完成，跨 DC 靠 async replication 與 repair 追平。這是 Cassandra 在全域部署時的標準打法。</p>
+  </div>
+
+  <div class="oneliner">
+    <b>一句話答法</b>Cassandra 無 master，coordinator 依 token 找 replica 並行寫入；一致性由 CL 與 <var>RF</var> 共同決定，預設偏可用性與吞吐，需主動調高 quorum 才接近強一致。
+  </div>
+</section>
+
+<hr class="div">
+
+<section id="s4">
+  <div class="sec-head">
+    <span class="sec-num">04</span>
+    <h2>HBase 對照：Master-based 與強一致路徑</h2>
+  </div>
+  <p class="sec-sub">HMaster、Region、WAL、MemStore——以及與 Cassandra 在一致性與運維上的取捨。</p>
+
+  <p><strong>HBase</strong> 建立在 HDFS 之上，架構明確分層：</p>
+  <ul>
+    <li><strong>HMaster</strong>：管理 Region 分配、schema 變更、failover（<strong>不是資料路徑上的單點</strong>，但 metadata 操作依賴它）。</li>
+    <li><strong>RegionServer</strong>：實際服務讀寫，每個 Region 是連續 row key 範圍的 shard。</li>
+    <li><strong>ZooKeeper</strong>：協調 master 選舉與 region 狀態。</li>
+  </ul>
+
+  <h3>寫入路徑</h3>
+  <p>寫入先 append 到 <strong>WAL（Write-Ahead Log）</strong>，再進 <strong>MemStore</strong>；MemStore 滿了 flush 成 HDFS 上的 <strong>HFile</strong>。讀取需合併 MemStore + 多個 HFile（類 LSM-Tree），背景 <strong>Compaction</strong> 合併小檔。單 Region 內讀寫走同一 RegionServer，語意上接近<strong>強一致</strong>。</p>
+
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>對比維度</th>
+          <th>Cassandra</th>
+          <th>HBase</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><strong>控制平面</strong></td>
+          <td>無中心 master（Gossip）</td>
+          <td>HMaster + ZK</td>
+        </tr>
+        <tr>
+          <td><strong>儲存底層</strong></td>
+          <td>本地 SSTable（自建）</td>
+          <td>HDFS HFile</td>
+        </tr>
+        <tr>
+          <td><strong>預設一致性</strong></td>
+          <td>最終一致（可調）</td>
+          <td>單 Region 強一致</td>
+        </tr>
+        <tr>
+          <td><strong>最佳場景</strong></td>
+          <td>線上服務、低延遲寫入</td>
+          <td>與 Hadoop 批次共存的離線/近線</td>
+        </tr>
+        <tr>
+          <td><strong>擴展痛點</strong></td>
+          <td>hot partition、repair 成本</td>
+          <td>Region split、Major compaction IO</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="callout warn">
+    <div class="c-title"><span class="ic">陷阱</span>以為 HBase 適合低延遲 OLTP</div>
+    <p>HBase 為<strong>高吞吐批次寫入 + 大範圍 scan</strong> 優化，單筆隨機讀寫延遲通常高於 Cassandra。若你要毫秒級線上 API 且無 Hadoop 依賴，Cassandra / Scylla 更常見；HBase 適合「寫入特徵庫、MapReduce 讀、離線訓練」這類路徑。</p>
+  </div>
+
+  <div class="oneliner">
+    <b>一句話答法</b>HBase 是 master-based + HDFS 的強一致 wide-column，擅長與 Hadoop 批次共存；Cassandra 是 masterless 最終一致，擅長線上服務的水平寫入擴展——選誰看你是 OLTP 還是離線分析。
+  </div>
+</section>
+
+<hr class="div">
+
+<section id="s5">
+  <div class="sec-head">
+    <span class="sec-num">05</span>
+    <h2>依查詢設計資料模型</h2>
+  </div>
+  <p class="sec-sub">從 access pattern 反推 schema、反正規化、多表物化——與關聯式「先正規化再優化」的思維翻轉。</p>
+
+  <p>關聯式教科書教的是：<strong>消除冗餘 → 正規化 → 需要時再 denormalize</strong>。Wide-column 幾乎反過來：<strong>先列出所有讀寫查詢，再為每條查詢設計一張（或一種）table</strong>。Cassandra 不支援跨 partition JOIN，Document DB 的 <code>$lookup</code> 在這裡也不存在。</p>
+
+  <h3>實戰範例：電商訂單</h3>
+  <p>需求：</p>
+  <ul>
+    <li>Q1：依 <code>user_id</code> 查最近訂單列表</li>
+    <li>Q2：依 <code>order_id</code> 查單筆訂單詳情</li>
+    <li>Q3：依 <code>product_id</code> 查某商品的近期訂單（營運報表）</li>
+  </ul>
+
+  <p>關聯式一張 <code>orders</code> table + 索引搞定；Cassandra 需要<strong>至少兩張物化視角</strong>：</p>
+
+  <pre><code>-- Q1：收件箱模式
+CREATE TABLE orders_by_user (
+  user_id UUID, order_id TIMEUUID, total DECIMAL, status TEXT,
+  PRIMARY KEY (user_id, order_id)
+) WITH CLUSTERING ORDER BY (order_id DESC);
+
+-- Q2：直接 lookup（order_id 作 partition key）
+CREATE TABLE orders_by_id (
+  order_id UUID PRIMARY KEY,
+  user_id UUID, total DECIMAL, status TEXT, items TEXT
+);
+
+-- Q3 若流量大，再建 orders_by_product；否則用批次工具從 Q2 匯出</code></pre>
+
+  <div class="callout accent">
+    <div class="c-title"><span class="ic">關鍵</span>寫入放大是可接受的 Trade-off</div>
+    <p>建立訂單時可能需<strong>同時寫入多張 table</strong>（dual write 或 async fan-out）。在關聯式這是冗餘；在 Cassandra 這是<strong>為讀取效能付的設計代價</strong>。面試要主動講出這個 trade-off，並提到可用 Kafka / CDC 做 eventual 同步降低雙寫風險。</p>
+  </div>
+
+  <h3>避免 Hot Partition</h3>
+  <p>若 partition key 選錯（例如全用同一個 <code>tenant_id</code> 下的單調遞增 ID），所有寫入會打到同一節點。解法：<strong>複合 partition key</strong>（<code>((user_id, bucket)), message_id</code>，bucket = hash % 16）、<strong>reverse timestamp</strong>、或 <strong>random salt</strong>（讀取時需 scatter-gather 多 partition）。</p>
+
+  <div class="callout warn">
+    <div class="c-title"><span class="ic">陷阱</span>Secondary Index 濫用</div>
+    <p>Cassandra 的 secondary index 在<strong>高基數欄位</strong>上效能極差（需掃描所有節點）。正確做法是<strong>用查詢驅動的物化 table</strong>，或引入 <strong>Elasticsearch / Sai index</strong> 做搜尋側車。</p>
+  </div>
+
+  <div class="oneliner">
+    <b>一句話答法</b>Wide-column 建模是「一個查詢一張表」的物化思維：用寫入放大與反正規化換取 partition-local 讀取，絕不指望 ad-hoc JOIN。
+  </div>
+</section>
+
+<hr class="div">
+
+<section id="s6">
+  <div class="sec-head">
+    <span class="sec-num">06</span>
+    <h2>互動演示：Partition Key 與查詢路由</h2>
+  </div>
+  <p class="sec-sub">切換資料模型與查詢模式，觀察 coordinator 命中哪些節點、是否觸發 scatter-gather 全叢集掃描。</p>
+
+  <p>下方模擬 4 節點 Cassandra ring。選擇<strong>資料模型</strong>（partition key 設計）與<strong>查詢模式</strong>，執行查詢後觀察：命中節點數、延遲等級、以及是否為高效 partition-local 讀取。</p>
+
+  <div class="demo" id="demo-wide-column">
+    <div class="demo-bar">
+      <span class="label">互動 · Partition Key 查詢路由</span>
+      <span class="label" style="text-transform:none;font-family:var(--sans);font-size:12px;color:var(--text-2)">切換模型與查詢，觀察 ring 節點命中與 scatter-gather</span>
+    </div>
+    <div class="demo-body">
+      <div style="display:flex;flex-wrap:wrap;gap:12px;align-items:center;margin-bottom:14px">
+        <div class="seg" role="group" aria-label="資料模型">
+          <button data-model="inbox" aria-pressed="true">收件箱 (user_id, msg_id)</button>
+          <button data-model="orders" aria-pressed="false">訂單 (order_id)</button>
+          <button data-model="bad" aria-pressed="false">錯誤設計 (status)</button>
+        </div>
+      </div>
+
+      <div style="display:flex;flex-wrap:wrap;gap:12px;align-items:center;margin-bottom:14px">
+        <div class="seg" role="group" aria-label="查詢模式">
+          <button data-query="pk" aria-pressed="true">帶 Partition Key</button>
+          <button data-query="range" aria-pressed="false">Partition + 範圍</button>
+          <button data-query="scan" aria-pressed="false">無 PK 全表掃描</button>
+        </div>
+        <button class="btn primary" id="btn-run" type="button">執行查詢</button>
+        <button class="btn" id="btn-reset" type="button">Reset</button>
+      </div>
+
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:14px">
+        <div style="border:1px solid var(--border);border-radius:var(--radius-sm);padding:14px;background:var(--bg-soft);min-height:180px">
+          <div style="font-family:var(--mono);font-size:11px;color:var(--text-3);margin-bottom:8px">RING TOPOLOGY (4 NODES)</div>
+          <div id="wc-ring" style="font-size:13px;line-height:2.2"></div>
+        </div>
+        <div style="border:1px solid var(--border);border-radius:var(--radius-sm);padding:14px;background:#ffffff;min-height:180px">
+          <div style="font-family:var(--mono);font-size:11px;color:var(--text-3);margin-bottom:8px">QUERY PLAN</div>
+          <div id="wc-plan" style="font-family:var(--mono);font-size:12px;line-height:1.8"></div>
+        </div>
+      </div>
+
+      <div style="border:1px solid var(--border);border-radius:var(--radius-sm);padding:12px;background:#ffffff;margin-bottom:14px">
+        <div style="font-family:var(--mono);font-size:11px;color:var(--text-3);margin-bottom:8px">METRICS</div>
+        <div id="wc-metrics" style="display:flex;flex-wrap:wrap;gap:16px;font-size:13px"></div>
+      </div>
+
+      <div class="status-line" id="wc-status">
+        選擇資料模型與查詢模式，按「執行查詢」觀察路由行為。
+      </div>
+
+      <div class="legend">
+        <span><i class="dot ns-idle"></i>閒置節點</span>
+        <span><i class="dot ns-wait"></i>Coordinator</span>
+        <span><i class="dot ns-ok"></i>Replica 命中</span>
+        <span><i class="dot ns-bad"></i>Scatter-gather</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="oneliner">
+    <b>一句話答法</b>高效 wide-column 查詢 = partition key 精準命中少數 replica；無 PK 或低基數 PK 設計會把一次讀取變成 N 節點 scatter-gather——建模階段就要擋掉。
+  </div>
+</section>

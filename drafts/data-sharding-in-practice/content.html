@@ -1,0 +1,559 @@
+<!-- ============ 01 總覽與定位 ============ -->
+<section id="s1">
+  <div class="sec-head">
+    <span class="sec-num">01</span>
+    <h2>總覽與定位</h2>
+  </div>
+  <p class="sec-sub">從「知道 Range / Hash / Directory」到「Production 怎麼落地」——實務分片決策地圖。</p>
+
+  <p>上一篇「資料分片基礎概念」建立了分片策略與系統挑戰的語彙。本篇聚焦<strong>實務落地</strong>：真實產品如何選 sharding key、如何設計 co-location、如何在不停機前提下做 rebalance，以及不同業務型態的典型分片藍圖。</p>
+
+  <p>面試與架構 review 的高分答案，往往不是背出公式，而是能說出：<strong>「這個存取模式 → 因此選這個 key → 用這種策略 → 擴容時走這條遷移路徑」</strong> 的完整因果鏈。</p>
+
+  <div class="callout accent">
+    <div class="c-title"><span class="ic">座標</span>本篇 vs 基礎篇</div>
+    <p>
+      • <strong>基礎篇</strong>：Range / Hash / Directory 的定義、優缺點、hot spot 與 scatter-gather 概念。
+      <br>• <strong>本篇</strong>：多租戶 SaaS、電商、社交、時序等場景的<strong>具體分片藍圖</strong>、線上遷移 SOP、Directory 路由表治理，以及 co-location 設計模式。
+      <br>• <strong>延伸</strong>：Hash 擴容細節見「一致性雜湊綜合手冊」；寬列儲存（Cassandra）的 partition key 設計見後續 NoSQL 專篇。
+    </p>
+  </div>
+
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>實務決策層次</th>
+          <th>核心問題</th>
+          <th>常見產出</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><strong>1. 存取模式</strong></td>
+          <td>80% 請求是 point lookup 還是 range scan？</td>
+          <td>決定 Range vs Hash 的大方向</td>
+        </tr>
+        <tr>
+          <td><strong>2. Sharding Key</strong></td>
+          <td>哪個欄位能讓多數查詢只打一個 shard？</td>
+          <td class="hl"><code>user_id</code>、<code>tenant_id</code>、<code>order_id</code> 等</td>
+        </tr>
+        <tr>
+          <td><strong>3. Co-location</strong></td>
+          <td>哪些表 / 列必須在同一 shard？</td>
+          <td>避免跨 shard JOIN 與 2PC</td>
+        </tr>
+        <tr>
+          <td><strong>4. 擴容與遷移</strong></td>
+          <td>新增 shard 或搬大 tenant 時怎麼零 downtime？</td>
+          <td>雙寫、backfill、map version、節流</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="cap">實務分片是「存取模式驅動」的設計，不是先選技術再硬套業務。</p>
+
+  <div class="oneliner">
+    <b>一句話答法</b>分片實務 = 用存取模式倒推 sharding key 與策略，再預留 co-location 與線上遷移能力；公式只是手段，業務查詢路徑才是起點。
+  </div>
+</section>
+
+<hr class="div">
+
+<!-- ============ 02 四大典型應用場景 ============ -->
+<section id="s2">
+  <div class="sec-head">
+    <span class="sec-num">02</span>
+    <h2>四大典型應用場景</h2>
+  </div>
+  <p class="sec-sub">多租戶 SaaS、電商、社交訊息、時序日誌——各自的分片藍圖長什麼樣？</p>
+
+  <h3>1. 多租戶 SaaS（B2B）</h3>
+  <p>每個 tenant 有獨立資料邊界，但 tenant 大小差異極大（免費版 vs 企業 VIP）。典型做法：</p>
+  <ul>
+    <li><strong>Directory Sharding</strong>：維護 <code>tenant_id → shard_id</code> 路由表，control plane 可手動把大 tenant 遷到專用 shard。</li>
+    <li><strong>Shared vs Dedicated</strong>：小 tenant 共用 shard pool；大 tenant 獨佔節點，避免 noisy neighbor。</li>
+    <li><strong>查詢模式</strong>：幾乎所有 API 帶 <code>tenant_id</code>，天然單 shard point lookup。</li>
+  </ul>
+
+  <h3>2. 電商訂單系統</h3>
+  <p>核心矛盾：下單寫入高吞吐 vs 用戶查「我的訂單歷史」。</p>
+  <ul>
+    <li><strong>Sharding Key</strong>：通常用 <code>user_id</code>（或 <code>buyer_id</code>），讓同一用戶的 orders + order_items 共 shard。</li>
+    <li><strong>Co-location</strong>：<code>order</code> 與 <code>order_item</code> 都用 <code>order_id</code> 或父級 <code>user_id</code> 做 key，本地 JOIN 成立。</li>
+    <li><strong>反例</strong>：用 <code>order_id</code> 做 key 卻常查「某用戶全部訂單」→ 每次 scatter-gather 全 shard。</li>
+  </ul>
+
+  <h3>3. 社交訊息 / Feed</h3>
+  <p>寫入分散、讀取局部性強——適合 hash 均勻打散。</p>
+  <ul>
+    <li><strong>訊息 inbox</strong>：以 <code>conversation_id</code> 或 <code>user_id</code> hash，同一對話訊息共 shard。</li>
+    <li><strong>Hot user</strong>：celebrity 帳號可能打爆單 shard → 讀 replica fanout、edge cache、或 fan-out on write 改 fan-out on read。</li>
+    <li><strong>Timeline</strong>：常另建 per-user timeline 表（denormalize），寫入時 fan-out，讀取變單 shard point lookup。</li>
+  </ul>
+
+  <div class="callout accent">
+    <div class="c-title"><span class="ic">白話</span>這幾個「fan-out」到底在幹嘛</div>
+    <p>
+      • <strong>寫入時 fan-out（fan-out on write）</strong>：發文的當下，系統就主動把這篇貼文複製一份，塞進每個粉絲自己的動態列表；粉絲刷新時只需查自己那份，很快，但粉絲越多，發文時要複製的份數就越多。
+      <br>• <strong>fan-out on read</strong>：反過來，發文時只存一份在作者自己那邊，不主動派送；等粉絲要看動態時，才臨時去逐一查詢所有追蹤對象、現場拼出畫面——寫入變輕，讀取變重。
+      <br>• <strong>replica fanout</strong>：跟前兩者是不同層次的事，指把「同一個熱門 shard」收到的讀取請求，分散發給它底下多台唯讀複本一起扛，用來稀釋單台機器的讀取壓力，跟 on-write / on-read 的取捨無關。
+    </p>
+  </div>
+
+  <h3>4. 日誌 / 指標 / IoT 時序</h3>
+  <p>寫入連續、查詢多為時間區間——Range by time 幾乎是預設答案。</p>
+  <ul>
+    <li><strong>Partition</strong>：按天 / 週 / 月切 partition，舊 partition 可整批 archive 或 TTL drop。</li>
+    <li><strong>Hot partition</strong>：「今天」的 partition 承接全部新寫入 → 需 monitor 並預先 split 或 buffer 層削峰。</li>
+    <li><strong>跨時間聚合</strong>：報表走 OLAP / 預聚合表，避免線上 scatter-gather 全歷史 shard。</li>
+  </ul>
+
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>場景</th>
+          <th>建議 Key</th>
+          <th>策略</th>
+          <th>擴容痛點</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>多租戶 SaaS</td>
+          <td><code>tenant_id</code></td>
+          <td class="hl">Directory</td>
+          <td>大 tenant 遷移、map 一致性</td>
+        </tr>
+        <tr>
+          <td>電商訂單</td>
+          <td><code>user_id</code></td>
+          <td>Hash / Consistent Hash</td>
+          <td>跨 shard 報表需二級索引</td>
+        </tr>
+        <tr>
+          <td>社交訊息</td>
+          <td><code>conversation_id</code></td>
+          <td>Hash</td>
+          <td>Hot user / celebrity</td>
+        </tr>
+        <tr>
+          <td>時序日誌</td>
+          <td><code>timestamp</code>（+ device_id）</td>
+          <td>Range by time</td>
+          <td>最新 partition hot spot</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="cap">沒有通用 key：同一公司不同服務（訂單 vs 搜尋 vs 報表）可能用不同 sharding 策略。</p>
+
+  <div class="oneliner">
+    <b>一句話答法</b>SaaS 用 Directory 管大 tenant；電商 / 社交用 hash 共 shard；時序用 time-range——選型從「80% 查詢長什麼樣」倒推。
+  </div>
+</section>
+
+<hr class="div">
+
+<!-- ============ 03 Co-location 與資料模型 ============ -->
+<section id="s3">
+  <div class="sec-head">
+    <span class="sec-num">03</span>
+    <h2>Co-location 與資料模型</h2>
+  </div>
+  <p class="sec-sub">讓相關列落在同一 shard——分片後避免跨 shard JOIN 的第一道防線。</p>
+
+  <p><strong>Co-location（共置）</strong>指刻意讓邏輯上相關的多筆資料，經 sharding key 計算後落在同一物理 shard。這樣本地 ACID、本地 JOIN、本地 transaction 仍然成立，不必引入 2PC 或 Saga。</p>
+
+  <h3>Parent-Child 共 Shard</h3>
+  <p>父表與子表使用<strong>相同的 sharding key</strong>（通常是父 ID 或共同的 <code>user_id</code>）：</p>
+  <ul>
+    <li><code>orders</code> + <code>order_items</code>：key = <code>user_id</code> 或 <code>order_id</code>（若 order_id 含 user 前綴更佳）。</li>
+    <li><code>documents</code> + <code>document_versions</code>：key = <code>document_id</code>。</li>
+    <li><code>accounts</code> + <code>account_settings</code>：key = <code>account_id</code>。</li>
+  </ul>
+
+  <h3>Denormalize 換取單 Shard 讀</h3>
+  <p>當正規化模型必然跨 shard 時，實務常<strong>冗餘一份</strong>到查詢側：</p>
+  <ul>
+    <li>Feed：寫入時 fan-out 到各 follower 的 timeline shard（以 <code>follower_user_id</code> 為 key）。</li>
+    <li>搜尋：主庫 shard 存 authoritative data；Elasticsearch 建全域 inverted index 承擔跨 shard 搜尋。</li>
+    <li>報表：CDC 同步到 OLAP（BigQuery / ClickHouse），線上 OLTP shard 不做全表聚合。</li>
+  </ul>
+
+  <div class="callout warn">
+    <div class="c-title"><span class="ic">陷阱</span>Secondary Index 不等於解決跨 Shard</div>
+    <p>在 shard 內建 local secondary index 只能加速<strong>該 shard 內</strong>的查詢。若查詢條件不含 sharding key（例如「依 <code>email</code> 查用戶」而 key 是 <code>user_id</code>），仍須 scatter-gather 或維護<strong>全域 lookup 表</strong>（<code>email → user_id → shard</code>）。</p>
+  </div>
+
+  <div class="callout accent">
+    <div class="c-title"><span class="ic">設計原則</span>Transaction Boundary = Shard Boundary</div>
+    <p>若一個 business transaction 需要原子更新多個實體，設計時應讓這些列<strong>共用 sharding key</strong>。跨 shard 原子性代價是 2PC 延遲、協調者 SPOF 與 partition 下的阻塞——能避免就避免。</p>
+  </div>
+
+  <div class="oneliner">
+    <b>一句話答法</b>Co-location 讓相關列共 shard；跨 shard 需求用 denormalize、二級索引服務或 OLAP 卸載，不要假設「加個 distributed JOIN」就能優雅解決。
+  </div>
+</section>
+
+<hr class="div">
+
+<!-- ============ 04 線上遷移與 Rebalance SOP ============ -->
+<section id="s4">
+  <div class="sec-head">
+    <span class="sec-num">04</span>
+    <h2>線上遷移與 Rebalance SOP</h2>
+  </div>
+  <p class="sec-sub">新增 shard、搬大 tenant、split hot range——Production 零 downtime 遷移的標準步驟。</p>
+
+  <p>分片不是「上線時切好就一勞永逸」。流量成長、tenant 膨脹、hot partition 出現時，都需要<strong>背景搬資料</strong>。以下 SOP 適用 Directory 與 Hash 擴容，細節因策略而異，但階段邏輯相通。</p>
+
+  <h3>標準六階段遷移流程</h3>
+  <ol>
+    <li><strong>Plan</strong>：定義遷移範圍（哪些 key / tenant）、目標 shard、節流上限、回滾條件。</li>
+    <li><strong>Dual-write</strong>：Router 同時寫舊 shard 與新 shard（或寫舊 + async replicate），確保新寫入兩邊都有。</li>
+    <li><strong>Backfill</strong>：背景掃描舊 shard 歷史資料，批量複製到新 shard，追 incremental changelog 直到 lag 接近零。</li>
+    <li><strong>Verify</strong>：抽樣 checksum、row count、業務 invariant 比對；shadow read 新 shard 結果與舊 shard diff。</li>
+    <li><strong>Cutover</strong>：更新 shard map / ring version，讀寫流量切到新 shard；保留舊副本一段時間做 rollback window。</li>
+    <li><strong>Cleanup</strong>：確認無回滾需求後，停止 dual-write、刪除舊副本、釋放容量。</li>
+  </ol>
+
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>階段</th>
+          <th>風險</th>
+          <th>緩解</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>Dual-write</td>
+          <td>兩邊寫入不一致</td>
+          <td>Idempotent write、version column、compensation job</td>
+        </tr>
+        <tr>
+          <td>Backfill</td>
+          <td>與線上流量搶 I/O</td>
+          <td class="hl">Rate limit、離峰執行、優先搬冷資料</td>
+        </tr>
+        <tr>
+          <td>Cutover</td>
+          <td>Client cache 舊 map</td>
+          <td>Map version + TTL + sticky routing</td>
+        </tr>
+        <tr>
+          <td>Cleanup</td>
+          <td>過早刪除無法回滾</td>
+          <td>保留舊副本 N 天 + 監控告警</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="cap">遷移期間 observability 比速度更重要：lag、error rate、P99 與 checksum diff 必須可視。</p>
+
+  <h3>Directory vs Hash 擴容差異</h3>
+  <ul>
+    <li><strong>Directory</strong>：改 map 即可指向新 shard；遷移粒度是 tenant / key range，最靈活。map service 需高可用 + cache。</li>
+    <li><strong>Hash (<code>% N</code>)</strong>：N 改變幾乎全量 remap，Production 很少直接改 N；通常換 Consistent Hash 或做 logical shard → physical shard 兩層映射。</li>
+    <li><strong>Consistent Hash</strong>：新增節點只搬相鄰 vnode range；需 ring version 讓 client 漸進切換（詳見一致性雜湊手冊）。</li>
+  </ul>
+
+  <div class="callout warn">
+    <div class="c-title"><span class="ic">陷阱</span>「停機遷移」在大型系統不可接受</div>
+    <p>面試若只答「dump → restore → 改 DNS」會失分。Production 預期是<strong>漸進式、可回滾、可節流</strong>的線上遷移；並說明 dual-write 窗口與 map version 如何保證 read-your-writes。</p>
+  </div>
+
+  <div class="oneliner">
+    <b>一句話答法</b>零 downtime 遷移 = dual-write + backfill + verify + cutover + cleanup；Directory 改 map，Hash 擴容靠 consistent hash 或 logical shard 間接映射。
+  </div>
+</section>
+
+<hr class="div">
+
+<!-- ============ 05 互動 Demo ============ -->
+<section id="s5">
+  <div class="sec-head">
+    <span class="sec-num">05</span>
+    <h2>互動 Demo：多租戶遷移模擬器</h2>
+  </div>
+  <p class="sec-sub">Directory Sharding 下，把 hot tenant 從共享 shard 遷到專用 shard 的六階段流程。</p>
+
+  <p>下方模擬一個 3-shard 的多租戶 SaaS：<strong>Tenant A</strong>（小）、<strong>Tenant B</strong>（中）、<strong>Tenant VIP</strong>（大，佔 Shard 2 過半容量）。按「下一步」走完整遷移 SOP，觀察 dual-write、backfill、cutover 各階段的路由與狀態變化。</p>
+
+  <div class="demo" id="demo-migrate">
+    <div class="demo-bar">
+      <span class="label">互動 · 多租戶 Directory 遷移</span>
+      <span class="label" style="text-transform:none;font-family:var(--sans);font-size:12px;color:var(--text-2)">逐步執行遷移 SOP</span>
+    </div>
+    <div class="demo-body">
+      <div class="mg-controls">
+        <div class="seg" role="group" aria-label="檢視模式">
+          <button data-view="map" aria-pressed="true">路由表</button>
+          <button data-view="shards" aria-pressed="false">Shard 負載</button>
+        </div>
+        <div class="mg-btns">
+          <button class="btn primary" id="mg-next" type="button">下一步</button>
+          <button class="btn" id="mg-reset" type="button">Reset</button>
+        </div>
+      </div>
+
+      <div class="mg-phase" id="mg-phase">階段 0 / 6 · 初始狀態</div>
+
+      <div class="mg-canvas" id="mg-canvas">
+        <div class="mg-panel" id="mg-map-panel">
+          <div class="mg-panel-title">Shard Map（Directory）</div>
+          <div class="mg-map" id="mg-map"></div>
+        </div>
+        <div class="mg-panel" id="mg-shard-panel" hidden>
+          <div class="mg-panel-title">Physical Shards</div>
+          <div class="mg-shards" id="mg-shards"></div>
+        </div>
+      </div>
+
+      <div class="legend">
+        <span><i class="dot ns-idle"></i>閒置 / 正常</span>
+        <span><i class="dot ns-lock"></i>遷移中（雙寫）</span>
+        <span><i class="dot ns-wait"></i>Backfill 進行中</span>
+        <span><i class="dot ns-ok"></i>已切換完成</span>
+        <span><i class="dot ns-bad"></i>Hot / 超載</span>
+      </div>
+
+      <div class="status-line" id="mg-status">
+        初始：Tenant VIP 與 Tenant B 共用 Shard 2，VIP 流量佔 62% 容量，形成 hot spot。目標：將 VIP 遷到新建的 Shard 4（Dedicated）。
+      </div>
+    </div>
+  </div>
+  <p class="cap">洞察：Directory 的價值不在公式優雅，而在 control plane 可對單一 tenant 做精細遷移——這是多租戶 SaaS 的實務標配。</p>
+
+  <div class="oneliner">
+    <b>一句話答法</b>Demo 展示 Directory 遷移的 dual-write → backfill → cutover 節奏；面試時應能逐步說出每階段 router 行為與回滾策略。
+  </div>
+</section>
+
+<hr class="div">
+
+<!-- ============ 06 面試考點與架構折衷 ============ -->
+<section id="s6">
+  <div class="sec-head">
+    <span class="sec-num">06</span>
+    <h2>面試考點與架構折衷</h2>
+  </div>
+  <p class="sec-sub">實務追問：大 tenant 怎麼搬？跨 shard 報表怎麼做？什麼時候不該分片？</p>
+
+  <div class="callout accent">
+    <div class="c-title"><span class="ic">考點 1</span>「某 SaaS 有一個 tenant 流量是其他 100 倍的，怎麼辦？」</div>
+    <p><strong>回答框架</strong>：
+      <br>1. 確認 sharding 策略是否 Directory（可單獨遷移）。
+      <br>2. 把大 tenant 搬到 dedicated shard / 獨立 cluster。
+      <br>3. 遷移走 dual-write + backfill + cutover，全程節流。
+      <br>4. 若仍不足：tenant 內再分 sub-shard（例如依 <code>workspace_id</code> hash）。
+    </p>
+  </div>
+
+  <div class="callout accent">
+    <div class="c-title"><span class="ic">考點 2</span>「分片後怎么做全局報表 / 搜尋？」</div>
+    <p><strong>回答框架</strong>：
+      <br>1. OLTP shard 不做全 cluster 聚合——延遲與成本不可控。
+      <br>2. CDC → OLAP（ClickHouse / BigQuery）或搜尋引擎（Elasticsearch）建全域索引。
+      <br>3. 即時性要求低時用 batch ETL；要求高時用 stream + materialized view。
+    </p>
+  </div>
+
+  <div class="callout accent">
+    <div class="c-title"><span class="ic">考點 3</span>「什麼時候不該分片？」</div>
+    <p><strong>回答框架</strong>：
+      <br>1. 資料量與 QPS 仍可在單機 + read replica + cache 內解決。
+      <br>2. 業務強依賴跨表 JOIN / 複雜 transaction，且無法 co-locate 或 denormalize。
+      <br>3. 團隊缺乏 rebalance、map 治理與跨 shard debug 的運維能力。
+      <br>4. 過早分片會永久增加系統複雜度——應有明確的容量 trigger（例如單表 &gt; 500GB 或寫入 P99 觸頂）。
+    </p>
+  </div>
+
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>實務信號</th>
+          <th>建議動作</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>單 shard CPU / 磁碟 &gt; 70% 且 key 分布均勻</td>
+          <td class="hl">加 shard + rebalance</td>
+        </tr>
+        <tr>
+          <td>單 tenant 佔一 shard 過半</td>
+          <td>Directory 遷到 dedicated shard</td>
+        </tr>
+        <tr>
+          <td>跨 shard 查詢 P99 飆升</td>
+          <td>檢視 sharding key 是否與查詢對齊；考慮 denormalize 或二級索引</td>
+        </tr>
+        <tr>
+          <td>最新 time partition 持續 hot</td>
+          <td>Buffer 層（Kafka）+ 預 split + 寫入 batch</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="callout warn">
+    <div class="c-title"><span class="ic">Risk & Impact</span>實務分片的系統代價</div>
+    <p>
+      • <strong>Payload / Latency</strong>：scatter-gather 與 dual-write 期間寫入放大；Directory 每次請求多一次 map lookup（通常 cache）。
+      <br>• <strong>Security</strong>：多租戶環境需確保 router 強制注入 <code>tenant_id</code>，防止跨 tenant 資料洩漏。
+      <br>• <strong>Dependency</strong>：shard map / control plane 成為關鍵路徑；需 HA、版本化與 cache invalidation 策略。
+    </p>
+  </div>
+
+  <div class="oneliner">
+    <b>一句話答法</b>實務高分 = 場景藍圖 + co-location 設計 + 六階段遷移 SOP + 知道何時用 OLAP 卸載跨 shard 需求，以及何時根本不該分片。
+  </div>
+</section>
+
+<style>
+  .mg-controls {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    flex-wrap: wrap;
+    margin-bottom: 16px;
+  }
+  .mg-btns {
+    display: flex;
+    gap: 8px;
+  }
+  .mg-phase {
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--accent);
+    letter-spacing: .06em;
+    margin-bottom: 14px;
+    padding: 8px 12px;
+    background: var(--accent-soft);
+    border-radius: var(--radius-sm);
+    border: 1px solid var(--accent-line);
+  }
+  .mg-canvas {
+    min-height: 200px;
+  }
+  .mg-panel-title {
+    font-family: var(--mono);
+    font-size: 11px;
+    letter-spacing: .1em;
+    text-transform: uppercase;
+    color: var(--text-3);
+    margin-bottom: 12px;
+  }
+  .mg-map {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .mg-row {
+    display: grid;
+    grid-template-columns: 120px 1fr 80px;
+    gap: 10px;
+    align-items: center;
+    padding: 10px 12px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    background: var(--bg-soft);
+    font-size: 13.5px;
+    transition: background .25s, border-color .25s;
+  }
+  .mg-row .tenant {
+    font-weight: 600;
+  }
+  .mg-row .shard-tag {
+    font-family: var(--mono);
+    font-size: 12px;
+    padding: 3px 8px;
+    border-radius: 4px;
+    border: 1px solid var(--border-strong);
+    background: #fff;
+    text-align: center;
+  }
+  .mg-row .load-bar {
+    height: 8px;
+    background: #e9e7e3;
+    border-radius: 4px;
+    overflow: hidden;
+  }
+  .mg-row .load-fill {
+    height: 100%;
+    border-radius: 4px;
+    transition: width .4s ease, background .3s;
+  }
+  .mg-row.state-lock {
+    border-color: var(--warn);
+    background: var(--warn-soft);
+  }
+  .mg-row.state-wait {
+    border-color: var(--accent);
+    background: var(--accent-soft);
+  }
+  .mg-row.state-ok {
+    border-color: var(--ok);
+    background: var(--ok-soft);
+  }
+  .mg-shards {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+    gap: 12px;
+  }
+  .mg-shard-card {
+    border: 1.5px solid var(--border-strong);
+    border-radius: var(--radius-sm);
+    padding: 14px 12px;
+    text-align: center;
+    background: #fff;
+    transition: background .25s, border-color .25s;
+  }
+  .mg-shard-card .sname {
+    font-weight: 700;
+    font-size: 14px;
+    margin-bottom: 4px;
+  }
+  .mg-shard-card .smeta {
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--text-3);
+    margin-bottom: 10px;
+  }
+  .mg-shard-card .sbar {
+    height: 10px;
+    background: #e9e7e3;
+    border-radius: 5px;
+    overflow: hidden;
+    margin-bottom: 6px;
+  }
+  .mg-shard-card .sfill {
+    height: 100%;
+    border-radius: 5px;
+    transition: width .4s ease, background .3s;
+  }
+  .mg-shard-card .spct {
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--text-2);
+  }
+  .mg-shard-card.hot {
+    border-color: var(--bad);
+    background: var(--bad-soft);
+  }
+  .mg-shard-card.migrating {
+    border-color: var(--warn);
+    background: var(--warn-soft);
+  }
+  .mg-shard-card.new-shard {
+    border-style: dashed;
+    border-color: var(--accent);
+  }
+</style>

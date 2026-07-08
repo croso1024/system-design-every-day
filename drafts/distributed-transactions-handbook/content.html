@@ -1,0 +1,472 @@
+    <!-- HERO -->
+    <header class="hero">
+      <div class="eyebrow">系統設計 · 田野手冊</div>
+      <h1>分散式交易：在一致性與可用性之間鬆綁</h1>
+      <p class="lede">當一筆業務操作橫跨多個服務、多個資料庫時，如何保證它「要嘛全部成功、要嘛全部失敗」？這份手冊用一條演化線串起 2PC、TCC、Saga 與訊息家族——它們不是並列的三選一，而是一路在強一致與最終一致之間逐步放手的取捨史。</p>
+      <div class="meta">
+        <span class="tag">2PC</span>
+        <span class="tag">TCC</span>
+        <span class="tag">Saga</span>
+        <span class="tag">Outbox</span>
+        <span class="tag">面試導向</span>
+      </div>
+    </header>
+
+    <!-- ============ 01 總覽 ============ -->
+    <section id="s1">
+      <div class="sec-head"><span class="sec-num">01</span><h2>總覽與定位</h2></div>
+      <p class="sec-sub">是什麼、解決什麼痛、在系統設計版圖中的座標。</p>
+
+      <p>分散式交易要解的核心問題只有一句話：<strong>一筆業務操作橫跨多個服務或多個資料庫時，怎麼保證它的原子性（要嘛全成、要嘛全敗），不會卡在「一半成功一半失敗」的不一致狀態。</strong></p>
+
+      <h3>天真版：單體 + 單庫，ACID 直接搞定</h3>
+      <p>在單一應用配單一資料庫的世界裡，這件事根本不需要你操心。你只要把所有寫入包進一個本地交易：</p>
+      <pre><code>BEGIN;
+  UPDATE account SET balance = balance - 100 WHERE id = 'A';
+  UPDATE account SET balance = balance + 100 WHERE id = 'B';
+COMMIT;   -- 兩個 UPDATE 一起成功，或一起失敗</code></pre>
+      <p>資料庫的 <em>ACID</em> 保證了原子性與隔離性，你拿到的是免費的強一致。</p>
+
+      <h3>問題：拆成微服務後，邊界把交易切斷了</h3>
+      <p>一旦把系統拆成「訂單服務、帳務服務、庫存服務」各自擁有獨立資料庫，上面那個 <code>BEGIN...COMMIT</code> 就<strong>跨不過服務邊界</strong>了——帳務的 DB 連線無法 commit 庫存的 DB。每個服務只能管好自己的本地交易，沒有人手上握著一把能一次提交所有人的鎖。</p>
+
+      <div class="callout accent">
+        <div class="c-title"><span class="ic">座標</span>分散式交易在版圖中的位置</div>
+        <p>它本質上是一個<strong>一致性協調問題</strong>，而非單一技術。所有方案都是在 CAP 的取捨下，用不同手段去逼近「跨服務的原子性」。理解它的關鍵，是先接受「沒有免費的強一致」這件事——這正是下一章的主題。</p>
+      </div>
+
+      <div class="oneliner">
+        <b>一句話答法</b>分散式交易就是「跨多個獨立資料源、保證一組操作原子性」的協調機制；單庫靠 ACID，多服務只能靠 2PC / TCC / Saga 等方案在一致性與可用性之間做取捨。
+      </div>
+    </section>
+
+    <hr class="div">
+
+    <!-- ============ 02 取捨 ============ -->
+    <section id="s2">
+      <div class="sec-head"><span class="sec-num">02</span><h2>為什麼沒有銀彈</h2></div>
+      <p class="sec-sub">先架好一致性光譜這個座標系，後面三個方案才知道自己站在哪。</p>
+
+      <p>很多人把 2PC / TCC / Saga 當成三個平行的選項，這是誤解。它們其實落在<strong>同一條取捨光譜</strong>上：愈往左愈強一致、但鎖得久、吞吐低、可用性差；愈往右愈鬆綁、無鎖、吞吐高、可用性好，代價是只能保證最終一致。</p>
+
+      <p>這背後是 <em>CAP</em> 的現實：當網路可能分區（P 無可避免），你只能在一致性（C）與可用性（A）之間偏向一邊。2PC 偏 CP，Saga 偏 AP，TCC 在中間。</p>
+
+      <!-- INTERACTIVE: spectrum -->
+      <div class="demo" id="demo-spec">
+        <div class="demo-bar">
+          <span class="label">互動 · 一致性光譜</span>
+          <span class="label" style="text-transform:none;font-family:var(--sans);font-size:12px;color:var(--text-2)">點選方案，看它的取捨落點</span>
+        </div>
+        <div class="demo-body">
+          <div class="spectrum">
+            <div class="spec-track"></div>
+            <button class="spec-mark" data-key="2pc" style="left:6%" aria-pressed="false" aria-label="2PC">
+              <span class="pin"></span><span class="pn">2PC</span>
+            </button>
+            <button class="spec-mark" data-key="tcc" style="left:44%" aria-pressed="false" aria-label="TCC">
+              <span class="pin"></span><span class="pn">TCC</span>
+            </button>
+            <button class="spec-mark" data-key="saga" style="left:90%" aria-pressed="false" aria-label="Saga">
+              <span class="pin"></span><span class="pn">Saga</span>
+            </button>
+          </div>
+          <div class="spec-ends"><span>← 強一致 / 偏 CP</span><span>偏 AP / 最終一致 →</span></div>
+
+          <div class="spec-panel" id="spec-panel">
+            <h4 id="sp-name">點上方任一方案</h4>
+            <div class="pmeta" id="sp-meta">四個維度會同步顯示此消彼長的取捨</div>
+            <div class="bars" id="sp-bars"></div>
+          </div>
+        </div>
+      </div>
+      <p class="cap">拉桿洞察：四項指標幾乎是「翹翹板」——把一致性與鎖定往上推，吞吐與可用性必然往下掉。</p>
+
+      <div class="oneliner">
+        <b>一句話答法</b>沒有銀彈，只有取捨：選方案等於選你願意在「強一致 ↔ 高可用」這條軸上站哪裡。
+      </div>
+    </section>
+
+    <hr class="div">
+
+    <!-- ============ 03 2PC ============ -->
+    <section id="s3">
+      <div class="sec-head"><span class="sec-num">03</span><h2>2PC 兩階段提交</h2></div>
+      <p class="sec-sub">最接近單庫直覺的解法——強一致、對業務無侵入，但代價也最重。</p>
+
+      <h3>核心機制</h3>
+      <p>引入一個<strong>協調者（Coordinator / TC）</strong>，把提交切成兩個階段：</p>
+      <ul>
+        <li><strong>Prepare（準備）</strong>：協調者問所有參與者「準備好提交了嗎？」參與者執行操作但<strong>不提交</strong>、鎖住資源，回覆 Yes / No。</li>
+        <li><strong>Commit（提交）</strong>：若全部回 Yes，協調者下令全體 Commit；只要有一個 No，就全體 Rollback。</li>
+      </ul>
+
+      <!-- INTERACTIVE: 2PC flow -->
+      <div class="demo" id="demo-2pc">
+        <div class="demo-bar">
+          <span class="label">互動 · 2PC 流程</span>
+          <div class="seg" role="group" aria-label="情境切換">
+            <button data-sc="ok" aria-pressed="true">正常提交</button>
+            <button data-sc="crash" aria-pressed="false">協調者掛掉</button>
+          </div>
+        </div>
+        <div class="demo-body">
+          <div class="actors" id="p2-actors">
+            <div class="actor coordinator" data-id="tc"><div class="aname">協調者 TC</div><div class="arole">coordinator</div><div class="astate" data-state>待命</div></div>
+            <div class="actor" data-id="p1"><div class="aname">帳務服務</div><div class="arole">participant</div><div class="astate" data-state>idle</div></div>
+            <div class="actor" data-id="p2"><div class="aname">庫存服務</div><div class="arole">participant</div><div class="astate" data-state>idle</div></div>
+          </div>
+          <div class="flowsteps" id="p2-steps"></div>
+          <div class="status-line" id="p2-status">按「下一步」開始走兩階段流程。</div>
+          <div style="margin-top:14px;display:flex;gap:8px;">
+            <button class="btn primary" id="p2-next">下一步</button>
+            <button class="btn" id="p2-reset">重置</button>
+          </div>
+          <div class="legend">
+            <span><i class="dot ns-idle"></i>idle</span>
+            <span><i class="dot ns-lock"></i>已鎖定待命</span>
+            <span><i class="dot ns-ok"></i>已提交</span>
+            <span><i class="dot ns-bad"></i>阻塞 / 異常</span>
+          </div>
+        </div>
+      </div>
+      <p class="cap">把情境切到「協調者掛掉」，會看到參與者 Prepare 後鎖死資源、卻收不到 Commit 指令，永遠卡在待命——這就是 2PC 最痛的同步阻塞與單點故障。</p>
+
+      <h3>天真版 → 問題</h3>
+      <p>2PC 的直覺很美：行為跟單庫的 commit 幾乎一樣，對業務透明（資料庫層用 XA 協議就能跑）。但它有三個致命缺陷：</p>
+      <ul>
+        <li><strong>同步阻塞</strong>：Prepare 後資源被鎖住，得等所有人回應才能釋放，併發吞吐極低。</li>
+        <li><strong>協調者單點故障</strong>：協調者在 Commit 階段掛掉，參與者卡在「不知該 Commit 還是 Rollback」的懸置狀態。</li>
+        <li><strong>資料不一致風險</strong>：Commit 指令只送達部分參與者時網路斷掉，仍可能不一致。</li>
+      </ul>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ic">陷阱</span>常見誤區</div>
+        <p>以為「3PC 解決了所有問題」。3PC 多了 CanCommit 階段與 timeout，緩解了阻塞與單點，但<strong>無法在網路分區下徹底消除不一致</strong>，且複雜度更高，實務上幾乎不用。</p>
+      </div>
+
+      <h3>使用情境與限制</h3>
+      <p>適合<strong>一致性要求極高、併發不大、且不跨組織</strong>的場景：傳統金融行內系統、跨庫但同一組織的操作。常搭配支援 XA 的關聯式資料庫與 JTA 交易管理員。微服務世界因為它的阻塞特性，已越來越少用。</p>
+
+      <div class="oneliner">
+        <b>一句話答法</b>2PC 用協調者把提交拆成 Prepare / Commit 兩步換取強一致，但代價是同步阻塞與協調者單點，吞吐差、微服務少用。
+      </div>
+    </section>
+
+    <hr class="div">
+
+    <!-- ============ 04 TCC ============ -->
+    <section id="s4">
+      <div class="sec-head"><span class="sec-num">04</span><h2>TCC（Try-Confirm-Cancel）</h2></div>
+      <p class="sec-sub">把 2PC 的概念上提到業務層，用「資源預留」取代「資料庫長鎖」。</p>
+
+      <h3>核心機制</h3>
+      <p>每個服務要實作三個介面：</p>
+      <ul>
+        <li><strong>Try</strong>：嘗試執行，做資源的<strong>預留 / 凍結</strong>（扣款先凍結額度、扣庫存先扣到「凍結庫存」），但不真正生效。</li>
+        <li><strong>Confirm</strong>：所有 Try 成功後，正式確認（把凍結的真正扣掉）。</li>
+        <li><strong>Cancel</strong>：任一 Try 失敗，釋放預留的資源。</li>
+      </ul>
+      <p>它不靠資料庫鎖，而是用業務上的「軟狀態（凍結）」，所以<strong>沒有長時間的資源鎖定</strong>，效能比 2PC 好；又因為有 Try 階段確認可行性才提交，一致性比 Saga 強。</p>
+
+      <div class="callout accent">
+        <div class="c-title"><span class="ic">關鍵</span>不會出現「Confirm 完又 Cancel」</div>
+        <p>全域決策是二元且有順序的：協調者等<strong>所有</strong>參與者 Try 都成功才進入 Confirm；只要有一個 Try 失敗就全體 Cancel，此時<strong>還沒有任何服務 Confirm</strong>。你要嘛全 Confirm、要嘛全 Cancel。</p>
+      </div>
+
+      <h3>可靠性從何而來？（服務掛了怎麼辦）</h3>
+      <p>關鍵觀念：<strong>TCC 的可靠性不依賴單一服務不掛掉</strong>。若某服務 Try 成功、協調者決議 Cancel，但它在執行 Cancel 時異常關閉——此時資源停在「凍結」狀態，這是<strong>安全的中間態，不是不一致</strong>。可靠性來自三件事的組合：</p>
+      <ul>
+        <li><strong>協調者的持久化事務日誌</strong>：下達 Cancel 前先把全域決議寫進可靠儲存，重啟後一查就知道「這筆該 Cancel、但某服務尚未完成」。</li>
+        <li><strong>重試機制</strong>：協調者對未成功的 Cancel 不放棄、持續重試，服務恢復後 Cancel 會被重新驅動到成功。</li>
+        <li><strong>Confirm / Cancel 必須冪等</strong>：因為有重試，同一指令可能被呼叫多次，必須執行幾次結果都一樣。</li>
+      </ul>
+
+      <!-- INTERACTIVE: TCC timeline lab -->
+      <div class="demo" id="demo-tcc">
+        <div class="demo-bar">
+          <span class="label">互動 · TCC 時序實驗室</span>
+          <span class="label" style="text-transform:none;font-family:var(--sans);font-size:12px;color:var(--text-2)">改變 Try / Cancel 的抵達順序，親手製造經典坑</span>
+        </div>
+        <div class="demo-body">
+          <div class="tl-scenarios" id="tl-scenarios">
+            <button class="tl-opt" data-sc="normal" aria-pressed="true">
+              <span style="flex:1"><span class="tlname">正常：Try → Cancel</span><span class="tldesc">先凍結，後釋放。教科書情形。</span></span>
+              <span class="tlbadge">baseline</span>
+            </button>
+            <button class="tl-opt" data-sc="empty" aria-pressed="false">
+              <span style="flex:1"><span class="tlname">空回滾：只有 Cancel（沒 Try）</span><span class="tldesc">Try 在網路上丟失，協調者超時直接發 Cancel。</span></span>
+              <span class="tlbadge">empty rollback</span>
+            </button>
+            <button class="tl-opt" data-sc="hang" aria-pressed="false">
+              <span style="flex:1"><span class="tlname">懸掛：Cancel → Try（亂序）</span><span class="tldesc">Cancel 先到、延遲的 Try 後到。</span></span>
+              <span class="tlbadge">hanging</span>
+            </button>
+          </div>
+
+          <div class="tl-result">
+            <div class="tl-card naive">
+              <div class="tch">天真版（不查事務狀態）</div>
+              <div id="tl-naive-body"></div>
+              <div class="verdict" id="tl-naive-verdict"></div>
+            </div>
+            <div class="tl-card fixed">
+              <div class="tch">正解（維護事務控制表）</div>
+              <div id="tl-fixed-body"></div>
+              <div class="verdict" id="tl-fixed-verdict"></div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <p class="cap">同樣是 Try 與 Cancel 兩個操作，只是抵達順序不同，就能炸出「空回滾」與「懸掛」兩個坑——而解法都是同一招：每個服務維護<strong>事務控制表</strong>，動作前先查狀態。</p>
+
+      <h3>三個魔鬼細節</h3>
+      <ul>
+        <li><strong>空回滾</strong>：Cancel 被呼叫，但該服務從沒收到 Try。Cancel 必須能判斷「沒看過這筆 Try」→ 直接回成功、什麼都不做。</li>
+        <li><strong>冪等</strong>：Confirm / Cancel 可能被重複呼叫，必須靠記錄交易狀態保證重複執行無副作用。</li>
+        <li><strong>懸掛</strong>：延遲的 Try 比 Cancel 還晚到，凍結了一筆永遠不會被 Confirm / Cancel 的資源。Try 執行前必須檢查「這筆是否已被 Cancel」，若是就拒絕凍結。</li>
+      </ul>
+      <p>要正確處理這三件事，每個服務通常要維護一張<strong>事務控制表</strong>（記錄每個全域交易 ID 的狀態：tried / confirmed / cancelled），三個方法動作前都先查表。這就是 TCC「業務侵入性高」的具體代價。</p>
+
+      <h3>使用情境與限制</h3>
+      <p>適合<strong>一致性要求高、又不能接受 2PC 長鎖</strong>的場景，典型如<strong>支付、帳務、交易扣款</strong>。代價是每個操作都要拆成三個方法並自理冪等／空回滾／懸掛，開發成本高、容易出 bug。</p>
+
+      <div class="oneliner">
+        <b>一句話答法</b>TCC 把交易上提到業務層，用 Try 預留資源、Confirm / Cancel 收尾；可靠性靠協調者持久化決議 + 重試 + 冪等補償，難點是空回滾、冪等、懸掛三坑。
+      </div>
+    </section>
+
+    <hr class="div">
+
+    <!-- ============ 05 Saga ============ -->
+    <section id="s5">
+      <div class="sec-head"><span class="sec-num">05</span><h2>Saga</h2></div>
+      <p class="sec-sub">再鬆一步：連預留都不要，每步直接提交，靠補償回滾。</p>
+
+      <h3>核心機制</h3>
+      <p>把一個長交易拆成一串<strong>本地交易序列</strong>，<strong>每一步都立刻提交</strong>。每步都對應一個<strong>補償操作（Compensating Transaction）</strong>，一旦某步失敗，就反向依序執行先前已提交步驟的補償，把它們「邏輯上撤銷」。</p>
+      <p>例如「建立訂單 → 扣款 → 扣庫存 → 安排出貨」若在扣庫存失敗，就反向補償「退款 → 取消訂單」（失敗的那步自身已在本地回滾，通常不需補償）。</p>
+
+      <!-- INTERACTIVE: Saga chain -->
+      <div class="demo" id="demo-saga">
+        <div class="demo-bar">
+          <span class="label">互動 · Saga 補償鏈</span>
+          <div class="seg" role="group" aria-label="協調模式">
+            <button data-mode="orch" aria-pressed="true">Orchestration 編排</button>
+            <button data-mode="chor" aria-pressed="false">Choreography 編舞</button>
+          </div>
+        </div>
+        <div class="demo-body">
+          <div class="saga-pick">
+            注入失敗於：
+            <select id="saga-fail">
+              <option value="1">扣款（第 2 步）</option>
+              <option value="2" selected>扣庫存（第 3 步）</option>
+              <option value="3">安排出貨（第 4 步）</option>
+              <option value="-1">全部成功</option>
+            </select>
+          </div>
+          <div class="saga-chain" id="saga-chain"></div>
+          <div class="status-line" id="saga-status">選好失敗點後按「執行」，觀看正向推進與反向補償。</div>
+          <div style="margin-top:14px;display:flex;gap:8px;">
+            <button class="btn primary" id="saga-run">執行</button>
+            <button class="btn" id="saga-reset">重置</button>
+          </div>
+          <div class="legend">
+            <span><i class="dot ns-idle"></i>未執行</span>
+            <span><i class="dot ns-ok"></i>已提交</span>
+            <span><i class="dot ns-bad"></i>失敗</span>
+            <span><i class="dot ns-lock"></i>已補償（撤銷）</span>
+          </div>
+          <div class="status-line" id="saga-mode-note" style="margin-top:10px"></div>
+        </div>
+      </div>
+      <p class="cap">注意失敗時補償鏈是<strong>反向</strong>跑的，且只補償「已成功提交」的步驟；切換編排／編舞，差別在「有沒有中央協調器」與流程的可追蹤性。</p>
+
+      <h3>兩種協調模式</h3>
+      <ul>
+        <li><strong>Choreography（編舞）</strong>：沒有中央協調者，靠事件驅動——每個服務做完發出事件，下一個監聽。耦合低，但流程難追蹤、容易事件風暴。</li>
+        <li><strong>Orchestration（編排）</strong>：有一個 Saga 協調器集中控制流程。清晰、好維護、好監控，協調器是核心元件。中大型系統多選這種。</li>
+      </ul>
+
+      <h3>限制與取捨</h3>
+      <ul>
+        <li><strong>只保證最終一致</strong>：過程中會有中間狀態被外部看到（錢扣了但貨還沒出）。</li>
+        <li><strong>沒有隔離性</strong>：需自己在業務層處理（狀態欄位、語意鎖）。</li>
+        <li><strong>有些操作無法補償</strong>：例如已寄出的 Email——這時要靠「往前重試」而非「往後補償」。</li>
+      </ul>
+
+      <div class="callout accent">
+        <div class="c-title"><span class="ic">搭配</span>Saga 幾乎不單獨出現</div>
+        <p>實務上 Saga 常與 <strong>Transactional Outbox</strong> 一起用，確保「本地交易提交」與「事件發出」的可靠連動——這正是下一章的主題。</p>
+      </div>
+
+      <h3>使用情境</h3>
+      <p>跨多個微服務的<strong>長業務流程</strong>：電商下單、訂單履約、行程預訂等。一致性可接受最終一致、但需要高可用與高吞吐時的首選。</p>
+
+      <div class="oneliner">
+        <b>一句話答法</b>Saga 把長交易拆成一連串「本地交易 + 補償」，失敗就反向補償；無鎖、高可用、最終一致，代價是沒有隔離性、且有些操作無法補償。
+      </div>
+    </section>
+
+    <hr class="div">
+
+    <!-- ============ 06 訊息家族 ============ -->
+    <section id="s6">
+      <div class="sec-head"><span class="sec-num">06</span><h2>訊息驅動家族</h2></div>
+      <p class="sec-sub">Outbox / 可靠訊息 / AT 模式——補上實務拼圖，回答「還有沒有其他做法」。</p>
+
+      <h3>先看痛點：雙寫問題（Dual Write）</h3>
+      <p>微服務常見需求是「改完自己的 DB，還要發一則訊息通知別人」。天真寫法是「先 commit DB，再發 MQ」——但這兩個動作不是原子的：若在中間崩潰，<strong>DB 改了、訊息卻沒發出去</strong>，下游永遠不知道，資料就不一致了。</p>
+
+      <!-- INTERACTIVE: outbox -->
+      <div class="demo" id="demo-outbox">
+        <div class="demo-bar">
+          <span class="label">互動 · 雙寫問題 vs Outbox</span>
+          <div class="seg" role="group" aria-label="做法切換">
+            <button data-mode="naive" aria-pressed="true">天真版：先寫DB再發MQ</button>
+            <button data-mode="outbox" aria-pressed="false">正解：Outbox</button>
+          </div>
+        </div>
+        <div class="demo-body">
+          <div class="ob-stage" id="ob-stage"></div>
+          <div class="status-line" id="ob-status"></div>
+          <div style="margin-top:14px;display:flex;gap:8px;">
+            <button class="btn primary" id="ob-run">執行</button>
+            <button class="btn" id="ob-crash">在「DB 已提交、訊息未發出」處崩潰</button>
+            <button class="btn" id="ob-reset">重置</button>
+          </div>
+        </div>
+      </div>
+      <p class="cap">在天真版按「崩潰」會看到 DB 已改、訊息遺失 → 不一致；Outbox 版同樣崩潰，訊息因為和業務資料寫在同一交易而留在 outbox 表，重啟後被投遞補回，最終一致。</p>
+
+      <h3>三種常見做法</h3>
+      <h4>① Transactional Outbox（事務型發件匣）</h4>
+      <p>把「業務寫入」和「要發送的訊息」放進<strong>同一個本地交易</strong>、寫進同一個 DB（多一張 outbox 表）；再由背景 relay 程序輪詢 outbox，把訊息可靠投遞出去。這是解雙寫問題的主流做法，常配 Saga。</p>
+      <h4>② 可靠訊息最終一致（基於 MQ）</h4>
+      <p>靠訊息佇列達成最終一致——例如 RocketMQ 的事務訊息，或 Kafka + 消費端冪等。本質上是 Outbox / Saga 思路的訊息化實作。</p>
+      <h4>③ AT 模式（如 Seata Automatic Transaction）</h4>
+      <p>框架在執行 SQL 時自動產生反向 SQL 當補償，對業務近乎無侵入，可看成「自動化的 Saga」。代價是有全域鎖、且依賴特定框架。</p>
+
+      <div class="oneliner">
+        <b>一句話答法</b>Outbox 把「寫 DB」和「發訊息」綁進同一個本地交易來消滅雙寫問題，再用背景 relay 投遞；它與可靠訊息、AT 模式都是最終一致家族，常與 Saga 搭配。
+      </div>
+    </section>
+
+    <hr class="div">
+
+    <!-- ============ 07 比較與選型 ============ -->
+    <section id="s7">
+      <div class="sec-head"><span class="sec-num">07</span><h2>比較與選型</h2></div>
+      <p class="sec-sub">把所有方案放回同一張地圖，再用一條決策流程收斂。</p>
+
+      <h3>多維度對照</h3>
+      <div class="tbl-wrap">
+        <table id="cmp-table">
+          <thead>
+            <tr><th>維度</th><th>2PC</th><th>TCC</th><th>Saga</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>一致性</td><td>強一致</td><td>較強（準強一致）</td><td>最終一致</td></tr>
+            <tr><td>業務侵入</td><td>低（DB / XA 層）</td><td>很高（三介面）</td><td>中（要寫補償）</td></tr>
+            <tr><td>資源鎖定</td><td>長（同步阻塞）</td><td>短（業務軟凍結）</td><td>無</td></tr>
+            <tr><td>效能 / 吞吐</td><td>低</td><td>中</td><td>高</td></tr>
+            <tr><td>隔離性</td><td>有</td><td>較有</td><td>無（需自理）</td></tr>
+            <tr><td>複雜度</td><td>中</td><td>高</td><td>中～高</td></tr>
+            <tr><td>適用流程長度</td><td>短</td><td>短～中</td><td>長</td></tr>
+            <tr><td>典型場景</td><td>行內金融、跨庫同組織</td><td>支付、帳務扣款</td><td>電商下單、長履約</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p class="cap">提示：滑鼠移到任一欄會高亮整欄，方便逐方案縱讀。</p>
+
+      <!-- INTERACTIVE: wizard -->
+      <div class="demo" id="demo-wiz">
+        <div class="demo-bar"><span class="label">互動 · 選型決策器</span></div>
+        <div class="demo-body">
+          <div class="wiz-q" data-q="length">
+            <div class="wq">1. 這筆交易的流程有多長？</div>
+            <div class="wiz-opts">
+              <button data-v="short" aria-pressed="false">短（少數步驟、同步完成）</button>
+              <button data-v="long" aria-pressed="false">長（多服務、跨時間）</button>
+            </div>
+          </div>
+          <div class="wiz-q" data-q="consistency">
+            <div class="wq">2. 一致性要求？</div>
+            <div class="wiz-opts">
+              <button data-v="strong" aria-pressed="false">必須強一致（不能有可見中間態）</button>
+              <button data-v="eventual" aria-pressed="false">可接受最終一致</button>
+            </div>
+          </div>
+          <div class="wiz-q" data-q="scope">
+            <div class="wq">3. 範圍與性質？</div>
+            <div class="wiz-opts">
+              <button data-v="same-org" aria-pressed="false">同組織、跨庫、可用 XA</button>
+              <button data-v="payment" aria-pressed="false">支付 / 帳務扣款</button>
+              <button data-v="cross-svc" aria-pressed="false">跨多個微服務</button>
+            </div>
+          </div>
+          <div class="wiz-result" id="wiz-result">
+            <div class="wr-pick" id="wiz-pick"></div>
+            <div class="wr-why" id="wiz-why"></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="callout accent">
+        <div class="c-title"><span class="ic">直覺</span>選型心法</div>
+        <p><strong>短流程 + 強一致 + 同組織</strong> 往 2PC / TCC 想；<strong>長流程 + 可接受最終一致 + 跨多微服務</strong> 往 Saga + Outbox 想。微服務下的主流組合其實是 <strong>Saga（Orchestration）+ Transactional Outbox</strong>，因為它在可用性與可維護性上最平衡。</p>
+      </div>
+    </section>
+
+    <hr class="div">
+
+    <!-- ============ 08 面試速查 ============ -->
+    <section id="s8">
+      <div class="sec-head"><span class="sec-num">08</span><h2>面試速查</h2></div>
+      <p class="sec-sub">高頻追問、陷阱清單、一句話收尾。</p>
+
+      <h3>高頻問答（點擊展開）</h3>
+
+      <details class="faq">
+        <summary><span style="flex:1"><span class="q">Q1</span> 為什麼微服務不直接用 2PC 就好？</span><span class="chev">▸</span></summary>
+        <div class="ans"><p>2PC 在 Prepare 後會同步鎖住所有參與者的資源直到提交完成，併發吞吐極低；協調者又是單點，掛在 Commit 階段會讓參與者卡死。微服務追求高可用與高吞吐，這兩點都踩雷，所以多改用 Saga / TCC。</p></div>
+      </details>
+
+      <details class="faq">
+        <summary><span style="flex:1"><span class="q">Q2</span> TCC 的服務在 Cancel 途中崩潰，資料會不一致嗎？</span><span class="chev">▸</span></summary>
+        <div class="ans"><p>不會。崩潰時資源停在「凍結」這個安全中間態。協調者已把「該 Cancel」的決議持久化，會持續重試；服務恢復後 Cancel 被重新驅動到成功。可靠性來自<strong>持久化決議 + 重試 + 冪等補償</strong>，而非服務本身不死。</p></div>
+      </details>
+
+      <details class="faq">
+        <summary><span style="flex:1"><span class="q">Q3</span> 什麼是空回滾與懸掛？怎麼解？</span><span class="chev">▸</span></summary>
+        <div class="ans"><p><strong>空回滾</strong>：Cancel 來了但根本沒收過 Try（Try 遺失、協調者超時直接取消）。<strong>懸掛</strong>：延遲的 Try 比 Cancel 還晚到，凍結了沒人會收尾的資源。兩者都靠<strong>事務控制表</strong>解：Cancel 先查「有沒有 Try 過」，Try 先查「是否已被 Cancel」。</p></div>
+      </details>
+
+      <details class="faq">
+        <summary><span style="flex:1"><span class="q">Q4</span> Saga 失敗時，補償鏈怎麼跑？</span><span class="chev">▸</span></summary>
+        <div class="ans"><p>反向、依序補償<strong>已成功提交</strong>的步驟。失敗的那一步自身已在本地回滾，通常不需補償。注意補償操作本身也要冪等，且有些動作（已發 Email）無法補償，要改用往前重試。</p></div>
+      </details>
+
+      <details class="faq">
+        <summary><span style="flex:1"><span class="q">Q5</span> Outbox 解決了什麼，為何不直接「先寫 DB 再發 MQ」？</span><span class="chev">▸</span></summary>
+        <div class="ans"><p>「先寫 DB 再發 MQ」是兩個非原子動作，中間崩潰會 DB 改了但訊息丟失（雙寫問題）。Outbox 把訊息和業務資料寫進<strong>同一個本地交易</strong>，再由背景 relay 投遞，保證「資料改了，訊息一定發得出去」。</p></div>
+      </details>
+
+      <details class="faq">
+        <summary><span style="flex:1"><span class="q">Q6</span> Saga 沒有隔離性會出什麼問題？怎麼緩解？</span><span class="chev">▸</span></summary>
+        <div class="ans"><p>中間狀態會被別的交易讀到（讀到「已扣款但未出貨」的訂單）。常見緩解：加狀態欄位（pending / confirmed）、語意鎖（semantic lock）、版本號 / 重讀值校驗（reread value）等業務層手段。</p></div>
+      </details>
+
+      <h3>陷阱清單</h3>
+      <div class="trap"><span class="tn">坑</span><span>把 2PC / TCC / Saga 講成「三選一的平行選項」——它們其實在同一條一致性光譜上，差別是取捨位置。</span></div>
+      <div class="trap"><span class="tn">坑</span><span>以為 TCC 會「Confirm 完再 Cancel」——標準流程是全 Try 成功才 Confirm，否則全 Cancel，不混用。</span></div>
+      <div class="trap"><span class="tn">坑</span><span>把 Confirm / Cancel / 補償寫成非冪等——只要有重試機制，非冪等遲早出事。</span></div>
+      <div class="trap"><span class="tn">坑</span><span>用 Saga 卻假設它有隔離性——它沒有，中間態會被看到，要在業務層自理。</span></div>
+      <div class="trap"><span class="tn">坑</span><span>忽略「無法補償的操作」（已寄出的信、已撥出的款）——這類要設計成往前重試或加人工介入。</span></div>
+
+      <h3>一句話收尾</h3>
+      <div class="oneliner"><b>2PC</b>協調者主導 Prepare / Commit 換強一致，代價是阻塞與單點。</div>
+      <div class="oneliner"><b>TCC</b>業務層 Try 預留 + Confirm / Cancel 收尾，靠持久化決議 + 重試 + 冪等求可靠。</div>
+      <div class="oneliner"><b>Saga</b>本地交易序列 + 反向補償，無鎖、最終一致，無隔離性。</div>
+      <div class="oneliner"><b>選型</b>短 + 強一致 + 同組織 → 2PC / TCC；長 + 最終一致 + 跨服務 → Saga + Outbox。</div>
+    </section>

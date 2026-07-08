@@ -1,0 +1,442 @@
+<!-- ============ 01 總覽與定位 ============ -->
+<section id="s1">
+  <div class="sec-head">
+    <span class="sec-num">01</span>
+    <h2>總覽與定位</h2>
+  </div>
+  <p class="sec-sub">當單機儲存與寫入吞吐觸頂時，如何把資料拆到多台機器上？</p>
+
+  <p>隨著業務成長，單一資料庫節點遲早會遇到<strong>儲存容量</strong>、<strong>寫入吞吐</strong>或<strong>索引維護成本</strong>的上限。此時我們需要把資料集拆成多個子集，分散到不同節點上各自服務——這就是<strong>分片（Sharding / Partitioning）</strong>。</p>
+
+  <p>分片的核心問題只有一個：<strong>給定一筆資料（或查詢），應該路由到哪個 shard？</strong> 路由策略決定了擴容難度、查詢效率、熱點風險，以及跨 shard 交易的複雜度。</p>
+
+  <div class="callout accent">
+    <div class="c-title"><span class="ic">座標</span>分片 vs 複寫</div>
+    <p>
+      • <strong>分片（Sharding）</strong>：把<strong>不同</strong>資料子集放到不同節點，目的是擴充<strong>寫入</strong>與<strong>儲存</strong>容量。
+      <br>• <strong>複寫（Replication）</strong>：把<strong>相同</strong>資料拷貝到多個節點，目的是容錯與擴充<strong>讀取</strong>吞吐。
+      <br>Production 大規模系統（Cassandra、Spanner、DynamoDB）幾乎都是<strong>兩者結合</strong>：每個 shard 本身再有多份 replica。
+    </p>
+  </div>
+
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>維度</th>
+          <th>單機資料庫</th>
+          <th>分片後</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><strong>儲存上限</strong></td>
+          <td>受單機磁碟與索引大小限制</td>
+          <td class="hl">隨 shard 數線性擴展</td>
+        </tr>
+        <tr>
+          <td><strong>寫入吞吐</strong></td>
+          <td>單一 WAL / B-tree 寫入瓶頸</td>
+          <td>寫入分散到多個 shard owner</td>
+        </tr>
+        <tr>
+          <td><strong>查詢複雜度</strong></td>
+          <td>JOIN、聚合在單機完成</td>
+          <td>跨 shard 查詢需 scatter-gather 或 denormalize</td>
+        </tr>
+        <tr>
+          <td><strong>交易</strong></td>
+          <td>本地 ACID 天然成立</td>
+          <td>跨 shard 交易需 2PC / Saga 等分散式協調</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="cap">分片換來水平擴展能力，代價是路由、一致性與跨 shard 查詢的系統複雜度。</p>
+
+  <div class="oneliner">
+    <b>一句話答法</b>分片是把資料集拆成多個子集分散到不同節點，以突破單機儲存與寫入瓶頸；它與複寫互補，是大型資料系統的基礎擴展手段。
+  </div>
+</section>
+
+<hr class="div">
+
+<!-- ============ 02 垂直 vs 水平分片 ============ -->
+<section id="s2">
+  <div class="sec-head">
+    <span class="sec-num">02</span>
+    <h2>垂直 vs 水平分片</h2>
+  </div>
+  <p class="sec-sub">先釐清「拆欄位」與「拆列」——面試裡常被混用。</p>
+
+  <h3>垂直分片（Vertical Partitioning）</h3>
+  <p>依<strong>欄位或功能域</strong>拆分。例如把用戶表的 <code>profile</code> 欄位放到 Profile DB，把 <code>billing</code> 欄位放到 Billing DB；或把圖片、影片等大物件拆到 Object Storage，主表只留 metadata。</p>
+  <ul>
+    <li><strong>優點</strong>：各子表可獨立擴展、備份與存取控制；熱欄位與冷欄位可分流。</li>
+    <li><strong>缺點</strong>：跨表 JOIN 變成跨服務 RPC；schema 變更需協調多個 store。</li>
+    <li><strong>典型場景</strong>：微服務邊界、冷熱資料分離、合規隔離（PII 獨立庫）。</li>
+  </ul>
+
+  <h3>水平分片（Horizontal Partitioning / Sharding）</h3>
+  <p>依<strong>列（row）</strong>拆分：同一 schema 的多筆資料，依 sharding key 路由到不同 shard。例如 <code>user_id</code> 模 4 分到 4 台 DB，或依時間 range 把訂單分到不同 partition。</p>
+  <ul>
+    <li><strong>優點</strong>：寫入與儲存可隨 shard 數近乎線性擴展；單 shard 資料量可控。</li>
+    <li><strong>缺點</strong>：需選好 sharding key；跨 shard 查詢與交易成本高。</li>
+    <li><strong>典型場景</strong>：社交 feed、電商訂單、IoT 時序資料、多租戶 SaaS。</li>
+  </ul>
+
+  <div class="callout warn">
+    <div class="c-title"><span class="ic">陷阱</span>「分表」不一定是 Sharding</div>
+    <p>MySQL 分表若只是把同一邏輯表拆成 <code>orders_2024</code>、<code>orders_2025</code> 但仍在一台機器上，那是<strong>分區（Partitioning）</strong>或表管理策略，不是水平擴展。真正的 sharding 意味著不同 partition 由<strong>不同節點</strong>服務。</p>
+  </div>
+
+  <div class="oneliner">
+    <b>一句話答法</b>垂直分片拆欄位/功能域，適合微服務邊界；水平分片拆列，才是突破單機寫入與容量上限的核心手段。
+  </div>
+</section>
+
+<hr class="div">
+
+<!-- ============ 03 三大分片策略 ============ -->
+<section id="s3">
+  <div class="sec-head">
+    <span class="sec-num">03</span>
+    <h2>三大分片策略</h2>
+  </div>
+  <p class="sec-sub">Range、Hash、Directory——路由公式決定擴容與查詢行為。</p>
+
+  <h3>1. Range-based Sharding</h3>
+  <p>依 sharding key 的<strong>連續區間</strong>劃分。例如用戶 ID <code>1..1M</code> → Shard A，<code>1M+1..2M</code> → Shard B；或依時間 <code>2024-01</code> → Partition Jan。</p>
+  <ul>
+    <li><strong>優點</strong>：範圍查詢（時間區間、ID 區間）可只打少數 shard；資料局部性佳，適合時序與報表。</li>
+    <li><strong>缺點</strong>：新用戶或新時間段可能全部擠在「最新 range」→ <strong>hot shard</strong>；手動調整 range 邊界需 rebalancing。</li>
+  </ul>
+
+  <h3>2. Hash-based Sharding</h3>
+  <p>對 sharding key 做 hash，再映射到 shard。最簡形式是 <code>hash(key) % N</code>（<var>N</var> 為 shard 數）。</p>
+  <ul>
+    <li><strong>優點</strong>：key 分布均勻時負載平衡佳；新增 key 自然打散。</li>
+    <li><strong>缺點</strong>：<var>N</var> 改變時幾乎所有 key 需 remap（見一致性雜湊手冊）；無法做 key 範圍查詢，只能 point lookup。</li>
+  </ul>
+
+  <h3>3. Directory / Lookup Sharding</h3>
+  <p>維護一張<strong>路由表（shard map）</strong>：<code>tenant_id → shard_id</code> 或 <code>user_id → shard_id</code>，由 control plane 或 metadata service 管理。</p>
+  <ul>
+    <li><strong>優點</strong>：彈性最高——可手動遷移大 tenant、做 canary、A/B 分 shard；不受 hash 公式限制。</li>
+    <li><strong>缺點</strong>：路由表本身成為<strong>關鍵依賴</strong>與一致性挑戰；每次請求多一次 lookup（通常 cache）。</li>
+  </ul>
+
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>策略</th>
+          <th>路由方式</th>
+          <th>負載平衡</th>
+          <th>範圍查詢</th>
+          <th>擴容難度</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><strong>Range</strong></td>
+          <td>key 落在哪個 interval</td>
+          <td>易受 skew 影響</td>
+          <td class="hl">友好</td>
+          <td>需 split range、搬資料</td>
+        </tr>
+        <tr>
+          <td><strong>Hash</strong></td>
+          <td><code>hash(key) % N</code> 或 hash ring</td>
+          <td class="hl">均勻（key 隨機時）</td>
+          <td>不支援</td>
+          <td>Modulo 全量 remap；Consistent Hash 局部</td>
+        </tr>
+        <tr>
+          <td><strong>Directory</strong></td>
+          <td>查 shard map</td>
+          <td>可人工調整</td>
+          <td>取決於 map 設計</td>
+          <td>改 map + 背景遷移</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="cap">沒有銀彈：Range 適合時序與報表；Hash 適合均勻 point lookup；Directory 適合多租戶與需人工調度的場景。</p>
+
+  <div class="callout accent">
+    <div class="c-title"><span class="ic">延伸</span>進階 Hash 路由</div>
+    <p>當 shard 數會動態變化時，單純 <code>% N</code> 代價過高。Production 常用 <strong>Consistent Hashing</strong>、Rendezvous Hashing 或 Dynamo-style 虛擬節點，把 remap 限制在局部區間——詳見本手冊「一致性雜湊綜合手冊」。</p>
+  </div>
+
+  <div class="oneliner">
+    <b>一句話答法</b>Range 靠區間、Hash 靠公式、Directory 靠路由表；選策略時先問「查詢是 point 還是 range？shard 數會不會常變？有沒有 hot tenant？」
+  </div>
+</section>
+
+<hr class="div">
+
+<!-- ============ 04 分片帶來的系統挑戰 ============ -->
+<section id="s4">
+  <div class="sec-head">
+    <span class="sec-num">04</span>
+    <h2>分片帶來的系統挑戰</h2>
+  </div>
+  <p class="sec-sub">Hot key、跨 shard 查詢、Rebalance——分片後才會浮現的問題。</p>
+
+  <h3>選對 Sharding Key</h3>
+  <p>Sharding key 應具備：<strong>高基數</strong>（避免全擠同一 shard）、<strong>查詢局部性</strong>（多數請求只需單 shard）、<strong>寫入分散</strong>（避免 sequential ID 全落最新 range）。</p>
+  <p>反例：用 <code>country_code</code> 做 key，大國流量會打爆單 shard；用 monotonic <code>auto_increment</code> 做 range sharding，新資料永遠寫入最後一個 partition。</p>
+
+  <h3>Hot Spot（熱點）</h3>
+  <p>即使 hash 均勻，<strong>單一 key 或少量 key</strong> 流量過大仍會打爆所在 shard（celebrity 貼文、搶購 SKU、全局 counter）。緩解手段包括：local cache、read replica fanout、key 拆分子 key、非同步聚合、寫入 queue 削峰。</p>
+
+  <h3>跨 Shard 查詢與聚合</h3>
+  <p>若查詢無法由 sharding key 定位單 shard，gateway 需<strong>scatter-gather</strong>：並行查所有 shard 再合併結果。成本高、延遲大，因此設計時常<strong>反規範化</strong>或建<strong>全域二級索引</strong>（如 Elasticsearch）承擔跨 shard 搜尋。</p>
+
+  <h3>Rebalancing 與線上遷移</h3>
+  <p>新增 shard、split hot range、遷移大 tenant 都需要<strong>背景搬資料</strong>。Production 流程通常包含：雙寫、追 incremental change、驗證、切流量、下線舊副本——並全程節流，避免搬遷與線上流量互搶 I/O。</p>
+
+  <div class="callout warn">
+    <div class="c-title"><span class="ic">陷阱</span>跨 Shard 交易不是「加個分布式鎖」就完事</div>
+    <p>若一筆交易涉及兩個 shard 上的列，本地 ACID 不再成立。需引入 2PC、Saga、或重新設計資料模型讓相關列<strong>共 shard</strong>（例如把 order 與 order_items 都用 <code>order_id</code> 做 sharding key）。</p>
+  </div>
+
+  <div class="oneliner">
+    <b>一句話答法</b>分片後要面對 sharding key 選型、hot spot、scatter-gather 與 rebalance；最好在一開始就讓大部分請求落在單 shard，並預留背景遷移能力。
+  </div>
+</section>
+
+<hr class="div">
+
+<!-- ============ 05 互動 Demo ============ -->
+<section id="s5">
+  <div class="sec-head">
+    <span class="sec-num">05</span>
+    <h2>互動 Demo：分片路由模擬器</h2>
+  </div>
+  <p class="sec-sub">同一組 key，切換 Range 與 Hash 策略，觀察路由結果與 hot shard 差異。</p>
+
+  <p>下方模擬器有 4 個 shard（A–D）與 12 筆 sample key。切換策略後可看到每個 key 落在哪個 shard；Range 模式刻意模擬「新 key 集中在最新區間」造成的 skew，Hash 模式則展示較均勻的分布。</p>
+
+  <div class="demo" id="demo-sharding">
+    <div class="demo-bar">
+      <span class="label">互動 · 分片路由模擬器</span>
+      <span class="label" style="text-transform:none;font-family:var(--sans);font-size:12px;color:var(--text-2)">切換 Range / Hash 策略</span>
+    </div>
+    <div class="demo-body">
+      <div class="sh-controls">
+        <div class="seg" role="group" aria-label="分片策略">
+          <button data-strategy="range" aria-pressed="true">Range-based</button>
+          <button data-strategy="hash" aria-pressed="false">Hash-based</button>
+        </div>
+        <button class="btn" id="sh-reset" type="button">Reset</button>
+      </div>
+
+      <div class="sh-shards" id="sh-shards" aria-label="Shard 負載視覺化"></div>
+
+      <div class="legend">
+        <span><i class="dot ns-idle"></i>空閒 shard</span>
+        <span><i class="dot ns-ok"></i>正常負載</span>
+        <span><i class="dot ns-lock"></i>偏高</span>
+        <span><i class="dot ns-bad"></i>Hot shard</span>
+      </div>
+
+      <div class="status-line" id="sh-status">Range：key 依 ID 區間路由；最新區間（Shard D）承接連續新 ID，易形成 hot spot。</div>
+
+      <div class="tbl-wrap sh-table-wrap">
+        <table id="sh-table">
+          <thead>
+            <tr>
+              <th>Key</th>
+              <th>Sharding Key</th>
+              <th>目標 Shard</th>
+              <th>備註</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+  <p class="cap">洞察：Range 適合區間查詢但需防 skew；Hash 分散寫入但失去 range scan 能力——選型取決於存取模式而非公式優雅度。</p>
+
+  <div class="oneliner">
+    <b>一句話答法</b>Demo 展示了同一批 key 在 Range 與 Hash 下的不同落點；面試時應能說出為何 Twitter 早期用 snowflake + hash，而時序日誌常用 time-range partition。
+  </div>
+</section>
+
+<hr class="div">
+
+<!-- ============ 06 面試考點與架構折衷 ============ -->
+<section id="s6">
+  <div class="sec-head">
+    <span class="sec-num">06</span>
+    <h2>面試考點與架構折衷</h2>
+  </div>
+  <p class="sec-sub">高頻追問：怎麼選 sharding key？怎麼擴容？跨 shard 怎麼查？</p>
+
+  <div class="callout accent">
+    <div class="c-title"><span class="ic">考點 1</span>如何選擇 Sharding Key？</div>
+    <p><strong>回答框架</strong>：
+      <br>1. 列出主要存取模式（point lookup vs range scan vs 聚合）。
+      <br>2. 選高基數、與查詢條件對齊的 key（如 messaging 用 <code>conversation_id</code>，電商用 <code>user_id</code> 或 <code>order_id</code>）。
+      <br>3. 說明如何避免 hot spot（hash 子 key、local cache、異步 counter）。
+      <br>4. 若需跨實體 JOIN，說明 co-location 或 denormalize 策略。
+    </p>
+  </div>
+
+  <div class="callout accent">
+    <div class="c-title"><span class="ic">考點 2</span>Shard 從 4 台擴到 8 台怎麼做？</div>
+    <p><strong>回答框架</strong>：
+      <br>1. 若用 <code>% N</code>：幾乎全量 remap → 說明為何改用 Consistent Hashing 或 double-write 遷移。
+      <br>2. 若用 Consistent Hashing：只搬相鄰 range，背景 backfill + 節流。
+      <br>3. 若用 Directory：更新 shard map，雙寫 + 驗證 + 切流量。
+      <br>4. 強調<strong>零 downtime</strong>需要 ring version / map version 與 client 相容窗口。
+    </p>
+  </div>
+
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>場景</th>
+          <th>建議策略</th>
+          <th>理由</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>多租戶 SaaS（大 tenant 需獨立遷移）</td>
+          <td class="hl">Directory + 必要時專用 shard</td>
+          <td>可手動把 VIP tenant 搬到獨立節點</td>
+        </tr>
+        <tr>
+          <td>社交訊息 / 用戶資料</td>
+          <td>Hash(<code>user_id</code>) 或 Consistent Hash</td>
+          <td>Point lookup 為主，需均勻寫入</td>
+        </tr>
+        <tr>
+          <td>日誌 / 指標 / 時序</td>
+          <td>Range by time</td>
+          <td>範圍查詢與 TTL 刪除舊 partition 天然契合</td>
+        </tr>
+        <tr>
+          <td>電商訂單（依用戶查歷史）</td>
+          <td>Hash(<code>user_id</code>)</td>
+          <td>同一用戶訂單共 shard，避免 scatter-gather</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="callout warn">
+    <div class="c-title"><span class="ic">風險</span>過早分片</div>
+    <p>在流量尚未觸頂前引入 sharding，會過早承擔路由、遷移與跨 shard 一致性成本。實務上常先<strong>垂直擴展 + 讀 replica + cache</strong>，確認單機瓶頸後再水平分片，並保留 rebalance 與 observability 預算。</p>
+  </div>
+
+  <div class="oneliner">
+    <b>一句話答法</b>高分答案 = 正確的 sharding key + 匹配存取模式的策略（Range/Hash/Directory）+ 擴容遷移流程 + 對 hot spot 與跨 shard 查詢的具體緩解。
+  </div>
+</section>
+
+<style>
+  .sh-controls {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    flex-wrap: wrap;
+    margin-bottom: 16px;
+  }
+
+  .sh-shards {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 10px;
+    margin-bottom: 14px;
+  }
+
+  @media (max-width: 560px) {
+    .sh-shards {
+      grid-template-columns: repeat(2, 1fr);
+    }
+  }
+
+  .sh-shard-card {
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    padding: 12px 10px;
+    background: var(--bg-soft);
+    text-align: center;
+    transition: border-color .25s, background .25s;
+  }
+
+  .sh-shard-card .sh-name {
+    font-weight: 700;
+    font-size: 14px;
+    margin-bottom: 4px;
+  }
+
+  .sh-shard-card .sh-count {
+    font-family: var(--mono);
+    font-size: 22px;
+    font-weight: 700;
+    color: var(--accent);
+    line-height: 1.2;
+  }
+
+  .sh-shard-card .sh-label {
+    font-size: 11px;
+    color: var(--text-3);
+    margin-top: 4px;
+  }
+
+  .sh-shard-card.level-ok {
+    border-color: var(--ok);
+    background: var(--ok-soft);
+  }
+
+  .sh-shard-card.level-ok .sh-count {
+    color: var(--ok);
+  }
+
+  .sh-shard-card.level-warn {
+    border-color: var(--warn);
+    background: var(--warn-soft);
+  }
+
+  .sh-shard-card.level-warn .sh-count {
+    color: var(--warn);
+  }
+
+  .sh-shard-card.level-hot {
+    border-color: var(--bad);
+    background: var(--bad-soft);
+  }
+
+  .sh-shard-card.level-hot .sh-count {
+    color: var(--bad);
+  }
+
+  .sh-table-wrap {
+    margin-top: 14px;
+    margin-bottom: 0;
+  }
+
+  .sh-badge {
+    display: inline-flex;
+    font-family: var(--mono);
+    font-size: 11px;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    padding: 2px 8px;
+    background: var(--bg-soft);
+  }
+
+  .sh-badge.hot {
+    border-color: var(--bad);
+    background: var(--bad-soft);
+    color: var(--bad);
+  }
+</style>

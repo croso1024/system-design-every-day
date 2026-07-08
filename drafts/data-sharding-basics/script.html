@@ -1,0 +1,161 @@
+<script>
+(function () {
+  const demo = document.getElementById('demo-sharding');
+  if (!demo) return;
+
+  const shardsEl = demo.querySelector('#sh-shards');
+  const statusEl = demo.querySelector('#sh-status');
+  const tbody = demo.querySelector('#sh-table tbody');
+  const buttons = Array.from(demo.querySelectorAll('[data-strategy]'));
+  const resetBtn = demo.querySelector('#sh-reset');
+
+  const SHARD_IDS = ['A', 'B', 'C', 'D'];
+
+  const keys = [
+    { id: 'u1001', sk: 1001 },
+    { id: 'u1002', sk: 1002 },
+    { id: 'u1003', sk: 1003 },
+    { id: 'u1004', sk: 1004 },
+    { id: 'u1005', sk: 1005 },
+    { id: 'u1006', sk: 1006 },
+    { id: 'u1007', sk: 1007 },
+    { id: 'u1008', sk: 1008 },
+    { id: 'u1009', sk: 1009 },
+    { id: 'u1010', sk: 1010 },
+    { id: 'u1011', sk: 1011 },
+    { id: 'u1012', sk: 1012 }
+  ];
+
+  let strategy = 'range';
+
+  function hashCode(str) {
+    let h = 0;
+    for (let i = 0; i < str.length; i++) {
+      h = ((h << 5) - h + str.charCodeAt(i)) | 0;
+    }
+    return Math.abs(h);
+  }
+
+  function routeRange(sk) {
+    if (sk <= 1003) return 'A';
+    if (sk <= 1006) return 'B';
+    if (sk <= 1009) return 'C';
+    return 'D';
+  }
+
+  function routeHash(sk) {
+    return SHARD_IDS[hashCode(String(sk)) % SHARD_IDS.length];
+  }
+
+  function routeKey(entry) {
+    return strategy === 'range' ? routeRange(entry.sk) : routeHash(entry.sk);
+  }
+
+  function noteFor(entry, shard) {
+    if (strategy === 'range') {
+      if (shard === 'D' && entry.sk >= 1010) {
+        return '新 ID 區間 → hot 候選';
+      }
+      if (entry.sk <= 1003) return '舊用戶區間';
+      return '—';
+    }
+    return 'hash 打散';
+  }
+
+  function countByShard(routes) {
+    const counts = {};
+    SHARD_IDS.forEach(function (id) { counts[id] = 0; });
+    routes.forEach(function (r) { counts[r.shard] += 1; });
+    return counts;
+  }
+
+  function loadLevel(count, max) {
+    if (max === 0) return 'idle';
+    const ratio = count / max;
+    if (ratio >= 0.85) return 'hot';
+    if (ratio >= 0.55) return 'warn';
+    if (count === 0) return 'idle';
+    return 'ok';
+  }
+
+  function renderShards(counts) {
+    const max = Math.max.apply(null, SHARD_IDS.map(function (id) { return counts[id]; }));
+    shardsEl.innerHTML = '';
+    SHARD_IDS.forEach(function (id) {
+      const count = counts[id];
+      const level = loadLevel(count, max);
+      const card = document.createElement('div');
+      card.className = 'sh-shard-card' + (level === 'hot' ? ' level-hot' : level === 'warn' ? ' level-warn' : level === 'ok' ? ' level-ok' : '');
+      card.innerHTML =
+        '<div class="sh-name">Shard ' + id + '</div>' +
+        '<div class="sh-count">' + count + '</div>' +
+        '<div class="sh-label">keys</div>';
+      shardsEl.appendChild(card);
+    });
+  }
+
+  function renderTable(routes) {
+    tbody.innerHTML = '';
+    routes.forEach(function (r) {
+      const tr = document.createElement('tr');
+      const note = r.note;
+      const noteHtml = note.indexOf('hot') >= 0
+        ? '<span class="sh-badge hot">' + note + '</span>'
+        : note;
+      tr.innerHTML =
+        '<td><code>' + r.id + '</code></td>' +
+        '<td><var>' + r.sk + '</var></td>' +
+        '<td><strong>Shard ' + r.shard + '</strong></td>' +
+        '<td>' + noteHtml + '</td>';
+      tbody.appendChild(tr);
+    });
+  }
+
+  function statusMessage(counts) {
+    if (strategy === 'range') {
+      const dCount = counts.D;
+      return 'Range：key 依 ID 區間路由；Shard D 目前持有 ' + dCount + ' 個 key（含最新 ID 1010–1012），展示 range skew 風險。';
+    }
+    const spread = SHARD_IDS.map(function (id) { return id + ':' + counts[id]; }).join(', ');
+    return 'Hash：key 經 hash 映射到 4 shard，分布較均勻（' + spread + '）。';
+  }
+
+  function render() {
+    const routes = keys.map(function (entry) {
+      const shard = routeKey(entry);
+      return {
+        id: entry.id,
+        sk: entry.sk,
+        shard: shard,
+        note: noteFor(entry, shard)
+      };
+    });
+    const counts = countByShard(routes);
+    renderShards(counts);
+    renderTable(routes);
+    statusEl.textContent = statusMessage(counts);
+  }
+
+  function setStrategy(next) {
+    strategy = next;
+    buttons.forEach(function (btn) {
+      btn.setAttribute('aria-pressed', btn.getAttribute('data-strategy') === next ? 'true' : 'false');
+    });
+    render();
+  }
+
+  buttons.forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      setStrategy(btn.getAttribute('data-strategy'));
+    });
+  });
+
+  if (resetBtn) {
+    resetBtn.addEventListener('click', function () {
+      setStrategy('range');
+    });
+  }
+
+  render();
+})();
+</script>
