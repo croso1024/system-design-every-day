@@ -75,7 +75,9 @@ function buildBooksIndexHtml(completed) {
           尚無已完成的主題。Agent 完成第一篇後，目錄會自動更新。
         </div>`;
 
-  const mermaidDiagram = generateMermaid();
+  // 傳入 in-memory completed，讓 mermaid 節點狀態與上方卡片同源（勿讓 generateMermaid 自行讀磁碟，
+  // 否則會在「尚未 saveCompleted」的呼叫端出現節點落後的 off-by-one bug）。
+  const mermaidDiagram = generateMermaid(completed);
 
   return `<!DOCTYPE html>
 <html lang="zh-Hant">
