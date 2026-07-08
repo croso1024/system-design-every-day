@@ -4,7 +4,10 @@
  * Assemble a topic page from templates/base.html and draft content files.
  *
  * Usage:
- *   node scripts/generate.js --topic <topic-id> --title "Topic Title" [--category "Category"]
+ *   node scripts/generate.js --topic <topic-id> --title "Topic Title" [--category "Category"] [--keep-date]
+ *
+ *   --keep-date  更新既有文件時保留 completed.json 原始 completed_at（不 bump 成今天）。
+ *                供 topic-reviser 修訂流程使用；新建主題請省略此旗標。
  *
  * Draft files (created by Agent before running this script):
  *   drafts/<topic-id>/content.html   - HTML body content (injected into CONTENT_PLACEHOLDER)
@@ -70,7 +73,7 @@ function main() {
   const category = args.category || 'General';
 
   if (!topicId || !title) {
-    console.error('Usage: node scripts/generate.js --topic <topic-id> --title "Topic Title" [--category "Category"]');
+    console.error('Usage: node scripts/generate.js --topic <topic-id> --title "Topic Title" [--category "Category"] [--keep-date]');
     process.exit(1);
   }
 
@@ -107,8 +110,21 @@ function main() {
   // ---- 階段一：純計算 (不落任何檔) ----
   const pageHtml = assemblePageHtml(template, { title, tocHtml, content, script });
 
-  const completedAt = new Date().toISOString().slice(0, 10);
+  const today = new Date().toISOString().slice(0, 10);
   const prevCompleted = loadCompleted();
+
+  // --keep-date：更新既有文件時保留原始 completed_at（更新 ≠ 重新完成），避免 upsert 把日期 bump 成今天。
+  // 僅在 completed.json 已有該主題且帶 completed_at 時生效；否則（新主題）退回今天。
+  let completedAt = today;
+  if (args['keep-date']) {
+    const existing = prevCompleted.find((item) => item.id === topicId);
+    if (existing && existing.completed_at) {
+      completedAt = existing.completed_at;
+    } else {
+      console.warn(`--keep-date：docs/completed.json 尚無 "${topicId}" 或缺 completed_at，改用今天 ${today}。`);
+    }
+  }
+
   const nextCompleted = upsertCompleted(prevCompleted, {
     id: topicId,
     title,
