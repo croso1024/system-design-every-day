@@ -1,0 +1,257 @@
+<script>
+(function () {
+  'use strict';
+
+  var DOCS = [
+    { id: 'doc1', title: 'Doc 1 · 2PC', body: '分散式 交易 使用 兩階段 提交 協調者 一致性', visible: true },
+    { id: 'doc2', title: 'Doc 2 · Replication', body: '資料 複寫 主從 架構 最終 一致 延遲', visible: true },
+    { id: 'doc3', title: 'Doc 3 · Sharding', body: '資料 分片 雜湊 路由 分散式 擴展', visible: true }
+  ];
+
+  var pendingDoc = null;
+  var analyzer = 'standard';
+  var totalDocs = 3;
+
+  function $(id) { return document.getElementById(id); }
+
+  function tokenize(text, mode) {
+    if (mode === 'keyword') {
+      return [text.trim().toLowerCase()].filter(Boolean);
+    }
+    return text.toLowerCase()
+      .replace(/[^\w\u4e00-\u9fff\s]/g, ' ')
+      .split(/\s+/)
+      .filter(function (t) { return t.length > 0; });
+  }
+
+  function buildIndex(docs, mode) {
+    var index = {};
+    docs.forEach(function (doc) {
+      if (!doc.visible) return;
+      var tokens = tokenize(doc.body, mode);
+      var tfMap = {};
+      tokens.forEach(function (t) {
+        tfMap[t] = (tfMap[t] || 0) + 1;
+      });
+      Object.keys(tfMap).forEach(function (term) {
+        if (!index[term]) index[term] = [];
+        index[term].push({ docId: doc.id, tf: tfMap[term] });
+      });
+    });
+    return index;
+  }
+
+  function bm25Score(term, posting, N, avgdl, docLen) {
+    var df = posting.length;
+    var idf = Math.log(1 + (N - df + 0.5) / (df + 0.5));
+    var tf = posting.find(function (p) { return p.docId === term.docId; });
+    if (!tf) return 0;
+    var f = tf.tf;
+    var k1 = 1.2;
+    var b = 0.75;
+    var tfNorm = (f * (k1 + 1)) / (f + k1 * (1 - b + b * (docLen / avgdl)));
+    return idf * tfNorm;
+  }
+
+  function scoreDoc(doc, queryTerms, index, allDocs) {
+    var visibleDocs = allDocs.filter(function (d) { return d.visible; });
+    var N = visibleDocs.length || 1;
+    var lens = visibleDocs.map(function (d) { return tokenize(d.body, analyzer).length; });
+    var avgdl = lens.reduce(function (a, b) { return a + b; }, 0) / (lens.length || 1);
+    var docLen = tokenize(doc.body, analyzer).length;
+    var score = 0;
+    queryTerms.forEach(function (qt) {
+      var posting = index[qt];
+      if (!posting) return;
+      var hit = posting.find(function (p) { return p.docId === doc.id; });
+      if (hit) {
+        score += bm25Score({ docId: doc.id }, posting, N, avgdl, docLen);
+      }
+    });
+    return score;
+  }
+
+  function renderCorpus() {
+    var el = $('demo-corpus');
+    if (!el) return;
+    el.innerHTML = '';
+    DOCS.forEach(function (doc) {
+      var row = document.createElement('div');
+      row.style.cssText = 'font-size:12.5px;padding:6px 0;border-bottom:1px solid var(--border);display:flex;gap:8px;align-items:flex-start';
+      var dot = document.createElement('i');
+      dot.className = 'dot ' + (doc.visible ? 'ns-ok' : 'ns-wait');
+      dot.style.flexShrink = '0';
+      dot.style.marginTop = '4px';
+      var txt = document.createElement('span');
+      txt.innerHTML = '<b style="font-family:var(--mono);font-size:11px">' + doc.id + '</b> ' + doc.body;
+      row.appendChild(dot);
+      row.appendChild(txt);
+      el.appendChild(row);
+    });
+    if (pendingDoc) {
+      var prow = document.createElement('div');
+      prow.style.cssText = 'font-size:12.5px;padding:6px 0;display:flex;gap:8px;align-items:flex-start;opacity:.85';
+      var pdot = document.createElement('i');
+      pdot.className = 'dot ns-wait';
+      pdot.style.flexShrink = '0';
+      pdot.style.marginTop = '4px';
+      var ptxt = document.createElement('span');
+      ptxt.innerHTML = '<b style="font-family:var(--mono);font-size:11px">' + pendingDoc.id + '</b> ' + pendingDoc.body + ' <span style="color:var(--warn)">(buffer)</span>';
+      prow.appendChild(pdot);
+      prow.appendChild(ptxt);
+      el.appendChild(prow);
+    }
+  }
+
+  function renderIndex() {
+    var el = $('demo-index');
+    if (!el) return;
+    var index = buildIndex(DOCS, analyzer);
+    var terms = Object.keys(index).sort();
+    if (!terms.length) {
+      el.textContent = '(empty — no visible docs)';
+      return;
+    }
+    el.innerHTML = terms.map(function (term) {
+      var plist = index[term].map(function (p) { return p.docId + ':' + p.tf; }).join(', ');
+      return '<div><span style="color:var(--accent)">' + term + '</span> → [' + plist + ']</div>';
+    }).join('');
+  }
+
+  function renderResults(query) {
+    var el = $('demo-results');
+    if (!el) return;
+    var q = (query || '').trim();
+    if (!q) {
+      el.innerHTML = '<span style="color:var(--text-3);font-size:13px">輸入查詢後按「搜尋」</span>';
+      return;
+    }
+    var queryTerms = tokenize(q, analyzer);
+    var index = buildIndex(DOCS, analyzer);
+    var hits = DOCS.filter(function (d) { return d.visible; })
+      .map(function (doc) {
+        return { doc: doc, score: scoreDoc(doc, queryTerms, index, DOCS) };
+      })
+      .filter(function (h) { return h.score > 0; })
+      .sort(function (a, b) { return b.score - a.score; });
+
+    if (!hits.length) {
+      el.innerHTML = '<span style="color:var(--bad);font-size:13px">0 hits — terms: [' + queryTerms.join(', ') + ']</span>';
+      return;
+    }
+
+    el.innerHTML = hits.map(function (h, i) {
+      var rank = i + 1;
+      var cls = rank === 1 ? 'ns-ok' : 'ns-idle';
+      return '<div style="display:flex;align-items:center;gap:10px;padding:6px 0;border-bottom:1px solid var(--border);font-size:13px">' +
+        '<span style="font-family:var(--mono);font-size:11px;color:var(--text-3);width:20px">#' + rank + '</span>' +
+        '<i class="dot ' + cls + '"></i>' +
+        '<span style="flex:1"><b>' + h.doc.id + '</b> — ' + h.doc.body.substring(0, 40) + '…</span>' +
+        '<span style="font-family:var(--mono);font-size:11px;color:var(--accent)">score ' + h.score.toFixed(2) + '</span>' +
+        '</div>';
+    }).join('');
+  }
+
+  function setStatus(msg) {
+    var el = $('demo-status');
+    if (el) el.textContent = msg;
+  }
+
+  function runSearch() {
+    var q = $('search-query') ? $('search-query').value : '';
+    var queryTerms = tokenize(q, analyzer);
+    renderIndex();
+    renderResults(q);
+    setStatus('Query terms [' + queryTerms.join(', ') + '] · Analyzer=' + analyzer + ' · Visible docs=' + DOCS.filter(function (d) { return d.visible; }).length + (pendingDoc ? ' · 1 doc in buffer (未 refresh)' : ''));
+  }
+
+  function resetDemo() {
+    DOCS = [
+      { id: 'doc1', title: 'Doc 1 · 2PC', body: '分散式 交易 使用 兩階段 提交 協調者 一致性', visible: true },
+      { id: 'doc2', title: 'Doc 2 · Replication', body: '資料 複寫 主從 架構 最終 一致 延遲', visible: true },
+      { id: 'doc3', title: 'Doc 3 · Sharding', body: '資料 分片 雜湊 路由 分散式 擴展', visible: true }
+    ];
+    pendingDoc = null;
+    totalDocs = 3;
+    analyzer = 'standard';
+    document.querySelectorAll('[data-analyzer]').forEach(function (btn) {
+      btn.setAttribute('aria-pressed', btn.getAttribute('data-analyzer') === 'standard' ? 'true' : 'false');
+    });
+    if ($('search-query')) $('search-query').value = '分散式 交易';
+    renderCorpus();
+    renderIndex();
+    renderResults('分散式 交易');
+    setStatus('已重置：預設查詢「分散式 交易」，doc1 應為最高分。');
+  }
+
+  function bindSeg(selector, attr, onSelect) {
+    document.querySelectorAll(selector).forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        document.querySelectorAll(selector).forEach(function (b) {
+          b.setAttribute('aria-pressed', 'false');
+        });
+        btn.setAttribute('aria-pressed', 'true');
+        onSelect(btn.getAttribute(attr));
+      });
+    });
+  }
+
+  bindSeg('[data-analyzer]', 'data-analyzer', function (val) {
+    analyzer = val;
+    setStatus('Analyzer 切換為 ' + val + (val === 'keyword' ? '（整句當單一 term）' : '（空白分詞 + lowercase）') + ' — 重新索引中…');
+    renderIndex();
+    runSearch();
+  });
+
+  if ($('btn-search')) {
+    $('btn-search').addEventListener('click', runSearch);
+  }
+  if ($('search-query')) {
+    $('search-query').addEventListener('keydown', function (e) {
+      if (e.key === 'Enter') runSearch();
+    });
+  }
+
+  if ($('btn-index-new')) {
+    $('btn-index-new').addEventListener('click', function () {
+      if (pendingDoc) {
+        setStatus('已有 doc 在 buffer 中，請先 Refresh 或 Reset。');
+        return;
+      }
+      totalDocs += 1;
+      pendingDoc = {
+        id: 'doc' + totalDocs,
+        title: 'Doc ' + totalDocs + ' · New',
+        body: '分散式 交易 Saga 模式 補償 最終一致',
+        visible: false
+      };
+      renderCorpus();
+      renderIndex();
+      setStatus('新 doc 已寫入 memory buffer（' + pendingDoc.id + '），對搜尋不可見。按 Refresh 後再搜「Saga」可找到。');
+    });
+  }
+
+  if ($('btn-refresh')) {
+    $('btn-refresh').addEventListener('click', function () {
+      if (!pendingDoc) {
+        setStatus('Buffer 為空，無需 Refresh。');
+        return;
+      }
+      pendingDoc.visible = true;
+      DOCS.push(pendingDoc);
+      var id = pendingDoc.id;
+      pendingDoc = null;
+      renderCorpus();
+      renderIndex();
+      runSearch();
+      setStatus('Refresh 完成：' + id + ' flush 成新 segment，現在可搜尋。');
+    });
+  }
+
+  if ($('btn-reset')) {
+    $('btn-reset').addEventListener('click', resetDemo);
+  }
+
+  resetDemo();
+})();
+</script>

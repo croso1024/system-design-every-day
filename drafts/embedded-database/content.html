@@ -1,0 +1,450 @@
+<section id="s1">
+  <div class="sec-head">
+    <span class="sec-num">01</span>
+    <h2>總覽與定位</h2>
+  </div>
+  <p class="sec-sub">嵌入式資料庫解決什麼痛？與 Client-Server DB、分散式 SQL 在系統設計版圖中的座標。</p>
+
+  <p>當你的服務跑在<strong>行動 App、IoT 閘道器、邊緣節點、或單機 Daemon</strong>上，往往無法（也不該）每次都連遠端 PostgreSQL——你需要一個<strong>跟著程序走、零網路依賴</strong>的儲存層。<strong>嵌入式資料庫（Embedded Database）</strong>把引擎打包成 library，以 in-process 方式被應用直接連結，資料通常落在本地檔案或記憶體中。</p>
+
+  <p>但「嵌入式」底下其實有<strong>兩條截然不同的產品線</strong>，面試與架構決策時必須分清楚：</p>
+  <ul>
+    <li><strong>嵌入式關聯型 / 應用直連</strong>（以 <strong>SQLite</strong> 為代表）：開發者直接寫 SQL、拿 ACID transaction，像用小型 PostgreSQL 一樣。</li>
+    <li><strong>嵌入式儲存引擎 / 被上層系統當底層</strong>（以 <strong>RocksDB</strong> 為代表）：不提供完整 SQL，而是 Key-Value + LSM-Tree 寫入路徑，被 Kafka、Flink、MySQL/Rocks 等當 storage engine。</li>
+  </ul>
+
+  <div class="callout accent">
+    <div class="c-title"><span class="ic">座標</span>Embedded DB vs Client-Server vs Distributed SQL</div>
+    <p>
+      • <strong>Client-Server DB（PG / MySQL）</strong>：獨立程序、網路協定、多 client 共享，適合多租戶後端。
+      <br>• <strong>Embedded DB（SQLite / RocksDB）</strong>：in-process、低延遲、離線可用，適合 edge / 單機 / 被其他 DB 嵌入。
+      <br>• <strong>Distributed SQL（Cockroach / TiDB）</strong>：水平擴展 + SQL，與嵌入式<strong>場景互斥</strong>——不是「升級版 SQLite」，而是不同問題域。
+      <br>實務常見：<code>Mobile App → SQLite</code>、<code>Stream Processor state → RocksDB</code>、<code>後端 SoT → PostgreSQL</code>。
+    </p>
+  </div>
+
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>維度</th>
+          <th>SQLite</th>
+          <th>RocksDB</th>
+          <th>PostgreSQL</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><strong>定位</strong></td>
+          <td class="hl">應用直連的嵌入式 RDBMS</td>
+          <td class="hl">嵌入式 KV 儲存引擎</td>
+          <td>Client-Server RDBMS</td>
+        </tr>
+        <tr>
+          <td><strong>API</strong></td>
+          <td>SQL + prepared statement</td>
+          <td>Get / Put / Iterator</td>
+          <td>SQL over wire</td>
+        </tr>
+        <tr>
+          <td><strong>儲存結構</strong></td>
+          <td>B-Tree（單檔 .db）</td>
+          <td>LSM-Tree（SST + WAL）</td>
+          <td>B-Tree / 可插拔 engine</td>
+        </tr>
+        <tr>
+          <td><strong>並發模型</strong></td>
+          <td>DB 級寫鎖、WAL 模式可多读</td>
+          <td>Column Family 並行寫</td>
+          <td>MVCC + 連線池</td>
+        </tr>
+        <tr>
+          <td><strong>典型場景</strong></td>
+          <td>手機離線快取、桌面 App、邊緣閘道</td>
+          <td>Kafka log、Flink state、MyRocks</td>
+          <td>後端 SoT、多租戶 SaaS</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="cap">面試高分：能說清楚「SQLite 給應用寫 SQL」與「RocksDB 給系統當 engine」是兩種嵌入式，不是同一類產品的競品。</p>
+
+  <div class="oneliner">
+    <b>一句話答法</b>嵌入式 DB 分兩派——SQLite 是 in-process 關聯型給 App 直連；RocksDB 是 LSM-Tree KV engine 給 Kafka / Flink / MySQL 當底層，兩者互補而非互斥。
+  </div>
+</section>
+
+<hr class="div">
+
+<section id="s2">
+  <div class="sec-head">
+    <span class="sec-num">02</span>
+    <h2>SQLite：嵌入式關聯型，直接給應用用</h2>
+  </div>
+  <p class="sec-sub">單檔、零部署、ACID——行動與邊緣場景的預設選項，但並發寫入與多程序共享有硬上限。</p>
+
+  <p><strong>SQLite</strong> 是全球部署量最大的資料庫之一（幾乎每支手機都有）。它把整個 DB 存成<strong>單一 .db 檔</strong>，引擎以 library 形式連結進 App process，查詢走 B-Tree 頁面結構，支援完整 SQL、索引、transaction、foreign key。</p>
+
+  <h3>為什麼 Edge / Mobile 愛 SQLite？</h3>
+  <ul>
+    <li><strong>零運維</strong>：不需起 DB server、不需 port、不需帳密輪替。</li>
+    <li><strong>離線優先</strong>：地鐵、工廠內網斷線時仍可讀寫本地 SoT，恢復連線再 sync 上雲。</li>
+    <li><strong>可預測延遲</strong>：in-process 呼叫，無 network RTT；簡單 point lookup 微秒～毫秒級。</li>
+    <li><strong>ACID 語意完整</strong>：<code>BEGIN … COMMIT</code> 真正 rollback，適合本地業務狀態機。</li>
+  </ul>
+
+  <pre><code>-- 典型 Android / iOS / Electron 本地快取
+CREATE TABLE sync_queue (
+  id INTEGER PRIMARY KEY,
+  payload TEXT NOT NULL,
+  status TEXT DEFAULT 'pending',
+  updated_at INTEGER
+);
+CREATE INDEX idx_status ON sync_queue(status);
+
+BEGIN IMMEDIATE;
+UPDATE sync_queue SET status = 'syncing' WHERE id = ?;
+-- 上傳成功後 COMMIT，失敗 ROLLBACK 恢復 pending
+COMMIT;</code></pre>
+
+  <h3>並發與 WAL 模式</h3>
+  <p>預設 rollback journal 下，SQLite 同一時間<strong>只允許一個 writer</strong>（DB 級鎖）。開啟 <strong>WAL（Write-Ahead Log）</strong> 後可<strong>多读單寫</strong>：reader 讀舊 snapshot，writer append WAL，適合讀多寫少的本地 cache。</p>
+
+  <div class="callout warn">
+    <div class="c-title"><span class="ic">陷阱</span>把 SQLite 當多寫入後端 DB</div>
+    <p>十幾個微服務同時寫同一個 .db 檔——即使 WAL 也會在 writer 鎖上排隊，P99 飆升。SQLite 設計假設是<strong>單 process 或少量協調寫入</strong>；高並發寫入請用 Client-Server DB，SQLite 只當 edge replica / cache。</p>
+  </div>
+
+  <div class="callout accent">
+    <div class="c-title"><span class="ic">實務</span>Edge 同步模式</div>
+    <p>
+      1. 本地 SQLite 為<strong>離線 SoT</strong>（使用者操作立即落盤）。
+      <br>2. Background worker 批次 push 到雲端 API（PostgreSQL SoT）。
+      <br>3. Conflict resolution：LWW（Last-Write-Wins）、CRDT、或 server authoritative merge。
+      <br>4. 注意 <code>PRAGMA synchronous</code> / <code>journal_mode</code> 與裝置儲存速度的平衡。
+    </p>
+  </div>
+
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>設定</th>
+          <th>效果</th>
+          <th>取捨</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><code>journal_mode=WAL</code></td>
+          <td>多读單寫、寫入不阻塞讀</td>
+          <td>需額外 -wal / -shm 檔；備份需 checkpoint</td>
+        </tr>
+        <tr>
+          <td><code>synchronous=NORMAL</code></td>
+          <td>平衡 durability 與速度</td>
+          <td>極端斷電可能丟最後一個 transaction</td>
+        </tr>
+        <tr>
+          <td><code>synchronous=FULL</code></td>
+          <td>每次 commit fsync</td>
+          <td>慢但最安全；金融級本地帳本可考慮</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="oneliner">
+    <b>一句話答法</b>SQLite = 單檔 in-process SQL + ACID，適合 mobile / edge 離線 SoT；WAL 改善讀並發，但多 writer 場景仍應換 Client-Server DB。
+  </div>
+</section>
+
+<hr class="div">
+
+<section id="s3">
+  <div class="sec-head">
+    <span class="sec-num">03</span>
+    <h2>RocksDB：嵌入式 LSM 儲存引擎，被系統當底層</h2>
+  </div>
+  <p class="sec-sub">不提供 SQL——以 LSM-Tree 優化寫入吞吐，是 Kafka、Flink、MyRocks 等元件的 storage substrate。</p>
+
+  <p><strong>RocksDB</strong> 源自 Facebook 對 LevelDB 的強化，是<strong>嵌入式 Key-Value store</strong>，底層採 <strong>LSM-Tree（Log-Structured Merge-Tree）</strong>：寫入先進 MemTable（記憶體），滿了 flush 成不可變 SST 檔，背景 compaction 合併層級。這與 SQLite 的 B-Tree「原地更新頁面」路徑截然不同——<strong>寫入放大換讀取與寫入吞吐</strong>。</p>
+
+  <h3>LSM 寫入路徑（呼應 LSM-Tree 概念）</h3>
+  <ol>
+    <li><strong>WAL append</strong>：先寫順序 log 保 durability，crash 可 replay。</li>
+    <li><strong>MemTable insert</strong>：記憶體內 sorted structure（often skiplist），寫入 O(log n) 且 sequential I/O 友善。</li>
+    <li><strong>Flush → L0 SST</strong>：MemTable 滿了 immutable 並 flush 成 SST 檔。</li>
+    <li><strong>Compaction</strong>：背景 merge L0→L1→… 移除 tombstone、降低 read amplification。</li>
+  </ol>
+
+  <div class="callout accent">
+    <div class="c-title"><span class="ic">關鍵</span>RocksDB 不是給 App 開發者寫 CRUD 的</div>
+    <p>你通常<strong>不會</strong>在產品 code 裡直接 <code>db.Put("user:1", …)</code> 當主 DB——而是<strong>基礎設施團隊</strong>把 RocksDB 嵌進：
+      <br>• <strong>Apache Kafka</strong>：broker local log segments（新版 tiered storage 亦相關）
+      <br>• <strong>Apache Flink</strong>：RocksDBStateBackend 存 checkpoint / keyed state
+      <br>• <strong>MySQL + MyRocks</strong>：用 Rocks 取代 InnoDB 作 storage engine
+      <br>• <strong>TiKV / Cockroach</strong> 等亦受 LSM 思路影響
+    </p>
+  </div>
+
+  <h3>Column Family 與 Tune 旋鈕</h3>
+  <p>RocksDB 用 <strong>Column Family（CF）</strong> 在同一 DB 實例邏輯分割 keyspace，各自 compaction 策略。Tune 重點：</p>
+
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>參數 / 概念</th>
+          <th>影響</th>
+          <th>面試怎麼講</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><code>write_buffer_size</code></td>
+          <td>MemTable 大小 → flush 頻率</td>
+          <td>大 buffer 減 flush 次數但增 memory</td>
+        </tr>
+        <tr>
+          <td><code>compaction_style</code> (level / universal)</td>
+          <td>合併策略與 write amp</td>
+          <td>寫多選 level compaction 常見；讀延遲敏感要顧 L0 檔數</td>
+        </tr>
+        <tr>
+          <td><code>max_background_jobs</code></td>
+          <td>compaction 並行度</td>
+          <td>compaction 跟不上 → L0 堆積 → read amp 爆炸</td>
+        </tr>
+        <tr>
+          <td>Tombstone / TTL</td>
+          <td>刪除標記需 compaction 才真正清</td>
+          <td>「刪了 key 為何還佔空間？」→ 等 compaction</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="callout warn">
+    <div class="c-title"><span class="ic">陷阱</span>Compaction 跟不上寫入</div>
+    <p>L0 SST 堆太多檔案，每次 read 要查多個 SST（read amplification↑），P99 延遲惡化。Flink checkpoint 密集寫入 + 小 MemTable + 少 background job 是典型踩雷組合——需監控 <code>pending_compaction_bytes</code> 與 stall 次數。</p>
+  </div>
+
+  <div class="oneliner">
+    <b>一句話答法</b>RocksDB 是 LSM-Tree 嵌入式 KV engine，給 Kafka / Flink / MyRocks 當底層；寫入走 WAL→MemTable→SST→Compaction，Tune 重點是 compaction 與 write/read amplification 平衡。
+  </div>
+</section>
+
+<hr class="div">
+
+<section id="s4">
+  <div class="sec-head">
+    <span class="sec-num">04</span>
+    <h2>SQLite vs RocksDB：怎麼選、怎麼共存</h2>
+  </div>
+  <p class="sec-sub">一個回答「App 怎麼存資料」，一個回答「系統元件怎麼持久化 state」——決策樹與共存架構。</p>
+
+  <h3>決策樹</h3>
+  <ul>
+    <li>需要 <strong>SQL、JOIN、離線 App cache</strong> → <strong>SQLite</strong></li>
+    <li>你在寫 <strong>DB / MQ / Stream Processor</strong> 本身，要高寫入 KV + 可 tune LSM → <strong>RocksDB</strong></li>
+    <li>需要 <strong>多 client 高並發寫入、跨機 HA</strong> → 都不是嵌入式答案，上 <strong>PostgreSQL / Distributed SQL</strong></li>
+  </ul>
+
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>Trade-off</th>
+          <th>SQLite</th>
+          <th>RocksDB</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><strong>開發者體驗</strong></td>
+          <td class="hl">SQL 生態成熟</td>
+          <td>需懂 KV + LSM tune</td>
+        </tr>
+        <tr>
+          <td><strong>寫入模式</strong></td>
+          <td>B-Tree 原地更新，隨機寫</td>
+          <td>LSM 順序寫友好，寫吞吐高</td>
+        </tr>
+        <tr>
+          <td><strong>讀取模式</strong></td>
+          <td>索引 point lookup 快</td>
+          <td>Range scan 需跨 SST，受 compaction 影響</td>
+        </tr>
+        <tr>
+          <td><strong>部署形態</strong></td>
+          <td>單檔複製即備份</td>
+          <td>目錄樹 + SST，需理解 live file set</td>
+        </tr>
+        <tr>
+          <td><strong>誰來維護</strong></td>
+          <td>App 工程師</td>
+          <td>平台 / 基礎設施工程師</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="callout accent">
+    <div class="c-title"><span class="ic">實務</span>同一產品裡兩者共存</div>
+    <p>
+      智慧工廠 Edge Gateway：<strong>SQLite</strong> 存本地感測器採樣與離線告警佇列（App 層 SQL）；閘道器上跑的<strong>輕量 stream processor</strong> 視窗聚合 state 用 <strong>RocksDB</strong>（元件內嵌 engine）。
+      <br>雲端 SoT 仍是 <strong>PostgreSQL</strong>——嵌入式只負責 edge 低延遲與離線，不做全局一致性的唯一來源。
+    </p>
+  </div>
+
+  <div class="callout warn">
+    <div class="c-title"><span class="ic">陷阱</span>用 RocksDB 重新發明 SQL</div>
+    <p>在 RocksDB 上自己實作 secondary index、transaction、query planner——除非你在做資料庫公司，否則應直接用 SQLite（要 SQL）或 PostgreSQL（要 server）。RocksDB 的價值是<strong>當 engine 被嵌入</strong>，不是當 App ORM 的替代品。</p>
+  </div>
+
+  <div class="oneliner">
+    <b>一句話答法</b>App 要 SQL 離線 → SQLite；基礎設施要高寫入 KV engine → RocksDB；兩者可共存於 edge 不同層，全局 SoT 仍應在 Client-Server DB。
+  </div>
+</section>
+
+<hr class="div">
+
+<section id="s5">
+  <div class="sec-head">
+    <span class="sec-num">05</span>
+    <h2>互動 Demo：SQLite WAL 交易 vs RocksDB LSM 寫入路徑</h2>
+  </div>
+  <p class="sec-sub">切換引擎模式，逐步觀察 SQLite 的 BEGIN/COMMIT 與 RocksDB 的 WAL→MemTable→Flush→Compaction 差異。</p>
+
+  <p>下方模擬兩種嵌入式引擎處理同一批寫入請求的路徑。SQLite 模式展示 transaction 狀態與 WAL checkpoint；RocksDB 模式展示 LSM 各層資料量與 compaction 如何影響 read amplification。</p>
+
+  <div class="demo" id="demo-embedded">
+    <div class="demo-bar">
+      <span class="label">互動 · 嵌入式引擎寫入路徑</span>
+      <span class="label" style="text-transform:none;font-family:var(--sans);font-size:12px;color:var(--text-2)">切換 SQLite / RocksDB，逐步寫入或觸發 compaction</span>
+    </div>
+    <div class="demo-body">
+      <div style="display:flex;flex-wrap:wrap;gap:12px;align-items:center;margin-bottom:14px">
+        <div class="seg" role="group" aria-label="引擎模式">
+          <button data-engine="sqlite" aria-pressed="true">SQLite (B-Tree + WAL)</button>
+          <button data-engine="rocksdb" aria-pressed="false">RocksDB (LSM-Tree)</button>
+        </div>
+        <button class="btn primary" id="btn-step" type="button">下一步</button>
+        <button class="btn" id="btn-batch" type="button">批次寫入 ×5</button>
+        <button class="btn" id="btn-compact" type="button">觸發 Compaction</button>
+        <button class="btn" id="btn-reset" type="button">Reset</button>
+      </div>
+
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:14px">
+        <div style="border:1px solid var(--border);border-radius:var(--radius-sm);padding:14px;background:var(--bg-soft);min-height:160px">
+          <div style="font-family:var(--mono);font-size:11px;color:var(--text-3);margin-bottom:8px">STORAGE LAYERS</div>
+          <div id="emb-layers" style="font-size:13px;line-height:2"></div>
+        </div>
+        <div style="border:1px solid var(--border);border-radius:var(--radius-sm);padding:14px;background:#ffffff;min-height:160px">
+          <div style="font-family:var(--mono);font-size:11px;color:var(--text-3);margin-bottom:8px">PIPELINE / TX STATE</div>
+          <div id="emb-pipeline" style="font-family:var(--mono);font-size:12px;line-height:1.8"></div>
+        </div>
+      </div>
+
+      <div style="border:1px solid var(--border);border-radius:var(--radius-sm);padding:12px;background:#ffffff;margin-bottom:14px">
+        <div style="font-family:var(--mono);font-size:11px;color:var(--text-3);margin-bottom:8px">METRICS</div>
+        <div id="emb-metrics" style="display:flex;flex-wrap:wrap;gap:16px;font-size:13px"></div>
+      </div>
+
+      <div class="legend">
+        <span><i class="dot ns-idle"></i>閒置 / 就緒</span>
+        <span><i class="dot ns-lock"></i>寫入中 / MemTable</span>
+        <span><i class="dot ns-wait"></i>WAL / Flush</span>
+        <span><i class="dot ns-ok"></i>已提交 / SST</span>
+        <span><i class="dot ns-bad"></i>Stall / 阻塞</span>
+      </div>
+
+      <div class="status-line" id="emb-status">
+        SQLite 模式：按「下一步」模擬 BEGIN → WAL append → B-Tree update → COMMIT → checkpoint。
+      </div>
+    </div>
+  </div>
+  <p class="cap">Demo 簡化真實引擎內部結構，目的在對比「SQL transaction 路徑」與「LSM 分層寫入 + compaction」的思維模型。</p>
+
+  <div class="oneliner">
+    <b>一句話答法</b>Demo 對比 SQLite 的 transaction+WAL 與 RocksDB 的 LSM 分層；後者需持續監控 compaction 與 read amplification，前者需理解單 writer 與 WAL 取捨。
+  </div>
+</section>
+
+<hr class="div">
+
+<section id="s6">
+  <div class="sec-head">
+    <span class="sec-num">06</span>
+    <h2>面試考點與架構折衷</h2>
+  </div>
+  <p class="sec-sub">Edge 離線同步怎麼設計？Flink 為何預設 RocksDB state？何時 SQLite 不該硬撐？</p>
+
+  <h3>高頻考點</h3>
+
+  <div class="callout accent">
+    <div class="c-title"><span class="ic">考點 1</span>「Mobile App 本地資料怎麼存？」</div>
+    <p><strong>回答框架</strong>：
+      <br>1. 離線 SoT 用 <strong>SQLite</strong>（ACID、單檔、WAL 多读）。
+      <br>2. 同步策略：queue + batch upload、conflict resolution（LWW / server wins）。
+      <br>3. 敏感資料：<code>SQLCipher</code> 或 OS Keychain 加密 key。
+      <br>4. 不要多 service 寫同一 .db；全局一致性交給雲端 PG。</p>
+  </div>
+
+  <div class="callout accent">
+    <div class="c-title"><span class="ic">考點 2</span>「Flink 為什麼用 RocksDB 做 state？」</div>
+    <p>Keyed state 可能<strong>大於 heap</strong>，需 spill 到本地 disk。RocksDB LSM <strong>寫入吞吐高</strong>、支援 iterator scan window state，且 embedded 無需外部 DB 運維。代價是 checkpoint 時需 snapshot SST + 上傳 DFS，compaction 與 disk I/O 要 tune。</p>
+  </div>
+
+  <div class="callout accent">
+    <div class="c-title"><span class="ic">考點 3</span>「SQLite 和 RocksDB 差在哪？」</div>
+    <p>• <strong>抽象層級</strong>：SQLite = SQL RDBMS for apps；RocksDB = KV engine for systems。
+      <br>• <strong>資料結構</strong>：B-Tree vs LSM-Tree。
+      <br>• <strong>並發</strong>：SQLite 單 writer；RocksDB 多 CF 並行寫但無 SQL transaction 跨行語意。
+      <br>• <strong>運維</strong>：SQLite 拷貝 .db 即備份；RocksDB 需理解 SST + checkpoint + compaction backlog。</p>
+  </div>
+
+  <div class="callout warn">
+    <div class="c-title"><span class="ic">陷阱</span>Edge 只谈 SQLite 不谈 sync</div>
+    <p>面試官追問「斷網三天後上線怎麼合併？」——必須講 <strong>version vector / logical clock / server authoritative merge</strong>，否則本地 ACID 無法延伸到分散式一致性。</p>
+  </div>
+
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>場景</th>
+          <th>推薦</th>
+          <th>避免</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>IoT 閘道離線快取</td>
+          <td class="hl">SQLite + 雲端 PG sync</td>
+          <td>嵌入式當唯一 global SoT</td>
+        </tr>
+        <tr>
+          <td>流處理大 state</td>
+          <td class="hl">RocksDBStateBackend</td>
+          <td>全放 heap 導致 OOM</td>
+        </tr>
+        <tr>
+          <td>微服務共享寫入</td>
+          <td>PostgreSQL / Redis</td>
+          <td>多 process 爭用 SQLite 檔案鎖</td>
+        </tr>
+        <tr>
+          <td>自研資料庫 storage 層</td>
+          <td>RocksDB / 自研 LSM</td>
+          <td>SQLite 當底層 engine</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="oneliner">
+    <b>一句話答法</b>Edge 用 SQLite 做離線 SQL SoT 並設計 sync；流處理與大 state 用 RocksDB embedded LSM；兩者服務不同層級，全局 HA 仍靠 Client-Server / Distributed DB。
+  </div>
+</section>

@@ -1,0 +1,312 @@
+<style>
+  svg circle {
+    transition: fill 0.3s, stroke 0.3s;
+  }
+  svg circle.ns-idle { fill: #ffffff; stroke: var(--border-strong); }
+  svg circle.ns-lock { fill: var(--warn-soft); stroke: var(--warn); }
+  svg circle.ns-ok { fill: var(--ok-soft); stroke: var(--ok); }
+  svg circle.ns-bad { fill: var(--bad-soft); stroke: var(--bad); }
+  svg circle.ns-wait { fill: var(--accent-soft); stroke: var(--accent); }
+  
+  circle#packet-write, circle#packet-f1, circle#packet-f2, circle#packet-read {
+    filter: drop-shadow(0px 1px 2px rgba(0,0,0,0.15));
+  }
+  
+  .tl-scenarios {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin-bottom: 16px;
+  }
+  
+  .tl-opt {
+    display: flex;
+    gap: 12px;
+    align-items: flex-start;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    padding: 12px 14px;
+    cursor: pointer;
+    background: #fff;
+    transition: border-color 0.15s, background 0.15s;
+    text-align: left;
+    width: 100%;
+  }
+  
+  .tl-opt:hover {
+    background: var(--bg-soft);
+  }
+  
+  .tl-opt[aria-pressed="true"] {
+    border-color: var(--accent);
+    background: var(--accent-soft);
+  }
+  
+  .tl-opt .tlname {
+    font-weight: 700;
+    font-size: 14px;
+    color: var(--text);
+  }
+  
+  .tl-opt .tldesc {
+    font-size: 12.5px;
+    color: var(--text-2);
+    margin-top: 4px;
+    line-height: 1.5;
+  }
+  
+  .tl-opt .tlbadge {
+    font-family: var(--mono);
+    font-size: 10px;
+    border: 1px solid var(--border-strong);
+    border-radius: 4px;
+    padding: 1px 6px;
+    color: var(--text-3);
+    flex: 0 0 auto;
+    margin-top: 2px;
+  }
+</style>
+
+<script>
+(function() {
+  // State variables
+  let scenario = 'normal'; // 'normal', 'stale-read', 'guard'
+  let isWriting = false;
+  let isReading = false;
+  let writeCompleted = false;
+  let f2Lagging = false;
+  
+  // DOM Elements
+  const btnWrite = document.getElementById('btn-write');
+  const btnRead = document.getElementById('btn-read');
+  const btnReset = document.getElementById('btn-reset');
+  const statusLine = document.getElementById('demo-status');
+  
+  const clientVal = document.getElementById('client-val');
+  const leaderVal = document.getElementById('leader-val');
+  const f1Val = document.getElementById('f1-val');
+  const f2Val = document.getElementById('f2-val');
+  
+  const lineClientLeader = document.getElementById('line-client-leader');
+  const lineLeaderF1 = document.getElementById('line-leader-f1');
+  const lineLeaderF2 = document.getElementById('line-leader-f2');
+  const lineClientF2 = document.getElementById('line-client-f2');
+  const lineClientLeaderRead = document.getElementById('line-client-leader-read');
+  
+  // Animation utility
+  function animateAlongPath(packetId, pathId, duration, reverse, onComplete) {
+    const packet = document.getElementById(packetId);
+    const path = document.getElementById(pathId);
+    if (!packet || !path) return;
+
+    packet.style.display = 'block';
+    const pathLength = path.getTotalLength();
+    const startTime = performance.now();
+
+    function update(time) {
+      const elapsed = time - startTime;
+      let progress = elapsed / duration;
+      if (progress > 1) progress = 1;
+
+      const currentProgress = reverse ? (1 - progress) : progress;
+      const point = path.getPointAtLength(currentProgress * pathLength);
+      packet.setAttribute('cx', point.x);
+      packet.setAttribute('cy', point.y);
+
+      if (progress < 1) {
+        requestAnimationFrame(update);
+      } else {
+        packet.style.display = 'none';
+        if (onComplete) onComplete();
+      }
+    }
+    requestAnimationFrame(update);
+  }
+
+  function setNodeState(nodeId, stateClass) {
+    const node = document.getElementById(nodeId);
+    if (!node) return;
+    const circle = node.querySelector('circle');
+    if (circle) {
+      circle.className.baseVal = stateClass;
+    }
+  }
+
+  // Initialize nodes
+  function init() {
+    isWriting = false;
+    isReading = false;
+    writeCompleted = false;
+    
+    btnWrite.disabled = false;
+    btnRead.disabled = true;
+    
+    clientVal.textContent = 'x = ?';
+    leaderVal.textContent = 'x = 0';
+    f1Val.textContent = 'x = 0';
+    f2Val.textContent = 'x = 0';
+    
+    setNodeState('node-client', 'ns-idle');
+    setNodeState('node-leader', 'ns-idle');
+    setNodeState('node-f1', 'ns-idle');
+    setNodeState('node-f2', scenario === 'normal' ? 'ns-idle' : 'ns-bad');
+    
+    lineClientLeader.setAttribute('stroke', '#dedcd8');
+    lineLeaderF1.setAttribute('stroke', '#dedcd8');
+    lineLeaderF2.setAttribute('stroke', '#dedcd8');
+    lineClientF2.setAttribute('stroke', '#dedcd8');
+    lineClientLeaderRead.style.display = 'none';
+    
+    if (scenario === 'normal') {
+      statusLine.textContent = '請點擊「1. 發送寫入 Write(x=10)」開始模擬正常同步與異步複寫。';
+    } else if (scenario === 'stale-read') {
+      statusLine.textContent = 'Follower 2 處於 Lag 狀態。請點擊「1. 發送寫入 Write(x=10)」觀察寫入流程。';
+    } else {
+      statusLine.textContent = '啟用守護模式。請點擊「1. 發送寫入 Write(x=10)」觀察一致性守護如何防禦 Stale Read。';
+    }
+  }
+
+  // Scenario Selection
+  document.querySelectorAll('[data-scenario]').forEach(button => {
+    button.addEventListener('click', function() {
+      if (isWriting || isReading) return; // Prevent switching during animation
+      
+      document.querySelectorAll('[data-scenario]').forEach(btn => {
+        btn.setAttribute('aria-pressed', 'false');
+      });
+      this.setAttribute('aria-pressed', 'true');
+      scenario = this.getAttribute('data-scenario');
+      init();
+    });
+  });
+
+  // Write Action
+  btnWrite.addEventListener('click', function() {
+    if (isWriting || writeCompleted) return;
+    isWriting = true;
+    btnWrite.disabled = true;
+    
+    statusLine.textContent = 'Client 發送 Write(x=10) 寫入請求給 Leader...';
+    setNodeState('node-client', 'ns-wait');
+    lineClientLeader.setAttribute('stroke', 'var(--accent)');
+    
+    // Step 1: Client to Leader
+    animateAlongPath('packet-write', 'line-client-leader', 800, false, function() {
+      statusLine.textContent = 'Leader 寫入本地，並併發向 Follower 1 (Sync) 與 Follower 2 (Async) 發送複寫請求...';
+      setNodeState('node-leader', 'ns-lock');
+      leaderVal.textContent = 'x = 10';
+      lineLeaderF1.setAttribute('stroke', 'var(--accent)');
+      lineLeaderF2.setAttribute('stroke', 'var(--accent)');
+      
+      let syncCompleted = false;
+      let asyncCompleted = false;
+      
+      // Step 2a: Leader to Follower 1 (Sync)
+      animateAlongPath('packet-f1', 'line-leader-f1', 600, false, function() {
+        setNodeState('node-f1', 'ns-lock');
+        f1Val.textContent = 'x = 10';
+        statusLine.textContent = 'Follower 1 (Sync) 寫入成功，回傳 ACK 給 Leader...';
+        
+        // Step 3a: Follower 1 ACK to Leader
+        animateAlongPath('packet-f1', 'line-leader-f1', 600, true, function() {
+          setNodeState('node-f1', 'ns-ok');
+          syncCompleted = true;
+          checkWriteAcknowledge();
+        });
+      });
+      
+      // Step 2b: Leader to Follower 2 (Async)
+      let asyncDuration = scenario === 'normal' ? 1200 : 8000; // Simulate lag in stale-read & guard
+      animateAlongPath('packet-f2', 'line-leader-f2', asyncDuration, false, function() {
+        setNodeState('node-f2', 'ns-ok');
+        f2Val.textContent = 'x = 10';
+        asyncCompleted = true;
+        if (writeCompleted && scenario !== 'normal') {
+          statusLine.textContent = '背景任務：Follower 2 (Async) 終於完成了異步同步，數據達到最終一致。';
+        }
+      });
+      
+      function checkWriteAcknowledge() {
+        if (syncCompleted) {
+          statusLine.textContent = 'Leader 收到 Sync 副本確認，立刻向 Client 返回「寫入成功」！此時 Follower 2 仍在背景同步中...';
+          setNodeState('node-leader', 'ns-ok');
+          lineClientLeader.setAttribute('stroke', 'var(--ok)');
+          
+          // Step 4: Leader returns success to Client
+          animateAlongPath('packet-write', 'line-client-leader', 800, true, function() {
+            setNodeState('node-client', 'ns-ok');
+            clientVal.textContent = 'x = 10';
+            writeCompleted = true;
+            isWriting = false;
+            btnRead.disabled = false;
+            
+            if (scenario === 'normal') {
+              statusLine.textContent = '寫入成功！現在你可以點擊「2. 發送讀取 Read(x)」來測試讀取。';
+            } else if (scenario === 'stale-read') {
+              statusLine.textContent = '寫入成功！此時 Follower 2 仍處於 Lag 狀態。請立刻點擊「2. 發送讀取 Read(x)」，看看會發生什麼！';
+            } else {
+              statusLine.textContent = '寫入成功！Follower 2 仍處於 Lag 狀態。請點擊「2. 發送讀取 Read(x)」，看一致性守護如何運作。';
+            }
+          });
+        }
+      }
+    });
+  });
+
+  // Read Action
+  btnRead.addEventListener('click', function() {
+    if (isReading || !writeCompleted) return;
+    isReading = true;
+    btnRead.disabled = true;
+    
+    if (scenario === 'normal') {
+      statusLine.textContent = 'Client 發送 Read(x) 讀取請求，由負載均衡隨機路由到 Follower 2 (Async)...';
+      lineClientF2.setAttribute('stroke', 'var(--accent)');
+      
+      animateAlongPath('packet-read', 'line-client-f2', 800, false, function() {
+        statusLine.textContent = 'Follower 2 已完成同步，回傳最新值 x = 10 給 Client...';
+        
+        animateAlongPath('packet-read', 'line-client-f2', 800, true, function() {
+          statusLine.textContent = '讀取成功！Client 成功讀取最新值 x = 10。';
+          setNodeState('node-client', 'ns-ok');
+          isReading = false;
+        });
+      });
+    } else if (scenario === 'stale-read') {
+      statusLine.textContent = 'Client 發送 Read(x) 讀取請求，被負載均衡路由到落後的 Follower 2...';
+      lineClientF2.setAttribute('stroke', 'var(--accent)');
+      
+      animateAlongPath('packet-read', 'line-client-f2', 800, false, function() {
+        statusLine.textContent = 'Follower 2 尚未收到最新變更（x = 0），回傳舊數據給 Client...';
+        
+        animateAlongPath('packet-read', 'line-client-f2', 800, true, function() {
+          statusLine.textContent = '🚨 異常觸發！Client 讀到了舊值 x = 0 (Stale Read)！這違反了 Read-after-write 一致性。';
+          clientVal.textContent = 'x = 0';
+          setNodeState('node-client', 'ns-bad');
+          isReading = false;
+        });
+      });
+    } else if (scenario === 'guard') {
+      statusLine.textContent = 'Client 發送 Read(x) 讀取請求。系統檢測到該 Client 剛剛進行過寫入，啟動 Read-after-write 守護，強制將請求路由至 Leader...';
+      lineClientLeaderRead.style.display = 'block';
+      
+      animateAlongPath('packet-read', 'line-client-leader-read', 800, false, function() {
+        statusLine.textContent = 'Leader 回傳最新值 x = 10 給 Client...';
+        
+        animateAlongPath('packet-read', 'line-client-leader-read', 800, true, function() {
+          statusLine.textContent = '🎉 守護成功！Client 成功讀取最新值 x = 10，完美繞過了 Lag 的 Follower 2！';
+          clientVal.textContent = 'x = 10';
+          setNodeState('node-client', 'ns-ok');
+          isReading = false;
+        });
+      });
+    }
+  });
+
+  // Reset Action
+  btnReset.addEventListener('click', init);
+
+  // Initialize on load
+  init();
+})();
+</script>

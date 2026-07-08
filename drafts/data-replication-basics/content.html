@@ -1,0 +1,409 @@
+<header class="hero">
+  <div class="eyebrow">系統設計 · 基礎手冊</div>
+  <h1>資料複寫基礎概念：高可用與一致性的權衡</h1>
+  <p class="lede">資料複寫（Data Replication）是分散式系統中保證高可用、低延遲與可擴充性的核心基石。然而，當數據被複製到多個節點時，我們必須面對物理極限——網路延遲與節點失效。這份指南將帶你理解複寫拓撲、同步與異步的權衡，以及在複製延遲下常見的一致性異常與解決方案。</p>
+  <div class="meta">
+    <span class="tag">Replication</span>
+    <span class="tag">Single-Leader</span>
+    <span class="tag">Multi-Leader</span>
+    <span class="tag">Leaderless</span>
+    <span class="tag">Replication Lag</span>
+    <span class="tag">面試導向</span>
+  </div>
+</header>
+
+<!-- ============ 01 總覽與定位 ============ -->
+<section id="s1">
+  <div class="sec-head">
+    <span class="sec-num">01</span>
+    <h2>總覽與定位</h2>
+  </div>
+  <p class="sec-sub">為什麼需要複寫？它與分片有何不同？在系統設計版圖中的座標為何？</p>
+
+  <p>在分散式系統中，我們幾乎不可能只將資料儲存在單一伺服器上。單點意味著單點故障（SPOF）、地理延遲限制以及吞吐量的瓶頸。為了解決這些問題，我們需要將相同的資料複製並儲存在多個透過網路連接的節點上，這就是<strong>資料複寫（Data Replication）</strong>。</p>
+
+  <h3>複寫的三大核心動機</h3>
+  <ul>
+    <li><strong>高可用性 (High Availability, HA)</strong>：當部分節點宕機、斷網或發生硬體故障時，系統仍能繼續運作，提供不間斷的服務。</li>
+    <li><strong>降低延遲 (Low Latency)</strong>：將資料儲存在地理位置上更接近用戶的節點（如 CDN 或多區域資料庫），縮短資料傳輸的物理距離。</li>
+    <li><strong>提升吞吐量 (Scalability/Read Throughput)</strong>：透過讀寫分離，讓多個副本（Replica）共同分擔讀取請求，極大地提升系統的併發讀取能力。</li>
+  </ul>
+
+  <div class="callout accent">
+    <div class="c-title"><span class="ic">座標</span>複寫 (Replication) vs. 分片 (Partitioning/Sharding)</div>
+    <p>這是面試中極易混淆的概念：
+      <br>• <strong>複寫 (Replication)</strong>：將<strong>相同</strong>的資料複製到多個節點。目的是容錯與擴充讀。
+      <br>• <strong>分片 (Partitioning/Sharding)</strong>：將<strong>不同</strong>的資料子集拆分到不同節點。目的是擴充寫入與儲存容量。
+      <br>在實際的大規模系統（如 Cassandra, Spanner）中，兩者通常是<strong>結合使用</strong>的：每個分片本身都會有多個複寫副本。
+    </p>
+  </div>
+
+  <div class="oneliner">
+    <b>一句話答法</b>資料複寫是將相同資料拷貝到多個節點以換取高可用與低延遲的機制；它與分片（拆分資料以擴充容量）相輔相成，是分散式資料庫的底層基石。
+  </div>
+</section>
+
+<hr class="div">
+
+<!-- ============ 02 複寫拓撲 ============ -->
+<section id="s2">
+  <div class="sec-head">
+    <span class="sec-num">02</span>
+    <h2>複寫拓撲：單主、多主與無主</h2>
+  </div>
+  <p class="sec-sub">決定「誰能接受寫入、誰負責傳播更新」的架構藍圖。</p>
+
+  <p>分散式資料庫如何組織節點間的寫入與讀取關係？這取決於系統採用的<strong>複寫拓撲（Replication Topologies）</strong>。主流拓撲可分為以下三種：</p>
+
+  <h3>1. 單主複製 (Single-Leader / Master-Slave)</h3>
+  <p>這是最經典且應用最廣泛的模式（如 MySQL, PostgreSQL, Redis）。
+    <br>• <strong>運作機制</strong>：系統中只有一個節點被指定為 <strong>Leader (Master)</strong>，所有寫入請求必須發送給 Leader。Leader 將更新寫入本地後，將變更日誌（Replication Log / Change Stream）發送給所有的 <strong>Follower (Slave/Replica)</strong> 節點。讀取請求則可以路由到 Leader 或任何 Follower。
+    <br>• <strong>失效轉移 (Failover)</strong>：若 Leader 宕機，系統會透過心跳檢測（Heartbeat）發現，並啟動選舉機制，將其中一個 Follower 提升（Promote）為新 Leader。
+  </p>
+  <div class="callout warn">
+    <div class="c-title"><span class="ic">陷阱</span>腦裂異常 (Split-brain)</div>
+    <p>在 Failover 過程中，若原 Leader 因為網路分區（Network Partition）只是暫時與叢集失去聯繫，但並未宕機，此時叢集選舉出了新 Leader。當網路恢復時，系統中會同時存在<strong>兩個自認為是 Leader 的節點</strong>，它們同時接受寫入，導致資料嚴重衝突。解決方案通常需要引入租約機制（Lease）或基於多數決（Quorum）的防禦令牌（Fencing Token）。</p>
+  </div>
+
+  <h3>2. 多主複製 (Multi-Leader / Multi-Master)</h3>
+  <p>當系統跨越複數個地理區域（Datacenter）時，單一 Leader 會面臨跨洋寫入的巨大延遲。此時可採用多主複製。
+    <br>• <strong>運作機制</strong>：在每個資料中心都設有一個 Leader。本地的寫入請求直接發送給該資料中心的 Leader，各資料中心的 Leader 之間再異步地將變更同步給彼此。
+    <br>• <strong>衝突解決 (Conflict Resolution)</strong>：多主複製最大的挑戰是<strong>寫入衝突</strong>（兩個資料中心同時修改同一筆資料）。常見的解決策略包括：
+      <br>1. <strong>最後寫入者勝 (Last-Write-Wins, LWW)</strong>：基於實體時間戳（Timestamp），但實體時鐘存在漂移風險。
+      <br>2. <strong>無衝突複製資料類型 (CRDT)</strong>：利用數學結構（如 Grow-only Counter）在併發寫入時自動合併，避免衝突。
+      <br>3. <strong>自訂衝突解決器</strong>：在應用層編寫合併邏輯。
+  </p>
+
+  <h3>3. 無主複製 (Leaderless / Dynamo-style)</h3>
+  <p>由 Amazon Dynamo 帶起風潮的去中心化架構（如 Cassandra, Riak）。
+    <br>• <strong>運作機制</strong>：系統中沒有 Leader 的概念。Client 直接將寫入併發發送給多個節點（通常是 <var>N</var> 個副本）。讀取時，Client 也會併發向多個節點發送讀取請求，並透過版本號（Version Vector）來識別並解決可能存在的數據不一致。
+    <br>• <strong>Quorum 讀寫機制</strong>：為了保證讀取到最新寫入的數據，寫入成功的節點數 <var>W</var> 與讀取請求的節點數 <var>R</var> 必須滿足以下公式：
+  </p>
+  <div class="formula">W + R &gt; N</div>
+  <p>當此條件成立時，寫入節點集合與讀取節點集合<strong>必定存在交集</strong>，因此讀取操作一定能拿到至少一個最新寫入的副本。</p>
+
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>維度 / 拓撲</th>
+          <th>單主複製 (Single-Leader)</th>
+          <th>多主複製 (Multi-Leader)</th>
+          <th>無主複製 (Leaderless)</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><strong>寫入路徑</strong></td>
+          <td>僅限單一 Leader 節點</td>
+          <td>各區域的 Leader 節點</td>
+          <td>併發寫入任意 <var>N</var> 個節點</td>
+        </tr>
+        <tr>
+          <td><strong>讀取路徑</strong></td>
+          <td>Leader 或任意 Follower</td>
+          <td>本地資料中心的任意節點</td>
+          <td>併發讀取 <var>R</var> 個節點並取最新值</td>
+        </tr>
+        <tr>
+          <td><strong>寫入衝突</strong></td>
+          <td>無（Leader 負責序列化寫入）</td>
+          <td>極高，需複雜的衝突解決策略</td>
+          <td>高，需透過 Quorum 與 Versioning 解決</td>
+        </tr>
+        <tr>
+          <td><strong>適用場景</strong></td>
+          <td>絕大多數傳統 RDBMS 應用</td>
+          <td>跨國多活資料中心、離線協作編輯</td>
+          <td>高寫入吞吐、高可用、無單點故障要求</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="cap">拓撲對比：單主複製結構最簡單，一致性最容易維護；無主複製則將複雜度移至 Client，以換取極高的寫入可用性。</p>
+
+  <div class="oneliner">
+    <b>一句話答法</b>單主複製由單一節點序列化所有寫入，結構簡單但有單點寫入瓶頸；多主複製解決跨區域延遲但引入衝突難題；無主複製靠 Quorum 讀寫保證一致性，具備極高可用性。
+  </div>
+</section>
+
+<hr class="div">
+
+<!-- ============ 03 同步 vs. 異步複寫 ============ -->
+<section id="s3">
+  <div class="sec-head">
+    <span class="sec-num">03</span>
+    <h2>同步 vs. 異步複寫</h2>
+  </div>
+  <p class="sec-sub">在「數據持久性 (Durability)」與「寫入延遲 (Latency)」之間的終極折衷。</p>
+
+  <p>當 Leader 收到寫入請求時，它必須決定<strong>何時向 Client 返回成功</strong>。這涉及到同步與異步的權衡：</p>
+
+  <h3>同步複寫 (Synchronous Replication)</h3>
+  <p>Leader 收到寫入請求後，將更新發送給 Follower，並<strong>阻塞等待</strong> Follower 完成寫入並回傳確認（ACK），最後才向 Client 返回成功。</p>
+  <ul>
+    <li><strong>優點</strong>：強持久性。保證 Follower 上的數據與 Leader 完全一致。即使 Leader 瞬間宕機，數據也絕不丟失。</li>
+    <li><strong>缺點</strong>：寫入延遲極高（取決於最慢的 Follower 網路 RTT）；可用性極差，任一 Follower 故障或網路抖動，都會導致整個系統的寫入操作被阻塞。</li>
+  </ul>
+
+  <h3>異步複寫 (Asynchronous Replication)</h3>
+  <p>Leader 寫入本地後，<strong>立刻</strong>向 Client 返回成功，並在背景（Background）異步地將更新發送給 Follower。</p>
+  <ul>
+    <li><strong>優點</strong>：極低的寫入延遲，高寫入可用性。即使所有 Follower 都斷線，Leader 仍能繼續接受寫入。</li>
+    <li><strong>缺點</strong>：存在數據丟失風險。若 Leader 在變更尚未同步到 Follower 前宕機，這部分未同步的寫入將永久丟失。此外，這會帶來 <strong>Replication Lag</strong>，導致讀寫不一致。</li>
+  </ul>
+
+  <h3>折衷方案：半同步複寫 (Semi-synchronous)</h3>
+  <p>為了兼顧兩者的優點，現代資料庫（如 MySQL Semi-Sync）常採用半同步架構：Leader 僅等待<strong>其中一個</strong> Follower 確認（通常是專門的 Sync Follower）即返回成功，其餘 Follower 則繼續採用異步同步。這保證了至少有兩個節點擁有最新數據，同時避免了被單一最慢節點拖垮的風險。</p>
+
+  <div class="callout warn">
+    <div class="c-title"><span class="ic">陷阱</span>面試常考：異步複寫下的 Failover 數據丟失</div>
+    <p>在異步複寫下，Leader 宕機後，一個落後的 Follower 被提升為新 Leader。此時，舊 Leader 重新上線，它發現自己本地有一些新 Leader 沒有的寫入。如果直接同步，會導致資料衝突。常見的做法是<strong>強行捨棄（Discard）</strong>舊 Leader 上未同步的寫入，這在金融等對資料精確度要求極高的場景中是不可接受的。此時必須考慮使用雙階段提交（2PC）或 Raft/Paxos 等強一致性共識演算法。</p>
+  </div>
+
+  <div class="oneliner">
+    <b>一句話答法</b>同步複寫保證不丟資料但犧牲寫入延遲與可用性；異步複寫追求極致效能但容忍 Replication Lag 與資料丟失風險；半同步則是只等一個副本確認的實務折衷。
+  </div>
+</section>
+
+<hr class="div">
+
+<!-- ============ 04 複製延遲下的三大一致性異常 ============ -->
+<section id="s4">
+  <div class="sec-head">
+    <span class="sec-num">04</span>
+    <h2>複製延遲下的三大一致性異常</h2>
+  </div>
+  <p class="sec-sub">當物理世界的延遲發生時，應用層會看到哪些奇葩的 Bug？</p>
+
+  <p>在採用<strong>異步複寫</strong>的系統中，由於網路擁塞或節點負載，Follower 的同步進度可能落後 Leader 數秒甚至數分鐘。這種現象稱為 <strong>Replication Lag</strong>。
+    <br>雖然系統最終會達到一致（Eventually Consistent），但在這段延遲窗口內，若用戶直接讀取落後的 Follower，就會觸發以下三種典型的一致性異常：
+  </p>
+
+  <h3>1. 讀寫一致性異常 (Read-After-Write Consistency Anomaly)</h3>
+  <p>• <strong>場景</strong>：用戶在社群媒體上發表了一篇貼文（寫入 Leader 成功），然後重新整理頁面。此時，讀取請求被路由到了一個尚未同步該貼文的 Follower 節點。
+    <br>• <strong>現象</strong>：用戶發現自己剛剛發表的貼文<strong>消失了</strong>！這會讓用戶產生極大的挫折感，誤以為系統出錯。
+    <br>• <strong>解決方案</strong>：
+      <br>1. <strong>特定路由</strong>：對於用戶自己修改的資料（如個人 Profile），強制路由到 Leader 讀取；非本人修改的資料則讀取 Follower。
+      <br>2. <strong>時間窗口守護</strong>：記錄用戶最後一次寫入的時間戳，在寫入後的特定窗口期內（如 5 秒內），該用戶的讀取請求強制路由至 Leader，或路由至同步進度已超越該時間戳的 Follower。
+  </p>
+
+  <h3>2. 單調讀取異常 (Monotonic Reads Anomaly)</h3>
+  <p>• <strong>場景</strong>：用戶 A 發表了兩條評論（1: "Hello", 2: "World"）。用戶 B 重新整理頁面，第一次讀取路由到了進度較快的 Follower 1，看到了這兩條評論。接著用戶 B 再次整理頁面，讀取路由到了進度較慢的 Follower 2。
+    <br>• <strong>現象</strong>：用戶 B 第二次讀取時，發現評論 2 <strong>消失了</strong>。在用戶看來，系統出現了「時間倒流」的詭異現象。
+    <br>• <strong>解決方案</strong>：
+      <br>1. <strong>黏性路由 (Sticky Routing)</strong>：確保同一個用戶的讀取請求總是路由到同一個副本（例如，對 User ID 進行 Hash 路由）。只有當該副本宕機時，才切換到其他副本。
+  </p>
+
+  <h3>3. 一致前綴讀取異常 (Consistent Prefix Reads Anomaly)</h3>
+  <p>• <strong>場景</strong>：在分片資料庫中，存在因果關係的兩筆寫入被分配到了不同的分片。例如，A 問："你吃飽了嗎？"（分片 1），B 回答："吃飽了。"（分片 2）。
+    <br>• <strong>現象</strong>：由於分片 1 與分片 2 的複寫延遲不同，第三方讀取者可能先看到 B 的回答 "吃飽了。"，過了一陣子才看到 A 的提問。這違反了<strong>因果關係（Causality）</strong>。
+    <br>• <strong>解決方案</strong>：
+      <br>1. <strong>因果追蹤</strong>：確保任何具有因果關係的寫入都被分配到同一個分片中。
+      <br>2. <strong>邏輯時鐘/版本向量</strong>：在應用層利用邏輯時鐘重建事件的先後順序。
+  </p>
+
+  <div class="oneliner">
+    <b>一句話答法</b>Replication Lag 會引發讀寫一致性（看不到自己的更新）、單調讀（資料時間倒流）與一致前綴讀（因果順序錯亂）三大異常；可透過強制路由 Leader、黏性路由與因果追蹤來防禦。
+  </div>
+</section>
+
+<hr class="div">
+
+<!-- ============ 05 互動演示 ============ -->
+<section id="s5">
+  <div class="sec-head">
+    <span class="sec-num">05</span>
+    <h2>互動演示：複寫延遲與一致性模擬器</h2>
+  </div>
+  <p class="sec-sub">點選不同情境，親身體驗同步/異步複寫的時序，以及 Replication Lag 帶來的 Stale Read 衝擊與防禦機制。</p>
+
+  <p>在分散式系統中，網路延遲（Network Latency）與節點負載是不可避免的現實。當我們使用異步複寫時，Follower 節點的更新進度會落後於 Leader，這段時間差稱為 <strong>Replication Lag</strong>。以下模擬器將展示三種情境，協助你直觀理解其運作行為與防禦手段。</p>
+
+  <div class="demo" id="demo-replication">
+    <div class="demo-bar">
+      <span class="label">互動 · 複寫延遲與一致性模擬器</span>
+      <span class="label" style="text-transform:none;font-family:var(--sans);font-size:12px;color:var(--text-2)">點選情境並操作寫入/讀取</span>
+    </div>
+    <div class="demo-body">
+      <!-- Scenario Selector -->
+      <div class="tl-scenarios">
+        <button class="tl-opt" data-scenario="normal" aria-pressed="true">
+          <div style="flex: 1 1 0%;">
+            <div class="tlname">情境 A：正常同步/異步複寫 (Sync & Async)</div>
+            <div class="tldesc">Leader 同步複製到 Follower 1 (Sync)，異步複製到 Follower 2 (Async)。Leader 收到 Follower 1 的確認後即向 Client 返回成功。</div>
+          </div>
+          <span class="tlbadge">Normal</span>
+        </button>
+        <button class="tl-opt" data-scenario="stale-read" aria-pressed="false">
+          <div style="flex: 1 1 0%;">
+            <div class="tlname">情境 B：Replication Lag 導致的 Stale Read 異常</div>
+            <div class="tldesc">Follower 2 發生嚴重延遲。Client 寫入成功後立刻讀取，請求被路由到 Follower 2，讀到了舊數據（Stale Read）。</div>
+          </div>
+          <span class="tlbadge" style="color:var(--bad);border-color:var(--bad-strong);background:var(--bad-soft)">Anomaly</span>
+        </button>
+        <button class="tl-opt" data-scenario="guard" aria-pressed="false">
+          <div style="flex: 1 1 0%;">
+            <div class="tlname">情境 C：啟用 Read-after-write 一致性守護</div>
+            <div class="tldesc">相同的延遲情境，但系統檢測到是該 Client 剛剛寫入的 key，強制將其讀取請求路由至 Leader，成功防禦 Stale Read。</div>
+          </div>
+          <span class="tlbadge" style="color:var(--ok);border-color:var(--border-strong);background:var(--ok-soft)">Guard</span>
+        </button>
+      </div>
+
+      <!-- Control Buttons -->
+      <div style="display: flex; gap: 12px; margin: 16px 0;">
+        <button class="btn primary" id="btn-write">1. 發送寫入 Write(x=10)</button>
+        <button class="btn" id="btn-read" disabled>2. 發送讀取 Read(x)</button>
+        <button class="btn" id="btn-reset">重置</button>
+      </div>
+
+      <!-- Status Line -->
+      <div class="status-line" id="demo-status">
+        請選擇上方情境，然後點擊「1. 發送寫入 Write(x=10)」開始模擬。
+      </div>
+
+      <!-- Visual Canvas (SVG) -->
+      <div class="sim-canvas-container" style="position:relative; background:var(--bg-soft); border:1px solid var(--border); border-radius:var(--radius-sm); padding:20px; margin-top:16px; overflow:hidden;">
+        <svg id="sim-svg" width="100%" height="280" viewBox="0 0 600 280" style="display:block;">
+          <!-- Connection Lines -->
+          <!-- Client to Leader -->
+          <path id="line-client-leader" d="M 80,140 L 250,60" stroke="#dedcd8" stroke-width="2" stroke-dasharray="5,5" fill="none" />
+          <!-- Leader to Follower 1 -->
+          <path id="line-leader-f1" d="M 290,60 L 450,60" stroke="#dedcd8" stroke-width="2" stroke-dasharray="5,5" fill="none" />
+          <!-- Leader to Follower 2 -->
+          <path id="line-leader-f2" d="M 290,60 L 450,220" stroke="#dedcd8" stroke-width="2" stroke-dasharray="5,5" fill="none" />
+          <!-- Client to Follower 2 (Read path) -->
+          <path id="line-client-f2" d="M 80,140 L 450,220" stroke="#dedcd8" stroke-width="2" stroke-dasharray="5,5" fill="none" />
+          <!-- Client to Leader (Read path for Guard) -->
+          <path id="line-client-leader-read" d="M 80,140 L 250,60" stroke="#3f6188" stroke-width="2" stroke-dasharray="5,5" fill="none" style="display:none;" />
+
+          <!-- Packets (Animated dots) -->
+          <circle id="packet-write" r="6" fill="var(--accent)" style="display:none;" />
+          <circle id="packet-f1" r="6" fill="var(--ok)" style="display:none;" />
+          <circle id="packet-f2" r="6" fill="var(--warn)" style="display:none;" />
+          <circle id="packet-read" r="6" fill="var(--accent)" style="display:none;" />
+
+          <!-- Nodes -->
+          <!-- Client Node -->
+          <g id="node-client" transform="translate(80,140)">
+            <circle r="32" fill="#ffffff" stroke="var(--border-strong)" stroke-width="2" />
+            <text text-anchor="middle" y="-4" font-weight="bold" font-size="12" fill="var(--text)">Client</text>
+            <text id="client-val" text-anchor="middle" y="14" font-family="var(--mono)" font-size="11" fill="var(--text-2)">x = ?</text>
+          </g>
+
+          <!-- Leader Node -->
+          <g id="node-leader" transform="translate(270,60)">
+            <circle r="32" fill="#ffffff" stroke="var(--border-strong)" stroke-width="2" />
+            <text text-anchor="middle" y="-4" font-weight="bold" font-size="12" fill="var(--text)">Leader</text>
+            <text id="leader-val" text-anchor="middle" y="14" font-family="var(--mono)" font-size="11" fill="var(--text-2)">x = 0</text>
+            <text text-anchor="middle" y="-38" font-family="var(--mono)" font-size="10" fill="var(--text-3)">PRIMARY</text>
+          </g>
+
+          <!-- Follower 1 (Sync) Node -->
+          <g id="node-f1" transform="translate(480,60)">
+            <circle r="32" fill="#ffffff" stroke="var(--border-strong)" stroke-width="2" />
+            <text text-anchor="middle" y="-4" font-weight="bold" font-size="12" fill="var(--text)">Follower 1</text>
+            <text id="f1-val" text-anchor="middle" y="14" font-family="var(--mono)" font-size="11" fill="var(--text-2)">x = 0</text>
+            <text text-anchor="middle" y="-38" font-family="var(--mono)" font-size="10" fill="var(--ok)">SYNC</text>
+          </g>
+
+          <!-- Follower 2 (Async) Node -->
+          <g id="node-f2" transform="translate(480,220)">
+            <circle r="32" fill="#ffffff" stroke="var(--border-strong)" stroke-width="2" />
+            <text text-anchor="middle" y="-4" font-weight="bold" font-size="12" fill="var(--text)">Follower 2</text>
+            <text id="f2-val" text-anchor="middle" y="14" font-family="var(--mono)" font-size="11" fill="var(--text-2)">x = 0</text>
+            <text text-anchor="middle" y="-38" font-family="var(--mono)" font-size="10" fill="var(--warn)">ASYNC</text>
+          </g>
+        </svg>
+      </div>
+
+      <!-- Legend -->
+      <div class="legend mt-4">
+        <span><i class="dot ns-idle"></i>待命 (Idle)</span>
+        <span><i class="dot ns-wait"></i>傳輸中 (Pending)</span>
+        <span><i class="dot ns-lock"></i>寫入中 (Writing)</span>
+        <span><i class="dot ns-ok"></i>成功/已同步 (OK)</span>
+        <span><i class="dot ns-bad"></i>延遲/異常 (Lagging)</span>
+      </div>
+    </div>
+  </div>
+  <p class="cap">時序洞察：在異步複寫下，寫入操作的 Latency 僅受限於 Leader 與 Sync 節點；但若沒有額外的一致性守護，讀取 Async 節點極易遭遇 Stale Read 異常。</p>
+
+  <div class="oneliner">
+    <b>一句話答法</b>Replication Lag 是異步複寫的必然代價；面對 Stale Read 異常，可透過「讀寫一致性守護」將特定讀取請求路由回 Leader，在 AP 的架構下局部實現強一致的用戶體驗。
+  </div>
+</section>
+
+<hr class="div">
+
+<!-- ============ 06 面試考點與架構折衷 ============ -->
+<section id="s6">
+  <div class="sec-head">
+    <span class="sec-num">06</span>
+    <h2>面試考點與架構折衷</h2>
+  </div>
+  <p class="sec-sub">高頻面試題與系統架構師的思維框架。</p>
+
+  <p>在系統設計面試中，資料複寫幾乎是所有大型系統設計題（如「設計一個 Messenger」或「設計一個電商購物車」）的必考點。面試官不會只問你定義，而是會拋出具體的架構衝突，考驗你的<strong>折衷（Trade-offs）思維</strong>。</p>
+
+  <h3>面試高頻問題與回答框架</h3>
+
+  <div class="callout accent">
+    <div class="c-title"><span class="ic">考點 1</span>如何處理 Replication Lag 帶來的 Stale Read 異常？</div>
+    <p><strong>回答框架</strong>：
+      <br>1. <strong>分類討論</strong>：首先指出並非所有資料都需要強一致。對於非關鍵資料（如貼文按讚數），容忍最終一致性，不需要特別處理。
+      <br>2. <strong>用戶體驗防禦</strong>：對於關鍵資料（如剛發表的貼文、修改的密碼），採用<strong>讀寫一致性守護</strong>。最簡單的實作是：用戶讀取自己剛修改的資料時，強制路由到 Leader。
+      <br>3. <strong>時效性快取</strong>：在 Redis 中記錄一個臨時標記 <code>user_just_updated:userId = true</code>（過期時間設為預估的最大 Lag，如 5 秒）。只要標記存在，讀取請求就路由到 Leader，否則路由到 Follower。
+    </p>
+  </div>
+
+  <div class="callout warn">
+    <div class="c-title"><span class="ic">考點 2</span>單主複製中，Leader 宕機時的 Failover 流程與潛在風險是什麼？</div>
+    <p><strong>回答框架</strong>：
+      <br>1. <strong>流程</strong>：心跳超時檢測 → 選舉新 Leader（通常選擇同步進度最接近、或 Raft Term 最高的節點） → 重新配置路由（通知 Client 與其他 Follower 指向新 Leader）。
+      <br>2. <strong>風險與折衷</strong>：
+        <br>• <strong>數據丟失</strong>：在異步複寫下，新 Leader 可能缺少舊 Leader 宕機前未同步的資料。
+        <br>• <strong>腦裂 (Split-brain)</strong>：舊 Leader 重新上線，與新 Leader 衝突。必須使用 Quorum 租約或 Fencing Token 確保只有一個 Leader 具備寫入權限。
+        <br>• <strong>超時設定的兩難</strong>：心跳超時設太短會導致頻繁的誤判與不必要選舉（引發抖動）；設太長則會增加系統的不可用時間。
+    </p>
+  </div>
+
+  <h3>架構師的折衷清單 (Trade-off Checklist)</h3>
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>設計決策</th>
+          <th>選擇 A (同步/強一致)</th>
+          <th>選擇 B (異步/最終一致)</th>
+          <th>折衷考量 (Trade-off)</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><strong>複寫時序</strong></td>
+          <td>同步複寫 (Synchronous)</td>
+          <td>異步複寫 (Asynchronous)</td>
+          <td><strong>Durability vs. Latency</strong>：金融交易選 A，社群媒體/日誌系統選 B。</td>
+        </tr>
+        <tr>
+          <td><strong>讀取路由</strong></td>
+          <td>全部路由至 Leader</td>
+          <td>讀寫分離 (Read from Followers)</td>
+          <td><strong>Consistency vs. Read Scalability</strong>：讀寫分離能大幅擴充讀取吞吐量，但必須承擔 Replication Lag 帶來的 Stale Read 異常。</td>
+        </tr>
+        <tr>
+          <td><strong>寫入拓撲</strong></td>
+          <td>單主複製 (Single-Leader)</td>
+          <td>無主複製 (Leaderless)</td>
+          <td><strong>Write Simplicity vs. Write Availability</strong>：單主複製無衝突但有寫入單點瓶頸；無主複製寫入極度可用但需要處理複雜的 Quorum 讀寫與版本衝突。</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="oneliner">
+    <b>一句話答法</b>沒有完美的複寫方案，只有最適合業務場景的折衷；面試中應從「資料關鍵度」出發，靈活運用特定路由、時效性快取與 Quorum 機制，在強一致與高可用之間取得平衡。
+  </div>
+</section>

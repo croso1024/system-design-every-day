@@ -1,0 +1,162 @@
+<script>
+"use strict";
+document.addEventListener("DOMContentLoaded", function(){
+
+  /* ===== 04 封裝 / 解封裝 builder ===== */
+  (function(){
+    var root = document.getElementById("demo-encap");
+    if(!root) return;
+
+    var stack   = document.getElementById("enc-stack");
+    var wire    = document.getElementById("enc-wire");
+    var pduEl   = document.getElementById("enc-pdu");
+    var bitsEl  = document.getElementById("enc-bits");
+    var statusEl= document.getElementById("enc-status");
+    var prevBtn = document.getElementById("enc-prev");
+    var nextBtn = document.getElementById("enc-next");
+    var resetBtn= document.getElementById("enc-reset");
+    var segBtns = root.querySelectorAll(".seg button");
+
+    var layerEls = {};
+    stack.querySelectorAll(".nl-layer").forEach(function(el){ layerEls[el.dataset.layer] = el; });
+    var boxEls = {};
+    wire.querySelectorAll(".nl-box").forEach(function(el){ boxEls[el.dataset.box] = el; });
+
+    var mode = "encap";
+    var idx = 0;
+
+    // 每個步驟：active 層、可見的 box 集合、PDU 名稱、位元串、說明
+    var ENCAP = [
+      { active:"app",  boxes:["payload"], pdu:"Message / 資料",
+        bits:"", note:"<b>應用層</b>：HTTP 產生要傳的請求資料（例如 <code>GET /index.html</code>）。此刻它還只是一段純資料。" },
+      { active:"tp",   boxes:["tp-h","payload"], pdu:"Segment",
+        bits:"", note:"<b>傳輸層（TCP）</b>：在前面貼上 TCP header（來源/目的 port、序號、旗標），資料單位成為 <b>Segment</b>。port 決定送到對方哪個程式，序號讓資料能可靠重組。" },
+      { active:"net",  boxes:["net-h","tp-h","payload"], pdu:"Packet",
+        bits:"", note:"<b>網路層（IP）</b>：再貼上 IP header（來源/目的 IP、TTL、上層協定=TCP），成為 <b>Packet</b>。IP 位址決定要送到「哪一台主機」、要跨哪些網路。" },
+      { active:"link", boxes:["link-h","net-h","tp-h","payload","link-t"], pdu:"Frame",
+        bits:"", note:"<b>鏈路層（Ethernet）</b>：前面加 frame header（來源/目的 MAC、EtherType），<b>尾端</b>再加 FCS 檢查碼，成為 <b>Frame</b>。MAC 只認得相鄰設備。" },
+      { active:null,   boxes:["link-h","net-h","tp-h","payload","link-t"], pdu:"Frame → bits",
+        bits:"01000101 00110010 10110001 …", note:"<b>送上實體線路</b>：Frame 化為一連串 bit（電壓／光／電波）送出。<b>注意</b>：每一層只認得自己貼的 header，完全不理會裡面包了什麼——這就是分層。" }
+    ];
+
+    var DECAP = [
+      { active:"link", boxes:["link-h","net-h","tp-h","payload","link-t"], pdu:"Frame",
+        bits:"01000101 00110010 10110001 …", note:"<b>收端·鏈路層</b>：bit 從線路抵達，先用 <b>FCS</b> 檢查有沒有毀損、比對目的 MAC 是不是自己，重組出完整 <b>Frame</b>。" },
+      { active:"net",  boxes:["net-h","tp-h","payload"], pdu:"Packet",
+        bits:"", note:"<b>網路層</b>：拆掉 frame header 與 FCS，取出裡面的 <b>Packet</b>。檢查目的 IP 是自己、TTL 等，再把內容往上交給傳輸層。" },
+      { active:"tp",   boxes:["tp-h","payload"], pdu:"Segment",
+        bits:"", note:"<b>傳輸層</b>：拆掉 IP header 後得到 <b>Segment</b>。依<b>目的 port</b> 找到對應的應用程式（多工解多工），確認序號、重組資料。" },
+      { active:"app",  boxes:["payload"], pdu:"Message / 資料",
+        bits:"", note:"<b>應用層</b>：拆掉 TCP header，交出原始 HTTP 資料。" },
+      { active:"app",  boxes:["payload"], pdu:"Message / 資料",
+        bits:"", note:"<b>解封裝完成</b>：伺服器程式拿到完整 HTTP 請求。整個過程與送端的封裝<b>逐層對稱</b>——這一層拆掉的，正是對面那一層貼上的。" }
+    ];
+
+    function steps(){ return mode==="encap" ? ENCAP : DECAP; }
+
+    function render(){
+      var s = steps()[idx];
+      // 層高亮
+      Object.keys(layerEls).forEach(function(k){
+        var el = layerEls[k];
+        el.classList.toggle("active", s.active === k);
+        el.classList.toggle("dim", s.active !== null && s.active !== k);
+      });
+      // box 顯示
+      Object.keys(boxEls).forEach(function(k){
+        boxEls[k].classList.toggle("hidden", s.boxes.indexOf(k) === -1);
+      });
+      pduEl.textContent = s.pdu;
+      bitsEl.textContent = s.bits || "";
+      statusEl.innerHTML = s.note;
+      prevBtn.disabled = idx <= 0;
+      nextBtn.disabled = idx >= steps().length - 1;
+    }
+
+    function reset(){ idx = 0; render(); }
+
+    nextBtn.addEventListener("click", function(){ if(idx < steps().length-1){ idx++; render(); } });
+    prevBtn.addEventListener("click", function(){ if(idx > 0){ idx--; render(); } });
+    resetBtn.addEventListener("click", reset);
+    segBtns.forEach(function(b){
+      b.addEventListener("click", function(){
+        segBtns.forEach(function(x){ x.setAttribute("aria-pressed","false"); });
+        b.setAttribute("aria-pressed","true");
+        mode = b.dataset.mode;
+        reset();
+      });
+    });
+
+    reset();
+  })();
+
+  /* ===== 05 端到端旅程 ===== */
+  (function(){
+    var root = document.getElementById("demo-journey");
+    if(!root) return;
+
+    var statusEl = document.getElementById("jn-status");
+    var nextBtn  = document.getElementById("jn-next");
+    var resetBtn = document.getElementById("jn-reset");
+
+    var nodeEls = {};
+    root.querySelectorAll(".nl-node").forEach(function(el){ nodeEls[el.dataset.node] = el; });
+    var hopEls = {};
+    root.querySelectorAll(".nl-hop").forEach(function(el){ hopEls[el.dataset.hop] = el; });
+
+    var CLS = { app:"on-app", tp:"on-tp", net:"on-net", link:"on-link" };
+    var ALL = ["app","tp","net","link"];
+
+    // 每步：hot 節點、done 節點集合、各節點點亮的層、活躍的 hop、說明
+    var STEPS = [
+      { hot:null, done:[], on:{}, hop:null,
+        text:"按「下一步」，跟著一個 HTTP 請求從你的電腦出發，看它一路上被哪些設備拆到第幾層。" },
+      { hot:"client", done:[], on:{ client:["app","tp","net","link"] }, hop:null,
+        text:"<b>送端·你的電腦</b>：資料從應用層一路往下<b>封裝</b>到鏈路層——貼 TCP → IP → Ethernet header，成為一個完整的 Frame。" },
+      { hot:"client", done:["client"], on:{ client:["link"] }, hop:"c-r",
+        text:"Frame 沿實體鏈路離開網卡，送往<b>預設閘道</b>（家用／機房路由器）。" },
+      { hot:"router", done:["client"], on:{ router:["link","net"] }, hop:null,
+        text:"<b>路由器</b>：只把 Frame 往上拆到<b>網路層（第 3 層）</b>，讀取<b>目的 IP</b>、查路由表決定下一跳。它<b>不拆也不在乎</b>你的 TCP／HTTP 內容。" },
+      { hot:"router", done:["client","router"], on:{ router:["link"] }, hop:"r-s",
+        text:"路由器換上<b>新的 frame header</b>（新的來源/目的 MAC），把同一個 IP Packet <b>重新封裝</b>成新 Frame，送往下一段鏈路。IP 不變，MAC 每一跳都換。" },
+      { hot:"server", done:["client","router"], on:{ server:["link","net","tp","app"] }, hop:null,
+        text:"<b>收端·伺服器</b>：Frame 一路往上<b>解封裝</b>到應用層，web server 程式終於拿到完整 HTTP 請求。與送端封裝<b>逐層對稱</b>——旅程完成。" }
+    ];
+
+    var idx = 0;
+
+    function clearCells(){
+      root.querySelectorAll(".nl-cell").forEach(function(c){
+        c.classList.remove("on-app","on-tp","on-net","on-link");
+      });
+    }
+    function render(){
+      var s = STEPS[idx];
+      clearCells();
+      Object.keys(nodeEls).forEach(function(k){
+        nodeEls[k].classList.toggle("hot", s.hot === k);
+        nodeEls[k].classList.toggle("done", s.done.indexOf(k) !== -1);
+      });
+      Object.keys(hopEls).forEach(function(k){
+        hopEls[k].classList.toggle("live", s.hop === k);
+      });
+      Object.keys(s.on).forEach(function(node){
+        var nd = nodeEls[node]; if(!nd) return;
+        s.on[node].forEach(function(l){
+          var cell = nd.querySelector('.nl-cell[data-l="'+l+'"]');
+          if(cell) cell.classList.add(CLS[l]);
+        });
+      });
+      statusEl.innerHTML = s.text;
+      nextBtn.disabled = idx >= STEPS.length - 1;
+    }
+    function reset(){ idx = 0; render(); }
+
+    nextBtn.addEventListener("click", function(){ if(idx < STEPS.length-1){ idx++; render(); } });
+    resetBtn.addEventListener("click", reset);
+
+    reset();
+  })();
+
+});
+</script>

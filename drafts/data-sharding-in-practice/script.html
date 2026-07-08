@@ -1,0 +1,214 @@
+<script>
+(function () {
+  const demo = document.getElementById('demo-migrate');
+  if (!demo) return;
+
+  const PHASES = [
+    {
+      name: '0 / 6 · 初始狀態',
+      status: '初始：Tenant VIP 與 Tenant B 共用 Shard 2，VIP 流量佔 62% 容量，形成 hot spot。目標：將 VIP 遷到新建的 Shard 4（Dedicated）。',
+      map: [
+        { tenant: 'Tenant A', shard: 'Shard 1', load: 18, state: '' },
+        { tenant: 'Tenant B', shard: 'Shard 2', load: 28, state: '' },
+        { tenant: 'Tenant VIP', shard: 'Shard 2', load: 62, state: 'hot' }
+      ],
+      shards: [
+        { name: 'Shard 1', pct: 18, tenants: 'A', state: '' },
+        { name: 'Shard 2', pct: 90, tenants: 'B, VIP', state: 'hot' },
+        { name: 'Shard 3', pct: 12, tenants: '—', state: '' }
+      ]
+    },
+    {
+      name: '1 / 6 · Plan',
+      status: 'Plan：建立 Shard 4（Dedicated），更新 control plane 遷移計畫。Router 仍走舊 map，線上流量不受影響。',
+      map: [
+        { tenant: 'Tenant A', shard: 'Shard 1', load: 18, state: '' },
+        { tenant: 'Tenant B', shard: 'Shard 2', load: 28, state: '' },
+        { tenant: 'Tenant VIP', shard: 'Shard 2 → 4', load: 62, state: 'hot' }
+      ],
+      shards: [
+        { name: 'Shard 1', pct: 18, tenants: 'A', state: '' },
+        { name: 'Shard 2', pct: 90, tenants: 'B, VIP', state: 'hot' },
+        { name: 'Shard 3', pct: 12, tenants: '—', state: '' },
+        { name: 'Shard 4', pct: 0, tenants: '（新建）', state: 'new-shard' }
+      ]
+    },
+    {
+      name: '2 / 6 · Dual-write',
+      status: 'Dual-write：Router 對 Tenant VIP 的寫入同時落 Shard 2（舊）與 Shard 4（新）。讀仍走 Shard 2，確保切換前一致性。',
+      map: [
+        { tenant: 'Tenant A', shard: 'Shard 1', load: 18, state: '' },
+        { tenant: 'Tenant B', shard: 'Shard 2', load: 28, state: '' },
+        { tenant: 'Tenant VIP', shard: '2 + 4 雙寫', load: 62, state: 'lock' }
+      ],
+      shards: [
+        { name: 'Shard 1', pct: 18, tenants: 'A', state: '' },
+        { name: 'Shard 2', pct: 90, tenants: 'B, VIP', state: 'migrating' },
+        { name: 'Shard 3', pct: 12, tenants: '—', state: '' },
+        { name: 'Shard 4', pct: 8, tenants: 'VIP（新寫）', state: 'migrating' }
+      ]
+    },
+    {
+      name: '3 / 6 · Backfill',
+      status: 'Backfill：背景 job 將 VIP 歷史資料從 Shard 2 複製到 Shard 4，節流 50 MB/s。追 incremental changelog，lag 從 2h 降至 30s。',
+      map: [
+        { tenant: 'Tenant A', shard: 'Shard 1', load: 18, state: '' },
+        { tenant: 'Tenant B', shard: 'Shard 2', load: 28, state: '' },
+        { tenant: 'Tenant VIP', shard: '2 + 4 雙寫', load: 62, state: 'wait' }
+      ],
+      shards: [
+        { name: 'Shard 1', pct: 18, tenants: 'A', state: '' },
+        { name: 'Shard 2', pct: 90, tenants: 'B, VIP', state: 'migrating' },
+        { name: 'Shard 3', pct: 12, tenants: '—', state: '' },
+        { name: 'Shard 4', pct: 55, tenants: 'VIP（backfill 78%）', state: 'migrating' }
+      ]
+    },
+    {
+      name: '4 / 6 · Verify',
+      status: 'Verify：抽樣 10k rows checksum 一致；shadow read Shard 4 與 Shard 2 diff = 0。Map version 準備從 v12 → v13。',
+      map: [
+        { tenant: 'Tenant A', shard: 'Shard 1', load: 18, state: '' },
+        { tenant: 'Tenant B', shard: 'Shard 2', load: 28, state: '' },
+        { tenant: 'Tenant VIP', shard: '待切 → Shard 4', load: 62, state: 'wait' }
+      ],
+      shards: [
+        { name: 'Shard 1', pct: 18, tenants: 'A', state: '' },
+        { name: 'Shard 2', pct: 90, tenants: 'B, VIP', state: 'migrating' },
+        { name: 'Shard 3', pct: 12, tenants: '—', state: '' },
+        { name: 'Shard 4', pct: 62, tenants: 'VIP（已同步）', state: '' }
+      ]
+    },
+    {
+      name: '5 / 6 · Cutover',
+      status: 'Cutover：Map v13 生效，Tenant VIP 讀寫皆路由至 Shard 4。Shard 2 負載降至 28%，hot spot 解除。舊副本保留 7 天 rollback window。',
+      map: [
+        { tenant: 'Tenant A', shard: 'Shard 1', load: 18, state: '' },
+        { tenant: 'Tenant B', shard: 'Shard 2', load: 28, state: '' },
+        { tenant: 'Tenant VIP', shard: 'Shard 4', load: 62, state: 'ok' }
+      ],
+      shards: [
+        { name: 'Shard 1', pct: 18, tenants: 'A', state: '' },
+        { name: 'Shard 2', pct: 28, tenants: 'B', state: '' },
+        { name: 'Shard 3', pct: 12, tenants: '—', state: '' },
+        { name: 'Shard 4', pct: 62, tenants: 'VIP', state: '' }
+      ]
+    },
+    {
+      name: '6 / 6 · Cleanup',
+      status: 'Cleanup：停止 dual-write，刪除 Shard 2 上 VIP 舊副本。遷移完成——Dedicated shard 就緒，Tenant B 恢復正常鄰居環境。',
+      map: [
+        { tenant: 'Tenant A', shard: 'Shard 1', load: 18, state: '' },
+        { tenant: 'Tenant B', shard: 'Shard 2', load: 28, state: '' },
+        { tenant: 'Tenant VIP', shard: 'Shard 4', load: 62, state: 'ok' }
+      ],
+      shards: [
+        { name: 'Shard 1', pct: 18, tenants: 'A', state: '' },
+        { name: 'Shard 2', pct: 28, tenants: 'B', state: '' },
+        { name: 'Shard 3', pct: 12, tenants: '—', state: '' },
+        { name: 'Shard 4', pct: 62, tenants: 'VIP', state: '' }
+      ]
+    }
+  ];
+
+  let phaseIdx = 0;
+  let viewMode = 'map';
+
+  const phaseEl = demo.querySelector('#mg-phase');
+  const statusEl = demo.querySelector('#mg-status');
+  const mapEl = demo.querySelector('#mg-map');
+  const shardsEl = demo.querySelector('#mg-shards');
+  const mapPanel = demo.querySelector('#mg-map-panel');
+  const shardPanel = demo.querySelector('#mg-shard-panel');
+  const nextBtn = demo.querySelector('#mg-next');
+  const resetBtn = demo.querySelector('#mg-reset');
+  const viewBtns = Array.from(demo.querySelectorAll('[data-view]'));
+
+  function loadColor(pct) {
+    if (pct >= 85) return 'var(--bad)';
+    if (pct >= 60) return 'var(--warn)';
+    return 'var(--ok)';
+  }
+
+  function rowStateClass(state) {
+    if (state === 'lock') return 'state-lock';
+    if (state === 'wait') return 'state-wait';
+    if (state === 'ok') return 'state-ok';
+    return '';
+  }
+
+  function renderMap(rows) {
+    mapEl.innerHTML = rows.map(function (r) {
+      var cls = rowStateClass(r.state === 'hot' ? '' : r.state);
+      var fillColor = r.state === 'hot' ? 'var(--bad)' : loadColor(r.load);
+      return (
+        '<div class="mg-row ' + cls + '">' +
+          '<span class="tenant">' + r.tenant + '</span>' +
+          '<div class="load-bar"><div class="load-fill" style="width:' + r.load + '%;background:' + fillColor + '"></div></div>' +
+          '<span class="shard-tag">' + r.shard + '</span>' +
+        '</div>'
+      );
+    }).join('');
+  }
+
+  function renderShards(shards) {
+    shardsEl.innerHTML = shards.map(function (s) {
+      var cardCls = s.state || '';
+      return (
+        '<div class="mg-shard-card ' + cardCls + '">' +
+          '<div class="sname">' + s.name + '</div>' +
+          '<div class="smeta">' + s.tenants + '</div>' +
+          '<div class="sbar"><div class="sfill" style="width:' + s.pct + '%;background:' + loadColor(s.pct) + '"></div></div>' +
+          '<div class="spct">' + s.pct + '%</div>' +
+        '</div>'
+      );
+    }).join('');
+  }
+
+  function render() {
+    var phase = PHASES[phaseIdx];
+    phaseEl.textContent = '階段 ' + phase.name;
+    statusEl.textContent = phase.status;
+    renderMap(phase.map);
+    renderShards(phase.shards);
+
+    if (phaseIdx >= PHASES.length - 1) {
+      nextBtn.disabled = true;
+      nextBtn.textContent = '完成';
+    } else {
+      nextBtn.disabled = false;
+      nextBtn.textContent = '下一步';
+    }
+  }
+
+  function setView(mode) {
+    viewMode = mode;
+    viewBtns.forEach(function (btn) {
+      btn.setAttribute('aria-pressed', btn.dataset.view === mode ? 'true' : 'false');
+    });
+    mapPanel.hidden = mode !== 'map';
+    shardPanel.hidden = mode !== 'shards';
+  }
+
+  viewBtns.forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      setView(btn.dataset.view);
+    });
+  });
+
+  nextBtn.addEventListener('click', function () {
+    if (phaseIdx < PHASES.length - 1) {
+      phaseIdx++;
+      render();
+    }
+  });
+
+  resetBtn.addEventListener('click', function () {
+    phaseIdx = 0;
+    setView('map');
+    render();
+  });
+
+  setView('map');
+  render();
+})();
+  </script>

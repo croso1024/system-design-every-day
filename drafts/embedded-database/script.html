@@ -1,0 +1,262 @@
+<script>
+(function () {
+  var engine = 'sqlite';
+  var stepIdx = 0;
+  var writeCount = 0;
+  var compactCount = 0;
+  var stalled = false;
+
+  /* SQLite state */
+  var sqliteSteps = [
+    { phase: 'BEGIN IMMEDIATE', layer: 'tx', status: 'lock' },
+    { phase: 'WAL append record', layer: 'wal', status: 'wait' },
+    { phase: 'B-Tree page update', layer: 'btree', status: 'lock' },
+    { phase: 'COMMIT + fsync', layer: 'db', status: 'ok' },
+    { phase: 'WAL checkpoint (async)', layer: 'db', status: 'idle' }
+  ];
+  var sqliteStep = 0;
+  var sqliteCommitted = 0;
+  var walSize = 0;
+  var dbPages = 1;
+
+  /* RocksDB state */
+  var memtable = 0;
+  var memCap = 8;
+  var l0sst = 0;
+  var l1sst = 0;
+  var walBytes = 0;
+  var readAmp = 1;
+  var rocksStep = 0;
+  var rocksPhases = ['WAL append', 'MemTable insert', 'MemTable full → Flush L0', 'L0 SST created'];
+
+  var elLayers = document.getElementById('emb-layers');
+  var elPipeline = document.getElementById('emb-pipeline');
+  var elMetrics = document.getElementById('emb-metrics');
+  var elStatus = document.getElementById('emb-status');
+  var segBtns = document.querySelectorAll('[data-engine]');
+
+  function dot(cls) {
+    return '<span style="display:inline-block;width:9px;height:9px;border-radius:2px;margin-right:6px;vertical-align:middle" class="' + cls + '"></span>';
+  }
+
+  function setSeg(eng) {
+    engine = eng;
+    segBtns.forEach(function (b) {
+      b.setAttribute('aria-pressed', b.getAttribute('data-engine') === eng ? 'true' : 'false');
+    });
+    reset(false);
+    elStatus.textContent = eng === 'sqlite'
+      ? 'SQLite 模式：按「下一步」模擬 BEGIN → WAL append → B-Tree update → COMMIT → checkpoint。'
+      : 'RocksDB 模式：按「下一步」模擬 WAL → MemTable → Flush L0；L0 過多時 read amplification 上升，需 Compaction。';
+  }
+
+  function renderSQLite() {
+    var layers = '';
+    layers += dot('ns-wait') + 'WAL 檔：' + walSize + ' records<br>';
+    layers += dot('ns-ok') + 'B-Tree 資料頁：' + dbPages + ' pages<br>';
+    layers += dot('ns-idle') + '主 .db 檔（single file）';
+
+    var pipe = '';
+    if (sqliteStep < sqliteSteps.length) {
+      var s = sqliteSteps[sqliteStep];
+      var stCls = s.status === 'lock' ? 'ns-lock' : s.status === 'wait' ? 'ns-wait' : s.status === 'ok' ? 'ns-ok' : 'ns-idle';
+      pipe += dot(stCls) + '<strong>' + s.phase + '</strong><br>';
+      pipe += '<span style="color:var(--text-3)">step ' + (sqliteStep + 1) + ' / ' + sqliteSteps.length + '</span>';
+    } else {
+      pipe += dot('ns-ok') + '<strong>Transaction idle</strong><br>';
+      pipe += '<span style="color:var(--text-3)">可按「下一步」開始新交易</span>';
+    }
+
+    elLayers.innerHTML = layers;
+    elPipeline.innerHTML = pipe;
+    elMetrics.innerHTML =
+      '<span><strong>Committed TX</strong>：' + sqliteCommitted + '</span>' +
+      '<span><strong>WAL size</strong>：' + walSize + '</span>' +
+      '<span><strong>Writer lock</strong>：' + (sqliteStep > 0 && sqliteStep < 4 ? 'held' : 'free') + '</span>' +
+      '<span><strong>Read amp</strong>：1（B-Tree index）</span>';
+  }
+
+  function renderRocksDB() {
+    var stallCls = stalled ? 'ns-bad' : 'ns-idle';
+    var layers = '';
+    layers += dot('ns-wait') + 'WAL：' + walBytes + ' KB<br>';
+    layers += dot(memtable >= memCap ? 'ns-bad' : 'ns-lock') + 'MemTable：' + memtable + ' / ' + memCap + ' keys<br>';
+    layers += dot('ns-ok') + 'L0 SST：' + l0sst + ' files<br>';
+    layers += dot('ns-ok') + 'L1 SST：' + l1sst + ' files';
+
+    var pipe = '';
+    if (rocksStep < rocksPhases.length) {
+      pipe += dot('ns-wait') + '<strong>' + rocksPhases[rocksStep] + '</strong><br>';
+    } else {
+      pipe += dot('ns-idle') + '<strong>Ready for next write</strong><br>';
+    }
+    pipe += '<span style="color:var(--text-3)">total writes: ' + writeCount + '</span>';
+
+    elLayers.innerHTML = layers;
+    elPipeline.innerHTML = pipe;
+    elMetrics.innerHTML =
+      '<span><strong>Write amp</strong>：~' + (1 + compactCount * 0.5).toFixed(1) + '×</span>' +
+      '<span><strong>Read amp</strong>：' + readAmp + ' SST lookups</span>' +
+      '<span><strong>Compactions</strong>：' + compactCount + '</span>' +
+      '<span><strong>Stall</strong>：' + (stalled ? dot('ns-bad') + 'yes' : dot('ns-ok') + 'no') + '</span>';
+  }
+
+  function render() {
+    if (engine === 'sqlite') renderSQLite();
+    else renderRocksDB();
+  }
+
+  function stepSQLite() {
+    if (sqliteStep >= sqliteSteps.length) {
+      sqliteStep = 0;
+    }
+    var s = sqliteSteps[sqliteStep];
+    if (s.phase.indexOf('WAL append') >= 0) walSize++;
+    if (s.phase.indexOf('B-Tree') >= 0) dbPages = Math.min(dbPages + 1, 12);
+    if (s.phase.indexOf('COMMIT') >= 0) {
+      sqliteCommitted++;
+      writeCount++;
+    }
+    if (s.phase.indexOf('checkpoint') >= 0 && walSize > 0) {
+      walSize = Math.max(0, walSize - 1);
+      elStatus.textContent = 'Checkpoint 將 WAL 合併回主 .db，reader 可繼續讀取舊 snapshot。';
+    } else {
+      elStatus.textContent = 'SQLite：' + s.phase + ' — 單 writer，WAL 允許 concurrent readers。';
+    }
+    sqliteStep++;
+    if (sqliteStep >= sqliteSteps.length) sqliteStep = sqliteSteps.length;
+    render();
+  }
+
+  function stepRocksDB() {
+    if (stalled) {
+      elStatus.textContent = 'Compaction backlog！寫入 stall — 請按「觸發 Compaction」或 Reset。';
+      render();
+      return;
+    }
+    if (rocksStep >= rocksPhases.length) rocksStep = 0;
+
+    var phase = rocksPhases[rocksStep];
+    walBytes += 4;
+    if (phase.indexOf('MemTable insert') >= 0 || phase.indexOf('WAL') >= 0) {
+      if (phase.indexOf('insert') >= 0) memtable++;
+    }
+    if (phase.indexOf('Flush') >= 0 || memtable >= memCap) {
+      if (memtable >= memCap) {
+        l0sst++;
+        memtable = 0;
+        readAmp = Math.min(l0sst + 1, 12);
+        writeCount++;
+        elStatus.textContent = 'MemTable flush → L0 SST #' + l0sst + '；L0 檔案越多，read amplification 越高。';
+        if (l0sst >= 6) {
+          stalled = true;
+          elStatus.textContent = 'L0 堆積 ' + l0sst + ' 檔！寫入 stall — compaction 跟不上，P99 延遲惡化。';
+        }
+        rocksStep = rocksPhases.length;
+        render();
+        return;
+      }
+    }
+    if (phase.indexOf('WAL') >= 0) {
+      memtable = Math.min(memtable + 1, memCap);
+      writeCount++;
+    }
+    elStatus.textContent = 'RocksDB：' + phase + ' — 順序寫 WAL + MemTable，flush 後才變 SST。';
+    rocksStep++;
+    render();
+  }
+
+  function batchWrite() {
+    for (var i = 0; i < 5; i++) {
+      if (engine === 'sqlite') {
+        if (sqliteStep >= sqliteSteps.length) sqliteStep = 0;
+        stepSQLite();
+      } else {
+        walBytes += 4;
+        memtable += 2;
+        writeCount++;
+        if (memtable >= memCap) {
+          l0sst++;
+          memtable = 0;
+          readAmp = Math.min(l0sst + 1, 12);
+          if (l0sst >= 6) stalled = true;
+        }
+      }
+    }
+    if (engine === 'rocksdb') {
+      elStatus.textContent = '批次 ×5 寫入完成。MemTable=' + memtable + '，L0=' + l0sst + ' SST。';
+      if (stalled) elStatus.textContent += ' L0 過多，已 stall！';
+    }
+    render();
+  }
+
+  function compact() {
+    if (engine === 'sqlite') {
+      walSize = 0;
+      elStatus.textContent = 'SQLite：手動 WAL checkpoint，WAL 清空合併至 .db。';
+    } else {
+      if (l0sst > 0) {
+        var merged = Math.min(l0sst, 3);
+        l1sst += 1;
+        l0sst -= merged;
+        compactCount++;
+        readAmp = Math.max(1, l0sst + 1);
+        stalled = l0sst >= 6;
+        elStatus.textContent = 'Compaction：合併 ' + merged + ' 個 L0 SST → L1；read amp 降至 ' + readAmp + '。';
+      } else {
+        elStatus.textContent = 'L0 已空，無需 compaction。';
+      }
+    }
+    render();
+  }
+
+  function reset(updateStatus) {
+    stepIdx = 0;
+    writeCount = 0;
+    compactCount = 0;
+    stalled = false;
+    sqliteStep = 0;
+    sqliteCommitted = 0;
+    walSize = 0;
+    dbPages = 1;
+    memtable = 0;
+    l0sst = 0;
+    l1sst = 0;
+    walBytes = 0;
+    readAmp = 1;
+    rocksStep = 0;
+    if (updateStatus !== false) {
+      setSeg(engine);
+    } else {
+      render();
+    }
+  }
+
+  segBtns.forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      setSeg(btn.getAttribute('data-engine'));
+    });
+  });
+
+  document.getElementById('btn-step').addEventListener('click', function () {
+    if (engine === 'sqlite') stepSQLite();
+    else stepRocksDB();
+  });
+  document.getElementById('btn-batch').addEventListener('click', batchWrite);
+  document.getElementById('btn-compact').addEventListener('click', compact);
+  document.getElementById('btn-reset').addEventListener('click', function () { reset(true); });
+
+  /* inject dot styles inline for demo mini-dots */
+  var style = document.createElement('style');
+  style.textContent = [
+    '#demo-embedded .ns-idle{background:#fff;border:1px solid #dedcd8}',
+    '#demo-embedded .ns-lock{background:#f6f0e7;border:1px solid #a3743e}',
+    '#demo-embedded .ns-ok{background:#eef4f1;border:1px solid #4d7d68}',
+    '#demo-embedded .ns-bad{background:#f6ecea;border:1px solid #a8554f}',
+    '#demo-embedded .ns-wait{background:#eef2f7;border:1px solid #3f6188}'
+  ].join('');
+  document.head.appendChild(style);
+
+  render();
+})();
+</script>
