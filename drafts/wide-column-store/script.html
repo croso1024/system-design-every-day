@@ -1,134 +1,343 @@
 <script>
 (function () {
+  var demo = document.getElementById('demo-wide-column');
+  if (!demo) return;
+
   var model = 'inbox';
   var query = 'pk';
   var nodes = ['N1', 'N2', 'N3', 'N4'];
-  var runCount = 0;
+  var RF = 3;
 
-  var elRing = document.getElementById('wc-ring');
-  var elPlan = document.getElementById('wc-plan');
-  var elMetrics = document.getElementById('wc-metrics');
-  var elStatus = document.getElementById('wc-status');
-  var modelBtns = document.querySelectorAll('[data-model]');
-  var queryBtns = document.querySelectorAll('[data-query]');
+  var elRow = demo.querySelector('#wc-row');
+  var elRing = demo.querySelector('#wc-ring');
+  var elPlan = demo.querySelector('#wc-plan');
+  var elMetrics = demo.querySelector('#wc-metrics');
+  var elStatus = demo.querySelector('#wc-status');
+  var modelBtns = demo.querySelectorAll('[data-model]');
+  var queryBtns = demo.querySelectorAll('[data-query]');
 
-  var scenarios = {
+  var datasets = {
     inbox: {
-      label: 'inbox_by_user (PK: user_id, CK: message_id)',
-      pk: 'user_id = alice-42',
-      range: 'user_id = alice-42 AND message_id > t-100',
-      scan: 'WHERE sender = "bob"  — 無 partition key'
+      label: 'inbox_by_user',
+      pkName: 'user_id',
+      pkValue: 'alice',
+      ckName: 'message_id',
+      note: '理想模型：高基數 PK + 時間序 CK',
+      partitions: {
+        alice: [
+          { ck: 'msg-1003', cols: ['sender=bob', 'subject=Hello', 'body=…', 'attachment_url'] },
+          { ck: 'msg-1002', cols: ['sender=carol', 'subject=Ping', 'body=…'] },
+          { ck: 'msg-1001', cols: ['sender=bob', 'subject=Hi'] }
+        ]
+      },
+      focusPk: 'alice',
+      rangeMatch: function (row) { return row.ck >= 'msg-1002'; },
+      queries: {
+        pk: 'WHERE user_id = alice',
+        range: 'WHERE user_id = alice AND message_id >= msg-1002',
+        scan: 'WHERE sender = bob  — 無 partition key'
+      }
     },
     orders: {
-      label: 'orders_by_id (PK: order_id)',
-      pk: 'order_id = ord-9f3a',
-      range: 'order_id = ord-9f3a  — 單列 lookup',
-      scan: 'WHERE status = "pending"  — 無 partition key'
+      label: 'orders_by_id',
+      pkName: 'order_id',
+      pkValue: 'ord-9f3a',
+      ckName: '(none)',
+      note: '單列 lookup：PK 即整筆訂單',
+      partitions: {
+        'ord-9f3a': [
+          { ck: '—', cols: ['user_id=alice', 'total=1280', 'status=paid', 'items=[…]'] }
+        ],
+        'ord-1a2b': [
+          { ck: '—', cols: ['user_id=bob', 'total=420', 'status=pending'] }
+        ]
+      },
+      focusPk: 'ord-9f3a',
+      rangeMatch: function () { return true; },
+      queries: {
+        pk: 'WHERE order_id = ord-9f3a',
+        range: 'WHERE order_id = ord-9f3a  — 無 clustering 範圍可掃',
+        scan: 'WHERE status = pending  — 無 partition key'
+      }
     },
     bad: {
-      label: 'orders_by_status (PK: status)  ⚠ hot partition',
-      pk: 'status = "pending"',
-      range: 'status = "pending" AND order_id > x',
-      scan: 'SELECT *  — 全表掃描'
+      label: 'orders_by_status',
+      pkName: 'status',
+      pkValue: 'pending',
+      ckName: 'order_id',
+      note: '錯誤：低基數 PK → hot partition',
+      partitions: {
+        pending: [
+          { ck: 'ord-aa01', cols: ['user=u1', 'total=99'] },
+          { ck: 'ord-aa02', cols: ['user=u2', 'total=50'] },
+          { ck: 'ord-aa03', cols: ['user=u3', 'total=12'] },
+          { ck: 'ord-aa04', cols: ['user=u4', 'total=880'] },
+          { ck: 'ord-aa05', cols: ['user=u5', 'total=3'] }
+        ],
+        paid: [
+          { ck: 'ord-bb01', cols: ['user=u9', 'total=10'] }
+        ]
+      },
+      focusPk: 'pending',
+      rangeMatch: function (row) { return row.ck >= 'ord-aa03'; },
+      queries: {
+        pk: 'WHERE status = pending',
+        range: 'WHERE status = pending AND order_id >= ord-aa03',
+        scan: 'SELECT *  — 全表掃描'
+      }
     }
   };
-
-  function dot(cls) {
-    return '<span style="display:inline-block;width:9px;height:9px;border-radius:2px;margin-right:6px;vertical-align:middle" class="' + cls + '"></span>';
-  }
 
   function hashPartition(key) {
     var h = 0;
     for (var i = 0; i < key.length; i++) h = ((h << 5) - h + key.charCodeAt(i)) | 0;
-    return Math.abs(h) % 4;
+    return Math.abs(h) % nodes.length;
+  }
+
+  function replicaSet(primary) {
+    var set = [];
+    for (var i = 0; i < RF; i++) set.push((primary + i) % nodes.length);
+    return set;
+  }
+
+  function escapeHtml(s) {
+    return String(s)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;');
+  }
+
+  function rowMatched(ds, row, rows) {
+    if (query === 'scan') return false;
+    if (query === 'range') return ds.rangeMatch(row);
+    if (model === 'inbox') return row === rows[0];
+    return true;
+  }
+
+  function renderWideRow(route, opts) {
+    opts = opts || {};
+    var preview = !!opts.preview;
+    var ds = datasets[model];
+    var html = '';
+
+    if (route.scatter) {
+      html += '<div class="wc-part-head">全表掃描：不鎖定單一 partition，各節點各自掃本地 SSTable。</div>';
+      Object.keys(ds.partitions).forEach(function (p) {
+        html += '<div class="wc-part-head" style="opacity:.7">partition <strong>' +
+          escapeHtml(ds.pkName) + '=' + escapeHtml(p) + '</strong> · ' +
+          ds.partitions[p].length + ' clustering row(s)</div>';
+      });
+      elRow.innerHTML = html;
+      return;
+    }
+
+    var pk = ds.focusPk;
+    var rows = ds.partitions[pk] || [];
+
+    html += '<div class="wc-part-head">partition <strong>' +
+      escapeHtml(ds.pkName) + '=' + escapeHtml(pk) + '</strong>';
+    if (model === 'bad') html += ' <span class="wc-badge hot">HOT</span>';
+    html += '<br><span style="color:var(--text-2);font-size:11px">' + escapeHtml(ds.note);
+    if (preview) html += ' · 預覽（尚未執行查詢）';
+    html += '</span></div>';
+
+    rows.forEach(function (row) {
+      var matched = preview ? false : rowMatched(ds, row, rows);
+      var cls = 'wc-ck-block';
+      if (!preview && (query === 'range' || query === 'pk')) {
+        cls += matched ? ' match' : ' dim';
+      }
+
+      html += '<div class="' + cls + '">';
+      html += '<div class="wc-ck-head"><span>' + escapeHtml(ds.ckName) + ' = ' +
+        escapeHtml(row.ck) + '</span>';
+      if (matched) html += '<span class="wc-badge hit">match</span>';
+      html += '</div><div class="wc-cols">';
+      row.cols.forEach(function (c) {
+        html += '<span class="wc-col">' + escapeHtml(c) + '</span>';
+      });
+      html += '</div></div>';
+    });
+
+    if (!preview && model === 'orders' && query === 'range') {
+      html += '<p style="margin:8px 0 0;font-size:12px;color:var(--text-2)">此模型沒有 clustering key，「範圍」與 point lookup 相同——按鈕保留是為了對照收件箱。</p>';
+    }
+
+    elRow.innerHTML = html;
+  }
+
+  function renderRing(route) {
+    var html = '';
+    nodes.forEach(function (n, i) {
+      var badges = [];
+      var dotCls = 'ns-idle';
+
+      if (i === route.coord) {
+        badges.push('<span class="wc-badge coord">coordinator</span>');
+        dotCls = 'ns-wait';
+      }
+      if (route.scatter && route.hit.indexOf(i) >= 0) {
+        badges.push('<span class="wc-badge scatter">scan</span>');
+        if (i !== route.coord) dotCls = 'ns-bad';
+      } else if (route.hot && route.primary === i) {
+        badges.push('<span class="wc-badge hot">hot primary</span>');
+        if (i !== route.coord) dotCls = 'ns-lock';
+      } else if (!route.scatter && route.replicas && route.replicas.indexOf(i) >= 0) {
+        badges.push('<span class="wc-badge hit">replica</span>');
+        if (i !== route.coord) dotCls = 'ns-ok';
+      }
+
+      html += '<div class="wc-ring-row">';
+      html += '<i class="dot ' + dotCls + '"></i>';
+      html += '<span class="wc-ring-name">' + n + '</span>';
+      html += '<span class="wc-ring-meta">token ' + (i * 25) + '–' + ((i + 1) * 25 - 1) + '</span>';
+      html += badges.join(' ');
+      html += '</div>';
+    });
+    elRing.innerHTML = html;
   }
 
   function computeRoute() {
-    var hit = [];
-    var scatter = false;
-    var coord = 0;
-    var latency = 'low';
-    var replicas = 1;
+    var ds = datasets[model];
     var plan = [];
 
-    if (query === 'scan' || (model === 'bad' && query !== 'pk')) {
-      scatter = true;
-      hit = [0, 1, 2, 3];
-      coord = 1;
-      latency = 'critical';
-      replicas = 4;
-      plan.push('① Client → Node-' + nodes[coord] + ' (coordinator)');
-      plan.push('② Scatter-gather：廣播至全部 4 nodes');
-      plan.push('③ 各節點本地掃描 SSTable');
-      plan.push('④ Coordinator 合併結果 → 高延遲');
-      elStatus.textContent = '危險：無有效 partition key，觸發全叢集 scatter-gather！生產環境應禁止此查詢。';
-      return { hit: hit, scatter: scatter, coord: coord, latency: latency, replicas: replicas, plan: plan };
+    if (query === 'scan') {
+      var coordScan = 1;
+      plan.push('① Client → ' + nodes[coordScan] + ' (coordinator)');
+      plan.push('② 查詢無有效 partition key → scatter-gather');
+      plan.push('③ 廣播至 N1–N4，各節點本地掃描');
+      plan.push('④ Coordinator 合併結果 → 延遲隨節點數上升');
+      return {
+        scatter: true,
+        hot: false,
+        coord: coordScan,
+        primary: -1,
+        replicas: [],
+        hit: [0, 1, 2, 3],
+        nodesContacted: 4,
+        latency: 'critical',
+        kind: 'scatter-gather',
+        plan: plan,
+        status: '危險：無 partition key，觸發全叢集 scatter-gather。生產環境應禁止。',
+        cql: ds.queries.scan
+      };
     }
 
-    var pkValue = model === 'inbox' ? 'alice-42' : model === 'orders' ? 'ord-9f3a' : 'pending';
-    var partIdx = hashPartition(pkValue);
-    hit = [partIdx];
-    coord = (partIdx + 1) % 4;
-    replicas = 3;
-    latency = query === 'range' ? 'low' : 'minimal';
+    var primary = hashPartition(ds.pkValue);
+    var replicas = replicaSet(primary);
+    var coord = (primary + 1) % nodes.length;
+    var hot = model === 'bad';
+    var latency = 'minimal';
+    var kind = 'point-lookup';
+    var status = '';
 
-    plan.push('① Client → Node-' + nodes[coord] + ' (coordinator)');
-    plan.push('② token(' + pkValue + ') → partition on ' + nodes[partIdx]);
-    if (query === 'range' && model === 'inbox') {
-      plan.push('③ Partition-local range scan (clustering key)');
-      plan.push('④ 回傳排序後前 50 列');
-      elStatus.textContent = '理想路徑：partition key 命中單一節點，clustering key 做範圍掃描——Cassandra 最擅長的查詢型態。';
-    } else if (model === 'bad') {
-      plan.push('③ 命中 Node-' + nodes[partIdx] + ' 但 status 基數極低');
-      plan.push('④ 幾乎所有「pending」訂單擠在同一 partition → hot spot');
+    plan.push('① Client → ' + nodes[coord] + ' (coordinator)');
+    plan.push('② token(' + ds.pkValue + ') → primary ' + nodes[primary] +
+      ' · replicas ' + replicas.map(function (i) { return nodes[i]; }).join(', '));
+
+    if (hot) {
+      plan.push('③ 路由正確，但 status 基數極低 → 大量列擠在同一 partition');
+      if (query === 'range') {
+        plan.push('④ Partition-local range scan（仍在熱點上掃）');
+        status = 'Hot partition：查詢仍是 partition-local，但 pending 抽屜過大，P99 與該節點負載會壞掉。';
+      } else {
+        plan.push('④ 讀取熱點 partition（寫入也會打同一組 replica）');
+        status = 'Hot partition：有帶 PK，所以不是 scatter-gather——病在「PK 選太粗」。';
+      }
       latency = 'high';
-      elStatus.textContent = 'Hot partition：低基數 partition key 讓大量寫入打到同一節點，P99 延遲飆升。';
+      kind = 'hot-partition';
+    } else if (query === 'range' && model === 'inbox') {
+      plan.push('③ Partition-local range scan（clustering key）');
+      plan.push('④ 回傳排序後匹配列（示範：msg-1002 起）');
+      status = '理想路徑：PK 命中少數 replica，CK 做範圍掃描——wide-column 最擅長的型態。';
+      latency = 'low';
+      kind = 'range-scan';
+    } else if (query === 'range' && model === 'orders') {
+      plan.push('③ 無 clustering key 可掃 → 等同 point lookup');
+      plan.push('④ 回傳單列');
+      status = '訂單表是單列模型：「範圍」按鈕沒有額外掃描語意，僅供對照。';
+      latency = 'minimal';
+      kind = 'point-lookup';
     } else {
-      plan.push('③ 直接讀取 ' + nodes[partIdx] + ' 上的單列 / 少數 replica');
+      plan.push('③ 向 replica set 讀取（示意 CL=ONE 時可只等一個）');
       plan.push('④ Partition-local point lookup 完成');
-      elStatus.textContent = '高效：partition key 精準路由到單一節點，延遲最低。';
+      status = '高效：partition key 精準路由，延遲最低。';
+      latency = 'minimal';
+      kind = 'point-lookup';
     }
 
-    return { hit: hit, scatter: scatter, coord: coord, latency: latency, replicas: replicas, plan: plan };
+    return {
+      scatter: false,
+      hot: hot,
+      coord: coord,
+      primary: primary,
+      replicas: replicas,
+      hit: replicas.slice(),
+      nodesContacted: replicas.length,
+      latency: latency,
+      kind: kind,
+      plan: plan,
+      status: status,
+      cql: ds.queries[query]
+    };
+  }
+
+  function renderPlan(route) {
+    var html = '';
+    route.plan.forEach(function (line) {
+      html += '<div>' + escapeHtml(line) + '</div>';
+    });
+    html += '<div style="margin-top:8px;color:var(--text-2)">CQL · ' +
+      escapeHtml(route.cql) + '</div>';
+    elPlan.innerHTML = html;
+  }
+
+  function latencyDot(lat) {
+    if (lat === 'minimal' || lat === 'low') return 'ns-ok';
+    if (lat === 'high') return 'ns-lock';
+    return 'ns-bad';
+  }
+
+  function renderMetrics(route) {
+    var ds = datasets[model];
+    elMetrics.innerHTML =
+      '<span><strong>Model</strong>：' + escapeHtml(ds.label) + '</span>' +
+      '<span><strong>Kind</strong>：' + escapeHtml(route.kind) + '</span>' +
+      '<span><strong>Nodes contacted</strong>：' + route.nodesContacted + ' / 4</span>' +
+      '<span><strong>RF</strong>：' + RF +
+      (route.scatter ? '（掃描時問遍全部節點）' : '（replica set 大小）') + '</span>' +
+      '<span><strong>Latency</strong>：<i class="dot ' + latencyDot(route.latency) +
+      '"></i> ' + escapeHtml(route.latency) + '</span>';
   }
 
   function renderIdle() {
-    var ring = '';
-    nodes.forEach(function (n, i) {
-      ring += dot('ns-idle') + 'Node-' + n + '  [token range ' + (i * 25) + '–' + ((i + 1) * 25 - 1) + ']<br>';
+    var ds = datasets[model];
+    renderWideRow({ scatter: false }, { preview: true });
+    renderRing({
+      scatter: false,
+      hot: false,
+      coord: -1,
+      primary: -1,
+      replicas: [],
+      hit: []
     });
-    elRing.innerHTML = ring;
-    elPlan.innerHTML = '<span style="color:var(--text-3)">等待執行查詢…</span>';
+    elPlan.innerHTML = '<span style="color:var(--text-3)">等待執行查詢…</span>' +
+      '<div style="margin-top:8px;color:var(--text-2)">CQL · ' +
+      escapeHtml(ds.queries[query]) + '</div>';
     elMetrics.innerHTML =
-      '<span><strong>Model</strong>：' + scenarios[model].label + '</span>' +
-      '<span><strong>Query</strong>：' + scenarios[model][query] + '</span>';
+      '<span><strong>Model</strong>：' + escapeHtml(ds.label) + '</span>' +
+      '<span><strong>Query</strong>：' + escapeHtml(ds.queries[query]) + '</span>' +
+      '<span><strong>RF</strong>：' + RF + '</span>';
+    elStatus.textContent = '已選模型「' + ds.label + '」。選擇查詢後按「執行查詢」。';
   }
 
-  function renderResult(route) {
-    var ring = '';
-    nodes.forEach(function (n, i) {
-      var cls = 'ns-idle';
-      if (i === route.coord) cls = 'ns-wait';
-      else if (route.hit.indexOf(i) >= 0) cls = route.scatter ? 'ns-bad' : 'ns-ok';
-      ring += dot(cls) + 'Node-' + n;
-      if (i === route.coord) ring += '  ← coordinator';
-      if (route.hit.indexOf(i) >= 0 && i !== route.coord) ring += '  ← replica';
-      ring += '<br>';
-    });
-    elRing.innerHTML = ring;
-
-    var planHtml = '';
-    route.plan.forEach(function (line) {
-      planHtml += dot('ns-wait') + line + '<br>';
-    });
-    elPlan.innerHTML = planHtml;
-
-    var latCls = route.latency === 'minimal' ? 'ns-ok' : route.latency === 'low' ? 'ns-ok' : route.latency === 'high' ? 'ns-lock' : 'ns-bad';
-    elMetrics.innerHTML =
-      '<span><strong>Nodes hit</strong>：' + route.hit.length + ' / 4</span>' +
-      '<span><strong>RF contacted</strong>：' + route.replicas + '</span>' +
-      '<span><strong>Latency</strong>：' + dot(latCls) + route.latency + '</span>' +
-      '<span><strong>Runs</strong>：' + runCount + '</span>';
+  function runQuery() {
+    var route = computeRoute();
+    renderWideRow(route);
+    renderRing(route);
+    renderPlan(route);
+    renderMetrics(route);
+    elStatus.textContent = route.status;
   }
 
   function setModel(m) {
@@ -137,7 +346,6 @@
       b.setAttribute('aria-pressed', b.getAttribute('data-model') === m ? 'true' : 'false');
     });
     renderIdle();
-    elStatus.textContent = '已切換模型：' + scenarios[m].label + '。選擇查詢後按「執行查詢」。';
   }
 
   function setQuery(q) {
@@ -148,16 +356,17 @@
     renderIdle();
   }
 
-  function runQuery() {
-    runCount++;
-    var route = computeRoute();
-    renderResult(route);
-  }
-
   function reset() {
-    runCount = 0;
+    model = 'inbox';
+    query = 'pk';
+    modelBtns.forEach(function (b) {
+      b.setAttribute('aria-pressed', b.getAttribute('data-model') === 'inbox' ? 'true' : 'false');
+    });
+    queryBtns.forEach(function (b) {
+      b.setAttribute('aria-pressed', b.getAttribute('data-query') === 'pk' ? 'true' : 'false');
+    });
     renderIdle();
-    elStatus.textContent = '已重置。選擇資料模型與查詢模式，按「執行查詢」觀察路由行為。';
+    elStatus.textContent = '已重置。選擇資料模型與查詢模式，按「執行查詢」。';
   }
 
   modelBtns.forEach(function (b) {
@@ -166,8 +375,8 @@
   queryBtns.forEach(function (b) {
     b.addEventListener('click', function () { setQuery(b.getAttribute('data-query')); });
   });
-  document.getElementById('btn-run').addEventListener('click', runQuery);
-  document.getElementById('btn-reset').addEventListener('click', reset);
+  demo.querySelector('#btn-run').addEventListener('click', runQuery);
+  demo.querySelector('#btn-reset').addEventListener('click', reset);
 
   renderIdle();
 })();
