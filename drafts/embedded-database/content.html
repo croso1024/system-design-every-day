@@ -54,7 +54,7 @@
         </tr>
         <tr>
           <td><strong>並發模型</strong></td>
-          <td>DB 級寫鎖、WAL 模式可多读</td>
+          <td>DB 級寫鎖、WAL 模式可多讀</td>
           <td>Column Family 並行寫</td>
           <td>MVCC + 連線池</td>
         </tr>
@@ -73,6 +73,21 @@
     <b>一句話答法</b>嵌入式 DB 分兩派——SQLite 是 in-process 關聯型給 App 直連；RocksDB 是 LSM-Tree KV engine 給 Kafka / Flink / MySQL 當底層，兩者互補而非互斥。
   </div>
 </section>
+
+<hr class="div">
+
+<div class="callout accent">
+  <div class="c-title"><span class="ic">先備</span>兩個反覆出現的底層原語：WAL 與 LSM-Tree</div>
+  <p>接下來每一節、連互動 Demo 都會不斷用到這兩個詞。它們不專屬某個引擎，而是儲存系統的通用構件，先各給一句定義與一張流程小圖：</p>
+
+  <p><strong>WAL（Write-Ahead Log）</strong>——跨資料庫的通用<strong>耐久性原語</strong>：改資料前，先把「打算做什麼」<strong>循序 append 進一份 log</strong>、確認落盤後才動主結構。好處是 crash 後能用 log <strong>replay</strong> 補回未落盤的寫入、或 <strong>rollback</strong> 未提交的交易，不留半殘狀態；同時把大量隨機寫收斂成一次循序寫。SQLite、RocksDB、PostgreSQL 都靠它保證 crash consistency——下文 SQLite 的「WAL 模式」與 RocksDB 的「WAL append」都是同一概念的應用。</p>
+  <div style="overflow-x:auto;margin:10px 0 4px"><pre style="margin:0;padding:10px 12px;background:#fdfbf7;border:1px solid var(--border);border-radius:var(--radius-sm);font-family:var(--mono);font-size:12px;line-height:1.8;color:var(--text-2)">寫入 ① append log → ② fsync 落盤 → ③ 更新主結構
+crash 後 ↩ 讀 log：replay 補回 ／ rollback 回滾</pre></div>
+
+  <p><strong>LSM-Tree（Log-Structured Merge-Tree）</strong>——一種<strong>只追加、不原地改</strong>的儲存結構。B-Tree 是定位頁面後<strong>原地覆寫</strong>（隨機寫）；LSM 反過來——新寫入一律堆進記憶體 <strong>MemTable</strong>、批次 flush 成不可變的 <strong>SST</strong> 檔，資料因此分成新舊多層，再靠背景 <strong>compaction</strong> 慢慢合併、丟棄被覆蓋或刪除的舊值。核心取捨：以<strong>寫入放大</strong>＋需要背景 compaction 為代價，把隨機寫轉成循序寫，換得極高寫入吞吐——這正是 Kafka／Flink 這類寫密集元件選它的原因。</p>
+  <div style="overflow-x:auto;margin:10px 0 2px"><pre style="margin:0;padding:10px 12px;background:#fdfbf7;border:1px solid var(--border);border-radius:var(--radius-sm);font-family:var(--mono);font-size:12px;line-height:1.8;color:var(--text-2)">B-Tree   ：定位頁面 → 原地覆寫（隨機寫）
+LSM-Tree ：寫入 → MemTable → flush → L0 → compaction → L1（順序寫）</pre></div>
+</div>
 
 <hr class="div">
 
@@ -108,7 +123,7 @@ UPDATE sync_queue SET status = 'syncing' WHERE id = ?;
 COMMIT;</code></pre>
 
   <h3>並發與 WAL 模式</h3>
-  <p>預設 rollback journal 下，SQLite 同一時間<strong>只允許一個 writer</strong>（DB 級鎖）。開啟 <strong>WAL（Write-Ahead Log）</strong> 後可<strong>多读單寫</strong>：reader 讀舊 snapshot，writer append WAL，適合讀多寫少的本地 cache。</p>
+  <p>預設 rollback journal 下，SQLite 同一時間<strong>只允許一個 writer</strong>（DB 級鎖）。開啟 <strong>WAL（Write-Ahead Log）</strong> 後可<strong>多讀單寫</strong>：reader 讀舊 snapshot，writer append WAL，適合讀多寫少的本地 cache。</p>
 
   <div class="callout warn">
     <div class="c-title"><span class="ic">陷阱</span>把 SQLite 當多寫入後端 DB</div>
@@ -137,7 +152,7 @@ COMMIT;</code></pre>
       <tbody>
         <tr>
           <td><code>journal_mode=WAL</code></td>
-          <td>多读單寫、寫入不阻塞讀</td>
+          <td>多讀單寫、寫入不阻塞讀</td>
           <td>需額外 -wal / -shm 檔；備份需 checkpoint</td>
         </tr>
         <tr>
@@ -224,6 +239,8 @@ COMMIT;</code></pre>
       </tbody>
     </table>
   </div>
+
+  <p>那讀取怎麼辦？一個 key 可能散落在 MemTable 與多層 SST，理論上每次 GET 都要逐層探查（read amplification）。RocksDB 靠兩個機制壓制：每個 SST 內建 <strong>Bloom filter</strong>——先用機率結構判斷「這個 SST <em>絕對不含</em>該 key」就直接跳過，只探真正可能命中的檔；再加上 <strong>block cache</strong> 把熱門資料頁留在記憶體。因此實務 read amp 遠低於「L0 檔數」的最壞估計。</p>
 
   <div class="callout warn">
     <div class="c-title"><span class="ic">陷阱</span>Compaction 跟不上寫入</div>
@@ -313,62 +330,62 @@ COMMIT;</code></pre>
 <section id="s5">
   <div class="sec-head">
     <span class="sec-num">05</span>
-    <h2>互動 Demo：SQLite WAL 交易 vs RocksDB LSM 寫入路徑</h2>
+    <h2>互動 Demo：同一批寫入，B-Tree 與 LSM 怎麼演化</h2>
   </div>
-  <p class="sec-sub">切換引擎模式，逐步觀察 SQLite 的 BEGIN/COMMIT 與 RocksDB 的 WAL→MemTable→Flush→Compaction 差異。</p>
+  <p class="sec-sub">左右並排餵<strong>同一批寫入</strong>，直接對比 SQLite 的 B-Tree 原地更新＋WAL 與 RocksDB 的 MemTable→L0→L1 分層寫入與 compaction。</p>
 
-  <p>下方模擬兩種嵌入式引擎處理同一批寫入請求的路徑。SQLite 模式展示 transaction 狀態與 WAL checkpoint；RocksDB 模式展示 LSM 各層資料量與 compaction 如何影響 read amplification。</p>
+  <p>下方兩欄接收<strong>同一批寫入請求</strong>。左邊 SQLite 走 B-Tree：每筆寫入<strong>原地翻新</strong>某個資料頁、append WAL，累積到門檻自動 checkpoint。右邊 RocksDB 走 LSM：寫入先進 MemTable，滿了 flush 成一塊 L0 SST，L0 堆太多得靠 compaction 併進 L1。按 <strong>GET</strong> 觀察兩者讀取路徑差異——B-Tree 一次命中 vs LSM 靠 <strong>Bloom filter</strong> 跳過不含該 key 的 SST。</p>
 
   <div class="demo" id="demo-embedded">
     <div class="demo-bar">
-      <span class="label">互動 · 嵌入式引擎寫入路徑</span>
-      <span class="label" style="text-transform:none;font-family:var(--sans);font-size:12px;color:var(--text-2)">切換 SQLite / RocksDB，逐步寫入或觸發 compaction</span>
+      <span class="label">互動 · 同一批寫入，兩種引擎</span>
+      <span class="label" style="text-transform:none;font-family:var(--sans);font-size:12px;color:var(--text-2)">寫入 / 查詢同時餵給兩邊，對比儲存結構如何演化</span>
     </div>
     <div class="demo-body">
       <div style="display:flex;flex-wrap:wrap;gap:12px;align-items:center;margin-bottom:14px">
-        <div class="seg" role="group" aria-label="引擎模式">
-          <button data-engine="sqlite" aria-pressed="true">SQLite (B-Tree + WAL)</button>
-          <button data-engine="rocksdb" aria-pressed="false">RocksDB (LSM-Tree)</button>
-        </div>
-        <button class="btn primary" id="btn-step" type="button">下一步</button>
+        <button class="btn primary" id="btn-write" type="button">寫入 1 筆</button>
         <button class="btn" id="btn-batch" type="button">批次寫入 ×5</button>
+        <button class="btn" id="btn-get" type="button">GET 查一筆</button>
         <button class="btn" id="btn-compact" type="button">觸發 Compaction</button>
         <button class="btn" id="btn-reset" type="button">Reset</button>
+        <span id="emb-counter" style="margin-left:auto;font-family:var(--mono);font-size:12px;color:var(--text-3)">寫入總數：0</span>
       </div>
 
-      <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:14px">
-        <div style="border:1px solid var(--border);border-radius:var(--radius-sm);padding:14px;background:var(--bg-soft);min-height:160px">
-          <div style="font-family:var(--mono);font-size:11px;color:var(--text-3);margin-bottom:8px">STORAGE LAYERS</div>
-          <div id="emb-layers" style="font-size:13px;line-height:2"></div>
+      <div class="eng-grid" style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:14px">
+        <div class="eng-col">
+          <div class="eng-title">SQLite · B-Tree + WAL（原地更新）</div>
+          <div class="eng-row"><span class="rl">WAL（append，滿了 checkpoint）</span><div id="emb-wal"></div></div>
+          <div class="eng-row"><span class="rl">B-Tree 資料頁（寫入原地翻新，橘＝剛更新）</span><div id="emb-btree"></div></div>
+          <div class="eng-metrics" id="emb-sqlite-metrics"></div>
         </div>
-        <div style="border:1px solid var(--border);border-radius:var(--radius-sm);padding:14px;background:#ffffff;min-height:160px">
-          <div style="font-family:var(--mono);font-size:11px;color:var(--text-3);margin-bottom:8px">PIPELINE / TX STATE</div>
-          <div id="emb-pipeline" style="font-family:var(--mono);font-size:12px;line-height:1.8"></div>
+        <div class="eng-col">
+          <div class="eng-title">RocksDB · LSM-Tree（追加＋合併）</div>
+          <div class="eng-row"><span class="rl">MemTable（記憶體，滿了 flush）</span><div id="emb-mem"></div></div>
+          <div class="eng-row"><span class="rl">L0 SST（flush 產物，key 範圍可重疊）</span><div id="emb-l0"></div></div>
+          <div class="eng-row"><span class="rl">L1 SST（compaction 合併後）</span><div id="emb-l1"></div></div>
+          <div class="eng-metrics" id="emb-rocks-metrics"></div>
         </div>
-      </div>
-
-      <div style="border:1px solid var(--border);border-radius:var(--radius-sm);padding:12px;background:#ffffff;margin-bottom:14px">
-        <div style="font-family:var(--mono);font-size:11px;color:var(--text-3);margin-bottom:8px">METRICS</div>
-        <div id="emb-metrics" style="display:flex;flex-wrap:wrap;gap:16px;font-size:13px"></div>
       </div>
 
       <div class="legend">
-        <span><i class="dot ns-idle"></i>閒置 / 就緒</span>
-        <span><i class="dot ns-lock"></i>寫入中 / MemTable</span>
+        <span><i class="dot ns-idle"></i>空槽 / 閒置</span>
         <span><i class="dot ns-wait"></i>WAL / Flush</span>
-        <span><i class="dot ns-ok"></i>已提交 / SST</span>
-        <span><i class="dot ns-bad"></i>Stall / 阻塞</span>
+        <span><i class="dot ns-lock"></i>寫入中 / MemTable</span>
+        <span><i class="dot ns-ok"></i>已落盤（頁 / SST）</span>
+        <span><i class="dot ns-bad"></i>MemTable 滿 / Stall</span>
+        <span><i class="dot" style="background:#eef4f1;border:2px solid #4d7d68"></i>GET 命中</span>
+        <span><i class="dot" style="background:#f4f3f1;border:1px dashed #cfccc6"></i>Bloom 跳過</span>
       </div>
 
       <div class="status-line" id="emb-status">
-        SQLite 模式：按「下一步」模擬 BEGIN → WAL append → B-Tree update → COMMIT → checkpoint。
+        按「寫入 1 筆」或「批次寫入 ×5」，同一批寫入會同時餵給 SQLite 與 RocksDB；再按「GET 查一筆」對比讀取路徑。
       </div>
     </div>
   </div>
-  <p class="cap">Demo 簡化真實引擎內部結構，目的在對比「SQL transaction 路徑」與「LSM 分層寫入 + compaction」的思維模型。</p>
+  <p class="cap">Demo 簡化真實引擎內部：SQLite 頁面數、WAL 門檻與 RocksDB 的 MemTable 容量、層數都縮小到方便觀察的量級，重點在兩種寫入 / 讀取路徑的思維模型對比。</p>
 
   <div class="oneliner">
-    <b>一句話答法</b>Demo 對比 SQLite 的 transaction+WAL 與 RocksDB 的 LSM 分層；後者需持續監控 compaction 與 read amplification，前者需理解單 writer 與 WAL 取捨。
+    <b>一句話答法</b>同一批寫入下，SQLite 原地翻新 B-Tree 頁面、WAL 累積後 checkpoint（read amp 恆為 1，但受單 writer 限制）；RocksDB 把寫入堆進 MemTable→flush L0→compaction 併 L1（寫入吞吐高，但 L0 堆積會 stall），讀取靠 Bloom filter 跳過不含該 key 的 SST。
   </div>
 </section>
 
@@ -386,7 +403,7 @@ COMMIT;</code></pre>
   <div class="callout accent">
     <div class="c-title"><span class="ic">考點 1</span>「Mobile App 本地資料怎麼存？」</div>
     <p><strong>回答框架</strong>：
-      <br>1. 離線 SoT 用 <strong>SQLite</strong>（ACID、單檔、WAL 多读）。
+      <br>1. 離線 SoT 用 <strong>SQLite</strong>（ACID、單檔、WAL 多讀）。
       <br>2. 同步策略：queue + batch upload、conflict resolution（LWW / server wins）。
       <br>3. 敏感資料：<code>SQLCipher</code> 或 OS Keychain 加密 key。
       <br>4. 不要多 service 寫同一 .db；全局一致性交給雲端 PG。</p>
@@ -406,7 +423,7 @@ COMMIT;</code></pre>
   </div>
 
   <div class="callout warn">
-    <div class="c-title"><span class="ic">陷阱</span>Edge 只谈 SQLite 不谈 sync</div>
+    <div class="c-title"><span class="ic">陷阱</span>Edge 只談 SQLite 不談 sync</div>
     <p>面試官追問「斷網三天後上線怎麼合併？」——必須講 <strong>version vector / logical clock / server authoritative merge</strong>，否則本地 ACID 無法延伸到分散式一致性。</p>
   </div>
 
