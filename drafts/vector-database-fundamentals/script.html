@@ -2,21 +2,35 @@
 (function () {
   'use strict';
 
-  var K = 5;
-  var NUM_POINTS = 200;
-  var IVF_LIST = 8;
+  var demo = document.getElementById('demo-ann');
+  if (!demo) return;
 
-  var canvas, ctx;
+  var K = 5;
+  var NUM_POINTS = 120;
+  var IVF_LIST = 8;
+  var HNSW_M = 6;
+  var COST_PER_CMP_MS = 0.045;
+
+  var canvas = demo.querySelector('#ann-canvas');
+  var ctx = canvas ? canvas.getContext('2d') : null;
+
   var points = [];
-  var query = { x: 0.5, y: 0.5 };
-  var indexType = 'hnsw';
-  var param = 10;
+  var query = { x: 0.55, y: 0.42 };
+  var indexType = 'brute';
+  var param = 8;
   var ivfCentroids = [];
   var ivfAssignments = [];
+  var hnswEdges = [];
 
-  function $(id) { return document.getElementById(id); }
-
-  function rand() { return Math.random(); }
+  var elTrace = demo.querySelector('#ann-trace');
+  var elGt = demo.querySelector('#ann-gt');
+  var elResult = demo.querySelector('#ann-result');
+  var elMetrics = demo.querySelector('#ann-metrics');
+  var elStatus = demo.querySelector('#ann-status');
+  var elParam = demo.querySelector('#ann-param');
+  var elParamVal = demo.querySelector('#ann-param-val');
+  var elParamLabel = demo.querySelector('#ann-param-label');
+  var idxBtns = demo.querySelectorAll('[data-idx]');
 
   function dist(a, b) {
     var dx = a.x - b.x;
@@ -30,216 +44,334 @@
     return dx * dx + dy * dy;
   }
 
+  function seededRand(seed) {
+    var s = seed % 2147483647;
+    if (s <= 0) s += 2147483646;
+    return function () {
+      s = (s * 16807) % 2147483647;
+      return (s - 1) / 2147483646;
+    };
+  }
+
   function genPoints() {
+    var rnd = seededRand(42);
     points = [];
-    for (var i = 0; i < NUM_POINTS; i++) {
-      points.push({
-        id: 'v' + (i + 1),
-        x: 0.05 + rand() * 0.9,
-        y: 0.05 + rand() * 0.9
-      });
+    var i;
+    // Three soft clusters + some noise → IVF story is visible
+    var centers = [
+      { x: 0.28, y: 0.30 },
+      { x: 0.72, y: 0.28 },
+      { x: 0.50, y: 0.72 }
+    ];
+    for (i = 0; i < NUM_POINTS; i++) {
+      if (i < 90) {
+        var c = centers[i % 3];
+        points.push({
+          id: 'v' + (i + 1),
+          x: Math.min(0.95, Math.max(0.05, c.x + (rnd() - 0.5) * 0.28)),
+          y: Math.min(0.95, Math.max(0.05, c.y + (rnd() - 0.5) * 0.28))
+        });
+      } else {
+        points.push({
+          id: 'v' + (i + 1),
+          x: 0.05 + rnd() * 0.9,
+          y: 0.05 + rnd() * 0.9
+        });
+      }
     }
   }
 
   function buildIVF() {
+    var rnd = seededRand(7);
     ivfCentroids = [];
-    for (var c = 0; c < IVF_LIST; c++) {
+    var c;
+    for (c = 0; c < IVF_LIST; c++) {
       ivfCentroids.push({
-        x: 0.1 + rand() * 0.8,
-        y: 0.1 + rand() * 0.8
+        x: 0.12 + rnd() * 0.76,
+        y: 0.12 + rnd() * 0.76
       });
     }
-    for (var iter = 0; iter < 12; iter++) {
-      var sums = [];
-      var counts = [];
-      for (var s = 0; s < IVF_LIST; s++) {
+    var iter, p, best, bestD, ci, d, sums, counts, u;
+    for (iter = 0; iter < 15; iter++) {
+      sums = [];
+      counts = [];
+      for (u = 0; u < IVF_LIST; u++) {
         sums.push({ x: 0, y: 0 });
         counts.push(0);
       }
-      points.forEach(function (p) {
-        var best = 0;
-        var bestD = Infinity;
-        for (var ci = 0; ci < IVF_LIST; ci++) {
-          var d = distSq(p, ivfCentroids[ci]);
+      for (p = 0; p < points.length; p++) {
+        best = 0;
+        bestD = Infinity;
+        for (ci = 0; ci < IVF_LIST; ci++) {
+          d = distSq(points[p], ivfCentroids[ci]);
           if (d < bestD) { bestD = d; best = ci; }
         }
-        sums[best].x += p.x;
-        sums[best].y += p.y;
+        sums[best].x += points[p].x;
+        sums[best].y += points[p].y;
         counts[best]++;
-      });
-      for (var u = 0; u < IVF_LIST; u++) {
+      }
+      for (u = 0; u < IVF_LIST; u++) {
         if (counts[u] > 0) {
           ivfCentroids[u].x = sums[u].x / counts[u];
           ivfCentroids[u].y = sums[u].y / counts[u];
         }
       }
     }
-    ivfAssignments = points.map(function (p) {
-      var best = 0;
-      var bestD = Infinity;
-      for (var ci = 0; ci < IVF_LIST; ci++) {
-        var d = distSq(p, ivfCentroids[ci]);
+    ivfAssignments = points.map(function (pt) {
+      best = 0;
+      bestD = Infinity;
+      for (ci = 0; ci < IVF_LIST; ci++) {
+        d = distSq(pt, ivfCentroids[ci]);
         if (d < bestD) { bestD = d; best = ci; }
       }
       return best;
     });
   }
 
+  function buildHNSW() {
+    // Undirected kNN graph on points (simplified single-layer HNSW-like)
+    hnswEdges = points.map(function () { return []; });
+    var i, j, list, a, b;
+    for (i = 0; i < points.length; i++) {
+      list = [];
+      for (j = 0; j < points.length; j++) {
+        if (i === j) continue;
+        list.push({ j: j, d: dist(points[i], points[j]) });
+      }
+      list.sort(function (x, y) { return x.d - y.d; });
+      for (a = 0; a < HNSW_M; a++) {
+        b = list[a].j;
+        if (hnswEdges[i].indexOf(b) < 0) hnswEdges[i].push(b);
+        if (hnswEdges[b].indexOf(i) < 0) hnswEdges[b].push(i);
+      }
+    }
+  }
+
   function bruteForce(q) {
-    return points.slice().sort(function (a, b) {
-      return dist(a, q) - dist(b, q);
-    }).slice(0, K);
+    var cmp = 0;
+    var scored = points.map(function (p) {
+      cmp++;
+      return { p: p, d: dist(p, q) };
+    });
+    scored.sort(function (a, b) { return a.d - b.d; });
+    return {
+      top: scored.slice(0, K).map(function (r) { return r.p; }),
+      comparisons: cmp,
+      visited: points.map(function (_, i) { return i; }),
+      probedClusters: null,
+      steps: ['Flat：對全部 ' + points.length + ' 點各算一次距離', '比較次數 = ' + cmp + '（精確，無剪枝）']
+    };
+  }
+
+  function ivfSearch(q, nprobe) {
+    var cmp = 0;
+    var ranked = ivfCentroids.map(function (c, i) {
+      cmp++;
+      return { idx: i, d: dist(c, q) };
+    }).sort(function (a, b) { return a.d - b.d; });
+
+    var probeCount = Math.max(1, Math.min(nprobe, IVF_LIST));
+    var probeSet = {};
+    var probed = [];
+    var i;
+    for (i = 0; i < probeCount; i++) {
+      probeSet[ranked[i].idx] = true;
+      probed.push(ranked[i].idx);
+    }
+
+    var candidates = [];
+    var visited = [];
+    points.forEach(function (p, idx) {
+      if (probeSet[ivfAssignments[idx]]) {
+        candidates.push(p);
+        visited.push(idx);
+      }
+    });
+
+    var scored = candidates.map(function (p) {
+      cmp++;
+      return { p: p, d: dist(p, q) };
+    });
+    scored.sort(function (a, b) { return a.d - b.d; });
+
+    var steps = [
+      'IVF：先算 query 到 ' + IVF_LIST + ' 個 centroid 的距離',
+      'nprobe=' + probeCount + ' → 探 cluster ' + probed.map(function (x) { return 'C' + x; }).join(', '),
+      '只在這些桶內的 ' + candidates.length + ' 點上算距離（其餘 ' + (points.length - candidates.length) + ' 點直接跳過）',
+      '總比較次數 = ' + cmp + '（含 centroid）'
+    ];
+
+    return {
+      top: scored.slice(0, K).map(function (r) { return r.p; }),
+      comparisons: cmp,
+      visited: visited,
+      probedClusters: probed,
+      steps: steps
+    };
   }
 
   function hnswSearch(q, ef) {
-    var entry = points[0];
-    var bestDist = dist(entry, q);
-    for (var i = 1; i < Math.min(20, points.length); i++) {
-      var d = dist(points[i], q);
-      if (d < bestDist) { bestDist = d; entry = points[i]; }
+    var cmp = 0;
+    // Entry: closest among a small sample of points (stand-in for upper layer)
+    var entryIdx = 0;
+    var bestD = dist(points[0], q);
+    cmp++;
+    var i, d;
+    for (i = 1; i < Math.min(12, points.length); i++) {
+      d = dist(points[i], q);
+      cmp++;
+      if (d < bestD) { bestD = d; entryIdx = i; }
     }
 
     var visited = {};
-    visited[entry.id] = true;
-    var candidates = [{ p: entry, d: bestDist }];
-    var results = [{ p: entry, d: bestDist }];
-    var steps = 0;
-    var maxSteps = ef * 3;
+    visited[entryIdx] = true;
+    var visitedList = [entryIdx];
+    var candidates = [{ idx: entryIdx, d: bestD }];
+    var results = [{ idx: entryIdx, d: bestD }];
+    var expansions = 0;
+    var maxExpansions = Math.max(ef * 2, ef + 4);
 
-    while (candidates.length && steps < maxSteps) {
+    while (candidates.length && expansions < maxExpansions) {
       candidates.sort(function (a, b) { return a.d - b.d; });
       var curr = candidates.shift();
-      steps++;
+      // Stop if current is farther than worst in result and result is full (classic beam prune)
+      results.sort(function (a, b) { return a.d - b.d; });
+      if (results.length >= ef && curr.d > results[results.length - 1].d) break;
 
-      var neighbors = points
-        .map(function (p) { return { p: p, d: dist(p, q) }; })
-        .sort(function (a, b) { return a.d - b.d; })
-        .slice(0, Math.max(4, Math.floor(ef / 3)));
-
-      neighbors.forEach(function (n) {
-        if (visited[n.p.id]) return;
-        visited[n.p.id] = true;
-        if (results.length < ef || n.d < results[results.length - 1].d) {
-          candidates.push(n);
-          results.push(n);
+      expansions++;
+      var neighbors = hnswEdges[curr.idx];
+      neighbors.forEach(function (nIdx) {
+        if (visited[nIdx]) return;
+        visited[nIdx] = true;
+        visitedList.push(nIdx);
+        var nd = dist(points[nIdx], q);
+        cmp++;
+        if (results.length < ef || nd < results[results.length - 1].d) {
+          candidates.push({ idx: nIdx, d: nd });
+          results.push({ idx: nIdx, d: nd });
           results.sort(function (a, b) { return a.d - b.d; });
           if (results.length > ef) results = results.slice(0, ef);
         }
       });
     }
 
-    return results.slice(0, K).map(function (r) { return r.p; });
-  }
+    results.sort(function (a, b) { return a.d - b.d; });
+    var top = results.slice(0, K).map(function (r) { return points[r.idx]; });
 
-  function ivfSearch(q, nprobe) {
-    var ranked = ivfCentroids.map(function (c, i) {
-      return { idx: i, d: dist(c, q) };
-    }).sort(function (a, b) { return a.d - b.d; });
+    var steps = [
+      'HNSW（簡化單層）：預建每點約 ' + HNSW_M + ' 條鄰近邊',
+      '入口點 ≈ ' + points[entryIdx].id + '（上層粗定位的簡化）',
+      'ef=' + ef + '：候選隊列寬度；沿圖邊擴張 ' + expansions + ' 步',
+      '實際訪問 ' + visitedList.length + ' 點 / ' + points.length + '，比較次數 = ' + cmp,
+      '未訪問的點不會被算距離——這才是「近似」的來源'
+    ];
 
-    var probeCount = Math.min(nprobe, IVF_LIST);
-    var probeSet = {};
-    for (var i = 0; i < probeCount; i++) {
-      probeSet[ranked[i].idx] = true;
-    }
-
-    var candidates = points.filter(function (p, idx) {
-      return probeSet[ivfAssignments[idx]];
-    });
-
-    if (!candidates.length) candidates = points.slice();
-
-    return candidates.sort(function (a, b) {
-      return dist(a, q) - dist(b, q);
-    }).slice(0, K);
-  }
-
-  function simulateLatency(type, p) {
-    if (type === 'brute') return 80 + NUM_POINTS * 0.4;
-    if (type === 'hnsw') return 3 + p * 1.2 + Math.random() * 2;
-    return 2 + p * 0.8 + Math.random() * 1.5;
+    return {
+      top: top,
+      comparisons: cmp,
+      visited: visitedList,
+      probedClusters: null,
+      steps: steps
+    };
   }
 
   function recallAtK(ann, gt) {
     var gtIds = {};
     gt.forEach(function (p) { gtIds[p.id] = true; });
     var hit = 0;
-    ann.forEach(function (p) {
-      if (gtIds[p.id]) hit++;
-    });
+    ann.forEach(function (p) { if (gtIds[p.id]) hit++; });
     return hit / K;
   }
 
-  function runQuery() {
-    var gt = bruteForce(query);
-    var ann;
-    var latency;
-
-    if (indexType === 'brute') {
-      ann = gt;
-      latency = simulateLatency('brute', 0);
-    } else if (indexType === 'hnsw') {
-      ann = hnswSearch(query, param);
-      latency = simulateLatency('hnsw', param);
-    } else {
-      ann = ivfSearch(query, param);
-      latency = simulateLatency('ivf', param);
-    }
-
-    var rec = recallAtK(ann, gt);
-    renderCanvas(gt, ann);
-    renderLists(gt, ann, rec, latency);
-    setStatus(
-      'Index=' + indexType.toUpperCase() +
-      ' · param=' + param +
-      ' · recall@' + K + '=' + (rec * 100).toFixed(0) + '%' +
-      ' · latency≈' + latency.toFixed(1) + 'ms (simulated)'
-    );
+  function escapeHtml(s) {
+    return String(s)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;');
   }
 
-  function renderLists(gt, ann, rec, latency) {
-    var gtEl = $('ann-gt');
-    var resEl = $('ann-result');
-    var metEl = $('ann-metrics');
-    if (!gtEl || !resEl || !metEl) return;
+  function runQuery() {
+    var gtPack = bruteForce(query);
+    var gt = gtPack.top;
+    var pack;
 
+    if (indexType === 'brute') {
+      pack = gtPack;
+    } else if (indexType === 'ivf') {
+      pack = ivfSearch(query, param);
+    } else {
+      pack = hnswSearch(query, param);
+    }
+
+    var rec = recallAtK(pack.top, gt);
+    var latency = pack.comparisons * COST_PER_CMP_MS;
+
+    renderCanvas(gt, pack);
+    renderLists(gt, pack.top, rec, latency, pack.comparisons);
+    renderTrace(pack);
+    elStatus.textContent =
+      indexType.toUpperCase() +
+      ' · param=' + (indexType === 'brute' ? '—' : param) +
+      ' · recall@' + K + '=' + (rec * 100).toFixed(0) + '%' +
+      ' · comparisons=' + pack.comparisons +
+      ' · latency≈' + latency.toFixed(1) + 'ms（由比較次數推估）';
+  }
+
+  function renderTrace(pack) {
+    if (!elTrace) return;
+    elTrace.innerHTML = pack.steps.map(function (line) {
+      return '<div>' + escapeHtml(line) + '</div>';
+    }).join('');
+  }
+
+  function renderLists(gt, ann, rec, latency, cmp) {
     var annIds = {};
     ann.forEach(function (p) { annIds[p.id] = true; });
 
-    gtEl.innerHTML = gt.map(function (p, i) {
+    elGt.innerHTML = gt.map(function (p, i) {
       var hit = annIds[p.id];
-      var cls = hit ? 'color:var(--ok)' : 'color:var(--text-2)';
-      return '<div style="' + cls + '">#' + (i + 1) + ' ' + p.id + ' d=' + dist(p, query).toFixed(3) + '</div>';
+      var color = hit ? 'var(--ok)' : 'var(--warn)';
+      return '<div style="color:' + color + '">#' + (i + 1) + ' ' + p.id +
+        (hit ? '' : ' · MISS') +
+        ' · d=' + dist(p, query).toFixed(3) + '</div>';
     }).join('');
 
-    resEl.innerHTML = ann.map(function (p, i) {
+    elResult.innerHTML = ann.map(function (p, i) {
       var inGt = gt.some(function (g) { return g.id === p.id; });
-      var cls = inGt ? 'color:var(--ok)' : 'color:var(--bad)';
-      return '<div style="' + cls + '">#' + (i + 1) + ' ' + p.id + ' d=' + dist(p, query).toFixed(3) + '</div>';
+      var color = inGt ? 'var(--ok)' : 'var(--bad)';
+      return '<div style="color:' + color + '">#' + (i + 1) + ' ' + p.id +
+        (inGt ? '' : ' · 誤報') +
+        ' · d=' + dist(p, query).toFixed(3) + '</div>';
     }).join('');
 
     var recPct = (rec * 100).toFixed(0);
     var recCls = rec >= 0.95 ? 'var(--ok)' : rec >= 0.6 ? 'var(--warn)' : 'var(--bad)';
-    metEl.innerHTML =
-      '<div><b>Recall@' + K + '</b>: <span style="color:' + recCls + ';font-weight:600">' + recPct + '%</span></div>' +
-      '<div><b>Latency</b>: ' + latency.toFixed(1) + ' ms</div>' +
-      '<div><b>Index</b>: ' + indexType.toUpperCase() + '</div>' +
-      '<div><b>Param</b>: ' + param + (indexType === 'hnsw' ? ' (ef)' : indexType === 'ivf' ? ' (nprobe)' : '') + '</div>';
+    elMetrics.innerHTML =
+      '<div><strong>Recall@' + K + '</strong>：<span style="color:' + recCls + ';font-weight:600">' + recPct + '%</span></div>' +
+      '<div><strong>Distance comparisons</strong>：' + cmp + '</div>' +
+      '<div><strong>Latency (est.)</strong>：' + latency.toFixed(1) + ' ms</div>' +
+      '<div><strong>Index</strong>：' + indexType.toUpperCase() + '</div>' +
+      '<div><strong>Param</strong>：' + (indexType === 'brute' ? '—' : param + (indexType === 'hnsw' ? ' (ef)' : ' (nprobe)')) + '</div>';
   }
 
-  function renderCanvas(gt, ann) {
-    if (!canvas || !ctx) return;
+  function renderCanvas(gt, pack) {
+    if (!ctx || !canvas) return;
     var w = canvas.width;
     var h = canvas.height;
-    var pad = 24;
+    var pad = 28;
+    var visitedSet = {};
+    (pack.visited || []).forEach(function (i) { visitedSet[i] = true; });
 
     ctx.fillStyle = '#ffffff';
     ctx.fillRect(0, 0, w, h);
 
+    // grid
     ctx.strokeStyle = '#ecebe8';
     ctx.lineWidth = 1;
-    for (var g = 0; g <= 10; g++) {
-      var gx = pad + (w - 2 * pad) * g / 10;
-      var gy = pad + (h - 2 * pad) * g / 10;
+    var g;
+    for (g = 0; g <= 8; g++) {
+      var gx = pad + (w - 2 * pad) * g / 8;
+      var gy = pad + (h - 2 * pad) * g / 8;
       ctx.beginPath();
       ctx.moveTo(gx, pad);
       ctx.lineTo(gx, h - pad);
@@ -250,167 +382,177 @@
       ctx.stroke();
     }
 
+    function toXY(p) {
+      return {
+        x: pad + p.x * (w - 2 * pad),
+        y: pad + p.y * (h - 2 * pad)
+      };
+    }
+
+    // IVF centroids + probe highlight
     if (indexType === 'ivf') {
+      var probeSet = {};
+      (pack.probedClusters || []).forEach(function (id) { probeSet[id] = true; });
       ivfCentroids.forEach(function (c, i) {
-        var cx = pad + c.x * (w - 2 * pad);
-        var cy = pad + c.y * (h - 2 * pad);
-        ctx.strokeStyle = '#cdd9e6';
-        ctx.setLineDash([4, 4]);
+        var xy = toXY(c);
         ctx.beginPath();
-        ctx.arc(cx, cy, 28, 0, Math.PI * 2);
+        ctx.arc(xy.x, xy.y, probeSet[i] ? 36 : 22, 0, Math.PI * 2);
+        ctx.strokeStyle = probeSet[i] ? '#3f6188' : '#cdd9e6';
+        ctx.lineWidth = probeSet[i] ? 2 : 1;
+        ctx.setLineDash(probeSet[i] ? [] : [4, 4]);
         ctx.stroke();
         ctx.setLineDash([]);
-        ctx.fillStyle = '#9aa0a8';
+        ctx.fillStyle = probeSet[i] ? '#3f6188' : '#9aa0a8';
         ctx.font = '10px JetBrains Mono, monospace';
-        ctx.fillText('C' + i, cx - 8, cy + 4);
+        ctx.fillText('C' + i, xy.x - 8, xy.y + 3);
       });
+    }
+
+    // HNSW edges (faint), emphasize visited edges
+    if (indexType === 'hnsw') {
+      var i, ni, a, b, nIdx;
+      ctx.lineWidth = 1;
+      for (i = 0; i < points.length; i++) {
+        for (ni = 0; ni < hnswEdges[i].length; ni++) {
+          nIdx = hnswEdges[i][ni];
+          if (nIdx < i) continue;
+          a = toXY(points[i]);
+          b = toXY(points[nIdx]);
+          var hot = visitedSet[i] && visitedSet[nIdx];
+          ctx.strokeStyle = hot ? 'rgba(63,97,136,0.35)' : 'rgba(222,220,216,0.7)';
+          ctx.beginPath();
+          ctx.moveTo(a.x, a.y);
+          ctx.lineTo(b.x, b.y);
+          ctx.stroke();
+        }
+      }
     }
 
     var gtIds = {};
     gt.forEach(function (p) { gtIds[p.id] = true; });
     var annIds = {};
-    ann.forEach(function (p) { annIds[p.id] = true; });
+    pack.top.forEach(function (p) { annIds[p.id] = true; });
 
-    points.forEach(function (p) {
-      var px = pad + p.x * (w - 2 * pad);
-      var py = pad + p.y * (h - 2 * pad);
+    points.forEach(function (p, idx) {
+      var xy = toXY(p);
       var isHit = annIds[p.id] && gtIds[p.id];
-      var isMiss = annIds[p.id] && !gtIds[p.id];
+      var isFalse = annIds[p.id] && !gtIds[p.id];
+      var isMiss = gtIds[p.id] && !annIds[p.id];
+      var dim = indexType !== 'brute' && !visitedSet[idx];
 
       ctx.beginPath();
-      ctx.arc(px, py, isHit || isMiss ? 5 : 3, 0, Math.PI * 2);
-      if (isHit) {
-        ctx.fillStyle = '#4d7d68';
-      } else if (isMiss) {
-        ctx.fillStyle = '#a8554f';
-      } else {
-        ctx.fillStyle = '#dedcd8';
-      }
+      ctx.arc(xy.x, xy.y, isHit || isFalse || isMiss ? 5.5 : 3, 0, Math.PI * 2);
+      if (isHit) ctx.fillStyle = '#4d7d68';
+      else if (isFalse) ctx.fillStyle = '#a8554f';
+      else if (isMiss) ctx.fillStyle = '#a3743e';
+      else ctx.fillStyle = dim ? '#ecebe8' : '#dedcd8';
+      ctx.globalAlpha = dim && !isMiss ? 0.45 : 1;
       ctx.fill();
-    });
+      ctx.globalAlpha = 1;
 
-    gt.forEach(function (p) {
-      if (!annIds[p.id]) {
-        var px = pad + p.x * (w - 2 * pad);
-        var py = pad + p.y * (h - 2 * pad);
+      if (isMiss) {
         ctx.beginPath();
-        ctx.arc(px, py, 7, 0, Math.PI * 2);
+        ctx.arc(xy.x, xy.y, 8, 0, Math.PI * 2);
         ctx.strokeStyle = '#a3743e';
-        ctx.lineWidth = 2;
+        ctx.lineWidth = 1.5;
         ctx.stroke();
       }
     });
 
-    var qx = pad + query.x * (w - 2 * pad);
-    var qy = pad + query.y * (h - 2 * pad);
+    var qxy = toXY(query);
     ctx.fillStyle = '#3f6188';
     ctx.beginPath();
-    ctx.moveTo(qx, qy - 10);
-    ctx.lineTo(qx + 8, qy + 6);
-    ctx.lineTo(qx - 8, qy + 6);
+    ctx.moveTo(qxy.x, qxy.y - 10);
+    ctx.lineTo(qxy.x + 8, qxy.y + 6);
+    ctx.lineTo(qxy.x - 8, qxy.y + 6);
     ctx.closePath();
     ctx.fill();
-    ctx.strokeStyle = '#3f6188';
-    ctx.lineWidth = 1.5;
-    ctx.stroke();
-
     ctx.fillStyle = '#6b7078';
     ctx.font = '11px JetBrains Mono, monospace';
-    ctx.fillText('QUERY ★', qx + 10, qy - 4);
+    ctx.fillText('QUERY', qxy.x + 10, qxy.y - 4);
   }
 
-  function setStatus(msg) {
-    var el = $('ann-status');
-    if (el) el.textContent = msg;
+  function syncParamUI() {
+    if (indexType === 'brute') {
+      elParam.disabled = true;
+      elParamLabel.textContent = 'param';
+      elParamVal.textContent = '—';
+    } else if (indexType === 'ivf') {
+      elParam.disabled = false;
+      elParam.min = '1';
+      elParam.max = String(IVF_LIST);
+      if (param > IVF_LIST) param = IVF_LIST;
+      if (param < 1) param = 1;
+      elParam.value = String(param);
+      elParamLabel.textContent = 'nprobe';
+      elParamVal.textContent = String(param);
+    } else {
+      elParam.disabled = false;
+      elParam.min = '2';
+      elParam.max = '40';
+      if (param < 2) param = 2;
+      elParam.value = String(param);
+      elParamLabel.textContent = 'ef';
+      elParamVal.textContent = String(param);
+    }
   }
 
-  function randomQuery() {
-    query = { x: 0.08 + rand() * 0.84, y: 0.08 + rand() * 0.84 };
+  function setIndex(type) {
+    indexType = type;
+    idxBtns.forEach(function (b) {
+      b.setAttribute('aria-pressed', b.getAttribute('data-idx') === type ? 'true' : 'false');
+    });
+    if (type === 'ivf' && param > IVF_LIST) param = 3;
+    if (type === 'hnsw' && param < 2) param = 8;
+    syncParamUI();
     runQuery();
   }
 
   function resetDemo() {
     genPoints();
     buildIVF();
-    query = { x: 0.55, y: 0.45 };
-    indexType = 'hnsw';
-    param = 10;
-    document.querySelectorAll('[data-idx]').forEach(function (btn) {
-      btn.setAttribute('aria-pressed', btn.getAttribute('data-idx') === 'hnsw' ? 'true' : 'false');
+    buildHNSW();
+    query = { x: 0.55, y: 0.42 };
+    indexType = 'brute';
+    param = 8;
+    idxBtns.forEach(function (b) {
+      b.setAttribute('aria-pressed', b.getAttribute('data-idx') === 'brute' ? 'true' : 'false');
     });
-    var slider = $('ann-param');
-    if (slider) { slider.value = 10; slider.min = 1; slider.max = 50; }
-    var pv = $('ann-param-val');
-    if (pv) pv.textContent = '10';
+    syncParamUI();
     runQuery();
-    setStatus('已重置：200 個 2D 向量，HNSW ef=10。調高 ef 觀察 recall 上升、延遲增加。');
+    elStatus.textContent = '已重置為 Flat：' + NUM_POINTS + ' 點。先確認 recall@5=100%，再切 IVF／HNSW 把參數調小看漏檢。';
   }
 
-  function bindSeg() {
-    document.querySelectorAll('[data-idx]').forEach(function (btn) {
-      btn.addEventListener('click', function () {
-        document.querySelectorAll('[data-idx]').forEach(function (b) {
-          b.setAttribute('aria-pressed', 'false');
-        });
-        btn.setAttribute('aria-pressed', 'true');
-        indexType = btn.getAttribute('data-idx');
-        var slider = $('ann-param');
-        if (slider) {
-          if (indexType === 'brute') {
-            slider.disabled = true;
-          } else {
-            slider.disabled = false;
-            slider.max = indexType === 'ivf' ? String(IVF_LIST) : '50';
-          }
-        }
-        runQuery();
-      });
+  idxBtns.forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      setIndex(btn.getAttribute('data-idx'));
     });
-  }
+  });
 
-  function init() {
-    canvas = $('ann-canvas');
-    if (canvas) ctx = canvas.getContext('2d');
+  elParam.addEventListener('input', function () {
+    param = parseInt(elParam.value, 10);
+    elParamVal.textContent = String(param);
+    runQuery();
+  });
 
-    bindSeg();
+  demo.querySelector('#btn-random-q').addEventListener('click', function () {
+    query = { x: 0.08 + Math.random() * 0.84, y: 0.08 + Math.random() * 0.84 };
+    runQuery();
+  });
+  demo.querySelector('#btn-reset').addEventListener('click', resetDemo);
 
-    var slider = $('ann-param');
-    if (slider) {
-      slider.addEventListener('input', function () {
-        param = parseInt(slider.value, 10);
-        var pv = $('ann-param-val');
-        if (pv) pv.textContent = String(param);
-        runQuery();
-      });
-    }
+  canvas.addEventListener('click', function (e) {
+    var rect = canvas.getBoundingClientRect();
+    var scaleX = canvas.width / rect.width;
+    var scaleY = canvas.height / rect.height;
+    var pad = 28;
+    var cx = (e.clientX - rect.left) * scaleX;
+    var cy = (e.clientY - rect.top) * scaleY;
+    query.x = Math.max(0, Math.min(1, (cx - pad) / (canvas.width - 2 * pad)));
+    query.y = Math.max(0, Math.min(1, (cy - pad) / (canvas.height - 2 * pad)));
+    runQuery();
+  });
 
-    if ($('btn-query')) $('btn-query').addEventListener('click', runQuery);
-    if ($('btn-random-q')) $('btn-random-q').addEventListener('click', randomQuery);
-    if ($('btn-reset')) $('btn-reset').addEventListener('click', resetDemo);
-
-    if (canvas) {
-      canvas.addEventListener('click', function (e) {
-        var rect = canvas.getBoundingClientRect();
-        var scaleX = canvas.width / rect.width;
-        var scaleY = canvas.height / rect.height;
-        var pad = 24;
-        var w = canvas.width;
-        var h = canvas.height;
-        var cx = (e.clientX - rect.left) * scaleX;
-        var cy = (e.clientY - rect.top) * scaleY;
-        query.x = Math.max(0, Math.min(1, (cx - pad) / (w - 2 * pad)));
-        query.y = Math.max(0, Math.min(1, (cy - pad) / (h - 2 * pad)));
-        runQuery();
-      });
-    }
-
-    resetDemo();
-  }
-
-  if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', init);
-  } else {
-    init();
-  }
+  resetDemo();
 })();
 </script>
