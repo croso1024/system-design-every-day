@@ -132,6 +132,7 @@ function buildBooksIndexHtml(completed) {
       <p class="mt-4 max-w-2xl text-stone-500 font-light leading-relaxed">
         每日自動更新的 System Design 學習手冊。每篇指南皆包含概念說明、System Design 脈絡、架構圖與可互動的演算法/系統行為演示。
       </p>
+      <!-- BUILD_META -->
     </div>
   </header>
 
