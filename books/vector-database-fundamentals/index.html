@@ -1437,6 +1437,15 @@
     <p>若查詢本質是精確 ID、固定欄位過濾、或「必須出現某個型號字串」——先用 SQL / 倒排索引。向量搜尋適合「意思像不像」；語料極小（幾百筆）時，甚至直接算全量距離就夠，不必急著上專用向量庫。</p>
   </div>
 
+  <div class="callout accent">
+    <div class="c-title"><span class="ic">範圍</span>本篇講什麼、不講什麼</div>
+    <p>
+      • <strong>本篇聚焦</strong>：Embedding → 索引（ANN）→ 檢索品質（recall）→ 何時用 pgvector／專用庫。
+      <br>• <strong>名詞對齊</strong>：業界常把「存向量 + 做近鄰搜尋」的元件叫 <strong>Vector Store</strong>（應用／框架用語）或 <strong>Vector Database</strong>（獨立服務）。兩者都在做同一件事；本篇用「向量資料庫」統稱。
+      <br>• <strong>輕觸即可</strong>：量化壓縮、寫入後索引何時可查——在 §05 用最短路徑交代，不當成完整儲存引擎專題。
+    </p>
+  </div>
+
   <div class="oneliner">
     <b>一句話答法</b>向量搜尋把內容變成高維座標，用距離表達語意相近；它補的是 keyword 做不到的「用字不同、意思相近」，常與全文搜尋一起用。
   </div>
@@ -1454,39 +1463,41 @@
   <p>把每段文字想成平面上的一個點。Embedding 模型的工作，是讓「語意相近」的點靠得近、「不相干」的點離得遠。查詢時：把問題也變成一個點（下圖的 ★），再找離它最近的幾個點——這就是 <strong>Nearest Neighbor / Top-K</strong>。</p>
 
   <div class="vd-sketch" aria-label="2D 向量空間示意">
-    <table>
-      <thead>
-        <tr>
-          <th>內容（示意）</th>
-          <th>向量（簡化成 2 維）</th>
-          <th>與 Query 的距離</th>
-        </tr>
-      </thead>
-      <tbody>
-        <tr>
-          <td>Query：「多機備份會不會掉資料」</td>
-          <td class="mono">(0.62, 0.55) ★</td>
-          <td>—</td>
-        </tr>
-        <tr>
-          <td>「分散式系統如何保證資料不遺失」</td>
-          <td class="mono">(0.60, 0.58)</td>
-          <td class="near">很近 → 應命中</td>
-        </tr>
-        <tr>
-          <td>「資料庫主從複寫與 failover」</td>
-          <td class="mono">(0.58, 0.50)</td>
-          <td class="near">近 → 常進 Top-K</td>
-        </tr>
-        <tr>
-          <td>「今天午餐吃什麼」</td>
-          <td class="mono">(0.12, 0.90)</td>
-          <td>很遠 → 不該出現</td>
-        </tr>
-      </tbody>
-    </table>
+    <div class="tbl-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>內容（示意）</th>
+            <th>向量（簡化成 2 維）</th>
+            <th>與 Query 的距離</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>Query：「多機備份會不會掉資料」</td>
+            <td class="mono">(0.62, 0.55) ★</td>
+            <td>—</td>
+          </tr>
+          <tr>
+            <td>「分散式系統如何保證資料不遺失」</td>
+            <td class="mono">(0.60, 0.58)</td>
+            <td class="near">很近 → 應命中</td>
+          </tr>
+          <tr>
+            <td>「資料庫主從複寫與 failover」</td>
+            <td class="mono">(0.58, 0.50)</td>
+            <td class="near">近 → 常進 Top-K</td>
+          </tr>
+          <tr>
+            <td>「今天午餐吃什麼」</td>
+            <td class="mono">(0.12, 0.90)</td>
+            <td>很遠 → 不該出現</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
   </div>
-  <p class="cap">真實系統是幾百～上千維，人眼看不見，但「距離近 = 較相似」的直覺相同。Demo 會用 2D 畫布讓你親手點 query。</p>
+  <p class="cap">真實系統是幾百～上千維，人眼看不見，但「距離近 = 較相似」的直覺相同。§06 Demo 會用 2D 畫布讓你親手點 query。</p>
 
   <h3>常見距離／相似度</h3>
   <ul>
@@ -1494,7 +1505,36 @@
     <li><strong>Cosine Similarity</strong>：比「方向」像不像，不太在乎向量長短；文字最常用。實務常先做 <strong>L2 normalize</strong>（把長度收成 1），再比角度。</li>
     <li><strong>Inner Product（內積）</strong>：向量已 normalize 時與 Cosine 等價；若沒 normalize，長度會干擾分數，別跟 Cosine 混用。</li>
   </ul>
-  <p class="cap">下文 Demo 用 L2 在 2D 示意「近／遠」；文字系統多半是 normalize 後的 Cosine／IP，但「愈近愈像」的決策邏輯相同。</p>
+
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>場景</th>
+          <th>常見選法</th>
+          <th>記住一句</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>文字／RAG chunk</td>
+          <td class="hl">先 L2 normalize，再用 Cosine 或 IP</td>
+          <td>比方向，不比長短</td>
+        </tr>
+        <tr>
+          <td>圖像 embedding</td>
+          <td>常直接 L2</td>
+          <td>空間距離本身有意義</td>
+        </tr>
+        <tr>
+          <td>索引與查詢混用不同度量</td>
+          <td>—</td>
+          <td class="hl">分數不可比，等於換了一個空間</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="cap">§06 Demo 用 L2 在 2D 示意「近／遠」；文字系統多半是 normalize 後的 Cosine／IP，但「愈近愈像」的決策邏輯相同。</p>
 
   <div class="callout accent">
     <div class="c-title"><span class="ic">關鍵</span>為什麼不能「掃全部算距離」就結束？</div>
@@ -1532,9 +1572,9 @@
   </div>
 
   <ol>
-    <li><strong>Chunking</strong>：長文切成片段。模型內部用 <strong>token</strong>（子詞單位，可粗想成「比字元大、比句子小的計長單位」）限制長度；實務常切成約數百 token——大約半頁～一頁說明文字的量級。一頁 PDF 常見會變成數個 chunk。切太細語意破碎；切太粗一次撈回太多雜訊。</li>
+    <li><strong>Chunking</strong>：長文切成片段。模型內部用 <strong>token</strong>（子詞單位，可粗想成「比字元大、比句子小的計長單位」）限制長度；實務常切成約數百 token——大約半頁～一頁說明文字的量級。一頁 PDF 常見會變成數個 chunk。切太細語意破碎；切太粗一次撈回太多雜訊。邊界常留 <strong>overlap</strong>（重疊）：實務常見約 <strong>10%～20%</strong> 的長度，讓跨段關鍵句兩邊都留得到。</li>
     <li><strong>Embedding</strong>：呼叫模型把 chunk 轉成 <var>d</var> 維向量（常見 768～1536）。<strong>建索引與查詢必須同一模型、同一維度</strong>。</li>
-    <li><strong>Metadata</strong>：一併存 <code>doc_id</code>、<code>tenant_id</code>、<code>source</code> 等，供過濾（權限、租戶、時間）。</li>
+    <li><strong>Metadata</strong>：一併存 <code>doc_id</code>、<code>tenant_id</code>、<code>source</code> 等，供過濾（權限、租戶、時間）。注意：若先 ANN 取 Top-10 再過濾，可能只剩 1～2 筆——看起來像「搜尋很空」。能 <strong>pre-filter</strong>（先縮小候選再搜）就先縮小；細節見 §07。</li>
     <li><strong>Query path</strong>：使用者問題同樣 embed → ANN 取 Top-K →（可選）<strong>rerank</strong>（用更重的模型把候選再排一次）→ 把原文 chunk 當上下文交給 LLM。</li>
   </ol>
 
@@ -1545,32 +1585,34 @@
 
   <h3>Chunk 切壞的後果（反例）</h3>
   <div class="vd-sketch">
-    <table>
-      <thead>
-        <tr>
-          <th>切法</th>
-          <th>發生什麼</th>
-          <th>使用者感受</th>
-        </tr>
-      </thead>
-      <tbody>
-        <tr>
-          <td>切太細（一句一切）</td>
-          <td>「主從複寫」與「會不會丟資料」拆成兩段向量</td>
-          <td>問完整問題時，兩段都不夠像 → <strong>漏檢</strong></td>
-        </tr>
-        <tr>
-          <td>切太粗（整章一段）</td>
-          <td>一段向量混雜多主題</td>
-          <td>撈得到文件，但上下文又臭又長 → LLM 答得糊</td>
-        </tr>
-        <tr>
-          <td>合理 + 少量 overlap</td>
-          <td>邊界句子兩邊都留一點</td>
-          <td>較不易在段落接縫處漏掉關鍵句</td>
-        </tr>
-      </tbody>
-    </table>
+    <div class="tbl-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>切法</th>
+            <th>發生什麼</th>
+            <th>使用者感受</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>切太細（一句一切）</td>
+            <td>「主從複寫」與「會不會丟資料」拆成兩段向量</td>
+            <td>問完整問題時，兩段都不夠像 → <strong>漏檢</strong></td>
+          </tr>
+          <tr>
+            <td>切太粗（整章一段）</td>
+            <td>一段向量混雜多主題</td>
+            <td>撈得到文件，但上下文又臭又長 → LLM 答得糊</td>
+          </tr>
+          <tr>
+            <td>合理 + 少量 overlap</td>
+            <td>邊界句子兩邊都留一點（約 10%～20%）</td>
+            <td>較不易在段落接縫處漏掉關鍵句</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
   </div>
 
   <div class="callout warn">
@@ -1608,7 +1650,7 @@
     </div>
     <div class="step">
       <span class="t">HNSW · 在圖上走路</span>
-      事先把相近的向量連成<strong>鄰近圖</strong>（實作常有多層；Demo 用單層示意）。查詢可以想成三步：① 選一個入口點；② 看它的鄰居，留下較近的候選；③ 再從候選往外擴——參數 <code>ef</code> 就是「候選名單最多留多寬」。ef 愈大，走得愈勤 → recall@K↑、延遲↑。右側 Demo trace 會顯示「擴張了幾步、訪問了幾點」。
+      事先把相近的向量連成<strong>鄰近圖</strong>（實作常有多層；§06 Demo 用單層 + 少量跨區跳接邊示意）。查詢可以想成三步：① 選一個入口點；② 看它的鄰居，留下較近的候選；③ 再從候選往外擴——參數 <code>ef</code> 就是「候選名單最多留多寬」。ef 愈大，走得愈勤 → recall@K↑、延遲↑。§06 Demo 的 SEARCH TRACE 會顯示「擴張了幾步、訪問了幾點」。
     </div>
   </div>
 
@@ -1647,7 +1689,7 @@
 
   <div class="callout warn">
     <div class="c-title"><span class="ic">陷阱</span>只報 latency、不報 recall</div>
-    <p>把參數壓到「1ms」很漂亮，但 recall@10 = 70% 表示每 10 個該中的大約漏 3 個——檢索層先壞了。SLA 應同時寫：<strong>recall@K ≥ X% 且 P99 ≤ Y ms</strong>。下面 Demo 會讓你同時看到命中、漏檢與「實際比較了幾次距離」。</p>
+    <p>把參數壓到「1ms」很漂亮，但 recall@10 = 70% 表示每 10 個該中的大約漏 3 個——檢索層先壞了。SLA 應同時寫：<strong>recall@K ≥ X% 且 P99 ≤ Y ms</strong>。§06 Demo 會讓你同時看到命中、漏檢與「實際比較了幾次距離」。</p>
   </div>
 
   <div class="oneliner">
@@ -1687,7 +1729,25 @@ ORDER BY embedding &lt;=&gt; $1   -- &lt;=&gt; = cosine 距離，愈小愈像
 LIMIT 10;</code></pre>
 
   <h3>專用向量庫：為規模而生</h3>
-  <p><strong>Milvus</strong> 這類系統把「向量集合、分片、多種 ANN、水平擴展」當一等公民。適合億級向量、高 QPS，或需要把索引／向量壓進更少記憶體（量化、磁碟型索引等進階手段）時。代價是多一套運維，metadata 也不如 SQL 靈活。內部還有 collection／segment 等名詞——決策階段可先略過，當成「可水平切的索引分片」即可。</p>
+  <p><strong>Milvus</strong>、<strong>FAISS</strong>（常作函式庫嵌入服務，而非獨立 DB）這類系統把「向量集合、分片、多種 ANN、水平擴展」當一等公民。適合億級向量、高 QPS，或需要把索引／向量壓進更少記憶體時。代價是多一套運維，metadata 也不如 SQL 靈活。內部還有 collection／segment 等名詞——決策階段可先略過，當成「可水平切的索引分片」即可。</p>
+
+  <div class="callout accent">
+    <div class="c-title"><span class="ic">名詞</span>量化（Quantization）在省什麼</div>
+    <p>
+      原始 <code>float32 × 1536</code> 維很吃記憶體。量化用較少位元近似每個向量（常見：<strong>SQ</strong> 標量量化、 <strong>PQ</strong> 乘積量化——把高維切段後各段用 code book 編碼）。
+      <br>效果：記憶體↓、可快取更多向量 → QPS↑；代價是距離變成近似值，recall 可能略降，需要用更高的 <code>nprobe</code>／<code>ef</code> 或 rerank 補回來。
+    </p>
+  </div>
+
+  <div class="callout warn">
+    <div class="c-title"><span class="ic">流程</span>寫入之後，索引何時「可查」</div>
+    <p>
+      • <strong>Flat</strong>：寫入即可比距離，無額外索引結構。
+      <br>• <strong>HNSW</strong>：新點可增量插入圖，但大量寫入後圖品質會漂，偶發需要 rebuild 才能維持 recall。
+      <br>• <strong>IVF</strong>：centroid 是離線分群結果；資料分布大變時，舊桶邊界失準 → 常需定期重訓 centroid 再重建 list。
+      <br>Production 要問清楚：upsert 是「立刻可搜」還是「進 buffer，背景合併後才進 ANN」。
+    </p>
+  </div>
 
   <div class="tbl-wrap">
     <table>
@@ -1747,7 +1807,7 @@ LIMIT 10;</code></pre>
     <li><strong>Flat</strong>——全掃，recall@5 應為 100%，比較次數 = 全部點。</li>
     <li><strong>IVF + 小 nprobe</strong>——畫布出現 cluster 圓；<strong>實線粗圓 = 有 probe</strong>。只探少數桶時，看漏檢（橘）與比較次數下降。</li>
     <li><strong>IVF + 大 nprobe</strong>——recall 回升、比較次數上升。</li>
-    <li><strong>HNSW + 小 ef / 大 ef</strong>——淡線是鄰近邊，亮一點的是走過的邊；右側 trace 顯示擴張步數與訪問點數。</li>
+    <li><strong>HNSW</strong>——切換後預設 <code>ef=16</code>（教學起點，通常已接近滿分）；再把 ef 往下調到 2～4，觀察漏檢與比較次數下降。淡線是鄰近邊，亮一點的是走過的邊；右側 TRACE 顯示擴張步數與訪問點數。</li>
   </ol>
 
   <div class="demo" id="demo-ann">
@@ -1765,7 +1825,7 @@ LIMIT 10;</code></pre>
         <div class="vd-param">
           <label>
             <span id="ann-param-label">param</span>:
-            <input type="range" id="ann-param" min="1" max="40" value="8" disabled>
+            <input type="range" id="ann-param" min="1" max="40" value="16" disabled>
             <span id="ann-param-val">—</span>
           </label>
         </div>
@@ -1811,7 +1871,7 @@ LIMIT 10;</code></pre>
       </div>
     </div>
   </div>
-  <p class="cap">這是 2D 教學模型：IVF 真的只掃被 probe 的 cluster；HNSW 真的只沿預建鄰近邊擴張。真實高維曲線更陡，仍需離線 benchmark 定參。</p>
+  <p class="cap">這是 2D 教學模型：IVF 真的只掃被 probe 的 cluster；HNSW 真的只沿預建鄰近邊（含少量跨區跳接）擴張。真實高維 HNSW 有多層、曲線更陡，仍需離線 benchmark 定參。</p>
 
   <div class="oneliner">
     <b>一句話答法</b>調大 nprobe / ef = 願意多做距離比較換更高 recall；Production 用標注集畫 recall-latency 曲線找 SLA 甜蜜點。
@@ -1828,17 +1888,62 @@ LIMIT 10;</code></pre>
   <p class="sec-sub">把前面串成可答的架構故事：檢索差先查 recall，再決定調 ANN、chunk 或 hybrid。</p>
 
   <ul>
-    <li><strong>Ingestion</strong>：文件 → chunk → embed → upsert（+ metadata）。</li>
+    <li><strong>Ingestion</strong>：文件 → chunk → embed → upsert（+ metadata）。寫入後索引是否立刻可搜，見 §05。</li>
     <li><strong>Retrieval</strong>：query embed → ANN Top-K →（可選）rerank → 當 LLM 上下文（RAG 的檢索段）。</li>
     <li><strong>Hybrid</strong>：BM25 與向量各取一截，再把兩路排名合併（常見手法叫 <strong>RRF</strong>：兩邊名次互相加權，不必調分數量綱）——專有名詞靠 keyword，語意靠向量。</li>
     <li><strong>Filter</strong>：假設 ANN 取 Top-10，再按 <code>tenant_id</code> 過濾只剩 2 筆——使用者會覺得「搜尋很空」。能 <strong>pre-filter</strong>（先縮小再 ANN）就先縮小；只能 <strong>post-filter</strong> 時，要把 K 加大或換支援過濾的索引路徑。</li>
   </ul>
 
+  <h3>RRF 合併：一個最小例子</h3>
+  <p>假設向量路與 BM25 路各回傳排名（名次愈小愈好）。<strong>RRF</strong> 常用分數：<code>1 / (60 + rank)</code>，兩路加總後再排序——重點是<strong>用名次、不用原始分數</strong>，所以不必把 Cosine 與 BM25 硬齊到同一量綱。</p>
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>chunk</th>
+          <th>向量名次</th>
+          <th>BM25 名次</th>
+          <th>RRF（示意）</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>A（語意很像，但沒出現型號字）</td>
+          <td>1</td>
+          <td>5</td>
+          <td>1/61 + 1/65 ≈ 0.0318</td>
+        </tr>
+        <tr>
+          <td>B（有精確型號，語意普通）</td>
+          <td>4</td>
+          <td>1</td>
+          <td>1/64 + 1/61 ≈ 0.0320 → <span class="hl">常會浮上來</span></td>
+        </tr>
+        <tr>
+          <td>C（兩路都普通）</td>
+          <td>3</td>
+          <td>4</td>
+          <td>1/63 + 1/64 ≈ 0.0315</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="cap">上表只示範「名次相加」的直覺；常數 60 可調，但面試講清楚「為何不用原始分數相加」比背數字重要。</p>
+
+  <div class="callout accent">
+    <div class="c-title"><span class="ic">流程</span>pre-filter vs post-filter</div>
+    <p>
+      • <strong>pre-filter</strong>：先用 metadata（租戶、ACL、時間）縮小集合，再跑 ANN——Top-K 幾乎都是「合法且相關」。
+      <br>• <strong>post-filter</strong>：先 ANN 再丟棄不合格——若過濾很嚴，要把 <var>K</var> 加大（例如先取 50 再濾），否則結果會空。
+      <br>• 產品若強制多租戶隔離，優先選支援過濾感知索引（filtered HNSW／分 collection）的路徑，而不是只靠應用層事後丟棄。
+    </p>
+  </div>
+
   <div class="callout accent">
     <div class="c-title"><span class="ic">考點</span>「RAG 檢索效果不好怎麼查？」</div>
     <p>
       1. 用標注 query–chunk 量 recall@K。
-      <br>2. 低 recall → 調 ef/nprobe、檢查 chunk、試 hybrid。
+      <br>2. 低 recall → 調 ef/nprobe、檢查 chunk／overlap、試 hybrid。
       <br>3. recall 高仍答錯 → reranker 或 prompt／模型問題。
       <br>4. 延遲高 → 減 K、量化、或擴 query 節點——但先確認沒為了速度犧牲太多 recall。
     </p>
@@ -1913,7 +2018,10 @@ LIMIT 10;</code></pre>
   var K = 5;
   var NUM_POINTS = 120;
   var IVF_LIST = 8;
-  var HNSW_M = 6;
+  var HNSW_M = 10;          // 本地鄰近度：太小會讓圖困在單一 cluster
+  var HNSW_LONG_RANGE = 2;  // 每點額外連到較遠樣本，模擬多層入口的「跳接」
+  var HNSW_ENTRY_SAMPLE = 24;
+  var HNSW_DEFAULT_EF = 16; // 切到 HNSW 時的教學起點：可見漏檢，但不至於 0%
   var COST_PER_CMP_MS = 0.045;
 
   var canvas = demo.querySelector('#ann-canvas');
@@ -2033,10 +2141,17 @@ LIMIT 10;</code></pre>
     });
   }
 
+  function linkUndirected(i, j) {
+    if (i === j) return;
+    if (hnswEdges[i].indexOf(j) < 0) hnswEdges[i].push(j);
+    if (hnswEdges[j].indexOf(i) < 0) hnswEdges[j].push(i);
+  }
+
   function buildHNSW() {
-    // Undirected kNN graph on points (simplified single-layer HNSW-like)
+    // Undirected kNN graph + sparse long-range edges (simplified single-layer HNSW-like).
+    // Long-range links stand in for upper-layer shortcuts so the demo can leave a wrong cluster.
     hnswEdges = points.map(function () { return []; });
-    var i, j, list, a, b;
+    var i, j, list, a, b, step, far;
     for (i = 0; i < points.length; i++) {
       list = [];
       for (j = 0; j < points.length; j++) {
@@ -2044,11 +2159,21 @@ LIMIT 10;</code></pre>
         list.push({ j: j, d: dist(points[i], points[j]) });
       }
       list.sort(function (x, y) { return x.d - y.d; });
-      for (a = 0; a < HNSW_M; a++) {
-        b = list[a].j;
-        if (hnswEdges[i].indexOf(b) < 0) hnswEdges[i].push(b);
-        if (hnswEdges[b].indexOf(i) < 0) hnswEdges[b].push(i);
+      for (a = 0; a < HNSW_M && a < list.length; a++) {
+        linkUndirected(i, list[a].j);
       }
+      // Connect toward the far end of the sorted list (cross-cluster shortcuts)
+      for (a = 0; a < HNSW_LONG_RANGE; a++) {
+        far = list.length - 1 - a * 7;
+        if (far <= HNSW_M) break;
+        linkUndirected(i, list[far].j);
+      }
+    }
+    // Deterministic ring of hubs across the three soft clusters → guarantees an escape path
+    step = 3;
+    for (i = 0; i < 90; i += step) {
+      b = (i + step) % 90;
+      linkUndirected(i, b);
     }
   }
 
@@ -2117,12 +2242,13 @@ LIMIT 10;</code></pre>
 
   function hnswSearch(q, ef) {
     var cmp = 0;
-    // Entry: closest among a small sample of points (stand-in for upper layer)
+    // Entry: closest among a stratified sample (stand-in for upper-layer greedy search)
     var entryIdx = 0;
     var bestD = dist(points[0], q);
     cmp++;
-    var i, d;
-    for (i = 1; i < Math.min(12, points.length); i++) {
+    var i, d, sampleStep;
+    sampleStep = Math.max(1, Math.floor(points.length / HNSW_ENTRY_SAMPLE));
+    for (i = sampleStep; i < points.length; i += sampleStep) {
       d = dist(points[i], q);
       cmp++;
       if (d < bestD) { bestD = d; entryIdx = i; }
@@ -2134,7 +2260,7 @@ LIMIT 10;</code></pre>
     var candidates = [{ idx: entryIdx, d: bestD }];
     var results = [{ idx: entryIdx, d: bestD }];
     var expansions = 0;
-    var maxExpansions = Math.max(ef * 2, ef + 4);
+    var maxExpansions = Math.max(ef * 3, ef + 8);
 
     while (candidates.length && expansions < maxExpansions) {
       candidates.sort(function (a, b) { return a.d - b.d; });
@@ -2164,8 +2290,8 @@ LIMIT 10;</code></pre>
     var top = results.slice(0, K).map(function (r) { return points[r.idx]; });
 
     var steps = [
-      'HNSW（簡化單層）：預建每點約 ' + HNSW_M + ' 條鄰近邊',
-      '入口點 ≈ ' + points[entryIdx].id + '（上層粗定位的簡化）',
+      'HNSW（簡化單層 + 少量跳接邊）：每點約 ' + HNSW_M + ' 條近鄰 + 跨區捷徑',
+      '入口點 ≈ ' + points[entryIdx].id + '（從分散樣本中選最近，模擬上層粗定位）',
       'ef=' + ef + '：候選隊列寬度；沿圖邊擴張 ' + expansions + ' 步',
       '實際訪問 ' + visitedList.length + ' 點 / ' + points.length + '，比較次數 = ' + cmp,
       '未訪問的點不會被算距離——這才是「近似」的來源'
@@ -2403,12 +2529,19 @@ LIMIT 10;</code></pre>
   }
 
   function setIndex(type) {
+    var prev = indexType;
     indexType = type;
     idxBtns.forEach(function (b) {
       b.setAttribute('aria-pressed', b.getAttribute('data-idx') === type ? 'true' : 'false');
     });
-    if (type === 'ivf' && param > IVF_LIST) param = 3;
-    if (type === 'hnsw' && param < 2) param = 8;
+    if (type === 'ivf') {
+      // Coming from HNSW (ef 可到 40) 時，收斂到可觀察漏檢的 nprobe
+      if (prev !== 'ivf' || param > IVF_LIST) param = Math.min(3, IVF_LIST);
+    } else if (type === 'hnsw') {
+      // 避免沿用 IVF 的 nprobe=1～3 或 Flat 的殘值，直接落到教學起點
+      if (prev !== 'hnsw' || param < 2 || param > 40) param = HNSW_DEFAULT_EF;
+      if (param < 2) param = HNSW_DEFAULT_EF;
+    }
     syncParamUI();
     runQuery();
   }
@@ -2419,13 +2552,13 @@ LIMIT 10;</code></pre>
     buildHNSW();
     query = { x: 0.55, y: 0.42 };
     indexType = 'brute';
-    param = 8;
+    param = HNSW_DEFAULT_EF;
     idxBtns.forEach(function (b) {
       b.setAttribute('aria-pressed', b.getAttribute('data-idx') === 'brute' ? 'true' : 'false');
     });
     syncParamUI();
     runQuery();
-    elStatus.textContent = '已重置為 Flat：' + NUM_POINTS + ' 點。先確認 recall@5=100%，再切 IVF／HNSW 把參數調小看漏檢。';
+    elStatus.textContent = '已重置為 Flat：' + NUM_POINTS + ' 點。先確認 recall@5=100%，再切 IVF／HNSW：HNSW 預設 ef=' + HNSW_DEFAULT_EF + '，再往下調看漏檢。';
   }
 
   idxBtns.forEach(function (btn) {
