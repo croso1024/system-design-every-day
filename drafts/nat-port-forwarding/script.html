@@ -1,0 +1,425 @@
+<script>
+(function () {
+  "use strict";
+
+  var PUBLIC_IP = "203.0.113.50";
+  var nextExtPort = 40000;
+  var mode = "snat";
+  var entries = [];
+  var lastEntryId = null;
+  var seq = 0;
+
+  var statusEl = document.getElementById("nat-status");
+  var tbody = document.getElementById("nat-tbody");
+  var formSnat = document.getElementById("nat-form-snat");
+  var formDnat = document.getElementById("nat-form-dnat");
+  var pktBefore = document.getElementById("nat-pkt-before");
+  var pktAfter = document.getElementById("nat-pkt-after");
+
+  function setStatus(msg) {
+    if (statusEl) statusEl.textContent = msg;
+  }
+
+  function val(id) {
+    var el = document.getElementById(id);
+    return el ? String(el.value).trim() : "";
+  }
+
+  function validIPv4(s) {
+    var p = s.split(".");
+    if (p.length !== 4) return false;
+    for (var i = 0; i < 4; i++) {
+      if (!/^\d+$/.test(p[i])) return false;
+      var n = parseInt(p[i], 10);
+      if (n < 0 || n > 255) return false;
+    }
+    return true;
+  }
+
+  function validPort(s) {
+    if (!/^\d+$/.test(s)) return false;
+    var n = parseInt(s, 10);
+    return n >= 1 && n <= 65535;
+  }
+
+  function setPacket(el, data, changedKeys) {
+    if (!el) return;
+    var chg = changedKeys || {};
+    el.classList.toggle("changed", Object.keys(chg).length > 0);
+    ["src", "dst", "proto", "dir"].forEach(function (k) {
+      var node = el.querySelector('[data-f="' + k + '"]');
+      if (!node) return;
+      node.textContent = data[k] || "—";
+      node.classList.toggle("chg", !!chg[k]);
+    });
+  }
+
+  function renderTable(highlightId, highlightClass) {
+    if (!tbody) return;
+    if (!entries.length) {
+      tbody.innerHTML =
+        '<tr><td colspan="6" style="color:var(--text-3);text-align:center">尚無映射列 — 送出連線後會出現</td></tr>';
+      return;
+    }
+    tbody.innerHTML = entries
+      .map(function (e) {
+        var cls = e.id === highlightId ? highlightClass || "hit" : "";
+        return (
+          "<tr class=\"" +
+          cls +
+          "\">" +
+          "<td>" +
+          e.id +
+          "</td>" +
+          "<td>" +
+          e.type +
+          "</td>" +
+          "<td>" +
+          e.internal +
+          "</td>" +
+          "<td>" +
+          e.external +
+          "</td>" +
+          "<td>" +
+          e.peer +
+          "</td>" +
+          "<td>" +
+          e.state +
+          "</td>" +
+          "</tr>"
+        );
+      })
+      .join("");
+  }
+
+  function findSnat(lanIp, lanPort, dstIp, dstPort) {
+    for (var i = 0; i < entries.length; i++) {
+      var e = entries[i];
+      if (
+        e.type === "SNAT" &&
+        e.lanIp === lanIp &&
+        e.lanPort === lanPort &&
+        e.peerIp === dstIp &&
+        e.peerPort === dstPort
+      ) {
+        return e;
+      }
+    }
+    return null;
+  }
+
+  function findByExtPort(extPort, peerIp) {
+    for (var i = 0; i < entries.length; i++) {
+      var e = entries[i];
+      if (String(e.extPort) === String(extPort) && e.peerIp === peerIp) return e;
+      if (e.type === "DNAT" && String(e.extPort) === String(extPort)) return e;
+    }
+    return null;
+  }
+
+  function findDnatRule(extPort) {
+    for (var i = 0; i < entries.length; i++) {
+      var e = entries[i];
+      if (e.type === "DNAT" && String(e.extPort) === String(extPort) && e.state === "forward-rule") {
+        return e;
+      }
+    }
+    return null;
+  }
+
+  function ensureDnatRule(extPort, fwdIp, fwdPort) {
+    var existing = findDnatRule(extPort);
+    if (existing) {
+      existing.lanIp = fwdIp;
+      existing.lanPort = fwdPort;
+      existing.internal = fwdIp + ":" + fwdPort;
+      existing.external = PUBLIC_IP + ":" + extPort;
+      return existing;
+    }
+    seq += 1;
+    var row = {
+      id: seq,
+      type: "DNAT",
+      lanIp: fwdIp,
+      lanPort: fwdPort,
+      extPort: extPort,
+      internal: fwdIp + ":" + fwdPort,
+      external: PUBLIC_IP + ":" + extPort,
+      peer: "(規則)",
+      peerIp: "",
+      peerPort: "",
+      state: "forward-rule"
+    };
+    entries.push(row);
+    return row;
+  }
+
+  function sendSnat() {
+    var lanIp = val("nat-lan-ip");
+    var lanPort = val("nat-lan-port");
+    var dstIp = val("nat-dst-ip");
+    var dstPort = val("nat-dst-port");
+
+    if (!validIPv4(lanIp) || !validIPv4(dstIp) || !validPort(lanPort) || !validPort(dstPort)) {
+      setStatus("請輸入合法的 IPv4 與 Port（1–65535）。");
+      setPacket(pktBefore, { src: "—", dst: "—", proto: "TCP", dir: "—" }, {});
+      setPacket(pktAfter, { src: "—", dst: "—", proto: "TCP", dir: "—" }, {});
+      renderTable(null);
+      return;
+    }
+
+    var before = {
+      src: lanIp + ":" + lanPort,
+      dst: dstIp + ":" + dstPort,
+      proto: "TCP",
+      dir: "LAN → WAN"
+    };
+    setPacket(pktBefore, before, {});
+
+    var hit = findSnat(lanIp, lanPort, dstIp, dstPort);
+    var entry;
+    var highlight = "new";
+    if (hit) {
+      entry = hit;
+      entry.state = "established";
+      highlight = "hit";
+      setStatus(
+        "命中既有 SNAT 列 #" +
+          entry.id +
+          "：沿用公網映射 " +
+          entry.external +
+          "，無需新分配 port。"
+      );
+    } else {
+      nextExtPort += 1;
+      seq += 1;
+      entry = {
+        id: seq,
+        type: "SNAT",
+        lanIp: lanIp,
+        lanPort: lanPort,
+        extPort: nextExtPort,
+        peerIp: dstIp,
+        peerPort: dstPort,
+        internal: lanIp + ":" + lanPort,
+        external: PUBLIC_IP + ":" + nextExtPort,
+        peer: dstIp + ":" + dstPort,
+        state: "new"
+      };
+      entries.push(entry);
+      setStatus(
+        "新建 SNAT 映射 #" +
+          entry.id +
+          "：來源改寫為 " +
+          entry.external +
+          "，並寫入 NAT 表供回程還原。"
+      );
+    }
+
+    lastEntryId = entry.id;
+    var after = {
+      src: entry.external,
+      dst: dstIp + ":" + dstPort,
+      proto: "TCP",
+      dir: "SNAT（改寫 src）"
+    };
+    setPacket(pktAfter, after, { src: true });
+    renderTable(entry.id, highlight);
+  }
+
+  function sendDnat() {
+    var extPort = val("nat-ext-port");
+    var fwdIp = val("nat-fwd-ip");
+    var fwdPort = val("nat-fwd-port");
+    var clientIp = val("nat-client-ip");
+
+    if (!validIPv4(fwdIp) || !validIPv4(clientIp) || !validPort(extPort) || !validPort(fwdPort)) {
+      setStatus("請輸入合法的 IPv4 與 Port（1–65535）。");
+      renderTable(null);
+      return;
+    }
+
+    var clientPort = "51000";
+    var rule = ensureDnatRule(extPort, fwdIp, fwdPort);
+
+    var before = {
+      src: clientIp + ":" + clientPort,
+      dst: PUBLIC_IP + ":" + extPort,
+      proto: "TCP",
+      dir: "WAN → Router"
+    };
+    setPacket(pktBefore, before, {});
+
+    // Simulate firewall: only forwarded ports accepted
+    if (!rule) {
+      setPacket(pktAfter, {
+        src: clientIp + ":" + clientPort,
+        dst: PUBLIC_IP + ":" + extPort,
+        proto: "TCP",
+        dir: "DROP（無轉發規則）"
+      }, {});
+      renderTable(null, "drop");
+      setStatus("防火牆預設拒絕入站：沒有對應 Port Forward，封包被丟棄。");
+      lastEntryId = null;
+      return;
+    }
+
+    seq += 1;
+    var flow = {
+      id: seq,
+      type: "DNAT",
+      lanIp: fwdIp,
+      lanPort: fwdPort,
+      extPort: extPort,
+      peerIp: clientIp,
+      peerPort: clientPort,
+      internal: fwdIp + ":" + fwdPort,
+      external: PUBLIC_IP + ":" + extPort,
+      peer: clientIp + ":" + clientPort,
+      state: "established"
+    };
+    entries.push(flow);
+    lastEntryId = flow.id;
+
+    var after = {
+      src: clientIp + ":" + clientPort,
+      dst: fwdIp + ":" + fwdPort,
+      proto: "TCP",
+      dir: "DNAT（改寫 dst）"
+    };
+    setPacket(pktAfter, after, { dst: true });
+    renderTable(flow.id, "new");
+    setStatus(
+      "命中 Port Forward 規則 #" +
+        rule.id +
+        "：目的改寫為 " +
+        flow.internal +
+        "，並建立連線追蹤列 #" +
+        flow.id +
+        "。"
+    );
+  }
+
+  function reply() {
+    if (!lastEntryId) {
+      setStatus("尚無最近連線可模擬回程——請先送出一筆連線。");
+      return;
+    }
+    var entry = null;
+    for (var i = 0; i < entries.length; i++) {
+      if (entries[i].id === lastEntryId) {
+        entry = entries[i];
+        break;
+      }
+    }
+    if (!entry || entry.state === "forward-rule") {
+      setStatus("目前高亮的是轉發規則本身，請先送出一筆實際連線。");
+      return;
+    }
+
+    if (entry.type === "SNAT") {
+      var before = {
+        src: entry.peer,
+        dst: entry.external,
+        proto: "TCP",
+        dir: "WAN → Router（回程）"
+      };
+      var after = {
+        src: entry.peer,
+        dst: entry.internal,
+        proto: "TCP",
+        dir: "還原 dst → LAN"
+      };
+      setPacket(pktBefore, before, {});
+      setPacket(pktAfter, after, { dst: true });
+      entry.state = "established";
+      renderTable(entry.id, "hit");
+      setStatus(
+        "回程命中 NAT 表 #" +
+          entry.id +
+          "：目的 " +
+          entry.external +
+          " 還原為 " +
+          entry.internal +
+          "。"
+      );
+      return;
+    }
+
+    // DNAT reply: internal host responds, router rewrites src back to public
+    var before2 = {
+      src: entry.internal,
+      dst: entry.peer,
+      proto: "TCP",
+      dir: "LAN → WAN（回程）"
+    };
+    var after2 = {
+      src: entry.external,
+      dst: entry.peer,
+      proto: "TCP",
+      dir: "還原 src → 公網"
+    };
+    setPacket(pktBefore, before2, {});
+    setPacket(pktAfter, after2, { src: true });
+    entry.state = "established";
+    renderTable(entry.id, "hit");
+    setStatus(
+      "回程命中追蹤列 #" +
+        entry.id +
+        "：來源改回 " +
+        entry.external +
+        "，外部客戶端無感內網位址。"
+    );
+  }
+
+  function reset() {
+    entries = [];
+    lastEntryId = null;
+    seq = 0;
+    nextExtPort = 40000;
+    setPacket(pktBefore, { src: "—", dst: "—", proto: "TCP", dir: "—" }, {});
+    setPacket(pktAfter, { src: "—", dst: "—", proto: "TCP", dir: "—" }, {});
+    renderTable(null);
+    setStatus("已重置 NAT 表。選擇模式後按「送出連線」。");
+  }
+
+  function setMode(next) {
+    mode = next;
+    var buttons = document.querySelectorAll("#demo-nat .seg button");
+    buttons.forEach(function (btn) {
+      btn.setAttribute("aria-pressed", btn.getAttribute("data-mode") === mode ? "true" : "false");
+    });
+    if (formSnat) formSnat.hidden = mode !== "snat";
+    if (formDnat) formDnat.hidden = mode !== "dnat";
+    setStatus(
+      mode === "snat"
+        ? "出站模式：內網主機連外部服務，觀察 SNAT 如何分配公網 port。"
+        : "入站模式：外部客戶連公網 port，觀察 DNAT／Port Forward 如何改寫目的。"
+    );
+  }
+
+  var seg = document.querySelector("#demo-nat .seg");
+  if (seg) {
+    seg.addEventListener("click", function (ev) {
+      var btn = ev.target.closest("button[data-mode]");
+      if (!btn) return;
+      setMode(btn.getAttribute("data-mode"));
+    });
+  }
+
+  var btnSend = document.getElementById("nat-btn-send");
+  var btnReply = document.getElementById("nat-btn-reply");
+  var btnReset = document.getElementById("nat-btn-reset");
+  if (btnSend) {
+    btnSend.addEventListener("click", function () {
+      if (mode === "snat") sendSnat();
+      else sendDnat();
+    });
+  }
+  if (btnReply) btnReply.addEventListener("click", reply);
+  if (btnReset) btnReset.addEventListener("click", reset);
+
+  setMode("snat");
+  renderTable(null);
+})();
+</script>
