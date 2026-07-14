@@ -1,0 +1,342 @@
+<script>
+(function () {
+  "use strict";
+
+  var scenario = "same";
+  var stepIdx = 0;
+  var macTable = [];
+  var lastMacHighlight = null;
+
+  var MAC = {
+    A: "AA:AA:AA:00:00:0A",
+    B: "BB:BB:BB:00:00:0B",
+    C: "CC:CC:CC:00:00:0C",
+    GW: "RR:RR:RR:00:00:01",
+    ISP: "II:II:II:00:00:01"
+  };
+  var IP = {
+    A: "192.168.1.10",
+    B: "192.168.1.20",
+    C: "192.168.2.50",
+    GW: "192.168.1.1",
+    PUB: "203.0.113.80",
+    EXT: "93.184.216.34"
+  };
+
+  var statusEl = document.getElementById("lan-status");
+  var tbody = document.getElementById("lan-mac-tbody");
+  var btnNext = document.getElementById("lan-btn-next");
+  var btnReset = document.getElementById("lan-btn-reset");
+
+  var SCENARIOS = {
+    same: {
+      label: "同網段 A→B",
+      unused: ["modem"],
+      steps: [
+        {
+          hot: ["hostA"],
+          done: [],
+          links: [],
+          status: "Host A 要送資料給同網段的 Host B。目的 IP 在本地子網路 → 不經 Router。",
+          l2: { smac: MAC.A, dmac: MAC.B + "（若未知則先 ARP）", l2act: "組 Frame" },
+          l3: { sip: IP.A, dip: IP.B, l3act: "同網段，IP 不變" },
+          mac: null
+        },
+        {
+          hot: ["switch"],
+          done: ["hostA"],
+          links: ["switch-hosts"],
+          status: "Frame 進入 Switch。學習來源 MAC-A 在 Host A 埠；若尚未見過 MAC-B → 對其他埠洪泛。",
+          l2: { smac: MAC.A, dmac: MAC.B, l2act: "Learn MAC-A；Flood / Forward" },
+          l3: { sip: IP.A, dip: IP.B, l3act: "Switch 不看 IP" },
+          mac: { mac: MAC.A, port: "Port-A", vlan: "10", note: "來源學習", cls: "new" }
+        },
+        {
+          hot: ["hostB"],
+          done: ["hostA", "switch"],
+          links: ["switch-hosts"],
+          status: "Host B 收到 Frame。回程時 Switch 已學會 MAC-B，改為單播轉發，不再洪泛。",
+          l2: { smac: MAC.A, dmac: MAC.B, l2act: "送達 Port-B" },
+          l3: { sip: IP.A, dip: IP.B, l3act: "端到端交付" },
+          mac: { mac: MAC.B, port: "Port-B", vlan: "10", note: "回程學習", cls: "new" }
+        },
+        {
+          hot: [],
+          done: ["hostA", "switch", "hostB"],
+          links: [],
+          status: "完成：同網段路徑 = Host A → Switch → Host B。Router／Modem 全程未參與。",
+          l2: { smac: MAC.A, dmac: MAC.B, l2act: "Unicast 路徑就緒" },
+          l3: { sip: IP.A, dip: IP.B, l3act: "無需 Gateway" },
+          mac: null
+        }
+      ]
+    },
+    gw: {
+      label: "跨網段經 Gateway",
+      unused: ["modem"],
+      steps: [
+        {
+          hot: ["hostA"],
+          done: [],
+          links: [],
+          status: "Host A 要連 Host C（另一網段）。目的 IP 非本地 → 目的 MAC 設成預設閘道。",
+          l2: { smac: MAC.A, dmac: MAC.GW + "（Gateway）", l2act: "Frame 給 Router" },
+          l3: { sip: IP.A, dip: IP.C, l3act: "跨網段，交 Gateway" },
+          mac: null
+        },
+        {
+          hot: ["switch"],
+          done: ["hostA"],
+          links: ["switch-hosts"],
+          status: "Switch 只看 MAC：目的是 Gateway 的 MAC → 轉發到上聯 Router 的埠。",
+          l2: { smac: MAC.A, dmac: MAC.GW, l2act: "Forward 到上聯埠" },
+          l3: { sip: IP.A, dip: IP.C, l3act: "仍不解析 IP" },
+          mac: { mac: MAC.A, port: "Port-A", vlan: "10", note: "來源學習", cls: "new" }
+        },
+        {
+          hot: ["router"],
+          done: ["hostA", "switch"],
+          links: ["router-switch"],
+          status: "Router 拆 L2，查路由表：目的 192.168.2.0/24 在另一介面。TTL−1，重寫 MAC。",
+          l2: { smac: MAC.GW + "→新 Src", dmac: "→ Host C 側 MAC", l2act: "重寫 L2 Header" },
+          l3: { sip: IP.A, dip: IP.C, l3act: "路由轉送 · TTL−1" },
+          mac: { mac: MAC.GW, port: "Uplink", vlan: "10", note: "Gateway 埠", cls: "hit" }
+        },
+        {
+          hot: ["hostC"],
+          done: ["hostA", "switch", "router"],
+          links: [],
+          status: "封包抵達 Host C 所在網段。L2 由該側交換／直連完成；關鍵是中間經過了 L3。",
+          l2: { smac: "（C 側）", dmac: MAC.C, l2act: "最後一跳交付" },
+          l3: { sip: IP.A, dip: IP.C, l3act: "跨網段成功" },
+          mac: null
+        },
+        {
+          hot: [],
+          done: ["hostA", "switch", "router", "hostC"],
+          links: [],
+          status: "完成：跨網段 = Host → Switch → Router（L3）→ 目標網段。同網段的 Host B 未參與。",
+          l2: { smac: "—", dmac: "—", l2act: "每跳 MAC 不同" },
+          l3: { sip: IP.A, dip: IP.C, l3act: "端到端 IP 不變（無 NAT）" },
+          mac: null
+        }
+      ]
+    },
+    inet: {
+      label: "出外網經 Modem",
+      unused: ["hostB", "hostC"],
+      steps: [
+        {
+          hot: ["hostA"],
+          done: [],
+          links: [],
+          status: "Host A 存取外網 IP。目的非本地 → Frame 先給 Gateway（與跨網段相同起手式）。",
+          l2: { smac: MAC.A, dmac: MAC.GW, l2act: "送往 Gateway" },
+          l3: { sip: IP.A, dip: IP.EXT, l3act: "預設路由 0.0.0.0/0" },
+          mac: null
+        },
+        {
+          hot: ["switch", "router"],
+          done: ["hostA"],
+          links: ["switch-hosts", "router-switch"],
+          status: "Switch 轉到 Router。Router 命中預設路由，準備從 WAN 送出（實務上常做 SNAT）。",
+          l2: { smac: MAC.A, dmac: MAC.GW, l2act: "內網側轉發" },
+          l3: { sip: IP.A, dip: IP.EXT, l3act: "查預設路由 → WAN" },
+          mac: { mac: MAC.A, port: "Port-A", vlan: "10", note: "來源學習", cls: "new" }
+        },
+        {
+          hot: ["modem"],
+          done: ["hostA", "switch", "router"],
+          links: ["modem-router"],
+          status: "Router WAN 送出後，Modem 把乙太幀轉成 ISP 線路訊號（光／同軸等）。它不做你的內網 MAC 學習。",
+          l2: { smac: "WAN NIC", dmac: "ISP 側", l2act: "交 Modem 轉換" },
+          l3: { sip: IP.PUB + "（NAT 後）", dip: IP.EXT, l3act: "公網側轉送" },
+          mac: null
+        },
+        {
+          hot: [],
+          done: ["hostA", "switch", "router", "modem"],
+          links: [],
+          status: "完成：出外網路徑 = Host → Switch → Router（路由／NAT）→ Modem → ISP。接線順序與此一致。",
+          l2: { smac: "—", dmac: "—", l2act: "內外網 MAC 分離" },
+          l3: { sip: IP.PUB, dip: IP.EXT, l3act: "經預設路由出網" },
+          mac: null
+        }
+      ]
+    }
+  };
+
+  function setStatus(msg) {
+    if (statusEl) statusEl.textContent = msg;
+  }
+
+  function setFields(rootId, data, changed) {
+    var root = document.getElementById(rootId);
+    if (!root) return;
+    Object.keys(data).forEach(function (k) {
+      var node = root.querySelector('[data-f="' + k + '"]');
+      if (!node) return;
+      node.textContent = data[k];
+      node.classList.toggle("chg", !!(changed && changed[k]));
+    });
+  }
+
+  function clearNodeStates() {
+    document.querySelectorAll("#lan-topo .lan-node").forEach(function (n) {
+      n.classList.remove("hot", "done", "skip");
+    });
+    document.querySelectorAll("#lan-topo .lan-link-label").forEach(function (n) {
+      n.classList.remove("live");
+    });
+  }
+
+  function applyUnused(unused) {
+    (unused || []).forEach(function (id) {
+      var el = document.querySelector('#lan-topo [data-node="' + id + '"]');
+      if (el) el.classList.add("skip");
+    });
+  }
+
+  function renderMac(highlight) {
+    if (!tbody) return;
+    if (!macTable.length) {
+      tbody.innerHTML =
+        '<tr><td colspan="4" style="color:var(--text-3);text-align:center">尚無學習紀錄</td></tr>';
+      return;
+    }
+    tbody.innerHTML = macTable
+      .map(function (e) {
+        var cls = highlight && highlight.mac === e.mac ? highlight.cls || "hit" : "";
+        return (
+          "<tr class=\"" +
+          cls +
+          "\"><td>" +
+          e.mac +
+          "</td><td>" +
+          e.port +
+          "</td><td>" +
+          e.vlan +
+          "</td><td>" +
+          e.note +
+          "</td></tr>"
+        );
+      })
+      .join("");
+  }
+
+  function upsertMac(entry) {
+    if (!entry) {
+      lastMacHighlight = null;
+      renderMac(null);
+      return;
+    }
+    var found = false;
+    for (var i = 0; i < macTable.length; i++) {
+      if (macTable[i].mac === entry.mac) {
+        macTable[i] = {
+          mac: entry.mac,
+          port: entry.port,
+          vlan: entry.vlan,
+          note: entry.note
+        };
+        found = true;
+        break;
+      }
+    }
+    if (!found) {
+      macTable.push({
+        mac: entry.mac,
+        port: entry.port,
+        vlan: entry.vlan,
+        note: entry.note
+      });
+    }
+    lastMacHighlight = entry;
+    renderMac(entry);
+  }
+
+  function applyStep(step, sc) {
+    clearNodeStates();
+    applyUnused(sc.unused);
+    (step.done || []).forEach(function (id) {
+      var el = document.querySelector('#lan-topo [data-node="' + id + '"]');
+      if (el) {
+        el.classList.remove("skip");
+        el.classList.add("done");
+      }
+    });
+    (step.hot || []).forEach(function (id) {
+      var el = document.querySelector('#lan-topo [data-node="' + id + '"]');
+      if (el) {
+        el.classList.remove("skip", "done");
+        el.classList.add("hot");
+      }
+    });
+    (step.links || []).forEach(function (id) {
+      var el = document.querySelector('#lan-topo [data-link="' + id + '"]');
+      if (el) el.classList.add("live");
+    });
+    setStatus(step.status);
+    setFields("lan-pkt-l2", step.l2, { l2act: true });
+    setFields("lan-pkt-l3", step.l3, { l3act: true });
+    upsertMac(step.mac);
+  }
+
+  function resetScenario() {
+    stepIdx = 0;
+    macTable = [];
+    lastMacHighlight = null;
+    var sc = SCENARIOS[scenario];
+    clearNodeStates();
+    applyUnused(sc.unused);
+    setFields(
+      "lan-pkt-l2",
+      { smac: "—", dmac: "—", l2act: "—" },
+      {}
+    );
+    setFields(
+      "lan-pkt-l3",
+      { sip: "—", dip: "—", l3act: "—" },
+      {}
+    );
+    renderMac(null);
+    setStatus(
+      "情境「" + sc.label + "」已就緒。按「下一步」開始模擬封包路徑。"
+    );
+    if (btnNext) {
+      btnNext.disabled = false;
+      btnNext.textContent = "下一步";
+    }
+  }
+
+  function nextStep() {
+    var sc = SCENARIOS[scenario];
+    if (!sc) return;
+    if (stepIdx >= sc.steps.length) {
+      setStatus("已到最後一步。可按「重置」重播，或切換其他情境。");
+      return;
+    }
+    applyStep(sc.steps[stepIdx], sc);
+    stepIdx += 1;
+    if (stepIdx >= sc.steps.length && btnNext) {
+      btnNext.textContent = "完成";
+    }
+  }
+
+  document.querySelectorAll("#demo-lan-path .seg button").forEach(function (btn) {
+    btn.addEventListener("click", function () {
+      document.querySelectorAll("#demo-lan-path .seg button").forEach(function (b) {
+        b.setAttribute("aria-pressed", "false");
+      });
+      btn.setAttribute("aria-pressed", "true");
+      scenario = btn.getAttribute("data-sc") || "same";
+      resetScenario();
+    });
+  });
+
+  if (btnNext) btnNext.addEventListener("click", nextStep);
+  if (btnReset) btnReset.addEventListener("click", resetScenario);
+
+  resetScenario();
+})();
+</script>
