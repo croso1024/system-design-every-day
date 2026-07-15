@@ -1,0 +1,2359 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>DNS 網域名稱解析 (DNS Deep Dive) | System Design Every Day</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@300;400;500;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+  <script>
+    mermaid.initialize({
+      startOnLoad: true,
+      theme: 'default',
+      securityLevel: 'loose'
+    });
+  </script>
+  <style>
+    :root {
+      --bg: #ffffff;
+      --bg-soft: #fafaf9;
+      --text: #262a2f;
+      --text-2: #6b7078;
+      --text-3: #9aa0a8;
+      --border: #ecebe8;
+      --border-strong: #dedcd8;
+      --code-bg: #f6f5f3;
+      --accent: #3f6188;
+      --accent-soft: #eef2f7;
+      --accent-line: #cdd9e6;
+      --ok: #4d7d68;
+      --ok-soft: #eef4f1;
+      --warn: #a3743e;
+      --warn-soft: #f6f0e7;
+      --bad: #a8554f;
+      --bad-soft: #f6ecea;
+      --radius: 10px;
+      --radius-sm: 7px;
+      --maxw: 760px;
+      --sans: "Noto Sans TC", system-ui, -apple-system, "Segoe UI", sans-serif;
+      --mono: "JetBrains Mono", "SFMono-Regular", Menlo, Consolas, monospace;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    html {
+      scroll-behavior: smooth;
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      html {
+        scroll-behavior: auto;
+      }
+      * {
+        animation-duration: .001ms !important;
+        transition-duration: .001ms !important;
+      }
+    }
+
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font-family: var(--sans);
+      font-weight: 400;
+      font-size: 16px;
+      line-height: 1.78;
+      -webkit-font-smoothing: antialiased;
+      letter-spacing: .005em;
+    }
+
+    ::selection {
+      background: var(--accent-soft);
+    }
+
+    /* ---------- layout ---------- */
+    .wrap {
+      display: flex;
+      max-width: 1180px;
+      margin: 0 auto;
+      gap: 0;
+    }
+
+    .toc {
+      width: 248px;
+      flex: 0 0 248px;
+      position: sticky;
+      top: 0;
+      height: 100vh;
+      padding: 54px 22px 40px 28px;
+      overflow-y: auto;
+      border-right: 1px solid var(--border);
+    }
+
+    .toc-kicker {
+      font-family: var(--mono);
+      font-size: 11px;
+      letter-spacing: .14em;
+      text-transform: uppercase;
+      color: var(--text-3);
+      margin-bottom: 20px;
+    }
+
+    .toc-kicker a {
+      color: var(--text-3);
+      text-decoration: none;
+      border-bottom: none;
+      transition: color .15s;
+    }
+
+    .toc-kicker a:hover {
+      color: var(--text);
+    }
+
+    .toc-title {
+      font-size: 15px;
+      font-weight: 700;
+      line-height: 1.4;
+      margin: 0 0 24px;
+    }
+
+    .toc a {
+      display: flex;
+      gap: 10px;
+      align-items: baseline;
+      text-decoration: none;
+      color: var(--text-2);
+      font-size: 13.5px;
+      padding: 6px 10px;
+      border-radius: 6px;
+      line-height: 1.45;
+      transition: background .15s, color .15s;
+      border-bottom: none;
+    }
+
+    .toc a:hover {
+      background: var(--bg-soft);
+      color: var(--text);
+      border-bottom: none;
+    }
+
+    .toc a.active {
+      color: var(--accent);
+      background: var(--accent-soft);
+      font-weight: 500;
+      border-bottom: none;
+    }
+
+    .toc a .n {
+      font-family: var(--mono);
+      font-size: 11px;
+      color: var(--text-3);
+      flex: 0 0 18px;
+    }
+
+    .toc a.active .n {
+      color: var(--accent);
+    }
+
+    main {
+      flex: 1 1 auto;
+      min-width: 0;
+      padding: 0 40px;
+    }
+
+    .inner {
+      max-width: var(--maxw);
+      margin: 0 auto;
+      padding: 72px 0 140px;
+    }
+
+    /* ---------- hero ---------- */
+    .hero {
+      margin-bottom: 64px;
+    }
+
+    .hero .eyebrow {
+      font-family: var(--mono);
+      font-size: 12px;
+      letter-spacing: .16em;
+      text-transform: uppercase;
+      color: var(--accent);
+      margin-bottom: 18px;
+    }
+
+    .hero h1 {
+      font-size: 40px;
+      line-height: 1.18;
+      font-weight: 700;
+      margin: 0 0 18px;
+      letter-spacing: -.01em;
+    }
+
+    .hero .lede {
+      font-size: 18px;
+      line-height: 1.7;
+      color: var(--text-2);
+      font-weight: 300;
+      margin: 0;
+      max-width: 620px;
+    }
+
+    .hero .meta {
+      margin-top: 28px;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+
+    .tag {
+      font-family: var(--mono);
+      font-size: 12px;
+      color: var(--text-2);
+      border: 1px solid var(--border-strong);
+      padding: 4px 11px;
+      border-radius: 999px;
+      background: var(--bg-soft);
+    }
+
+    /* ---------- sections ---------- */
+    section {
+      padding-top: 30px;
+      scroll-margin-top: 24px;
+    }
+
+    .sec-head {
+      display: flex;
+      align-items: baseline;
+      gap: 14px;
+      margin: 0 0 8px;
+    }
+
+    .sec-num {
+      font-family: var(--mono);
+      font-size: 13px;
+      color: var(--text-3);
+      font-weight: 500;
+      padding-top: 6px;
+      flex: 0 0 auto;
+    }
+
+    h2 {
+      font-size: 27px;
+      font-weight: 700;
+      line-height: 1.3;
+      margin: 0;
+      letter-spacing: -.01em;
+    }
+
+    .sec-sub {
+      color: var(--text-2);
+      font-size: 15px;
+      margin: 2px 0 28px 0;
+      font-weight: 300;
+    }
+
+    h3 {
+      font-size: 18.5px;
+      font-weight: 700;
+      margin: 38px 0 12px;
+      line-height: 1.45;
+    }
+
+    h4 {
+      font-size: 15.5px;
+      font-weight: 700;
+      margin: 26px 0 8px;
+      color: var(--text);
+    }
+
+    p {
+      margin: 0 0 16px;
+    }
+
+    a {
+      color: var(--accent);
+      text-decoration: none;
+      border-bottom: 1px solid var(--accent-line);
+      transition: border-color .15s;
+    }
+
+    a:hover {
+      border-color: var(--accent);
+    }
+
+    strong {
+      font-weight: 700;
+    }
+
+    em {
+      font-style: normal;
+      background: var(--accent-soft);
+      padding: 0 4px;
+      border-radius: 4px;
+      font-weight: 500;
+      color: #2f4d6e;
+    }
+
+    hr.div {
+      border: none;
+      border-top: 1px solid var(--border);
+      margin: 46px 0;
+    }
+
+    ul, ol {
+      margin: 0 0 18px;
+      padding-left: 22px;
+    }
+
+    li {
+      margin: 7px 0;
+      padding-left: 4px;
+    }
+
+    li::marker {
+      color: var(--text-3);
+    }
+
+    code {
+      font-family: var(--mono);
+      font-size: .86em;
+      background: var(--code-bg);
+      padding: 2px 6px;
+      border-radius: 5px;
+      color: #43494f;
+    }
+
+    pre {
+      background: var(--code-bg);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 16px 18px;
+      overflow-x: auto;
+      margin: 0 0 20px;
+      line-height: 1.6;
+    }
+
+    pre code {
+      background: none;
+      padding: 0;
+      font-size: 13px;
+    }
+
+    /* ---------- math notation ---------- */
+    /* 行內數學變數，如 W、R、N。本站不載入 MathJax/KaTeX，請勿使用 $...$ 或 \[...\] LaTeX 分隔符。 */
+    var {
+      font-family: var(--mono);
+      font-style: normal;
+      font-weight: 500;
+      color: var(--accent);
+    }
+
+    /* 區塊數學公式，置中等寬呈現，記得將 > < & 轉義為 &gt; &lt; &amp;。 */
+    .formula {
+      font-family: var(--mono);
+      font-size: 15px;
+      text-align: center;
+      background: var(--bg-soft);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      padding: 14px 18px;
+      margin: 0 0 20px;
+      color: var(--text);
+      letter-spacing: .03em;
+      overflow-x: auto;
+    }
+
+    /* ---------- callouts ---------- */
+    .callout {
+      border: 1px solid var(--border);
+      border-left: 3px solid var(--border-strong);
+      background: var(--bg-soft);
+      border-radius: var(--radius-sm);
+      padding: 15px 18px;
+      margin: 0 0 22px;
+      font-size: 14.5px;
+    }
+
+    .callout .c-title {
+      font-weight: 700;
+      font-size: 13px;
+      letter-spacing: .02em;
+      margin-bottom: 5px;
+      display: flex;
+      gap: 7px;
+      align-items: center;
+    }
+
+    .callout p:last-child {
+      margin-bottom: 0;
+    }
+
+    .callout.accent {
+      border-left-color: var(--accent);
+      background: var(--accent-soft);
+    }
+
+    .callout.accent .c-title {
+      color: #2f4d6e;
+    }
+
+    .callout.warn {
+      border-left-color: var(--warn);
+      background: var(--warn-soft);
+    }
+
+    .callout.warn .c-title {
+      color: var(--warn);
+    }
+
+    .callout .ic {
+      font-family: var(--mono);
+      font-size: 11px;
+      border: 1px solid currentColor;
+      border-radius: 4px;
+      padding: 0 4px;
+      line-height: 1.5;
+      opacity: .8;
+    }
+
+    .oneliner {
+      border: 1px dashed var(--accent-line);
+      border-radius: var(--radius-sm);
+      padding: 13px 16px;
+      margin: 0 0 22px;
+      font-size: 14.5px;
+      background: #fbfcfd;
+    }
+
+    .oneliner b {
+      font-family: var(--mono);
+      font-size: 11px;
+      letter-spacing: .08em;
+      color: var(--accent);
+      display: block;
+      margin-bottom: 4px;
+      text-transform: uppercase;
+    }
+
+    /* ---------- tables ---------- */
+    .tbl-wrap {
+      overflow-x: auto;
+      margin: 0 0 24px;
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+    }
+
+    table {
+      border-collapse: collapse;
+      width: 100%;
+      font-size: 14px;
+      min-width: 520px;
+    }
+
+    th, td {
+      text-align: left;
+      padding: 11px 14px;
+      border-bottom: 1px solid var(--border);
+      vertical-align: top;
+    }
+
+    th {
+      font-weight: 700;
+      background: var(--bg-soft);
+      font-size: 12.5px;
+      letter-spacing: .02em;
+      color: var(--text-2);
+      position: sticky;
+      top: 0;
+    }
+
+    tr:last-child td {
+      border-bottom: none;
+    }
+
+    td.hl {
+      background: var(--accent-soft);
+    }
+
+    .cap {
+      font-size: 12.5px;
+      color: var(--text-3);
+      margin: -12px 0 26px;
+      font-family: var(--mono);
+    }
+
+    /* ---------- interactive shell ---------- */
+    .demo {
+      border: 1px solid var(--border-strong);
+      border-radius: var(--radius);
+      background: var(--bg);
+      margin: 24px 0 26px;
+      overflow: hidden;
+    }
+
+    .demo-bar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      flex-wrap: wrap;
+      padding: 13px 16px;
+      border-bottom: 1px solid var(--border);
+      background: var(--bg-soft);
+    }
+
+    .demo-bar .label {
+      font-family: var(--mono);
+      font-size: 11px;
+      letter-spacing: .1em;
+      text-transform: uppercase;
+      color: var(--text-3);
+    }
+
+    .demo-body {
+      padding: 20px 18px;
+    }
+
+    .seg {
+      display: inline-flex;
+      border: 1px solid var(--border-strong);
+      border-radius: 999px;
+      overflow: hidden;
+      background: var(--bg);
+    }
+
+    .seg button {
+      border: none;
+      background: none;
+      font-family: var(--sans);
+      font-size: 12.5px;
+      color: var(--text-2);
+      padding: 6px 14px;
+      cursor: pointer;
+      transition: background .15s, color .15s;
+    }
+
+    .seg button:hover {
+      color: var(--text);
+    }
+
+    .seg button[aria-pressed="true"] {
+      background: var(--accent);
+      color: #fff;
+    }
+
+    .btn {
+      font-family: var(--sans);
+      font-size: 13px;
+      border: 1px solid var(--border-strong);
+      background: var(--bg);
+      color: var(--text);
+      padding: 7px 16px;
+      border-radius: 7px;
+      cursor: pointer;
+      transition: background .15s, border-color .15s;
+    }
+
+    .btn:hover {
+      background: var(--bg-soft);
+      border-color: var(--text-3);
+    }
+
+    .btn.primary {
+      background: var(--accent);
+      color: #fff;
+      border-color: var(--accent);
+    }
+
+    .btn.primary:hover {
+      background: #365578;
+    }
+
+    .btn:disabled {
+      opacity: .4;
+      cursor: not-allowed;
+    }
+
+    .btn:focus-visible, .seg button:focus-visible, .toc a:focus-visible, a:focus-visible,
+    summary:focus-visible {
+      outline: 2px solid var(--accent);
+      outline-offset: 2px;
+      border-radius: 4px;
+    }
+
+    .status-line {
+      font-size: 13.5px;
+      color: var(--text-2);
+      min-height: 42px;
+      margin-top: 14px;
+      background: var(--bg-soft);
+      border-radius: var(--radius-sm);
+      padding: 10px 13px;
+      border: 1px solid var(--border);
+    }
+
+    .status-line b {
+      color: var(--text);
+    }
+
+    .legend {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 14px;
+      font-size: 11.5px;
+      color: var(--text-2);
+      margin-top: 14px;
+      font-family: var(--mono);
+    }
+
+    .legend span {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .dot {
+      width: 9px;
+      height: 9px;
+      border-radius: 3px;
+      display: inline-block;
+      border: 1px solid rgba(0, 0, 0, .08);
+    }
+
+    /* node states used across diagrams */
+    .nstate-idle {
+      fill: #fff;
+      stroke: var(--border-strong);
+    }
+
+    .ns-idle {
+      background: #fff;
+      border-color: var(--border-strong);
+    }
+
+    .ns-lock {
+      background: var(--warn-soft);
+      border-color: var(--warn);
+    }
+
+    .ns-ok {
+      background: var(--ok-soft);
+      border-color: var(--ok);
+    }
+
+    .ns-bad {
+      background: var(--bad-soft);
+      border-color: var(--bad);
+    }
+
+    .ns-wait {
+      background: var(--accent-soft);
+      border-color: var(--accent);
+    }
+
+    /* spectrum */
+    .spectrum {
+      position: relative;
+      margin: 26px 6px 10px;
+    }
+
+    .spec-track {
+      height: 4px;
+      border-radius: 2px;
+      background: linear-gradient(90deg, #9fb6cf, #e7e5e1 50%, #c9d8c9);
+      position: relative;
+    }
+
+    .spec-ends {
+      display: flex;
+      justify-content: space-between;
+      font-family: var(--mono);
+      font-size: 11px;
+      color: var(--text-2);
+      margin-top: 10px;
+    }
+
+    .spec-mark {
+      position: absolute;
+      top: -12px;
+      transform: translateX(-50%);
+      cursor: pointer;
+      text-align: center;
+      background: none;
+      border: none;
+      padding: 0;
+    }
+
+    .spec-mark .pin {
+      width: 18px;
+      height: 18px;
+      border-radius: 50%;
+      background: #fff;
+      border: 2px solid var(--border-strong);
+      margin: 0 auto;
+      transition: border-color .15s, transform .15s, box-shadow .15s;
+      display: block;
+    }
+
+    .spec-mark .pn {
+      font-family: var(--mono);
+      font-size: 12px;
+      margin-top: 8px;
+      color: var(--text-2);
+      font-weight: 500;
+      white-space: nowrap;
+      display: block;
+    }
+
+    .spec-mark[aria-pressed="true"] .pin {
+      border-color: var(--accent);
+      transform: scale(1.18);
+      box-shadow: 0 0 0 4px var(--accent-soft);
+    }
+
+    .spec-mark[aria-pressed="true"] .pn {
+      color: var(--accent);
+    }
+
+    .spec-panel {
+      margin-top: 34px;
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 18px;
+      background: var(--bg-soft);
+    }
+
+    .spec-panel h4 {
+      margin: 0 0 4px;
+    }
+
+    .spec-panel .pmeta {
+      font-family: var(--mono);
+      font-size: 12px;
+      color: var(--text-3);
+      margin-bottom: 14px;
+    }
+
+    .bars {
+      display: grid;
+      grid-template-columns: 78px 1fr 56px;
+      gap: 9px 12px;
+      align-items: center;
+    }
+
+    .bars .blabel {
+      font-size: 13px;
+      color: var(--text-2);
+    }
+
+    .bars .btrack {
+      height: 8px;
+      background: #e9e7e3;
+      border-radius: 4px;
+      overflow: hidden;
+    }
+
+    .bars .bfill {
+      height: 100%;
+      border-radius: 4px;
+      background: var(--accent);
+      transition: width .4s ease;
+    }
+
+    .bars .bval {
+      font-family: var(--mono);
+      font-size: 11px;
+      color: var(--text-2);
+      text-align: right;
+    }
+
+    /* generic actor diagram */
+    .actors {
+      display: flex;
+      gap: 12px;
+      flex-wrap: wrap;
+    }
+
+    .actor {
+      flex: 1 1 0;
+      min-width: 96px;
+      border: 1.5px solid var(--border-strong);
+      border-radius: var(--radius-sm);
+      padding: 11px 10px;
+      text-align: center;
+      background: #fff;
+      transition: background .25s, border-color .25s;
+    }
+
+    .actor .aname {
+      font-weight: 700;
+      font-size: 13px;
+    }
+
+    .actor .arole {
+      font-family: var(--mono);
+      font-size: 10.5px;
+      color: var(--text-3);
+      margin-top: 2px;
+    }
+
+    .actor .astate {
+      font-size: 11.5px;
+      margin-top: 8px;
+      font-family: var(--mono);
+      color: var(--text-2);
+      min-height: 16px;
+    }
+
+    .coordinator {
+      border-style: dashed;
+    }
+
+    .flowsteps {
+      margin-top: 16px;
+    }
+
+    .stepitem {
+      display: flex;
+      gap: 11px;
+      font-size: 13.5px;
+      padding: 7px 0;
+      color: var(--text-3);
+      border-top: 1px solid var(--border);
+    }
+
+    .stepitem:first-child {
+      border-top: none;
+    }
+
+    .stepitem.done {
+      color: var(--text);
+    }
+
+    .stepitem.cur {
+      color: var(--text);
+      font-weight: 500;
+    }
+
+    .stepitem .sx {
+      font-family: var(--mono);
+      font-size: 11px;
+      flex: 0 0 26px;
+      color: var(--text-3);
+      padding-top: 2px;
+    }
+
+    .stepitem.cur .sx {
+      color: var(--accent);
+    }
+
+    /* timeline lab (TCC) */
+    .tl-scenarios {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      margin-bottom: 6px;
+    }
+
+    .tl-opt {
+      display: flex;
+      gap: 11px;
+      align-items: flex-start;
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      padding: 10px 13px;
+      cursor: pointer;
+      background: #fff;
+      transition: border-color .15s, background .15s;
+    }
+
+    .tl-opt:hover {
+      background: var(--bg-soft);
+    }
+
+    .tl-opt[aria-pressed="true"] {
+      border-color: var(--accent);
+      background: var(--accent-soft);
+    }
+
+    .tl-opt .tlname {
+      font-weight: 700;
+      font-size: 13.5px;
+    }
+
+    .tl-opt .tldesc {
+      font-size: 12.5px;
+      color: var(--text-2);
+      margin-top: 2px;
+    }
+
+    .tl-opt .tlbadge {
+      font-family: var(--mono);
+      font-size: 10px;
+      border: 1px solid var(--border-strong);
+      border-radius: 4px;
+      padding: 1px 5px;
+      color: var(--text-3);
+      flex: 0 0 auto;
+      margin-top: 1px;
+    }
+
+    .tl-result {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
+      margin-top: 16px;
+    }
+
+    @media (max-width: 560px) {
+      .tl-result {
+        grid-template-columns: 1fr;
+      }
+    }
+
+    .tl-card {
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      padding: 13px 14px;
+      font-size: 13px;
+    }
+
+    .tl-card .tch {
+      font-family: var(--mono);
+      font-size: 11px;
+      letter-spacing: .06em;
+      text-transform: uppercase;
+      margin-bottom: 8px;
+      color: var(--text-3);
+    }
+
+    .tl-card.naive {
+      border-left: 3px solid var(--bad);
+    }
+
+    .tl-card.fixed {
+      border-left: 3px solid var(--ok);
+    }
+
+    .tl-card .verdict {
+      font-weight: 700;
+      margin-top: 8px;
+      font-size: 13px;
+    }
+
+    .tl-card.naive .verdict {
+      color: var(--bad);
+    }
+
+    .tl-card.fixed .verdict {
+      color: var(--ok);
+    }
+
+    /* saga chain */
+    .saga-chain {
+      display: flex;
+      flex-direction: column;
+      gap: 0;
+      margin-top: 8px;
+    }
+
+    .saga-step {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .saga-box {
+      flex: 1 1 auto;
+      border: 1.5px solid var(--border-strong);
+      border-radius: var(--radius-sm);
+      padding: 10px 13px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      background: #fff;
+      transition: .25s;
+    }
+
+    .saga-box .sgn {
+      font-weight: 600;
+      font-size: 13.5px;
+    }
+
+    .saga-box .sgs {
+      font-family: var(--mono);
+      font-size: 11px;
+      color: var(--text-3);
+    }
+
+    .saga-arrow {
+      height: 18px;
+      width: 2px;
+      background: var(--border-strong);
+      margin-left: 18px;
+    }
+
+    .saga-pick {
+      font-size: 12.5px;
+      color: var(--text-2);
+      margin: 4px 0 10px;
+    }
+
+    .saga-pick select {
+      font-family: var(--sans);
+      font-size: 13px;
+      padding: 5px 8px;
+      border: 1px solid var(--border-strong);
+      border-radius: 6px;
+      background: #fff;
+      color: var(--text);
+    }
+
+    /* outbox toggle */
+    .ob-stage {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      margin-top: 8px;
+    }
+
+    .ob-row {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      font-size: 13px;
+    }
+
+    .ob-chip {
+      border: 1.5px solid var(--border-strong);
+      border-radius: var(--radius-sm);
+      padding: 9px 12px;
+      background: #fff;
+      font-size: 13px;
+      transition: .25s;
+      flex: 0 0 auto;
+    }
+
+    .ob-chip .obt {
+      font-weight: 600;
+    }
+
+    .ob-chip .obs {
+      font-family: var(--mono);
+      font-size: 10.5px;
+      color: var(--text-3);
+    }
+
+    .ob-flow {
+      font-family: var(--mono);
+      font-size: 11px;
+      color: var(--text-3);
+    }
+
+    /* wizard */
+    .wiz-q {
+      margin-bottom: 16px;
+    }
+
+    .wiz-q .wq {
+      font-size: 14px;
+      font-weight: 600;
+      margin-bottom: 8px;
+    }
+
+    .wiz-opts {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+
+    .wiz-opts button {
+      font-family: var(--sans);
+      font-size: 13px;
+      border: 1px solid var(--border-strong);
+      background: #fff;
+      color: var(--text-2);
+      padding: 7px 14px;
+      border-radius: 7px;
+      cursor: pointer;
+      transition: .15s;
+    }
+
+    .wiz-opts button:hover {
+      border-color: var(--text-3);
+      color: var(--text);
+    }
+
+    .wiz-opts button[aria-pressed="true"] {
+      background: var(--accent);
+      color: #fff;
+      border-color: var(--accent);
+    }
+
+    .wiz-result {
+      margin-top: 18px;
+      border: 1px solid var(--accent-line);
+      border-radius: var(--radius);
+      padding: 16px 18px;
+      background: var(--accent-soft);
+      font-size: 14px;
+      display: none;
+    }
+
+    .wiz-result.show {
+      display: block;
+    }
+
+    .wiz-result .wr-pick {
+      font-size: 17px;
+      font-weight: 700;
+      color: #2f4d6e;
+      margin-bottom: 6px;
+    }
+
+    .wiz-result .wr-why {
+      color: #3a5572;
+    }
+
+    /* FAQ */
+    details.faq {
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      margin-bottom: 10px;
+      background: #fff;
+      overflow: hidden;
+    }
+
+    details.faq summary {
+      cursor: pointer;
+      padding: 14px 16px;
+      font-weight: 600;
+      font-size: 14.5px;
+      list-style: none;
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      align-items: center;
+    }
+
+    details.faq summary::-webkit-details-marker {
+      display: none;
+    }
+
+    details.faq summary .q {
+      font-family: var(--mono);
+      font-size: 11px;
+      color: var(--accent);
+      flex: 0 0 auto;
+    }
+
+    details.faq summary .chev {
+      transition: transform .2s;
+      color: var(--text-3);
+      flex: 0 0 auto;
+      font-size: 13px;
+    }
+
+    details.faq[open] summary .chev {
+      transform: rotate(90deg);
+    }
+
+    details.faq .ans {
+      padding: 0 16px 16px;
+      font-size: 14px;
+      color: var(--text-2);
+    }
+
+    details.faq .ans p {
+      margin: 0 0 10px;
+    }
+
+    details.faq .ans p:last-child {
+      margin: 0;
+    }
+
+    .trap {
+      display: flex;
+      gap: 10px;
+      font-size: 14px;
+      margin: 9px 0;
+    }
+
+    .trap .tn {
+      font-family: var(--mono);
+      font-size: 11px;
+      color: var(--bad);
+      flex: 0 0 auto;
+      border: 1px solid var(--bad-soft);
+      background: var(--bad-soft);
+      border-radius: 4px;
+      padding: 1px 6px;
+      height: fit-content;
+      margin-top: 2px;
+    }
+
+    /* mobile responsive */
+    .toc-toggle {
+      display: none;
+    }
+
+    @media (max-width: 920px) {
+      .wrap {
+        flex-direction: column;
+      }
+      .toc {
+        position: static;
+        width: auto;
+        height: auto;
+        border-right: none;
+        border-bottom: 1px solid var(--border);
+        padding: 18px 22px;
+      }
+      .toc-title {
+        margin-bottom: 0;
+      }
+      .toc-kicker {
+        margin-bottom: 10px;
+      }
+      .toc-nav {
+        display: none;
+        margin-top: 16px;
+      }
+      .toc-nav.open {
+        display: block;
+      }
+      .toc-toggle {
+        display: inline-block;
+        margin-top: 10px;
+      }
+      main {
+        padding: 0 22px;
+      }
+      .inner {
+        padding: 40px 0 100px;
+      }
+      .hero h1 {
+        font-size: 31px;
+      }
+    }
+
+    @media (max-width: 480px) {
+      body {
+        font-size: 15px;
+      }
+      .hero h1 {
+        font-size: 27px;
+      }
+      h2 {
+        font-size: 23px;
+      }
+      .demo-body {
+        padding: 16px 13px;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <!-- ===================== TOC SIDEBAR ===================== -->
+    <nav class="toc" aria-label="目錄">
+      <div class="toc-kicker"><a href="../index.html">← 返回目錄</a></div>
+      <div class="toc-title">DNS 網域名稱解析 (DNS Deep Dive)</div>
+      <button class="btn toc-toggle" aria-expanded="false">目錄 ▾</button>
+      <div class="toc-nav">
+        <a href="#s1"><span class="n">01</span>總覽與定位</a>
+        <a href="#s2"><span class="n">02</span>解析流程：遞迴與迭代</a>
+        <a href="#s3"><span class="n">03</span>伺服器階層：Root、TLD、Authority</a>
+        <a href="#s4"><span class="n">04</span>常見記錄類型</a>
+        <a href="#s5"><span class="n">05</span>TTL 與各層快取</a>
+        <a href="#s6"><span class="n">06</span>互動 · 遞迴解析查詢鏈路</a>
+        <a href="#s7"><span class="n">07</span>面試折衷與實務選型</a>
+      </div>
+    </nav>
+
+    <!-- ===================== MAIN CONTENT ===================== -->
+    <main>
+      <div class="inner">
+        <style>
+  /* 本篇專屬：dns-* 命名空間，不覆蓋全站 base 類別 */
+  #dns-root {
+    --dns-client: #6b6f9a; --dns-client-soft: #eef0f6;
+    --dns-resolver: #3f6188; --dns-resolver-soft: #eef2f7;
+    --dns-root: #a3743e; --dns-root-soft: #f6f0e7;
+    --dns-tld: #4d7d68; --dns-tld-soft: #eef4f1;
+    --dns-auth: #7a5a8e; --dns-auth-soft: #f3eef6;
+  }
+  .dns-roles {
+    display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px;
+    margin: 10px 0 6px;
+  }
+  @media (max-width: 860px) { .dns-roles { grid-template-columns: 1fr 1fr; } }
+  @media (max-width: 520px) { .dns-roles { grid-template-columns: 1fr; } }
+  .dns-role {
+    border: 1px solid var(--border); border-radius: var(--radius-sm);
+    padding: 12px 14px; background: #fff; border-left-width: 4px;
+  }
+  .dns-role.client { border-left-color: var(--dns-client); background: var(--dns-client-soft); }
+  .dns-role.resolver { border-left-color: var(--dns-resolver); background: var(--dns-resolver-soft); }
+  .dns-role.root { border-left-color: var(--dns-root); background: var(--dns-root-soft); }
+  .dns-role.auth { border-left-color: var(--dns-auth); background: var(--dns-auth-soft); }
+  .dns-role .rt { font-weight: 700; font-size: 13.5px; margin-bottom: 4px; }
+  .dns-role .rl {
+    font-family: var(--mono); font-size: 11px; color: var(--text-3);
+    margin-bottom: 6px; letter-spacing: .04em;
+  }
+  .dns-role .rs { font-size: 12.5px; color: var(--text-2); line-height: 1.55; }
+  .dns-flow {
+    display: flex; flex-wrap: wrap; gap: 6px; align-items: center;
+    margin: 10px 0; font-family: var(--mono); font-size: 12px;
+  }
+  .dns-chip {
+    border: 1px solid var(--border-strong); border-radius: 6px;
+    padding: 6px 10px; background: #fff; color: var(--text); font-weight: 600;
+  }
+  .dns-chip.client { background: var(--dns-client-soft); border-color: var(--dns-client); color: var(--dns-client); }
+  .dns-chip.resolver { background: var(--dns-resolver-soft); border-color: var(--dns-resolver); color: var(--dns-resolver); }
+  .dns-chip.root { background: var(--dns-root-soft); border-color: var(--dns-root); color: var(--dns-root); }
+  .dns-chip.tld { background: var(--dns-tld-soft); border-color: var(--dns-tld); color: var(--dns-tld); }
+  .dns-chip.auth { background: var(--dns-auth-soft); border-color: var(--dns-auth); color: var(--dns-auth); }
+  .dns-chip.op { background: var(--bg-soft); color: var(--text-3); border-style: dashed; font-weight: 500; }
+  .dns-mode-row {
+    display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin: 10px 0;
+  }
+  @media (max-width: 640px) { .dns-mode-row { grid-template-columns: 1fr; } }
+  .dns-mode-card {
+    border: 1px solid var(--border); border-radius: var(--radius-sm);
+    padding: 14px; background: #fff;
+  }
+  .dns-mode-card.rec { border-top: 3px solid var(--dns-resolver); }
+  .dns-mode-card.iter { border-top: 3px solid var(--dns-root); }
+  .dns-mode-card .mt { font-weight: 700; font-size: 14px; margin-bottom: 2px; }
+  .dns-mode-card .ms {
+    font-family: var(--mono); font-size: 11px; color: var(--text-3); margin-bottom: 8px;
+  }
+  .dns-mode-card ul { margin: 0; padding-left: 1.15em; font-size: 13px; color: var(--text-2); line-height: 1.6; }
+  .dns-cache-layers {
+    display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin: 10px 0 6px;
+  }
+  @media (max-width: 720px) { .dns-cache-layers { grid-template-columns: 1fr; } }
+  .dns-cache-card {
+    border: 1px solid var(--border); border-radius: var(--radius-sm);
+    padding: 12px 14px; background: #fff;
+  }
+  .dns-cache-card .ct { font-weight: 700; font-size: 13.5px; margin-bottom: 4px; }
+  .dns-cache-card .cs { font-size: 12.5px; color: var(--text-2); line-height: 1.55; }
+  .dns-cache-card .cttl {
+    font-family: var(--mono); font-size: 11px; color: var(--text-3); margin-top: 8px;
+  }
+
+  /* Demo */
+  .dns-demo-controls {
+    display: flex; flex-wrap: wrap; gap: 8px; margin: 10px 0 8px; align-items: center;
+  }
+  .dns-chain {
+    display: flex; flex-wrap: wrap; justify-content: center; align-items: stretch;
+    gap: 8px; margin: 10px 0;
+  }
+  .dns-node {
+    border: 1.5px solid var(--border-strong); border-radius: var(--radius-sm);
+    padding: 10px 12px; background: #fff; min-width: 96px; text-align: center;
+    transition: box-shadow .2s, border-color .2s, background .2s, opacity .2s;
+  }
+  .dns-node .nn { font-weight: 700; font-size: 13px; }
+  .dns-node .nk {
+    font-family: var(--mono); font-size: 10.5px; color: var(--text-3); margin-top: 2px;
+  }
+  .dns-node .ni {
+    font-family: var(--mono); font-size: 11px; color: var(--text-2); margin-top: 4px;
+  }
+  .dns-node.client { border-color: var(--dns-client); }
+  .dns-node.resolver { border-color: var(--dns-resolver); }
+  .dns-node.root { border-color: var(--dns-root); }
+  .dns-node.tld { border-color: var(--dns-tld); }
+  .dns-node.auth { border-color: var(--dns-auth); }
+  .dns-node.hot {
+    box-shadow: 0 0 0 3px var(--accent-soft);
+    border-color: var(--accent);
+    background: var(--accent-soft);
+  }
+  .dns-node.done { background: var(--ok-soft); border-color: var(--ok); }
+  .dns-node.cached { background: var(--warn-soft); border-color: var(--warn); }
+  .dns-node.skip { opacity: .38; }
+  .dns-arrow {
+    align-self: center; font-family: var(--mono); font-size: 12px;
+    color: var(--text-3); padding: 0 2px;
+  }
+  .dns-arrow.live { color: var(--accent); font-weight: 700; }
+  .dns-panels {
+    display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 10px;
+  }
+  @media (max-width: 640px) { .dns-panels { grid-template-columns: 1fr; } }
+  .dns-panel {
+    border: 1px solid var(--border); border-radius: var(--radius-sm);
+    padding: 12px; background: #fff; min-height: 140px;
+  }
+  .dns-panel .pt {
+    font-size: 11px; color: var(--text-3); letter-spacing: .06em;
+    text-transform: uppercase; font-family: var(--mono); margin-bottom: 8px;
+  }
+  .dns-panel .row {
+    display: flex; justify-content: space-between; gap: 8px;
+    font-family: var(--mono); font-size: 12.5px; padding: 3px 0;
+    border-bottom: 1px dashed var(--border);
+  }
+  .dns-panel .row:last-child { border-bottom: none; }
+  .dns-panel .k { color: var(--text-3); }
+  .dns-panel .v { color: var(--text); font-weight: 600; }
+  .dns-panel .v.chg { color: var(--ok); }
+  .dns-cache-wrap { overflow-x: auto; margin: 8px 0 4px; }
+  .dns-cache-tbl {
+    width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: 12px;
+  }
+  .dns-cache-tbl th, .dns-cache-tbl td {
+    border: 1px solid var(--border); padding: 7px 9px; text-align: left; white-space: nowrap;
+  }
+  .dns-cache-tbl th {
+    background: var(--bg-soft); color: var(--text-2); font-weight: 600;
+    letter-spacing: .04em; font-size: 11px; text-transform: uppercase;
+  }
+  .dns-cache-tbl tr.hit td { background: var(--ok-soft); }
+  .dns-cache-tbl tr.new td { background: var(--accent-soft); }
+  .dns-cache-tbl tr.exp td { background: var(--bad-soft); color: var(--bad); }
+</style>
+
+<div id="dns-root">
+
+<section id="s1">
+  <div class="sec-head"><span class="sec-num">01</span><h2>總覽與定位</h2></div>
+  <p class="sec-sub">DNS 把人類可讀的網域名稱轉成機器可連的 IP——是幾乎所有網路請求的第一跳。</p>
+
+  <p>你輸入 <code>api.example.com</code> 時，作業系統與瀏覽器並不知道該連哪個 IP。
+  <strong>DNS（Domain Name System）</strong> 是分散式的命名系統：把名稱解析成 <code>A</code>／<code>AAAA</code> 等紀錄，
+  再交給 TCP／UDP 真正建連。沒有 DNS，幾乎所有現代服務都動不了。</p>
+
+  <div class="dns-roles">
+    <div class="dns-role client">
+      <div class="rt">Stub Resolver</div>
+      <div class="rl">OS / Browser</div>
+      <div class="rs">應用端的輕量查詢器；通常只問本機或 ISP 的 Recursive Resolver，自己不做完整階層遍歷。</div>
+    </div>
+    <div class="dns-role resolver">
+      <div class="rt">Recursive Resolver</div>
+      <div class="rl">ISP / 8.8.8.8</div>
+      <div class="rs">代客完成整條查詢鏈，並快取答案。開發者日常「查 DNS」多半打到這一層。</div>
+    </div>
+    <div class="dns-role root">
+      <div class="rt">Root / TLD</div>
+      <div class="rl">. → .com</div>
+      <div class="rs">階層導航：Root 告訴你 .com 在哪；TLD 告訴你 example.com 的權威伺服器在哪。</div>
+    </div>
+    <div class="dns-role auth">
+      <div class="rt">Authoritative</div>
+      <div class="rl">Zone 真相來源</div>
+      <div class="rs">握有該網域的最終紀錄（A／MX／NS…）。改 DNS 設定，改的就是這一層。</div>
+    </div>
+  </div>
+
+  <div class="callout accent">
+    <div class="c-title"><span class="ic">座標</span>在網路棧中的位置</div>
+    <p>DNS 通常跑在 UDP／TCP <code>53</code>，介於「應用要連誰」與「L3 路由怎麼走」之間。
+    本篇接續 IP／LAN／NAT：有了位址與路徑之後，還缺「名稱 → 位址」這層目錄服務。</p>
+  </div>
+
+  <div class="oneliner">
+    <b>一句話答法</b>DNS 是分散式名稱目錄：Stub 問 Recursive，Recursive 沿 Root→TLD→Authority 迭代查出 IP，再靠 TTL 快取減少重複查詢。
+  </div>
+</section>
+
+<section id="s2">
+  <div class="sec-head"><span class="sec-num">02</span><h2>解析流程：遞迴與迭代</h2></div>
+  <p class="sec-sub">同一個「查 IP」請求，在 Stub 與 Resolver 眼裡是兩種完全不同的協議行為。</p>
+
+  <p>實務上幾乎所有客戶端都走<strong>遞迴查詢（Recursive Query）</strong>：Stub 對 Resolver 設 RD（Recursion Desired）旗標，
+  期望對方「給我最終答案」。Resolver 對外則多半用<strong>迭代查詢（Iterative Query）</strong>：自己一步步問 Root、TLD、Authority，
+  每次只拿到「下一步去哪問」的 referral，直到拿到最終紀錄。</p>
+
+  <div class="dns-mode-row">
+    <div class="dns-mode-card rec">
+      <div class="mt">遞迴查詢（客戶端視角）</div>
+      <div class="ms">Stub → Recursive Resolver</div>
+      <ul>
+        <li>客戶端只發一問，等最終答案（或錯誤）</li>
+        <li>快取命中時幾乎零延遲</li>
+        <li>客戶端不必知道 Root／TLD 拓樸</li>
+      </ul>
+    </div>
+    <div class="dns-mode-card iter">
+      <div class="mt">迭代查詢（Resolver 視角）</div>
+      <div class="ms">Resolver ↔ Root / TLD / Auth</div>
+      <ul>
+        <li>每次回應可能是 referral（NS＋glue）</li>
+        <li>Resolver 自己決定下一跳</li>
+        <li>可並行／快取各層 NS，降低 Root 壓力</li>
+      </ul>
+    </div>
+  </div>
+
+  <div class="dns-flow">
+    <span class="dns-chip client">Client</span>
+    <span class="dns-chip op">遞迴問</span>
+    <span class="dns-chip resolver">Resolver</span>
+    <span class="dns-chip op">迭代問</span>
+    <span class="dns-chip root">Root</span>
+    <span class="dns-chip op">→</span>
+    <span class="dns-chip tld">TLD</span>
+    <span class="dns-chip op">→</span>
+    <span class="dns-chip auth">Authority</span>
+    <span class="dns-chip op">A 紀錄</span>
+  </div>
+
+  <div class="callout warn">
+    <div class="c-title"><span class="ic">陷阱</span>「遞迴」不是協定裡的另一種封包格式</div>
+    <p>遞迴／迭代是<strong>查詢行為與誰負責走完整條鏈</strong>的差異，不是兩種不相容的 DNS 協議。
+    面試若只背「遞迴比較快」而不提「誰在做迭代、誰在快取」，容易被追問穿幫。</p>
+  </div>
+
+  <div class="oneliner">
+    <b>一句話答法</b>客戶端對 Resolver 做遞迴；Resolver 對階層伺服器做迭代。快取命中時連迭代都不必跑。
+  </div>
+</section>
+
+<section id="s3">
+  <div class="sec-head"><span class="sec-num">03</span><h2>伺服器階層：Root、TLD、Authority</h2></div>
+  <p class="sec-sub">DNS 是樹狀委派：每一層只負責「這一截名稱」與「下一層 NS 在哪」。</p>
+
+  <p>以查 <code>www.example.com</code> 的冷快取路徑為例：</p>
+  <ol>
+    <li><strong>Root（.）</strong>：不存業務紀錄；回傳 <code>.com</code> 的 NS 與 glue A／AAAA。</li>
+    <li><strong>TLD（.com）</strong>：回傳 <code>example.com</code> 的權威 NS（常來自註冊商／DNS 託管商）。</li>
+    <li><strong>Authoritative</strong>：回傳 <code>www.example.com</code> 的最終答案（例如 A → <code>93.184.216.34</code>）。</li>
+  </ol>
+
+  <p>Authority 管理的單位叫 <strong>Zone</strong>。Zone 檔裡的 <code>NS</code> 紀錄宣告「誰是這區的權威」；
+  父 Zone（如 <code>.com</code>）必須有對應的委派，否則全世界找不到你的伺服器——這也是「剛買網域卻解析不到」的常見根因。</p>
+
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>層級</th>
+          <th>回答什麼</th>
+          <th>典型運營者</th>
+          <th>開發者何時碰到</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>Root</td>
+          <td class="hl">TLD 的 NS</td>
+          <td>Root Server Operators</td>
+          <td>幾乎從不直接設定；Resolver 內建 Root hints</td>
+        </tr>
+        <tr>
+          <td>TLD</td>
+          <td class="hl">網域 NS 委派</td>
+          <td>Verisign、各 ccTLD</td>
+          <td>改註冊商 Nameserver 時</td>
+        </tr>
+        <tr>
+          <td>Authoritative</td>
+          <td class="hl">Zone 內最終紀錄</td>
+          <td>Cloudflare、Route53、自建 Bind</td>
+          <td>加 A／CNAME／MX、切藍綠、驗證所有權</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="cap">階層委派：每一層只導航，最終真相在 Authoritative Zone。</p>
+
+  <div class="oneliner">
+    <b>一句話答法</b>Root 指 TLD、TLD 指網域 NS、Authority 給最終紀錄；改 DNS 設定改的是 Authority，委派要與父 Zone 一致。
+  </div>
+</section>
+
+<section id="s4">
+  <div class="sec-head"><span class="sec-num">04</span><h2>常見記錄類型</h2></div>
+  <p class="sec-sub">面試與上線最常考的五種：A、AAAA、CNAME、MX、NS——各管一件事，不要混用。</p>
+
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>類型</th>
+          <th>語意</th>
+          <th>典型用途</th>
+          <th>注意</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><code>A</code></td>
+          <td class="hl">名稱 → IPv4</td>
+          <td>網站／API 主機</td>
+          <td>可多值做簡易 DNS LB</td>
+        </tr>
+        <tr>
+          <td><code>AAAA</code></td>
+          <td class="hl">名稱 → IPv6</td>
+          <td>雙棧服務</td>
+          <td>客戶端 Happy Eyeballs 會並行試</td>
+        </tr>
+        <tr>
+          <td><code>CNAME</code></td>
+          <td class="hl">名稱 → 另一名稱</td>
+          <td>CDN／別名／驗證</td>
+          <td>不可與同名其他紀錄並存；apex 常受限</td>
+        </tr>
+        <tr>
+          <td><code>MX</code></td>
+          <td class="hl">郵件交換主機</td>
+          <td>收信路由</td>
+          <td>帶 priority；值應是主機名非 IP</td>
+        </tr>
+        <tr>
+          <td><code>NS</code></td>
+          <td class="hl">Zone 權威伺服器</td>
+          <td>委派與託管</td>
+          <td>父子 Zone 必須一致，否則裂腦</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="cap">紀錄類型對照：選錯類型比設錯 IP 更難除錯。</p>
+
+  <div class="callout accent">
+    <div class="c-title"><span class="ic">關鍵</span>CNAME 鏈與 apex</div>
+    <p>CNAME 指向另一個名稱，Resolver 會繼續追到 A／AAAA。
+    根網域（apex，如 <code>example.com</code>）常因需同時存在 NS／MX 而不能放 CNAME——這才有 ALIAS／ANAME 等廠商擴充。
+    面試提到 CDN 時，能講清「為何 www 用 CNAME、apex 用 A／ALIAS」會加分。</p>
+  </div>
+
+  <div class="oneliner">
+    <b>一句話答法</b>A／AAAA 給位址、CNAME 給別名、MX 給郵件、NS 給權威；CNAME 不能跟同名其他紀錄共存，apex 要特別小心。
+  </div>
+</section>
+
+<section id="s5">
+  <div class="sec-head"><span class="sec-num">05</span><h2>TTL 與各層快取</h2></div>
+  <p class="sec-sub">開發者最常誤解的地方：改了 DNS 卻「立刻／永遠」不生效——多半是快取層次沒對齊。</p>
+
+  <p><strong>TTL（Time To Live）</strong> 是權威伺服器在答案上附的「允許快取多久（秒）」。
+  它不是「保證在 TTL 秒內全球同步切換」，而是「快取端最長可保留多久」的上限建議。</p>
+
+  <div class="dns-cache-layers">
+    <div class="dns-cache-card">
+      <div class="ct">瀏覽器／應用快取</div>
+      <div class="cs">Chrome 等可能另有連線／DNS 快取；長連線、HTTP keep-alive 會讓「看起來沒切」。</div>
+      <div class="cttl">TTL：廠商自訂，常短於 DNS TTL</div>
+    </div>
+    <div class="dns-cache-card">
+      <div class="ct">OS Stub 快取</div>
+      <div class="cs">系統 resolver 快取正向／負向答案；<code>nscd</code>、systemd-resolved 都會插手。</div>
+      <div class="cttl">TTL：遵循紀錄，負向快取另有規則</div>
+    </div>
+    <div class="dns-cache-card">
+      <div class="ct">Recursive Resolver</div>
+      <div class="cs">ISP／公共 DNS 的主力快取層；同一 Resolver 上的用戶共享命中。</div>
+      <div class="cttl">TTL：嚴格依剩餘 TTL 遞減</div>
+    </div>
+  </div>
+
+  <div class="callout warn">
+    <div class="c-title"><span class="ic">陷阱</span>三個常見誤解</div>
+    <p><strong>1.</strong>「把 TTL 改成 60 就 60 秒內全球切完」——舊 TTL 仍被舊快取遵守，要提前降 TTL 再切。<br>
+    <strong>2.</strong>「flush DNS 就能逼所有人更新」——你只能清本機；別人的 ISP Resolver 不受影響。<br>
+    <strong>3.</strong>「NXDOMAIN 不會被快取」——負向答案也有 TTL（SOA minimum 等），拼錯網域一樣會卡一陣子。</p>
+  </div>
+
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>場景</th>
+          <th>建議 TTL 心智</th>
+          <th>理由</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>穩定官網 A 紀錄</td>
+          <td class="hl">較長（如 1h–24h）</td>
+          <td>降低查詢量與延遲</td>
+        </tr>
+        <tr>
+          <td>即將切換／災備演練</td>
+          <td class="hl">提前降到數分鐘</td>
+          <td>縮短舊答案殘留窗口</td>
+        </tr>
+        <tr>
+          <td>動態服務發現（少用公網 DNS）</td>
+          <td class="hl">極短或不走公網 DNS</td>
+          <td>DNS 不是強一致註冊中心</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="cap">TTL 是快取契約，不是全球原子開關。</p>
+
+  <div class="oneliner">
+    <b>一句話答法</b>TTL 是快取上限不是切換保證；改 DNS 前先降 TTL，並記住瀏覽器、OS、Resolver 三層都會留舊答案。
+  </div>
+</section>
+
+<section id="s6">
+  <div class="sec-head"><span class="sec-num">06</span><h2>互動 · 遞迴解析查詢鏈路</h2></div>
+  <p class="sec-sub">逐步模擬一次 <code>www.example.com</code> 的冷查詢、快取命中，以及 TTL 過期後重查。</p>
+
+  <div class="demo" id="demo-dns-resolve">
+    <div class="demo-bar">
+      <span class="label">互動 · DNS 遞迴解析鏈</span>
+      <span class="label" style="text-transform:none;font-family:var(--sans);font-size:12px;color:var(--text-2)">選情境後按「下一步」</span>
+    </div>
+    <div class="demo-body">
+      <div class="seg" role="group" aria-label="情境切換">
+        <button data-sc="cold" aria-pressed="true">冷快取全鏈路</button>
+        <button data-sc="warm" aria-pressed="false">Resolver 快取命中</button>
+        <button data-sc="expire" aria-pressed="false">TTL 過期重查</button>
+      </div>
+
+      <div class="dns-demo-controls">
+        <button class="btn primary" id="dns-btn-next">下一步</button>
+        <button class="btn" id="dns-btn-reset">重置</button>
+        <div class="legend">
+          <span><i class="dot ns-wait"></i>作用中</span>
+          <span><i class="dot ns-ok"></i>已完成</span>
+          <span><i class="dot ns-lock"></i>快取命中</span>
+          <span><i class="dot ns-idle"></i>未參與</span>
+        </div>
+      </div>
+
+      <div class="status-line" id="dns-status">選擇情境後按「下一步」，觀看遞迴解析鏈路。</div>
+
+      <div class="dns-chain" id="dns-chain">
+        <div class="dns-node client" data-node="client">
+          <div class="nn">Client</div>
+          <div class="nk">Stub</div>
+          <div class="ni" id="dns-ni-client">待命</div>
+        </div>
+        <div class="dns-arrow" data-link="l1">→</div>
+        <div class="dns-node resolver" data-node="resolver">
+          <div class="nn">Resolver</div>
+          <div class="nk">Recursive</div>
+          <div class="ni" id="dns-ni-resolver">待命</div>
+        </div>
+        <div class="dns-arrow" data-link="l2">→</div>
+        <div class="dns-node root" data-node="root">
+          <div class="nn">Root</div>
+          <div class="nk">.</div>
+          <div class="ni" id="dns-ni-root">待命</div>
+        </div>
+        <div class="dns-arrow" data-link="l3">→</div>
+        <div class="dns-node tld" data-node="tld">
+          <div class="nn">TLD</div>
+          <div class="nk">.com</div>
+          <div class="ni" id="dns-ni-tld">待命</div>
+        </div>
+        <div class="dns-arrow" data-link="l4">→</div>
+        <div class="dns-node auth" data-node="auth">
+          <div class="nn">Authority</div>
+          <div class="nk">example.com</div>
+          <div class="ni" id="dns-ni-auth">待命</div>
+        </div>
+      </div>
+
+      <div class="dns-panels">
+        <div class="dns-panel" id="dns-q-panel">
+          <div class="pt">查詢 / 回應</div>
+          <div class="row"><span class="k">QNAME</span><span class="v" id="dns-qname">—</span></div>
+          <div class="row"><span class="k">QTYPE</span><span class="v" id="dns-qtype">—</span></div>
+          <div class="row"><span class="k">從</span><span class="v" id="dns-from">—</span></div>
+          <div class="row"><span class="k">到</span><span class="v" id="dns-to">—</span></div>
+          <div class="row"><span class="k">答案</span><span class="v" id="dns-answer">—</span></div>
+        </div>
+        <div class="dns-panel" id="dns-r-panel">
+          <div class="pt">最終結果</div>
+          <div class="row"><span class="k">主機</span><span class="v" id="dns-host">www.example.com</span></div>
+          <div class="row"><span class="k">A 紀錄</span><span class="v" id="dns-ip">—</span></div>
+          <div class="row"><span class="k">TTL</span><span class="v" id="dns-ttl">—</span></div>
+          <div class="row"><span class="k">來源</span><span class="v" id="dns-source">—</span></div>
+          <div class="row"><span class="k">延遲感</span><span class="v" id="dns-latency">—</span></div>
+        </div>
+      </div>
+
+      <div class="dns-cache-wrap">
+        <table class="dns-cache-tbl">
+          <thead>
+            <tr>
+              <th>快取鍵</th>
+              <th>類型</th>
+              <th>值</th>
+              <th>剩餘 TTL</th>
+              <th>狀態</th>
+            </tr>
+          </thead>
+          <tbody id="dns-cache-tbody">
+            <tr><td colspan="5" style="color:var(--text-3)">尚無快取條目</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p class="cap">Resolver 快取表：命中時跳過 Root／TLD／Authority；TTL 歸零後必須重走迭代。</p>
+    </div>
+  </div>
+
+  <div class="oneliner">
+    <b>一句話答法</b>冷查詢走完整 Root→TLD→Authority；熱查詢打 Resolver 快取；TTL 過期等於快取失效，必須重查權威。
+  </div>
+</section>
+
+<section id="s7">
+  <div class="sec-head"><span class="sec-num">07</span><h2>面試折衷與實務選型</h2></div>
+  <p class="sec-sub">DNS 看起來「只是查 IP」，但選型牽涉延遲、切換速度、可用性與安全。</p>
+
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>議題</th>
+          <th>常見選項</th>
+          <th>Trade-off</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>TTL 長短</td>
+          <td class="hl">長 TTL vs 短 TTL</td>
+          <td>長：省查詢、穩；短：切換快、權威壓力大</td>
+        </tr>
+        <tr>
+          <td>DNS 負載均衡</td>
+          <td class="hl">多 A 紀錄 vs GSLB</td>
+          <td>多 A 簡單但不懂健康檢查；GSLB 聰明但複雜、仍受 TTL 綁架</td>
+        </tr>
+        <tr>
+          <td>權威託管</td>
+          <td class="hl">雲 DNS vs 自建</td>
+          <td>雲：Anycast／任播／API；自建：可控但要扛 DDoS 與可用性</td>
+        </tr>
+        <tr>
+          <td>安全</td>
+          <td class="hl">DNSSEC / DoH / DoT</td>
+          <td>防污染與竊聽；代價是複雜度、延遲與除錯成本</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="cap">DNS 選型沒有銀彈：切換速度與快取效益永遠在拉扯。</p>
+
+  <div class="callout accent">
+    <div class="c-title"><span class="ic">面試</span>高頻追問怎麼答</div>
+    <p><strong>Q：為什麼改了 A 紀錄還連到舊 IP？</strong>
+    答：列三層快取＋舊 TTL 仍有效；解法是提前降 TTL、等窗口、必要時雙寫一段時間。<br>
+    <strong>Q：CNAME 和 A 差在哪？</strong>
+    答：A 直接給 IP；CNAME 給別名需再解析；apex 常不能 CNAME。<br>
+    <strong>Q：DNS LB 能取代健康檢查 LB 嗎？</strong>
+    答：不能——TTL 與客戶端快取會讓故障摘除變慢且不均勻。</p>
+  </div>
+
+  <div class="oneliner">
+    <b>一句話答法</b>DNS 擅長名稱與粗粒度流量導向，不擅長秒級故障轉移；設計時永遠把 TTL 與快取層算進 RTO。
+  </div>
+</section>
+
+</div>
+
+      </div>
+    </main>
+  </div>
+
+  <script>
+    "use strict";
+    document.addEventListener("DOMContentLoaded", function () {
+      /* ===== TOC scrollspy & mobile toggle ===== */
+      (function () {
+        var links = Array.prototype.slice.call(document.querySelectorAll(".toc-nav a"));
+        var map = {};
+        links.forEach(function (a) {
+          var href = a.getAttribute("href");
+          if (href && href.startsWith("#")) {
+            map[href.slice(1)] = a;
+          }
+        });
+        var secs = links.map(function (a) {
+          var href = a.getAttribute("href");
+          return href && href.startsWith("#") ? document.getElementById(href.slice(1)) : null;
+        }).filter(Boolean);
+
+        if (secs.length > 0 && typeof IntersectionObserver !== "undefined") {
+          var obs = new IntersectionObserver(function (entries) {
+            entries.forEach(function (e) {
+              if (e.isIntersecting) {
+                links.forEach(function (l) { l.classList.remove("active"); });
+                var act = map[e.target.id];
+                if (act) act.classList.add("active");
+              }
+            });
+          }, { rootMargin: "-20% 0px -70% 0px", threshold: 0 });
+          secs.forEach(function (s) { obs.observe(s); });
+        }
+
+        var toggle = document.querySelector(".toc-toggle");
+        var nav = document.querySelector(".toc-nav");
+        if (toggle && nav) {
+          toggle.addEventListener("click", function () {
+            var open = nav.classList.toggle("open");
+            toggle.setAttribute("aria-expanded", open ? "true" : "false");
+          });
+          nav.addEventListener("click", function (e) {
+            if (e.target.closest("a") && window.innerWidth <= 920) {
+              nav.classList.remove("open");
+              toggle.setAttribute("aria-expanded", "false");
+            }
+          });
+        }
+      })();
+    });
+  </script>
+
+  
+<script>
+(function () {
+  "use strict";
+
+  var scenario = "cold";
+  var stepIdx = 0;
+
+  var HOST = "www.example.com";
+  var IP = "93.184.216.34";
+  var TTL_FULL = "300s";
+
+  var statusEl = document.getElementById("dns-status");
+  var tbody = document.getElementById("dns-cache-tbody");
+  var btnNext = document.getElementById("dns-btn-next");
+  var btnReset = document.getElementById("dns-btn-reset");
+
+  var nodes = ["client", "resolver", "root", "tld", "auth"];
+  var links = ["l1", "l2", "l3", "l4"];
+
+  var SCENARIOS = {
+    cold: {
+      label: "冷快取全鏈路",
+      steps: [
+        {
+          hot: ["client"],
+          done: [],
+          cached: [],
+          skip: [],
+          links: [],
+          status: "Client Stub 要解析 www.example.com。本機快取未命中 → 對 Recursive Resolver 發出遞迴查詢（RD=1）。",
+          q: { qname: HOST, qtype: "A", from: "Client", to: "Resolver", answer: "（等待）" },
+          result: { ip: "—", ttl: "—", source: "—", latency: "查詢中" },
+          cache: [],
+          labels: { client: "發出查詢", resolver: "待命", root: "待命", tld: "待命", auth: "待命" }
+        },
+        {
+          hot: ["resolver"],
+          done: ["client"],
+          cached: [],
+          skip: [],
+          links: ["l1"],
+          status: "Resolver 收到遞迴請求。自身快取沒有 www.example.com → 開始迭代：先問 Root。",
+          q: { qname: HOST, qtype: "A", from: "Resolver", to: "Root", answer: "（等待 referral）" },
+          result: { ip: "—", ttl: "—", source: "迭代中", latency: "冷啟動" },
+          cache: [],
+          labels: { client: "等待", resolver: "快取未命中", root: "待命", tld: "待命", auth: "待命" }
+        },
+        {
+          hot: ["root"],
+          done: ["client", "resolver"],
+          cached: [],
+          skip: [],
+          links: ["l1", "l2"],
+          status: "Root 不持有業務紀錄，回傳 .com 的 NS＋glue。這是 referral，不是最終 A。",
+          q: { qname: HOST, qtype: "A", from: "Root", to: "Resolver", answer: "NS → .com TLD" },
+          result: { ip: "—", ttl: "—", source: "Root referral", latency: "冷啟動" },
+          cache: [{ key: ".com NS", type: "NS", value: "a.gtld-servers.net", ttl: "48h", note: "可快取", cls: "new" }],
+          labels: { client: "等待", resolver: "收 referral", root: "回 .com NS", tld: "待命", auth: "待命" }
+        },
+        {
+          hot: ["tld"],
+          done: ["client", "resolver", "root"],
+          cached: [],
+          skip: [],
+          links: ["l1", "l3"],
+          status: "Resolver 問 .com TLD：example.com 的權威 NS 在哪？TLD 回傳委派。",
+          q: { qname: HOST, qtype: "A", from: "TLD .com", to: "Resolver", answer: "NS → ns.example.com" },
+          result: { ip: "—", ttl: "—", source: "TLD referral", latency: "冷啟動" },
+          cache: [
+            { key: ".com NS", type: "NS", value: "a.gtld-servers.net", ttl: "48h", note: "命中可用", cls: "" },
+            { key: "example.com NS", type: "NS", value: "ns.example.com", ttl: "2h", note: "新委派", cls: "new" }
+          ],
+          labels: { client: "等待", resolver: "收委派", root: "已完成", tld: "回 NS", auth: "待命" }
+        },
+        {
+          hot: ["auth"],
+          done: ["client", "resolver", "root", "tld"],
+          cached: [],
+          skip: [],
+          links: ["l1", "l4"],
+          status: "Authority 回傳最終答案：www.example.com A 93.184.216.34，TTL=300。",
+          q: { qname: HOST, qtype: "A", from: "Authority", to: "Resolver", answer: "A " + IP },
+          result: { ip: IP, ttl: TTL_FULL, source: "Authoritative", latency: "冷啟動（完整鏈）" },
+          cache: [
+            { key: ".com NS", type: "NS", value: "a.gtld-servers.net", ttl: "48h", note: "—", cls: "" },
+            { key: "example.com NS", type: "NS", value: "ns.example.com", ttl: "2h", note: "—", cls: "" },
+            { key: HOST, type: "A", value: IP, ttl: TTL_FULL, note: "寫入快取", cls: "new" }
+          ],
+          labels: { client: "等待", resolver: "收 A", root: "已完成", tld: "已完成", auth: "回 A 紀錄" }
+        },
+        {
+          hot: ["client"],
+          done: ["client", "resolver", "root", "tld", "auth"],
+          cached: [],
+          skip: [],
+          links: ["l1"],
+          status: "Resolver 把最終答案回給 Client。後續相同查詢可直接打 Resolver 快取，不必再訪 Root／TLD／Authority。",
+          q: { qname: HOST, qtype: "A", from: "Resolver", to: "Client", answer: "A " + IP },
+          result: { ip: IP, ttl: TTL_FULL, source: "Resolver → Client", latency: "完成" },
+          cache: [
+            { key: ".com NS", type: "NS", value: "a.gtld-servers.net", ttl: "48h", note: "—", cls: "" },
+            { key: "example.com NS", type: "NS", value: "ns.example.com", ttl: "2h", note: "—", cls: "" },
+            { key: HOST, type: "A", value: IP, ttl: TTL_FULL, note: "可服務下一次", cls: "hit" }
+          ],
+          labels: { client: "取得 IP", resolver: "已快取", root: "已完成", tld: "已完成", auth: "已完成" }
+        }
+      ]
+    },
+    warm: {
+      label: "Resolver 快取命中",
+      steps: [
+        {
+          hot: ["client"],
+          done: [],
+          cached: [],
+          skip: ["root", "tld", "auth"],
+          links: [],
+          status: "Client 再次查詢 www.example.com。Stub 仍轉給 Resolver（本機也可能命中，此情境聚焦 Resolver）。",
+          q: { qname: HOST, qtype: "A", from: "Client", to: "Resolver", answer: "（等待）" },
+          result: { ip: "—", ttl: "—", source: "—", latency: "查詢中" },
+          cache: [
+            { key: HOST, type: "A", value: IP, ttl: "240s", note: "既有快取", cls: "" }
+          ],
+          labels: { client: "發出查詢", resolver: "待命", root: "略過", tld: "略過", auth: "略過" }
+        },
+        {
+          hot: ["resolver"],
+          done: ["client"],
+          cached: ["resolver"],
+          skip: ["root", "tld", "auth"],
+          links: ["l1"],
+          status: "Resolver 快取命中！剩餘 TTL=240s → 直接回 A，不接觸 Root／TLD／Authority。",
+          q: { qname: HOST, qtype: "A", from: "Resolver cache", to: "Client", answer: "A " + IP },
+          result: { ip: IP, ttl: "240s（剩餘）", source: "Resolver 快取", latency: "極低（熱路徑）" },
+          cache: [
+            { key: HOST, type: "A", value: IP, ttl: "240s", note: "HIT", cls: "hit" }
+          ],
+          labels: { client: "等待", resolver: "CACHE HIT", root: "略過", tld: "略過", auth: "略過" }
+        },
+        {
+          hot: ["client"],
+          done: ["client", "resolver"],
+          cached: ["resolver"],
+          skip: ["root", "tld", "auth"],
+          links: ["l1"],
+          status: "完成：熱路徑 = Client → Resolver 快取 → Client。這就是為什麼「改了 DNS 卻暫時看不到」——舊 TTL 仍被命中。",
+          q: { qname: HOST, qtype: "A", from: "Resolver", to: "Client", answer: "A " + IP },
+          result: { ip: IP, ttl: "240s（剩餘）", source: "快取命中", latency: "完成（無迭代）" },
+          cache: [
+            { key: HOST, type: "A", value: IP, ttl: "240s", note: "仍有效", cls: "hit" }
+          ],
+          labels: { client: "取得 IP", resolver: "已命中", root: "略過", tld: "略過", auth: "略過" }
+        }
+      ]
+    },
+    expire: {
+      label: "TTL 過期重查",
+      steps: [
+        {
+          hot: ["resolver"],
+          done: [],
+          cached: [],
+          skip: [],
+          links: [],
+          status: "時間過去，Resolver 上 www.example.com 的剩餘 TTL 歸零。下一筆查詢不能再當 HIT。",
+          q: { qname: HOST, qtype: "A", from: "—", to: "—", answer: "快取條目過期" },
+          result: { ip: "—", ttl: "0", source: "快取失效", latency: "—" },
+          cache: [
+            { key: HOST, type: "A", value: IP, ttl: "0", note: "EXPIRED", cls: "exp" }
+          ],
+          labels: { client: "待命", resolver: "TTL=0", root: "待命", tld: "待命", auth: "待命" }
+        },
+        {
+          hot: ["client", "resolver"],
+          done: [],
+          cached: [],
+          skip: [],
+          links: ["l1"],
+          status: "Client 再查。Resolver 發現過期 → 丟棄舊條目，重新迭代（可略過仍有效的 NS 快取）。",
+          q: { qname: HOST, qtype: "A", from: "Client", to: "Resolver", answer: "MISS（過期）" },
+          result: { ip: "—", ttl: "—", source: "重查中", latency: "需再訪 Authority" },
+          cache: [
+            { key: "example.com NS", type: "NS", value: "ns.example.com", ttl: "90m", note: "NS 仍有效", cls: "hit" }
+          ],
+          labels: { client: "再查詢", resolver: "MISS", root: "可略", tld: "可略", auth: "待命" }
+        },
+        {
+          hot: ["auth"],
+          done: ["client", "resolver"],
+          cached: [],
+          skip: ["root", "tld"],
+          links: ["l1", "l4"],
+          status: "NS 快取仍在，Resolver 直接問 Authority，取得新 A（可能已換成新 IP）與新 TTL。",
+          q: { qname: HOST, qtype: "A", from: "Authority", to: "Resolver", answer: "A 93.184.216.99（新）" },
+          result: { ip: "93.184.216.99", ttl: TTL_FULL, source: "Authoritative（重查）", latency: "中（跳過 Root/TLD）" },
+          cache: [
+            { key: "example.com NS", type: "NS", value: "ns.example.com", ttl: "90m", note: "—", cls: "" },
+            { key: HOST, type: "A", value: "93.184.216.99", ttl: TTL_FULL, note: "新值寫入", cls: "new" }
+          ],
+          labels: { client: "等待", resolver: "更新快取", root: "略過", tld: "略過", auth: "回新 A" }
+        },
+        {
+          hot: ["client"],
+          done: ["client", "resolver", "auth"],
+          cached: [],
+          skip: ["root", "tld"],
+          links: ["l1"],
+          status: "完成：TTL 過期後必須重問權威。這也解釋「提前降 TTL」——縮短舊答案殘留窗口，讓切換更快收斂。",
+          q: { qname: HOST, qtype: "A", from: "Resolver", to: "Client", answer: "A 93.184.216.99" },
+          result: { ip: "93.184.216.99", ttl: TTL_FULL, source: "重查後回傳", latency: "完成" },
+          cache: [
+            { key: HOST, type: "A", value: "93.184.216.99", ttl: TTL_FULL, note: "新快取", cls: "hit" }
+          ],
+          labels: { client: "取得新 IP", resolver: "已更新", root: "略過", tld: "略過", auth: "已完成" }
+        }
+      ]
+    }
+  };
+
+  function setText(id, text) {
+    var el = document.getElementById(id);
+    if (el) el.textContent = text;
+  }
+
+  function renderCache(rows) {
+    if (!tbody) return;
+    if (!rows || !rows.length) {
+      tbody.innerHTML = '<tr><td colspan="5" style="color:var(--text-3)">尚無快取條目</td></tr>';
+      return;
+    }
+    tbody.innerHTML = rows.map(function (r) {
+      var cls = r.cls ? ' class="' + r.cls + '"' : "";
+      return "<tr" + cls + "><td>" + r.key + "</td><td>" + r.type + "</td><td>" + r.value +
+        "</td><td>" + r.ttl + "</td><td>" + r.note + "</td></tr>";
+    }).join("");
+  }
+
+  function renderStep() {
+    var sc = SCENARIOS[scenario];
+    var step = sc.steps[stepIdx];
+    if (!step) return;
+
+    statusEl.textContent = step.status;
+
+    nodes.forEach(function (id) {
+      var el = document.querySelector('.dns-node[data-node="' + id + '"]');
+      if (!el) return;
+      el.classList.remove("hot", "done", "cached", "skip");
+      if (step.skip.indexOf(id) !== -1) el.classList.add("skip");
+      if (step.done.indexOf(id) !== -1) el.classList.add("done");
+      if (step.cached.indexOf(id) !== -1) el.classList.add("cached");
+      if (step.hot.indexOf(id) !== -1) {
+        el.classList.remove("done", "skip");
+        el.classList.add("hot");
+      }
+      var lab = step.labels && step.labels[id];
+      if (lab) setText("dns-ni-" + id, lab);
+    });
+
+    links.forEach(function (id) {
+      var el = document.querySelector('.dns-arrow[data-link="' + id + '"]');
+      if (!el) return;
+      el.classList.toggle("live", step.links.indexOf(id) !== -1);
+    });
+
+    setText("dns-qname", step.q.qname);
+    setText("dns-qtype", step.q.qtype);
+    setText("dns-from", step.q.from);
+    setText("dns-to", step.q.to);
+    setText("dns-answer", step.q.answer);
+
+    setText("dns-host", HOST);
+    setText("dns-ip", step.result.ip);
+    setText("dns-ttl", step.result.ttl);
+    setText("dns-source", step.result.source);
+    setText("dns-latency", step.result.latency);
+
+    var ipEl = document.getElementById("dns-ip");
+    if (ipEl) {
+      ipEl.classList.toggle("chg", step.result.ip !== "—" && step.result.ip !== IP);
+    }
+
+    renderCache(step.cache);
+
+    btnNext.disabled = stepIdx >= sc.steps.length - 1;
+  }
+
+  function reset() {
+    stepIdx = 0;
+    renderStep();
+  }
+
+  function next() {
+    var sc = SCENARIOS[scenario];
+    if (stepIdx < sc.steps.length - 1) {
+      stepIdx += 1;
+      renderStep();
+    }
+  }
+
+  document.querySelectorAll("#demo-dns-resolve .seg button").forEach(function (btn) {
+    btn.addEventListener("click", function () {
+      document.querySelectorAll("#demo-dns-resolve .seg button").forEach(function (b) {
+        b.setAttribute("aria-pressed", "false");
+      });
+      btn.setAttribute("aria-pressed", "true");
+      scenario = btn.getAttribute("data-sc");
+      reset();
+    });
+  });
+
+  btnNext.addEventListener("click", next);
+  btnReset.addEventListener("click", reset);
+
+  reset();
+})();
+</script>
+
+
+<!-- FULLSCREEN-FEATURE:START -->
+<style>
+  .fs-toggle {
+    position: fixed;
+    top: 18px;
+    right: 18px;
+    z-index: 1000;
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    font-family: var(--sans, system-ui, -apple-system, "Segoe UI", sans-serif);
+    font-size: 12.5px;
+    line-height: 1;
+    color: var(--text-2, #6b7078);
+    background: var(--bg, #ffffff);
+    border: 1px solid var(--border-strong, #dedcd8);
+    border-radius: 999px;
+    padding: 7px 13px 7px 11px;
+    cursor: pointer;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, .06), 0 4px 12px rgba(0, 0, 0, .04);
+    transition: background .15s, border-color .15s, color .15s;
+  }
+
+  .fs-toggle:hover {
+    background: var(--bg-soft, #fafaf9);
+    color: var(--text, #262a2f);
+    border-color: var(--text-3, #9aa0a8);
+  }
+
+  .fs-toggle:focus-visible {
+    outline: 2px solid var(--accent, #3f6188);
+    outline-offset: 2px;
+  }
+
+  .fs-toggle[aria-pressed="true"] {
+    background: var(--accent, #3f6188);
+    color: #fff;
+    border-color: var(--accent, #3f6188);
+  }
+
+  .fs-toggle .fs-ic {
+    flex: 0 0 auto;
+    display: block;
+  }
+
+  @media print {
+    .fs-toggle { display: none !important; }
+  }
+
+  @media (max-width: 480px) {
+    .fs-toggle { padding: 8px; }
+    .fs-toggle .fs-label { display: none; }
+  }
+</style>
+<button id="fs-toggle-btn" class="fs-toggle" type="button" aria-pressed="false"
+        aria-label="切換全螢幕檢視 (快捷鍵 F)" title="全螢幕檢視 (F)">
+  <svg class="fs-ic fs-ic-expand" viewBox="0 0 24 24" width="15" height="15" fill="none"
+       stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+    <path d="M8 3H5a2 2 0 0 0-2 2v3m18 0V5a2 2 0 0 0-2-2h-3m0 18h3a2 2 0 0 0 2-2v-3M3 16v3a2 2 0 0 0 2 2h3"/>
+  </svg>
+  <svg class="fs-ic fs-ic-compress" viewBox="0 0 24 24" width="15" height="15" fill="none"
+       stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="display:none">
+    <path d="M8 3v3a2 2 0 0 1-2 2H3m18 0h-3a2 2 0 0 1-2-2V3m0 18v-3a2 2 0 0 1 2-2h3M3 16h3a2 2 0 0 1 2 2v3"/>
+  </svg>
+  <span class="fs-label">全螢幕</span>
+</button>
+<script>
+  "use strict";
+  (function () {
+    var btn = document.getElementById("fs-toggle-btn");
+    if (!btn) return;
+    var docEl = document.documentElement;
+    var canFs = !!(docEl.requestFullscreen || docEl.webkitRequestFullscreen);
+    // 不支援 Fullscreen API (如 iPhone Safari) → 隱藏按鈕，避免壞掉的 UI
+    if (!canFs) { btn.style.display = "none"; return; }
+
+    var expandIc = btn.querySelector(".fs-ic-expand");
+    var compressIc = btn.querySelector(".fs-ic-compress");
+    var label = btn.querySelector(".fs-label");
+
+    function isFs() {
+      return !!(document.fullscreenElement || document.webkitFullscreenElement);
+    }
+    function enter() {
+      if (docEl.requestFullscreen) docEl.requestFullscreen();
+      else if (docEl.webkitRequestFullscreen) docEl.webkitRequestFullscreen();
+    }
+    function exit() {
+      if (document.exitFullscreen) document.exitFullscreen();
+      else if (document.webkitExitFullscreen) document.webkitExitFullscreen();
+    }
+    function toggle() { isFs() ? exit() : enter(); }
+    function sync() {
+      var on = isFs();
+      btn.setAttribute("aria-pressed", on ? "true" : "false");
+      if (label) label.textContent = on ? "離開全螢幕" : "全螢幕";
+      if (expandIc) expandIc.style.display = on ? "none" : "block";
+      if (compressIc) compressIc.style.display = on ? "block" : "none";
+    }
+
+    btn.addEventListener("click", toggle);
+    document.addEventListener("fullscreenchange", sync);
+    document.addEventListener("webkitfullscreenchange", sync);
+    document.addEventListener("keydown", function (e) {
+      if (e.key !== "f" && e.key !== "F") return;
+      if (e.metaKey || e.ctrlKey || e.altKey) return;
+      var t = e.target;
+      var tag = t && t.tagName ? t.tagName.toUpperCase() : "";
+      if (tag === "INPUT" || tag === "TEXTAREA" || (t && t.isContentEditable)) return;
+      e.preventDefault();
+      toggle();
+    });
+    sync();
+  })();
+</script>
+<!-- FULLSCREEN-FEATURE:END -->
+</body>
+</html>

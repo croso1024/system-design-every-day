@@ -1,0 +1,317 @@
+<script>
+(function () {
+  "use strict";
+
+  var scenario = "cold";
+  var stepIdx = 0;
+
+  var HOST = "www.example.com";
+  var IP = "93.184.216.34";
+  var TTL_FULL = "300s";
+
+  var statusEl = document.getElementById("dns-status");
+  var tbody = document.getElementById("dns-cache-tbody");
+  var btnNext = document.getElementById("dns-btn-next");
+  var btnReset = document.getElementById("dns-btn-reset");
+
+  var nodes = ["client", "resolver", "root", "tld", "auth"];
+  var links = ["l1", "l2", "l3", "l4"];
+
+  var SCENARIOS = {
+    cold: {
+      label: "冷快取全鏈路",
+      steps: [
+        {
+          hot: ["client"],
+          done: [],
+          cached: [],
+          skip: [],
+          links: [],
+          status: "Client Stub 要解析 www.example.com。本機快取未命中 → 對 Recursive Resolver 發出遞迴查詢（RD=1）。",
+          q: { qname: HOST, qtype: "A", from: "Client", to: "Resolver", answer: "（等待）" },
+          result: { ip: "—", ttl: "—", source: "—", latency: "查詢中" },
+          cache: [],
+          labels: { client: "發出查詢", resolver: "待命", root: "待命", tld: "待命", auth: "待命" }
+        },
+        {
+          hot: ["resolver"],
+          done: ["client"],
+          cached: [],
+          skip: [],
+          links: ["l1"],
+          status: "Resolver 收到遞迴請求。自身快取沒有 www.example.com → 開始迭代：先問 Root。",
+          q: { qname: HOST, qtype: "A", from: "Resolver", to: "Root", answer: "（等待 referral）" },
+          result: { ip: "—", ttl: "—", source: "迭代中", latency: "冷啟動" },
+          cache: [],
+          labels: { client: "等待", resolver: "快取未命中", root: "待命", tld: "待命", auth: "待命" }
+        },
+        {
+          hot: ["root"],
+          done: ["client", "resolver"],
+          cached: [],
+          skip: [],
+          links: ["l1", "l2"],
+          status: "Root 不持有業務紀錄，回傳 .com 的 NS＋glue。這是 referral，不是最終 A。",
+          q: { qname: HOST, qtype: "A", from: "Root", to: "Resolver", answer: "NS → .com TLD" },
+          result: { ip: "—", ttl: "—", source: "Root referral", latency: "冷啟動" },
+          cache: [{ key: ".com NS", type: "NS", value: "a.gtld-servers.net", ttl: "48h", note: "可快取", cls: "new" }],
+          labels: { client: "等待", resolver: "收 referral", root: "回 .com NS", tld: "待命", auth: "待命" }
+        },
+        {
+          hot: ["tld"],
+          done: ["client", "resolver", "root"],
+          cached: [],
+          skip: [],
+          links: ["l1", "l3"],
+          status: "Resolver 問 .com TLD：example.com 的權威 NS 在哪？TLD 回傳委派。",
+          q: { qname: HOST, qtype: "A", from: "TLD .com", to: "Resolver", answer: "NS → ns.example.com" },
+          result: { ip: "—", ttl: "—", source: "TLD referral", latency: "冷啟動" },
+          cache: [
+            { key: ".com NS", type: "NS", value: "a.gtld-servers.net", ttl: "48h", note: "命中可用", cls: "" },
+            { key: "example.com NS", type: "NS", value: "ns.example.com", ttl: "2h", note: "新委派", cls: "new" }
+          ],
+          labels: { client: "等待", resolver: "收委派", root: "已完成", tld: "回 NS", auth: "待命" }
+        },
+        {
+          hot: ["auth"],
+          done: ["client", "resolver", "root", "tld"],
+          cached: [],
+          skip: [],
+          links: ["l1", "l4"],
+          status: "Authority 回傳最終答案：www.example.com A 93.184.216.34，TTL=300。",
+          q: { qname: HOST, qtype: "A", from: "Authority", to: "Resolver", answer: "A " + IP },
+          result: { ip: IP, ttl: TTL_FULL, source: "Authoritative", latency: "冷啟動（完整鏈）" },
+          cache: [
+            { key: ".com NS", type: "NS", value: "a.gtld-servers.net", ttl: "48h", note: "—", cls: "" },
+            { key: "example.com NS", type: "NS", value: "ns.example.com", ttl: "2h", note: "—", cls: "" },
+            { key: HOST, type: "A", value: IP, ttl: TTL_FULL, note: "寫入快取", cls: "new" }
+          ],
+          labels: { client: "等待", resolver: "收 A", root: "已完成", tld: "已完成", auth: "回 A 紀錄" }
+        },
+        {
+          hot: ["client"],
+          done: ["client", "resolver", "root", "tld", "auth"],
+          cached: [],
+          skip: [],
+          links: ["l1"],
+          status: "Resolver 把最終答案回給 Client。後續相同查詢可直接打 Resolver 快取，不必再訪 Root／TLD／Authority。",
+          q: { qname: HOST, qtype: "A", from: "Resolver", to: "Client", answer: "A " + IP },
+          result: { ip: IP, ttl: TTL_FULL, source: "Resolver → Client", latency: "完成" },
+          cache: [
+            { key: ".com NS", type: "NS", value: "a.gtld-servers.net", ttl: "48h", note: "—", cls: "" },
+            { key: "example.com NS", type: "NS", value: "ns.example.com", ttl: "2h", note: "—", cls: "" },
+            { key: HOST, type: "A", value: IP, ttl: TTL_FULL, note: "可服務下一次", cls: "hit" }
+          ],
+          labels: { client: "取得 IP", resolver: "已快取", root: "已完成", tld: "已完成", auth: "已完成" }
+        }
+      ]
+    },
+    warm: {
+      label: "Resolver 快取命中",
+      steps: [
+        {
+          hot: ["client"],
+          done: [],
+          cached: [],
+          skip: ["root", "tld", "auth"],
+          links: [],
+          status: "Client 再次查詢 www.example.com。Stub 仍轉給 Resolver（本機也可能命中，此情境聚焦 Resolver）。",
+          q: { qname: HOST, qtype: "A", from: "Client", to: "Resolver", answer: "（等待）" },
+          result: { ip: "—", ttl: "—", source: "—", latency: "查詢中" },
+          cache: [
+            { key: HOST, type: "A", value: IP, ttl: "240s", note: "既有快取", cls: "" }
+          ],
+          labels: { client: "發出查詢", resolver: "待命", root: "略過", tld: "略過", auth: "略過" }
+        },
+        {
+          hot: ["resolver"],
+          done: ["client"],
+          cached: ["resolver"],
+          skip: ["root", "tld", "auth"],
+          links: ["l1"],
+          status: "Resolver 快取命中！剩餘 TTL=240s → 直接回 A，不接觸 Root／TLD／Authority。",
+          q: { qname: HOST, qtype: "A", from: "Resolver cache", to: "Client", answer: "A " + IP },
+          result: { ip: IP, ttl: "240s（剩餘）", source: "Resolver 快取", latency: "極低（熱路徑）" },
+          cache: [
+            { key: HOST, type: "A", value: IP, ttl: "240s", note: "HIT", cls: "hit" }
+          ],
+          labels: { client: "等待", resolver: "CACHE HIT", root: "略過", tld: "略過", auth: "略過" }
+        },
+        {
+          hot: ["client"],
+          done: ["client", "resolver"],
+          cached: ["resolver"],
+          skip: ["root", "tld", "auth"],
+          links: ["l1"],
+          status: "完成：熱路徑 = Client → Resolver 快取 → Client。這就是為什麼「改了 DNS 卻暫時看不到」——舊 TTL 仍被命中。",
+          q: { qname: HOST, qtype: "A", from: "Resolver", to: "Client", answer: "A " + IP },
+          result: { ip: IP, ttl: "240s（剩餘）", source: "快取命中", latency: "完成（無迭代）" },
+          cache: [
+            { key: HOST, type: "A", value: IP, ttl: "240s", note: "仍有效", cls: "hit" }
+          ],
+          labels: { client: "取得 IP", resolver: "已命中", root: "略過", tld: "略過", auth: "略過" }
+        }
+      ]
+    },
+    expire: {
+      label: "TTL 過期重查",
+      steps: [
+        {
+          hot: ["resolver"],
+          done: [],
+          cached: [],
+          skip: [],
+          links: [],
+          status: "時間過去，Resolver 上 www.example.com 的剩餘 TTL 歸零。下一筆查詢不能再當 HIT。",
+          q: { qname: HOST, qtype: "A", from: "—", to: "—", answer: "快取條目過期" },
+          result: { ip: "—", ttl: "0", source: "快取失效", latency: "—" },
+          cache: [
+            { key: HOST, type: "A", value: IP, ttl: "0", note: "EXPIRED", cls: "exp" }
+          ],
+          labels: { client: "待命", resolver: "TTL=0", root: "待命", tld: "待命", auth: "待命" }
+        },
+        {
+          hot: ["client", "resolver"],
+          done: [],
+          cached: [],
+          skip: [],
+          links: ["l1"],
+          status: "Client 再查。Resolver 發現過期 → 丟棄舊條目，重新迭代（可略過仍有效的 NS 快取）。",
+          q: { qname: HOST, qtype: "A", from: "Client", to: "Resolver", answer: "MISS（過期）" },
+          result: { ip: "—", ttl: "—", source: "重查中", latency: "需再訪 Authority" },
+          cache: [
+            { key: "example.com NS", type: "NS", value: "ns.example.com", ttl: "90m", note: "NS 仍有效", cls: "hit" }
+          ],
+          labels: { client: "再查詢", resolver: "MISS", root: "可略", tld: "可略", auth: "待命" }
+        },
+        {
+          hot: ["auth"],
+          done: ["client", "resolver"],
+          cached: [],
+          skip: ["root", "tld"],
+          links: ["l1", "l4"],
+          status: "NS 快取仍在，Resolver 直接問 Authority，取得新 A（可能已換成新 IP）與新 TTL。",
+          q: { qname: HOST, qtype: "A", from: "Authority", to: "Resolver", answer: "A 93.184.216.99（新）" },
+          result: { ip: "93.184.216.99", ttl: TTL_FULL, source: "Authoritative（重查）", latency: "中（跳過 Root/TLD）" },
+          cache: [
+            { key: "example.com NS", type: "NS", value: "ns.example.com", ttl: "90m", note: "—", cls: "" },
+            { key: HOST, type: "A", value: "93.184.216.99", ttl: TTL_FULL, note: "新值寫入", cls: "new" }
+          ],
+          labels: { client: "等待", resolver: "更新快取", root: "略過", tld: "略過", auth: "回新 A" }
+        },
+        {
+          hot: ["client"],
+          done: ["client", "resolver", "auth"],
+          cached: [],
+          skip: ["root", "tld"],
+          links: ["l1"],
+          status: "完成：TTL 過期後必須重問權威。這也解釋「提前降 TTL」——縮短舊答案殘留窗口，讓切換更快收斂。",
+          q: { qname: HOST, qtype: "A", from: "Resolver", to: "Client", answer: "A 93.184.216.99" },
+          result: { ip: "93.184.216.99", ttl: TTL_FULL, source: "重查後回傳", latency: "完成" },
+          cache: [
+            { key: HOST, type: "A", value: "93.184.216.99", ttl: TTL_FULL, note: "新快取", cls: "hit" }
+          ],
+          labels: { client: "取得新 IP", resolver: "已更新", root: "略過", tld: "略過", auth: "已完成" }
+        }
+      ]
+    }
+  };
+
+  function setText(id, text) {
+    var el = document.getElementById(id);
+    if (el) el.textContent = text;
+  }
+
+  function renderCache(rows) {
+    if (!tbody) return;
+    if (!rows || !rows.length) {
+      tbody.innerHTML = '<tr><td colspan="5" style="color:var(--text-3)">尚無快取條目</td></tr>';
+      return;
+    }
+    tbody.innerHTML = rows.map(function (r) {
+      var cls = r.cls ? ' class="' + r.cls + '"' : "";
+      return "<tr" + cls + "><td>" + r.key + "</td><td>" + r.type + "</td><td>" + r.value +
+        "</td><td>" + r.ttl + "</td><td>" + r.note + "</td></tr>";
+    }).join("");
+  }
+
+  function renderStep() {
+    var sc = SCENARIOS[scenario];
+    var step = sc.steps[stepIdx];
+    if (!step) return;
+
+    statusEl.textContent = step.status;
+
+    nodes.forEach(function (id) {
+      var el = document.querySelector('.dns-node[data-node="' + id + '"]');
+      if (!el) return;
+      el.classList.remove("hot", "done", "cached", "skip");
+      if (step.skip.indexOf(id) !== -1) el.classList.add("skip");
+      if (step.done.indexOf(id) !== -1) el.classList.add("done");
+      if (step.cached.indexOf(id) !== -1) el.classList.add("cached");
+      if (step.hot.indexOf(id) !== -1) {
+        el.classList.remove("done", "skip");
+        el.classList.add("hot");
+      }
+      var lab = step.labels && step.labels[id];
+      if (lab) setText("dns-ni-" + id, lab);
+    });
+
+    links.forEach(function (id) {
+      var el = document.querySelector('.dns-arrow[data-link="' + id + '"]');
+      if (!el) return;
+      el.classList.toggle("live", step.links.indexOf(id) !== -1);
+    });
+
+    setText("dns-qname", step.q.qname);
+    setText("dns-qtype", step.q.qtype);
+    setText("dns-from", step.q.from);
+    setText("dns-to", step.q.to);
+    setText("dns-answer", step.q.answer);
+
+    setText("dns-host", HOST);
+    setText("dns-ip", step.result.ip);
+    setText("dns-ttl", step.result.ttl);
+    setText("dns-source", step.result.source);
+    setText("dns-latency", step.result.latency);
+
+    var ipEl = document.getElementById("dns-ip");
+    if (ipEl) {
+      ipEl.classList.toggle("chg", step.result.ip !== "—" && step.result.ip !== IP);
+    }
+
+    renderCache(step.cache);
+
+    btnNext.disabled = stepIdx >= sc.steps.length - 1;
+  }
+
+  function reset() {
+    stepIdx = 0;
+    renderStep();
+  }
+
+  function next() {
+    var sc = SCENARIOS[scenario];
+    if (stepIdx < sc.steps.length - 1) {
+      stepIdx += 1;
+      renderStep();
+    }
+  }
+
+  document.querySelectorAll("#demo-dns-resolve .seg button").forEach(function (btn) {
+    btn.addEventListener("click", function () {
+      document.querySelectorAll("#demo-dns-resolve .seg button").forEach(function (b) {
+        b.setAttribute("aria-pressed", "false");
+      });
+      btn.setAttribute("aria-pressed", "true");
+      scenario = btn.getAttribute("data-sc");
+      reset();
+    });
+  });
+
+  btnNext.addEventListener("click", next);
+  btnReset.addEventListener("click", reset);
+
+  reset();
+})();
+</script>
