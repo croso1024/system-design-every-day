@@ -1356,9 +1356,12 @@
     display: flex; flex-wrap: wrap; gap: 8px; margin: 10px 0 8px; align-items: center;
   }
   .dns-chain {
-    display: flex; flex-wrap: wrap; justify-content: center; align-items: stretch;
+    display: flex; flex-wrap: wrap; justify-content: center; align-items: center;
     gap: 8px; margin: 10px 0;
   }
+  .dns-tiers { display: flex; flex-direction: column; gap: 8px; }
+  .dns-tier-row { display: flex; align-items: center; gap: 8px; }
+  .dns-tier-row .dns-node { flex: 1; }
   .dns-node {
     border: 1.5px solid var(--border-strong); border-radius: var(--radius-sm);
     padding: 10px 12px; background: #fff; min-width: 96px; text-align: center;
@@ -1512,6 +1515,16 @@
     <span class="dns-chip op">A 紀錄</span>
   </div>
 
+  <p>想在真機看這條迭代鏈路，用 <code>dig +trace</code>——它會<strong>自己扮演 Resolver</strong>，從 Root 開始一層層問下去，把每個 referral 印出來：</p>
+
+  <pre><code>$ dig +trace www.example.com
+
+.            NS   a.root-servers.net.  ...        # 1) 從 Root hints 起步，拿到根區 NS
+com.         NS   a.gtld-servers.net.  ...        # 2) 問 Root → 得到 .com 的 NS（referral）
+example.com. NS   ns.example.com.                 # 3) 問 .com TLD → 得到 example.com 委派
+www.example.com. A 93.184.216.34                  # 4) 問權威 → 拿到最終 A 紀錄</code></pre>
+  <p class="cap">對照左邊：每個 <code>NS</code> 行都是一次 referral（「下一步去哪問」），只有最後一行才是最終答案。少了 <code>+trace</code> 的普通 <code>dig www.example.com</code>，則是直接打你系統設定的 Resolver、由它代跑整條鏈——多半直接命中快取。</p>
+
   <div class="callout warn">
     <div class="c-title"><span class="ic">陷阱</span>「遞迴」不是協定裡的另一種封包格式</div>
     <p>遞迴／迭代是<strong>查詢行為與誰負責走完整條鏈</strong>的差異，不是兩種不相容的 DNS 協議。
@@ -1536,6 +1549,11 @@
 
   <p>Authority 管理的單位叫 <strong>Zone</strong>。Zone 檔裡的 <code>NS</code> 紀錄宣告「誰是這區的權威」；
   父 Zone（如 <code>.com</code>）必須有對應的委派，否則全世界找不到你的伺服器——這也是「剛買網域卻解析不到」的常見根因。</p>
+
+  <div class="callout accent">
+    <div class="c-title"><span class="ic">關鍵</span>為什麼需要 glue record？——打破循環依賴</div>
+    <p>委派 <code>example.com</code> 給 <code>ns1.example.com</code> 時會遇到雞生蛋問題：TLD 只回「權威 NS 叫 <code>ns1.example.com</code>」，但你<strong>要先解析 ns1.example.com 才知道它的 IP，而它本身又在 example.com 這個 Zone 內</strong>——要問它得先找到它，形成死循環。解法是 TLD 在回覆 NS 委派時，<strong>順帶附上該 NS 的 A／AAAA 位址</strong>，這筆「額外附帶的黏合紀錄」就是 <strong>glue record</strong>，讓 Resolver 不必再繞回來查就能直接連上權威。只有當 NS 名稱落在<em>被委派的 Zone 之內</em>（in-bailiwick）時才需要 glue；若 NS 用的是外部網域（如 <code>ns.some-dns-provider.net</code>）則不需要。</p>
+  </div>
 
   <div class="tbl-wrap">
     <table>
@@ -1645,6 +1663,11 @@
   <p><strong>TTL（Time To Live）</strong> 是權威伺服器在答案上附的「允許快取多久（秒）」。
   它不是「保證在 TTL 秒內全球同步切換」，而是「快取端最長可保留多久」的上限建議。</p>
 
+  <div class="callout accent">
+    <div class="c-title"><span class="ic">補充</span>負向答案（NXDOMAIN）的 TTL 從哪來？——SOA</div>
+    <p>正向答案的快取時間由該筆紀錄自己的 TTL 決定；但「查無此名（NXDOMAIN）」這種<strong>負向答案</strong>沒有具體紀錄可附 TTL，於是改由該 Zone 的 <strong>SOA（Start of Authority）</strong>紀錄裡的 <strong><code>minimum</code> 欄位</strong>（RFC 2308）決定要快取多久。每個 Zone 有且只有一筆 SOA，記錄該區的主要 NS、負責人信箱、序號（serial，控制 secondary 同步）與各項計時器。所以「拼錯網域會卡一陣子」正是負向快取按 SOA minimum 在生效。</p>
+  </div>
+
   <div class="dns-cache-layers">
     <div class="dns-cache-card">
       <div class="ct">瀏覽器／應用快取</div>
@@ -1740,31 +1763,40 @@
           <div class="nk">Stub</div>
           <div class="ni" id="dns-ni-client">待命</div>
         </div>
-        <div class="dns-arrow" data-link="l1">→</div>
+        <div class="dns-arrow" data-link="l1">⇄</div>
         <div class="dns-node resolver" data-node="resolver">
           <div class="nn">Resolver</div>
-          <div class="nk">Recursive</div>
+          <div class="nk">Recursive · hub</div>
           <div class="ni" id="dns-ni-resolver">待命</div>
         </div>
-        <div class="dns-arrow" data-link="l2">→</div>
-        <div class="dns-node root" data-node="root">
-          <div class="nn">Root</div>
-          <div class="nk">.</div>
-          <div class="ni" id="dns-ni-root">待命</div>
-        </div>
-        <div class="dns-arrow" data-link="l3">→</div>
-        <div class="dns-node tld" data-node="tld">
-          <div class="nn">TLD</div>
-          <div class="nk">.com</div>
-          <div class="ni" id="dns-ni-tld">待命</div>
-        </div>
-        <div class="dns-arrow" data-link="l4">→</div>
-        <div class="dns-node auth" data-node="auth">
-          <div class="nn">Authority</div>
-          <div class="nk">example.com</div>
-          <div class="ni" id="dns-ni-auth">待命</div>
+        <div class="dns-tiers">
+          <div class="dns-tier-row">
+            <span class="dns-arrow" data-link="l2">⇄</span>
+            <div class="dns-node root" data-node="root">
+              <div class="nn">Root</div>
+              <div class="nk">.</div>
+              <div class="ni" id="dns-ni-root">待命</div>
+            </div>
+          </div>
+          <div class="dns-tier-row">
+            <span class="dns-arrow" data-link="l3">⇄</span>
+            <div class="dns-node tld" data-node="tld">
+              <div class="nn">TLD</div>
+              <div class="nk">.com</div>
+              <div class="ni" id="dns-ni-tld">待命</div>
+            </div>
+          </div>
+          <div class="dns-tier-row">
+            <span class="dns-arrow" data-link="l4">⇄</span>
+            <div class="dns-node auth" data-node="auth">
+              <div class="nn">Authority</div>
+              <div class="nk">example.com</div>
+              <div class="ni" id="dns-ni-auth">待命</div>
+            </div>
+          </div>
         </div>
       </div>
+      <p class="cap" style="text-align:center">佈局刻意以 <strong>Resolver 為中心</strong>：每條輻條都是「Resolver ⇄ 某一層」的<strong>獨立往返</strong>，Resolver 每問完一層都回到自己再決定下一跳——不是 Root→TLD→Auth 之間接力轉交。</p>
 
       <div class="dns-panels">
         <div class="dns-panel" id="dns-q-panel">
@@ -1848,6 +1880,36 @@
     </table>
   </div>
   <p class="cap">DNS 選型沒有銀彈：切換速度與快取效益永遠在拉扯。</p>
+
+  <p>原生 DNS 有兩個安全弱點：答案<strong>可被竄改</strong>（快取污染／中間人偽造 referral），且查詢<strong>明文可被竊聽</strong>。三個常混為一談、其實正交的機制各解一半：</p>
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr><th>機制</th><th>保護什麼</th><th>怎麼做</th><th>代價 / 注意</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><strong>DNSSEC</strong></td>
+          <td class="hl">真實性 / 完整性</td>
+          <td>權威用私鑰對紀錄簽章（RRSIG），沿信任鏈（DS/DNSKEY）逐層驗證</td>
+          <td>不加密（內容仍明文可見）；金鑰輪替、簽章過期是常見營運事故</td>
+        </tr>
+        <tr>
+          <td><strong>DoT</strong>（DNS over TLS）</td>
+          <td class="hl">傳輸機密性</td>
+          <td>把 stub↔resolver 查詢包在 TLS，走專用 port <code>853</code></td>
+          <td>獨立 port 易被網管識別/封鎖；不保證答案未被權威端偽造</td>
+        </tr>
+        <tr>
+          <td><strong>DoH</strong>（DNS over HTTPS）</td>
+          <td class="hl">傳輸機密性</td>
+          <td>查詢包進 HTTPS（port <code>443</code>），混在一般網頁流量中</td>
+          <td>難被封鎖但也繞過企業 DNS 監控；同樣不驗證答案真偽</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="cap">關鍵區分：<strong>DNSSEC 管「答案是不是被竄改」，DoT／DoH 管「查詢過程有沒有被偷看」</strong>——兩者正交，完整防護會同時用。</p>
 
   <div class="callout accent">
     <div class="c-title"><span class="ic">面試</span>高頻追問怎麼答</div>
@@ -1948,7 +2010,7 @@
           done: [],
           cached: [],
           skip: [],
-          links: [],
+          links: ["l1"],
           status: "Client Stub 要解析 www.example.com。本機快取未命中 → 對 Recursive Resolver 發出遞迴查詢（RD=1）。",
           q: { qname: HOST, qtype: "A", from: "Client", to: "Resolver", answer: "（等待）" },
           result: { ip: "—", ttl: "—", source: "—", latency: "查詢中" },
@@ -1960,7 +2022,7 @@
           done: ["client"],
           cached: [],
           skip: [],
-          links: ["l1"],
+          links: [],
           status: "Resolver 收到遞迴請求。自身快取沒有 www.example.com → 開始迭代：先問 Root。",
           q: { qname: HOST, qtype: "A", from: "Resolver", to: "Root", answer: "（等待 referral）" },
           result: { ip: "—", ttl: "—", source: "迭代中", latency: "冷啟動" },
@@ -1972,8 +2034,8 @@
           done: ["client", "resolver"],
           cached: [],
           skip: [],
-          links: ["l1", "l2"],
-          status: "Root 不持有業務紀錄，回傳 .com 的 NS＋glue。這是 referral，不是最終 A。",
+          links: ["l2"],
+          status: "Resolver ⇄ Root：Root 不持有業務紀錄，回傳 .com 的 NS＋glue。這是 referral，不是最終 A，Resolver 收下後回到自己決定下一跳。",
           q: { qname: HOST, qtype: "A", from: "Root", to: "Resolver", answer: "NS → .com TLD" },
           result: { ip: "—", ttl: "—", source: "Root referral", latency: "冷啟動" },
           cache: [{ key: ".com NS", type: "NS", value: "a.gtld-servers.net", ttl: "48h", note: "可快取", cls: "new" }],
@@ -1984,8 +2046,8 @@
           done: ["client", "resolver", "root"],
           cached: [],
           skip: [],
-          links: ["l1", "l3"],
-          status: "Resolver 問 .com TLD：example.com 的權威 NS 在哪？TLD 回傳委派。",
+          links: ["l3"],
+          status: "Resolver ⇄ TLD：Resolver 拿 Root 給的 .com NS 直接問 TLD——example.com 的權威 NS 在哪？TLD 回傳委派。",
           q: { qname: HOST, qtype: "A", from: "TLD .com", to: "Resolver", answer: "NS → ns.example.com" },
           result: { ip: "—", ttl: "—", source: "TLD referral", latency: "冷啟動" },
           cache: [
@@ -1999,8 +2061,8 @@
           done: ["client", "resolver", "root", "tld"],
           cached: [],
           skip: [],
-          links: ["l1", "l4"],
-          status: "Authority 回傳最終答案：www.example.com A 93.184.216.34，TTL=300。",
+          links: ["l4"],
+          status: "Resolver ⇄ Authority：拿 TLD 給的 example.com NS 直接問權威，取得最終答案 www.example.com A 93.184.216.34，TTL=300。",
           q: { qname: HOST, qtype: "A", from: "Authority", to: "Resolver", answer: "A " + IP },
           result: { ip: IP, ttl: TTL_FULL, source: "Authoritative", latency: "冷啟動（完整鏈）" },
           cache: [
@@ -2036,7 +2098,7 @@
           done: [],
           cached: [],
           skip: ["root", "tld", "auth"],
-          links: [],
+          links: ["l1"],
           status: "Client 再次查詢 www.example.com。Stub 仍轉給 Resolver（本機也可能命中，此情境聚焦 Resolver）。",
           q: { qname: HOST, qtype: "A", from: "Client", to: "Resolver", answer: "（等待）" },
           result: { ip: "—", ttl: "—", source: "—", latency: "查詢中" },
@@ -2111,8 +2173,8 @@
           done: ["client", "resolver"],
           cached: [],
           skip: ["root", "tld"],
-          links: ["l1", "l4"],
-          status: "NS 快取仍在，Resolver 直接問 Authority，取得新 A（可能已換成新 IP）與新 TTL。",
+          links: ["l4"],
+          status: "NS 快取仍在，Resolver 跳過 Root／TLD，直接 ⇄ Authority，取得新 A（可能已換成新 IP）與新 TTL。",
           q: { qname: HOST, qtype: "A", from: "Authority", to: "Resolver", answer: "A 93.184.216.99（新）" },
           result: { ip: "93.184.216.99", ttl: TTL_FULL, source: "Authoritative（重查）", latency: "中（跳過 Root/TLD）" },
           cache: [
