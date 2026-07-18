@@ -12,7 +12,7 @@
 2. **結構化關係定義**：在 `docs/mindmap.json` 定義主題間的先修知識與關聯（如 2PC ──► TCC ──► Saga）。
 3. **Cursor Automation** 每日定時觸發 Cloud Agent。
 4. **Agent 智能決策**：Agent 透過 CLI 工具，僅載入過濾後的極小上下文，自發性決定「最符合連貫教學脈絡」的選題。
-5. **組裝編譯**：利用組裝腳本將草稿注入 Notion 風格的 HTML 範本，自動編譯出**全站可點擊、可互動的 Mermaid 技能樹心智圖**。
+5. **組裝編譯**：利用組裝腳本將草稿注入 Notion 風格的 HTML 範本，自動編譯出**首頁可點擊、可互動的 Cytoscape 技能樹學習地圖**（第三方資源失效時自動退回 server-rendered 純文字文章清單）。
 6. **自動部署**：由 GitHub Actions 將 `books/` 靜態網頁發佈至 GitHub Pages。
 
 ---
@@ -46,7 +46,7 @@
 ┌─────────────────────────┐
 │ 4. node scripts/generate.js ───► 組裝 drafts/ 內容至 templates/base.html
 │    (自動化編譯與組裝)   ├──────► 自動掃描 <h2> 標題生成左側 TOC 導覽列
-└───────────┬─────────────┘      └──────► 編譯 mindmap.json + completed.json 生成可點擊技能樹地圖
+└───────────┬─────────────┘      └──────► 編譯 mindmap.json + completed.json 生成可點擊 Cytoscape 學習地圖
             │
             ▼
 ┌─────────────────────────┐
@@ -74,18 +74,24 @@
     *   *回傳總篇數、完成數、待辦數與完成率百分比。*
 
 ### 2. 智能心智圖檢索與編譯器 `mindmap.js`
-負責解析 DAG 圖譜結構，提供強大的 Neighbors 推薦，並自動生成 Mermaid 圖。
+負責解析 DAG 圖譜結構，提供強大的 Neighbors 推薦，並可輸出兩種圖形資料：`generate-mermaid`（Mermaid 語法 CLI）與 `generate-learning-map`（首頁 Cytoscape 學習地圖的 renderer-neutral JSON payload）。
 *   **智能選題推薦 (鄰居節點檢索)**：
     ```bash
     node scripts/mindmap.js --action next
     ```
     *   *Agent 在啟動選題時，以此指令獲取強烈推薦的主題。*
     *   *它會尋找與昨日完成主題相連、且在 todo.json 中尚未完成的鄰近節點（包含 prerequisite 先修關係）。若當前系列已完結，則會自動挑選合適的「獨立起步節點」提供。*
-*   **編譯並輸出 Mermaid 程式碼**：
+*   **編譯並輸出 Mermaid 程式碼（獨立 CLI 工具）**：
     ```bash
     node scripts/mindmap.js --action generate-mermaid
     ```
     *   *讀取 `completed.json`，將已完成節點著色為 Notion 淺綠色（支援超連結跳轉）， pending 節點著色為藍色，直接輸出 Mermaid 語法。*
+    *   *註：首頁已改用 Cytoscape 學習地圖，不再內嵌此 Mermaid 輸出；本指令保留作為獨立查閱工具。*
+*   **編譯並輸出首頁學習地圖 payload**：
+    ```bash
+    node scripts/mindmap.js --action generate-learning-map
+    ```
+    *   *輸出首頁 Cytoscape 學習地圖所用的 renderer-neutral JSON payload（Root → Category → Topic 階層與跨群 / 群內關聯）。*
 
 ### 3. 自動化模板編譯器 `generate.js`
 將草稿組裝至外殼，並同步更新全站地圖與目錄。
@@ -95,7 +101,7 @@
     ```
     *   *自動讀取 `drafts/<topic-id>/content.html` 注入 `CONTENT_PLACEHOLDER`。*
     *   *自動掃描內文中的 `<section>` 與 `<h2>`，動態生成左側 TOC 導覽列注入 `TOC_PLACEHOLDER`。*
-    *   *自動呼叫 `mindmap.js` 編譯 Mermaid 技能樹，注入首頁 `books/index.html`。*
+    *   *自動呼叫 `mindmap.js` 編譯首頁 Cytoscape 學習地圖 payload，注入首頁 `books/index.html`。*
     *   *自動將本次完成寫入 `docs/completed.json`。*
 
 ---
@@ -119,12 +125,12 @@ system-design-every-day/
 │       ├── content.html      # H2 結構化內文 (由 auto-TOC 掃描)
 │       └── script.html       # 可選：自包含 Vanilla JS
 ├── books/
-│   ├── index.html            # 手冊目錄首頁 (內含可互動、可點擊的技能樹圖 🌳)
+│   ├── index.html            # 手冊目錄首頁 (內含可互動、可點擊的 Cytoscape 學習地圖 🌳)
 │   └── {topic-id}/
 │       └── index.html        # 各主題最終發佈網頁 (雙欄、Scrollspy 導覽、演示)
 └── scripts/
     ├── completed-ledger.js   # 輕量完成日誌查詢 CLI
-    ├── mindmap.js            # 智能心智圖推薦與 Mermaid 著色編譯器 CLI
+    ├── mindmap.js            # 智能心智圖推薦、Mermaid CLI 與首頁學習地圖 payload 編譯器
     └── generate.js           # 範本組裝、Auto-TOC 抽取與首頁技能樹更新
 ```
 
@@ -145,7 +151,7 @@ mkdir -p drafts/rate-limiter
 # 3. 執行自動化編譯
 node scripts/generate.js --topic rate-limiter --title "Rate Limiter (限流器)" --category "Infrastructure"
 ```
-完成後，您可以直接用瀏覽器打開 `books/index.html`，即可看到最新的**互動式 Mermaid 地圖**中 `rate-limiter` 節點已轉綠，點選即可進入閱讀您剛產出的完美頁面！
+完成後，您可以直接用瀏覽器打開 `books/index.html`，即可看到最新的**互動式 Cytoscape 學習地圖**中 `rate-limiter` 節點已轉綠，點選分群即可進入閱讀您剛產出的完美頁面！
 
 ---
 

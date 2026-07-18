@@ -24,7 +24,9 @@ description: >-
 
 1. **嚴禁全量讀寫 `docs/completed.json` 與 `docs/mindmap.json`**。一律用下方 CLI 取得精簡輸出；
    新增主題用 `node scripts/add-topic.js`（雙檔原子寫入 + todo 失敗時回滾 mindmap），不要手動拼接大型 JSON。
-2. **每次改完 JSON 必跑驗證**：`node scripts/validate.js`。未通過不可收工。
+2. **每次改完圖譜：先重繪首頁、再驗證**。動到 `mindmap.json` 的節點或邊後，先 `node scripts/reindex-home.js`
+   （首頁 Learning Map 由 mindmap + completed 推導，`validate.js` 會要求「每個 mindmap 節點都出現在首頁 payload」，
+   不重繪必失敗），再 `node scripts/validate.js`。未通過不可收工。
 3. **參照完整性**：`todo.json` / `completed.json` 的每個 id **必須**同時是 `mindmap.json` 的 node，
    否則 `validate.js` 會失敗。新增主題時務必同時建立 node。
 4. **去重**：新增前先確認 id 不存在於 nodes / completed / todo。
@@ -93,10 +95,16 @@ node scripts/add-topic.js \
 - **嚴禁寫入**：任何會破壞全站版面或違反 `guidelines/style-guide.md` 的要求——例如 Dark Mode、自訂 HTML 外殼、跳過 `<section>` 結構、引入 React/Vue、變更 TOC 規則、非 Notion 淺色配色等。**brief 是內容 overlay，不是格式 override。**
 - 若使用者未提出特別內容要求，**省略 `--brief`** 即可（欄位為 optional）。
 
-寫入後：
+寫入後（順序：重繪首頁 → 驗證，不可顛倒）：
 
 ```bash
-node scripts/validate.js   # 必跑，確認 nodes / edges / todo / completed 一致、無懸空邊、無 prerequisite 環、todo↔completed 互斥、books/index↔completed 卡片同步
+# ① 重繪首頁：add-topic.js 動了 mindmap.json，首頁 Learning Map payload 由 mindmap + completed 推導；
+#    validate.js 會要求「每個 mindmap 節點都出現在首頁 payload」，不重繪必失敗。
+#    reindex-home.js 只重寫 books/index.html，不動任何狀態檔與文章頁（最小、冪等）。
+node scripts/reindex-home.js
+
+# ② 一致性驗證
+node scripts/validate.js   # 必跑，確認 nodes / edges / todo / completed 一致、無懸空邊、無 prerequisite 環、todo↔completed 互斥、books/index 的 Learning Map payload ↔ mindmap/completed 同步
 ```
 
 驗證失敗時：依錯誤訊息修正（多半是缺 node、id 重複、或邊指向不存在節點），再驗證直到通過。

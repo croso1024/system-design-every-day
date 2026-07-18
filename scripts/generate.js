@@ -132,7 +132,7 @@ function main() {
     completed_at: completedAt,
     path: relativeOutputPath
   });
-  const booksIndexHtml = buildBooksIndexHtml(nextCompleted); // generateMermaid 也在此一次算完
+  const booksIndexHtml = buildBooksIndexHtml(nextCompleted); // Learning Map payload 也在此一次算完
 
   // ---- 階段二：集中原子落檔 ----
   // 順序：主題頁 → completed.json → books/index.html。

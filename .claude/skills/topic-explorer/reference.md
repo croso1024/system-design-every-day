@@ -48,7 +48,10 @@
 
 ## 2. Edge 語義 (與 scripts/mindmap.js 行為對齊)
 
-| type | 方向慣例 | Mermaid 連線 | 推薦器行為 |
+> 註：以下「連線表示」欄為 `mindmap.js --action generate-mermaid`（獨立 CLI 工具）的 Mermaid 語法慣例。
+> **首頁學習地圖已改用 Cytoscape 呈現**（`generate-learning-map` payload），方向語義完全相同，只是渲染器不同。
+
+| type | 方向慣例 | 連線表示 (Mermaid CLI) | 推薦器行為 |
 | :--- | :--- | :--- | :--- |
 | `prerequisite` | 先備 → 進階 | `==>` (粗箭頭) | 用來判斷主題是否「已解鎖」：若某主題所有 prerequisite 來源皆已完成，才視為可獨立起步 |
 | `related` | 任一方向皆可 | `-->` (細箭頭) | 推薦器會同時看出入邊，做為鄰接推薦來源 |
