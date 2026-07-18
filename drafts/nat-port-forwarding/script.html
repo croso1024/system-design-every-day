@@ -4,6 +4,7 @@
 
   var PUBLIC_IP = "203.0.113.50";
   var nextExtPort = 40000;
+  var nextClientPort = 51000;
   var mode = "snat";
   var entries = [];
   var lastEntryId = null;
@@ -108,11 +109,18 @@
     return null;
   }
 
-  function findByExtPort(extPort, peerIp) {
+  // 找「同一客戶端 → 同一外部 port」的既有連線追蹤列（非規則列），供去重沿用。
+  function findDnatFlow(extPort, clientIp) {
     for (var i = 0; i < entries.length; i++) {
       var e = entries[i];
-      if (String(e.extPort) === String(extPort) && e.peerIp === peerIp) return e;
-      if (e.type === "DNAT" && String(e.extPort) === String(extPort)) return e;
+      if (
+        e.type === "DNAT" &&
+        e.state !== "forward-rule" &&
+        String(e.extPort) === String(extPort) &&
+        e.peerIp === clientIp
+      ) {
+        return e;
+      }
     }
     return null;
   }
@@ -152,6 +160,32 @@
     };
     entries.push(row);
     return row;
+  }
+
+  // 「設定轉發規則」＝在邊界開一個洞（DNAT rule），與實際送連線分開。
+  // 沒有先開洞就送入站連線 → 走 sendDnat 的 DROP 分支。
+  function openDnatRule() {
+    var extPort = val("nat-ext-port");
+    var fwdIp = val("nat-fwd-ip");
+    var fwdPort = val("nat-fwd-port");
+
+    if (!validIPv4(fwdIp) || !validPort(extPort) || !validPort(fwdPort)) {
+      setStatus("請先輸入合法的外部 Port、內網 IP 與內網 Port（1–65535）再設定轉發規則。");
+      return;
+    }
+
+    var rule = ensureDnatRule(extPort, fwdIp, fwdPort);
+    lastEntryId = null; // 規則本身不是連線，不能拿來模擬回程
+    renderTable(rule.id, "new");
+    setStatus(
+      "已設定 Port Forward 規則 #" +
+        rule.id +
+        "：外部 " +
+        rule.external +
+        " → 內網 " +
+        rule.internal +
+        "。現在按「送出連線」試試；若把外部 Port 改成沒開洞的值，封包會被丟棄。"
+    );
   }
 
   function sendSnat() {
@@ -233,14 +267,64 @@
     var fwdPort = val("nat-fwd-port");
     var clientIp = val("nat-client-ip");
 
-    if (!validIPv4(fwdIp) || !validIPv4(clientIp) || !validPort(extPort) || !validPort(fwdPort)) {
-      setStatus("請輸入合法的 IPv4 與 Port（1–65535）。");
+    if (!validIPv4(clientIp) || !validPort(extPort)) {
+      setStatus("請輸入合法的外部客戶端 IPv4 與外部 Port（1–65535）。");
       renderTable(null);
       return;
     }
 
-    var clientPort = "51000";
-    var rule = ensureDnatRule(extPort, fwdIp, fwdPort);
+    // 防火牆預設拒絕入站：沒有先「設定轉發規則」開洞，就丟棄。
+    var rule = findDnatRule(extPort);
+    if (!rule) {
+      var dropPort = String(nextClientPort + 1);
+      setPacket(
+        pktBefore,
+        { src: clientIp + ":" + dropPort, dst: PUBLIC_IP + ":" + extPort, proto: "TCP", dir: "WAN → Router" },
+        {}
+      );
+      setPacket(
+        pktAfter,
+        { src: clientIp + ":" + dropPort, dst: PUBLIC_IP + ":" + extPort, proto: "TCP", dir: "DROP（無轉發規則）" },
+        {}
+      );
+      renderTable(null, "drop");
+      setStatus(
+        "防火牆預設拒絕入站：外部 Port " +
+          extPort +
+          " 沒有對應的 Port Forward 規則，封包被丟棄。請先按「設定轉發規則」開洞。"
+      );
+      lastEntryId = null;
+      return;
+    }
+
+    // 規則存在 → 依「客戶端＋外部 port」去重：同客戶端重送沿用既有追蹤列，避免疊出重複列。
+    var flow = findDnatFlow(extPort, clientIp);
+    var highlight = "new";
+    var clientPort;
+    if (flow) {
+      clientPort = flow.peerPort;
+      flow.state = "established";
+      highlight = "hit";
+    } else {
+      nextClientPort += 1;
+      clientPort = String(nextClientPort);
+      seq += 1;
+      flow = {
+        id: seq,
+        type: "DNAT",
+        lanIp: rule.lanIp,
+        lanPort: rule.lanPort,
+        extPort: extPort,
+        peerIp: clientIp,
+        peerPort: clientPort,
+        internal: rule.internal,
+        external: PUBLIC_IP + ":" + extPort,
+        peer: clientIp + ":" + clientPort,
+        state: "established"
+      };
+      entries.push(flow);
+    }
+    lastEntryId = flow.id;
 
     var before = {
       src: clientIp + ":" + clientPort,
@@ -250,53 +334,28 @@
     };
     setPacket(pktBefore, before, {});
 
-    // Simulate firewall: only forwarded ports accepted
-    if (!rule) {
-      setPacket(pktAfter, {
-        src: clientIp + ":" + clientPort,
-        dst: PUBLIC_IP + ":" + extPort,
-        proto: "TCP",
-        dir: "DROP（無轉發規則）"
-      }, {});
-      renderTable(null, "drop");
-      setStatus("防火牆預設拒絕入站：沒有對應 Port Forward，封包被丟棄。");
-      lastEntryId = null;
-      return;
-    }
-
-    seq += 1;
-    var flow = {
-      id: seq,
-      type: "DNAT",
-      lanIp: fwdIp,
-      lanPort: fwdPort,
-      extPort: extPort,
-      peerIp: clientIp,
-      peerPort: clientPort,
-      internal: fwdIp + ":" + fwdPort,
-      external: PUBLIC_IP + ":" + extPort,
-      peer: clientIp + ":" + clientPort,
-      state: "established"
-    };
-    entries.push(flow);
-    lastEntryId = flow.id;
-
     var after = {
       src: clientIp + ":" + clientPort,
-      dst: fwdIp + ":" + fwdPort,
+      dst: flow.internal,
       proto: "TCP",
       dir: "DNAT（改寫 dst）"
     };
     setPacket(pktAfter, after, { dst: true });
-    renderTable(flow.id, "new");
+    renderTable(flow.id, highlight);
     setStatus(
-      "命中 Port Forward 規則 #" +
-        rule.id +
-        "：目的改寫為 " +
-        flow.internal +
-        "，並建立連線追蹤列 #" +
-        flow.id +
-        "。"
+      highlight === "hit"
+        ? "命中既有追蹤列 #" +
+            flow.id +
+            "：同一客戶端的既有連線，目的仍改寫為 " +
+            flow.internal +
+            "（不重複建列）。"
+        : "命中 Port Forward 規則 #" +
+            rule.id +
+            "：目的改寫為 " +
+            flow.internal +
+            "，並建立連線追蹤列 #" +
+            flow.id +
+            "。"
     );
   }
 
@@ -377,6 +436,7 @@
     lastEntryId = null;
     seq = 0;
     nextExtPort = 40000;
+    nextClientPort = 51000;
     setPacket(pktBefore, { src: "—", dst: "—", proto: "TCP", dir: "—" }, {});
     setPacket(pktAfter, { src: "—", dst: "—", proto: "TCP", dir: "—" }, {});
     renderTable(null);
@@ -391,6 +451,8 @@
     });
     if (formSnat) formSnat.hidden = mode !== "snat";
     if (formDnat) formDnat.hidden = mode !== "dnat";
+    var ruleBtn = document.getElementById("nat-btn-rule");
+    if (ruleBtn) ruleBtn.hidden = mode !== "dnat";
     setStatus(
       mode === "snat"
         ? "出站模式：內網主機連外部服務，觀察 SNAT 如何分配公網 port。"
@@ -407,9 +469,11 @@
     });
   }
 
+  var btnRule = document.getElementById("nat-btn-rule");
   var btnSend = document.getElementById("nat-btn-send");
   var btnReply = document.getElementById("nat-btn-reply");
   var btnReset = document.getElementById("nat-btn-reset");
+  if (btnRule) btnRule.addEventListener("click", openDnatRule);
   if (btnSend) {
     btnSend.addEventListener("click", function () {
       if (mode === "snat") sendSnat();

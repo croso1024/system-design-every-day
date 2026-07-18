@@ -205,7 +205,16 @@
   </div>
   <p class="cap">Masquerade 是 SNAT 的動態版：出口 IP 隨介面位址變（DHCP 換 IP 時規則不用重寫）。</p>
 
-  <p>NAT 表一列通常至少包含：協議（TCP/UDP）、內網五元組資訊、對外映射的公有 IP:port、對端位址、以及逾時。TCP 有連線狀態可跟較久；UDP 通常用較短 idle timeout。表滿或 timeout 會造成「偶發連線失敗」——這是正式環境除錯時常見的盲點。</p>
+  <p>NAT 表一列通常至少包含：協議（TCP/UDP）、內網五元組資訊、對外映射的公有 IP:port、對端位址、以及逾時。TCP 有連線狀態可跟較久；UDP 通常用較短 idle timeout。在 Linux 上可用 <code>conntrack -L</code> 直接看這張表：</p>
+
+  <pre><code>$ conntrack -L
+tcp  6  431999 ESTABLISHED \
+    src=10.0.0.8   dst=93.184.216.34 sport=54321 dport=443   \  # 原始方向（內→外）
+    src=93.184.216.34 dst=203.0.113.50 sport=443 dport=40001 \  # 回程方向（外→內）
+    [ASSURED]</code></pre>
+  <p class="cap">同一筆連線用「原始 + 回程」兩個方向的五元組描述：回程的 <code>dport=40001</code> 就是路由器替 <code>10.0.0.8:54321</code> 分配的對外 port，回來的封包靠它還原。</p>
+
+  <p>這也點出 NAPT 的天花板：單一公有 IP 對每個「協議 × 對端 IP:port」大約只有 <strong>~64K 個可用來源 port</strong>。連線暴增（大量短連線、P2P、掃描）時 port 會耗盡，或 conntrack 表達到 <code>nf_conntrack_max</code> 上限，表現就是<strong>偶發、難重現的連線失敗</strong>——正式環境除錯時常見的盲點。</p>
 
   <div class="callout accent">
     <div class="c-title"><span class="ic">關鍵</span>NAT 破壞了端到端原則</div>
@@ -250,8 +259,13 @@
 
   <p>雲端對應觀念：Security Group／NLB Listener／Ingress 規則，本質也是「在邊界決定哪些外→內流量被改寫或放行」。家用路由器的 Port Forward 面板，只是同一設計的精簡版。</p>
 
+  <div class="callout warn">
+    <div class="c-title"><span class="ic">陷阱</span>設好了卻連不到？先懷疑 CGNAT／雙 NAT</div>
+    <p>「Port Forward 明明設對了，外面就是連不進來」——最常見的真兇是<strong>你的路由器根本沒有公有 IP</strong>。當 IPv4 位址枯竭，許多 ISP 改發<strong>私有 IP（如 <code>100.64.0.0/10</code>）</strong>給用戶，再於機房用一層 <strong>CGNAT（Carrier-Grade NAT，營運商級 NAT）</strong>共用少數公網 IP。這時封包會經過<strong>兩層 NAT</strong>：家用路由器一層、ISP 一層。你在自家路由器開的洞，外部流量根本到不了那台你看不見、也無權設定的 ISP NAT。同理，把數據機接到自己的路由器 WAN 口卻沒設 Bridge 模式，也會在自家造成雙 NAT。<strong>破解法</strong>：向 ISP 申請公有／固定 IP、把前段設備切 Bridge 模式，或改用不需入站洞的反向 Tunnel／VPN（見 s7）。</p>
+  </div>
+
   <div class="oneliner">
-    <b>一句話答法</b>Port Forwarding 是 DNAT：把打到公有 IP:外部 port 的封包目的改寫成內網主機:服務 port，並依賴狀態表處理回程。
+    <b>一句話答法</b>Port Forwarding 是 DNAT：把打到公有 IP:外部 port 的封包目的改寫成內網主機:服務 port，並依賴狀態表處理回程；若卡在 CGNAT／雙 NAT 之後，開洞也沒用，得改走 Tunnel 或申請公網 IP。
   </div>
 </section>
 
@@ -283,16 +297,32 @@
 
   <p>除錯口訣：先問「封包有沒有被防火牆丟掉」，再問「NAT 有沒有改對」。兩者混淆時，常見現象是：tcpdump 在 WAN 口看到 SYN，但 LAN 口沒有對應封包——可能是入站規則沒放行，或 DNAT 目標寫錯。</p>
 
-  <div class="nat-flow" aria-label="邊界處理順序示意">
+  <div class="nat-flow" aria-label="Linux netfilter 入站轉發處理順序示意">
     <span class="nat-chip">封包抵達</span>
     <span class="nat-chip op">→</span>
-    <span class="nat-chip fw">防火牆判定</span>
+    <span class="nat-chip pub">DNAT 改寫目的<br>(PREROUTING)</span>
     <span class="nat-chip op">→</span>
-    <span class="nat-chip pub">NAT 改寫</span>
+    <span class="nat-chip">路由決策</span>
+    <span class="nat-chip op">→</span>
+    <span class="nat-chip fw">防火牆過濾<br>(FORWARD)</span>
     <span class="nat-chip op">→</span>
     <span class="nat-chip priv">轉發到目標區</span>
   </div>
-  <p class="cap">實際 chain 順序因實作而異（如 Linux 的 PREROUTING DNAT 在路由決策前），面試重點是「過濾與改寫是兩層決策」，不要混成一句「開了 port 就好」。</p>
+  <p class="cap">以 Linux netfilter 入站轉發為例：DNAT 在 <code>PREROUTING</code>（路由決策<em>前</em>）先改寫目的，過濾則在 <code>FORWARD</code> 鏈判定。順序依 hook 而定，但面試重點不變——「改寫」與「過濾」是<strong>兩層獨立決策</strong>，別混成一句「開了 port 就好」。</p>
+
+  <p>把上述心智模型落成一組最小 iptables 規則，正好看出「改寫（<code>nat</code> 表）」與「過濾（<code>filter</code> 表）」是分開的兩件事：</p>
+
+  <pre><code># 出站放行、入站預設拒絕；永遠放行已建立/相關連線的回程
+iptables -P FORWARD DROP
+iptables -A FORWARD -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+
+# 改寫：Port Forward 外部 :8080 → 內網 10.0.0.20:8080（DNAT 在 nat 表）
+iptables -t nat -A PREROUTING -i wan0 -p tcp --dport 8080 \
+         -j DNAT --to-destination 10.0.0.20:8080
+
+# 過濾：還得在 filter 表放行這條新入站，否則 FORWARD 預設 DROP 會擋掉
+iptables -A FORWARD -p tcp -d 10.0.0.20 --dport 8080 -j ACCEPT</code></pre>
+  <p class="cap">只寫了 DNAT 卻忘了那條 <code>FORWARD ACCEPT</code>，就是「規則寫了卻沒通」的經典陷阱——改寫成功，但過濾把它擋下。</p>
 
   <div class="oneliner">
     <b>一句話答法</b>防火牆決定允不允許，NAT 決定如何改寫；入站預設拒絕、只開必要洞，並永遠放行已建立連線的回程。
@@ -355,6 +385,7 @@
       </div>
 
       <div class="nat-controls">
+        <button type="button" class="btn" id="nat-btn-rule" hidden>設定轉發規則</button>
         <button type="button" class="btn primary" id="nat-btn-send">送出連線</button>
         <button type="button" class="btn" id="nat-btn-reply">模擬回程</button>
         <button type="button" class="btn" id="nat-btn-reset">重置</button>
@@ -384,7 +415,7 @@
         </div>
       </div>
 
-      <p class="nat-legend-note">路由器公有 IP 固定為 <code>203.0.113.50</code>。SNAT 會分配對外 port；DNAT 僅在已設定的 Port Forward 規則上放行。</p>
+      <p class="nat-legend-note">路由器公有 IP 固定為 <code>203.0.113.50</code>。SNAT 會分配對外 port；DNAT 模式下請<strong>先「設定轉發規則」開洞，再「送出連線」</strong>——若把外部 Port 改成沒開洞的值再送，會示範防火牆預設拒絕、封包被丟棄（DROP）。</p>
 
       <div class="nat-table-wrap">
         <table class="nat-table" id="nat-table">
@@ -459,7 +490,13 @@
 
   <div class="callout accent">
     <div class="c-title"><span class="ic">面試</span>常被追問的延伸</div>
-    <p>「為什麼 WebRTC 需要 STUN？」——因為雙方都可能在 NAT 後，需要得知各自的公網映射並嘗試打洞。「為什麼微服务在 K8s 還要再談 NAT？」——NodePort／kube-proxy／Cloud NAT 都是同一類邊界改寫，只是控制面不同。</p>
+    <p>「為什麼 WebRTC 需要 STUN？」——因為雙方都可能在 NAT 後，得先透過 STUN 問出「我對外的公網 IP:port 長怎樣」，再交換給對方嘗試打洞。而<strong>打不打得通，取決於 NAT 類型</strong>：</p>
+    <ul>
+      <li><strong>Full-cone</strong>：對外映射固定，任何外部主機都能循該 port 回連——最好打洞。</li>
+      <li><strong>Restricted / Port-restricted</strong>：只放行「你先連過的」對端（IP／IP+port），需雙方近乎同時對打。</li>
+      <li><strong>Symmetric</strong>：對每個不同目的地都分配<strong>不同</strong>對外 port，STUN 問到的映射對 peer 不成立，打洞多半失敗，只能退回 <strong>TURN 中繼</strong>。</li>
+    </ul>
+    <p>「為什麼微服務在 K8s 還要再談 NAT？」——NodePort／kube-proxy／Cloud NAT 都是同一類邊界改寫，只是控制面不同。</p>
   </div>
 
   <div class="oneliner">
