@@ -91,14 +91,14 @@
 | `templates/base.html` | 全站 HTML 外殼範本 (Notion 淺色版) | 嚴格讀取，不建議手動更改 |
 | `drafts/{topic-id}/` | **撰稿主要工作區（內容原始碼）** | AI 建立與寫入 content.html 和 script.html，隨產物一起提交 |
 | `books/{topic-id}/index.html` | 發佈後的最終主題網頁 | **自動生成**（由 `generate.js` 產出，勿手動編輯） |
-| `books/index.html` | 手冊首頁（目錄 + 可點擊心智圖） | **自動生成**（由 `generate.js` 產出，勿手動編輯） |
+| `books/index.html` | 手冊首頁（目錄 + 可點擊 Cytoscape 學習地圖） | **自動生成**（由 `generate.js` 產出，勿手動編輯） |
 | `node scripts/completed-ledger.js` | 完成日誌與 todo 條目查詢 CLI | **唯讀查詢** |
-| `node scripts/mindmap.js` | 心智圖推薦與 Mermaid 編譯 CLI | **唯讀查詢與編譯** |
+| `node scripts/mindmap.js` | 心智圖推薦、Mermaid（CLI）與首頁學習地圖 payload 編譯 | **唯讀查詢與編譯** |
 | `node scripts/add-topic.js` | 新增主題到 mindmap+todo（雙檔原子寫入） | **自動化執行**（前段選題） |
-| `node scripts/generate.js` | 範本組裝、Mermaid 編譯與索引更新編譯器 | **自動化執行** |
+| `node scripts/generate.js` | 範本組裝、首頁學習地圖 payload 編譯與索引更新 | **自動化執行** |
 | `node scripts/remove-todo.js` | 從 todo.json 移除已完成主題的 CLI 腳本 | **自動化執行** |
 | `node scripts/remove-completed.js` | 從 completed.json 撤回主題並重繪索引（三檔交易式寫入 + 回滾） | **自動化執行**（撤回/重做用） |
-| `node scripts/validate.js` | 狀態檔一致性驗證（含todo<->completed互斥 + prerequisite 環偵測 + books/index<->completed 卡片同步） | **改完 JSON 必跑** |
+| `node scripts/validate.js` | 狀態檔一致性驗證（含todo<->completed互斥 + prerequisite 環偵測 + books/index 學習地圖 payload <-> completed/mindmap 同步） | **改完 JSON 必跑** |
 
 ---
 
@@ -108,7 +108,7 @@
 
 - **Lint / Test 檢查（唯一品質閘門）**：`node scripts/validate.js`。專案沒有單元測試框架、也沒有獨立 linter；CI（`.github/workflows/deploy.yml`）每次 push 到 `main` 都只跑這支驗證，通過後才部署。改完任何 `docs/*.json` 必跑。
 - **Build（產頁）**：先建立 `drafts/<topic-id>/content.html`（內容須含合法 `<section id="..."><h2>...</h2>` 結構，否則 `generate.js` 會零副作用 exit 1），再跑 `node scripts/generate.js --topic <id> --title "..." --category "..."`。draft 是產物的內容原始碼，`generate.js` 只讀不刪，隨產物一起提交。
-- **Run（沒有 dev server）**：產物是 `books/` 下的純靜態 HTML，無後端、無打包。用任意靜態伺服器預覽即可，例如 `python3 -m http.server 8080 --directory books`（或 `npx serve books`），再用瀏覽器開 `http://localhost:8080/index.html`。注意首頁的可點擊技能樹是用 **CDN 載入的 Mermaid** 繪製，故渲染心智圖需要對外網路。
+- **Run（沒有 dev server）**：產物是 `books/` 下的純靜態 HTML，無後端、無打包。用任意靜態伺服器預覽即可，例如 `python3 -m http.server 8080 --directory books`（或 `npx serve books`），再用瀏覽器開 `http://localhost:8080/index.html`。注意首頁的可點擊學習地圖是用 **CDN 載入的 Cytoscape** 繪製，故互動渲染需要對外網路；若 CDN 失效或瀏覽器停用 JavaScript，首頁會自動退回 server-rendered 的純文字已完成文章清單（連結仍可用）。
 - **副作用提醒**：`generate.js` 會異動受版控的 `docs/completed.json`、`books/index.html` 與 `books/<id>/index.html`。若只是臨時測試流程，請事後用 git 還原這些檔案，避免把試打的主題誤留進手冊。
 
 ## 🚀 Remote Sync Strategy（Only for Cursor Cloud Automation / Headless mode）

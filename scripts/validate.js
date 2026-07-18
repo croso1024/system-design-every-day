@@ -137,16 +137,33 @@ function validateMutualExclusion(todoIds, completedIds) {
 }
 
 /**
- * books/index.html ↔ completed.json 一致性檢查。
- * 首頁卡片與 completed 條目 1:1 對應，故比對「卡片 href 集合」即可偵測首頁過時：
- * 例如 remove-completed.js --no-reindex 後尚未補重繪、或 generate/撤回中途寫檔失敗。
- * 只取卡片 href 作為訊號（不解析 Mermaid 節點狀態——後者過於脆弱且與卡片同源於 completed）。
+ * 從 books/index.html 抽出 embedded Learning Map JSON payload。
  *
- * 注意：下方 cardRegex 與 lib/books.js 的 buildBooksIndexHtml 卡片模板「耦合」；
- *       若日後更動卡片 anchor 的 HTML 結構，必須同步更新此 regex，否則會誤報。
+ * ⚠️ 耦合提醒：下方 regex 綁定了 lib/books.js `buildBooksIndexHtml` 注入的
+ *    `<script id="learning-map-data" type="application/json">` 之「確切屬性順序與間距」
+ *    （id 在前、type 在後、單一空白）。若日後調整該 <script> 標籤的屬性順序 / 寫法，
+ *    必須同步更新此 regex，否則會誤報「缺少可解析 payload」而非真正原因。
+ * @returns {object|null}
  */
-function validateBooksIndexConsistency(completed) {
-  // 期望的 href 集合：與 buildBooksIndexHtml 同邏輯——item.path 去掉開頭 books/。
+function extractLearningMapPayload(html) {
+  const match = html.match(
+    /<script\s+id="learning-map-data"\s+type="application\/json">([\s\S]*?)<\/script>/i
+  );
+  if (!match) return null;
+  try {
+    return JSON.parse(match[1]);
+  } catch (e) {
+    error(`books/index.html learning-map-data JSON 解析失敗：${e.message}`);
+    return null;
+  }
+}
+
+/**
+ * books/index.html embedded payload ↔ completed.json 路徑一致性。
+ * 首頁不再渲染靜態卡片網格；以 payload 內 completed topics 的 path 作為訊號，
+ * 偵測首頁過時（例如 remove-completed.js --no-reindex 後尚未補重繪）。
+ */
+function validateBooksIndexConsistency(completed, mindmap) {
   const expected = new Set(
     completed
       .filter((item) => item && typeof item.path === 'string')
@@ -154,75 +171,216 @@ function validateBooksIndexConsistency(completed) {
   );
 
   if (!fs.existsSync(BOOKS_INDEX_PATH)) {
-    if (expected.size === 0) return; // 尚未發佈任何主題且首頁未生成 → 合法
+    if (expected.size === 0) return;
     error(`books/index.html 不存在，但 completed.json 有 ${expected.size} 筆主題。請執行 node scripts/generate.js 重新生成首頁。`);
     return;
   }
 
   const html = fs.readFileSync(BOOKS_INDEX_PATH, 'utf8');
-  // 鎖定卡片 anchor（class 以 "block rounded-xl" 起頭），避免誤抓 preconnect 等其他連結。
-  const actual = new Set();
-  const cardRegex = /<a\s+href="([^"]+)"\s+class="block rounded-xl/g;
-  let match;
-  while ((match = cardRegex.exec(html)) !== null) {
-    actual.add(match[1]);
+  const payload = extractLearningMapPayload(html);
+  if (!payload) {
+    error('books/index.html 缺少可解析的 <script id="learning-map-data" type="application/json"> payload（首頁過時或未改用 Cytoscape Learning Map，請執行 node scripts/reindex-home.js 只重繪首頁，或 generate.js / rebuild-all.js）。');
+    return;
   }
-
-  // completed 有、首頁缺 → 首頁漏渲染（過時）。
-  expected.forEach((href) => {
-    if (!actual.has(href)) {
-      error(`books/index.html 缺少 completed.json 主題卡片 "${href}"（首頁過時，請重跑 generate.js 或補重繪首頁）。`);
-    }
-  });
-  // 首頁有、completed 無 → 殘留已撤回主題（多半是 remove-completed.js --no-reindex 後未補重繪）。
-  actual.forEach((href) => {
-    if (!expected.has(href)) {
-      error(`books/index.html 殘留卡片 "${href}"，但其不在 completed.json（若剛用 remove-completed.js --no-reindex，請補重繪首頁後再驗證）。`);
-    }
-  });
-}
-
-/**
- * books/index.html 心智圖節點狀態 ↔ completed.json 一致性檢查。
- * 過去刻意不驗 mermaid 節點狀態（假設它與卡片「同源於 completed」），但該假設曾被打破：
- * generateMermaid 早期無條件從磁碟重讀 completed.json，在「尚未 saveCompleted」的呼叫端會把
- * 最新主題節點畫成 :::pending（off-by-one lag），卡片卻已正確——兩者短暫不同源。修正後兩者
- * 同源，本檢查作為安全網，確保此類節點落後 / 殘留完成態不再靜默溜過品質閘門。
- * 只有「同時是 mindmap 節點」的已完成主題才會出現在圖上；非節點者由 validateMindmap 負責。
- */
-function validateBooksIndexMermaidConsistency(completed, mindmap) {
-  if (!fs.existsSync(BOOKS_INDEX_PATH)) return; // 「首頁不存在」已由卡片檢查涵蓋
 
   const nodeIds = new Set(
     (mindmap && Array.isArray(mindmap.nodes) ? mindmap.nodes : [])
       .filter((n) => n && typeof n.id === 'string')
       .map((n) => n.id)
   );
-  const expectedCompleted = new Set(
-    completed
-      .filter((item) => item && typeof item.id === 'string' && nodeIds.has(item.id))
-      .map((item) => item.id)
-  );
 
-  const html = fs.readFileSync(BOOKS_INDEX_PATH, 'utf8');
-  const mermaidCompleted = new Set();
-  // 匹配 generateMermaid 產生的節點行：`  <id>["label"]:::completed`
-  const nodeRegex = /^\s{2,}([A-Za-z0-9_-]+)\[".*?"\]:::completed\s*$/gm;
-  let match;
-  while ((match = nodeRegex.exec(html)) !== null) {
-    mermaidCompleted.add(match[1]);
-  }
-
-  // completed 有、圖上非 :::completed → 節點狀態落後（mermaid off-by-one lag 的特徵）。
-  expectedCompleted.forEach((id) => {
-    if (!mermaidCompleted.has(id)) {
-      error(`books/index.html 心智圖節點 "${id}" 未標記為 :::completed，但其在 completed.json（mermaid 節點狀態落後，請重跑 generate.js / rebuild-all.js 重繪首頁）。`);
+  const actual = new Set();
+  const topics = Array.isArray(payload.topics) ? payload.topics : [];
+  topics.forEach((topic) => {
+    if (!topic || typeof topic.id !== 'string') return;
+    if (topic.completed && typeof topic.path === 'string' && topic.path) {
+      actual.add(topic.path.replace(/^books\//, ''));
     }
   });
-  // 圖上 :::completed、但不在 completed → 殘留已撤回主題的完成態。
-  mermaidCompleted.forEach((id) => {
-    if (!expectedCompleted.has(id)) {
-      error(`books/index.html 心智圖節點 "${id}" 標記為 :::completed，但其不在 completed.json（首頁殘留過時完成態，請重繪首頁）。`);
+
+  // 只比對「同時是 mindmap 節點」的 completed 條目（與 Learning Map 可見範圍一致）。
+  const expectedOnMap = new Set(
+    completed
+      .filter((item) => item && typeof item.id === 'string' && nodeIds.has(item.id) && typeof item.path === 'string')
+      .map((item) => item.path.replace(/^books\//, ''))
+  );
+
+  expectedOnMap.forEach((href) => {
+    if (!actual.has(href)) {
+      error(`books/index.html Learning Map payload 缺少 completed 路徑 "${href}"（首頁過時，請執行 node scripts/reindex-home.js 只重繪首頁，或 generate.js / rebuild-all.js）。`);
+    }
+  });
+  actual.forEach((href) => {
+    if (!expectedOnMap.has(href)) {
+      error(`books/index.html Learning Map payload 殘留 completed 路徑 "${href}"，但其不在 completed.json 的 mindmap 節點集合（請執行 node scripts/reindex-home.js 重繪首頁）。`);
+    }
+  });
+}
+
+/**
+ * books/index.html Learning Map payload 結構與狀態一致性檢查。
+ * 取代舊的 Mermaid :::completed regex 安全網。
+ */
+function validateBooksIndexLearningMapConsistency(completed, mindmap) {
+  if (!fs.existsSync(BOOKS_INDEX_PATH)) return;
+
+  const html = fs.readFileSync(BOOKS_INDEX_PATH, 'utf8');
+  const payload = extractLearningMapPayload(html);
+  if (!payload) return; // 缺少 payload 已由 validateBooksIndexConsistency 報錯
+
+  const { buildLearningMapData } = require('./mindmap');
+  const expectedPayload = buildLearningMapData(completed);
+
+  const mindmapNodes = Array.isArray(mindmap && mindmap.nodes) ? mindmap.nodes : [];
+  const mindmapById = new Map(
+    mindmapNodes
+      .filter((n) => n && typeof n.id === 'string')
+      .map((n) => [n.id, n])
+  );
+  const completedById = new Map(
+    (Array.isArray(completed) ? completed : [])
+      .filter((item) => item && typeof item.id === 'string')
+      .map((item) => [item.id, item])
+  );
+
+  const topics = Array.isArray(payload.topics) ? payload.topics : [];
+  const seenIds = new Set();
+
+  topics.forEach((topic, index) => {
+    const label = `learning-map topics[${index}]`;
+    if (!topic || typeof topic.id !== 'string') {
+      error(`${label} 缺少有效 id`);
+      return;
+    }
+    if (seenIds.has(topic.id)) {
+      error(`${label} 重複出現 id "${topic.id}"（每個 mindmap node 必須恰好一次）`);
+    }
+    seenIds.add(topic.id);
+
+    const mindNode = mindmapById.get(topic.id);
+    if (!mindNode) {
+      error(`${label} id "${topic.id}" 不在 mindmap.json nodes`);
+      return;
+    }
+    if (topic.title !== mindNode.title) {
+      error(`${label} title 不符：payload="${topic.title}" mindmap="${mindNode.title}"`);
+    }
+    if (topic.category !== mindNode.category) {
+      error(`${label} category 不符：payload="${topic.category}" mindmap="${mindNode.category}"`);
+    }
+
+    const ledger = completedById.get(topic.id);
+    const shouldComplete = Boolean(ledger);
+    if (Boolean(topic.completed) !== shouldComplete) {
+      error(`${label} completed 狀態不符 completed.json（payload=${topic.completed}, ledger=${shouldComplete}）`);
+    }
+
+    if (shouldComplete) {
+      const expectedPath = (ledger.path || `${topic.id}/index.html`).replace(/^books\//, '');
+      const actualPath = typeof topic.path === 'string' ? topic.path.replace(/^books\//, '') : null;
+      if (actualPath !== expectedPath) {
+        error(`${label} path 不符：payload="${actualPath}" expected="${expectedPath}"`);
+      }
+      // buildLearningMapData 對缺值 completed_at 會正規化為 null；此處兩側同樣 ?? null，
+      // 避免「payload=null vs ledger=undefined」在合法但缺欄位的 ledger 上誤報。
+      if ((topic.completed_at ?? null) !== (ledger.completed_at ?? null)) {
+        error(`${label} completed_at 不符：payload="${topic.completed_at}" ledger="${ledger.completed_at}"`);
+      }
+    } else if (topic.path !== null && topic.path !== undefined) {
+      error(`${label} 為 pending，但 path 不是 null（"${topic.path}"）`);
+    }
+  });
+
+  mindmapById.forEach((_node, id) => {
+    if (!seenIds.has(id)) {
+      error(`mindmap.json 節點 "${id}" 未出現在 books/index.html Learning Map payload topics`);
+    }
+  });
+
+  // Category 名稱集合一致
+  const expectedCategoryNames = new Set(expectedPayload.categories.map((c) => c.name));
+  const actualCategoryNames = new Set(
+    (Array.isArray(payload.categories) ? payload.categories : []).map((c) => c && c.name)
+  );
+  expectedCategoryNames.forEach((name) => {
+    if (!actualCategoryNames.has(name)) {
+      error(`Learning Map payload 缺少 category "${name}"`);
+    }
+  });
+  actualCategoryNames.forEach((name) => {
+    if (name && !expectedCategoryNames.has(name)) {
+      error(`Learning Map payload 出現多餘 category "${name}"`);
+    }
+  });
+
+  // Category relations：比對 builder 重算的聚合結果
+  function relationKey(rel) {
+    return `${rel.sourceCategory}|${rel.targetCategory}|${rel.type}|${rel.count}`;
+  }
+  const expectedRelations = new Set(
+    (expectedPayload.categoryRelations || []).map(relationKey)
+  );
+  const actualRelations = new Set(
+    (Array.isArray(payload.categoryRelations) ? payload.categoryRelations : []).map((rel) => {
+      if (!rel || typeof rel.sourceCategory !== 'string' || typeof rel.targetCategory !== 'string') {
+        error('Learning Map payload categoryRelations 含無效項目');
+        return '';
+      }
+      if (rel.type !== 'prerequisite' && rel.type !== 'related') {
+        error(`Learning Map payload categoryRelations 含非聚合類型 "${rel.type}"`);
+      }
+      return relationKey(rel);
+    })
+  );
+
+  expectedRelations.forEach((key) => {
+    if (!actualRelations.has(key)) {
+      error(`Learning Map payload 缺少聚合 relation：${key}`);
+    }
+  });
+  actualRelations.forEach((key) => {
+    if (key && !expectedRelations.has(key)) {
+      error(`Learning Map payload 多餘聚合 relation：${key}`);
+    }
+  });
+
+  // Same-category topic↔topic relations（選取分群後才顯示；payload 必須完整）
+  function topicRelationKey(rel) {
+    return `${rel.source}|${rel.target}|${rel.type}|${rel.category}`;
+  }
+  const expectedTopicRelations = new Set(
+    (expectedPayload.topicRelations || []).map(topicRelationKey)
+  );
+  const actualTopicRelations = new Set(
+    (Array.isArray(payload.topicRelations) ? payload.topicRelations : []).map((rel) => {
+      if (!rel || typeof rel.source !== 'string' || typeof rel.target !== 'string' || typeof rel.category !== 'string') {
+        error('Learning Map payload topicRelations 含無效項目');
+        return '';
+      }
+      if (rel.type !== 'prerequisite' && rel.type !== 'related') {
+        error(`Learning Map payload topicRelations 含非預期類型 "${rel.type}"`);
+      }
+      if (!mindmapById.has(rel.source) || !mindmapById.has(rel.target)) {
+        error(`Learning Map payload topicRelations 指向未知 topic：${rel.source} -> ${rel.target}`);
+      } else {
+        const sourceNode = mindmapById.get(rel.source);
+        const targetNode = mindmapById.get(rel.target);
+        if (sourceNode.category !== targetNode.category) {
+          error(`Learning Map payload topicRelations 不可含跨 Category 邊：${rel.source} -> ${rel.target}`);
+        }
+      }
+      return topicRelationKey(rel);
+    })
+  );
+
+  expectedTopicRelations.forEach((key) => {
+    if (!actualTopicRelations.has(key)) {
+      error(`Learning Map payload 缺少 topic relation：${key}`);
+    }
+  });
+  actualTopicRelations.forEach((key) => {
+    if (key && !expectedTopicRelations.has(key)) {
+      error(`Learning Map payload 多餘 topic relation：${key}`);
     }
   });
 }
@@ -373,8 +531,8 @@ function main() {
   const completedIds = validateCompleted(completed);
   validateMindmap(mindmap, todoIds, completedIds);
   validateMutualExclusion(todoIds, completedIds);
-  validateBooksIndexConsistency(completed);
-  validateBooksIndexMermaidConsistency(completed, mindmap);
+  validateBooksIndexConsistency(completed, mindmap);
+  validateBooksIndexLearningMapConsistency(completed, mindmap);
 
   if (hasError) {
     console.error('\nValidation FAILED. Please fix the errors above.');

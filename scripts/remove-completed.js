@@ -13,7 +13,7 @@
  *   --topic        要撤回的主題 id (必填)
  *   --restore-todo 把該主題加回 docs/todo.json (資料取自 mindmap node)；預設不加
  *   --purge-page   刪除 books/<id>/ 整個發佈頁 (不可逆)；預設保留 (留存頁不影響 validate)
- *   --no-reindex   不重繪 books/index.html；預設會重繪 (讓首頁卡片與心智圖同步)
+ *   --no-reindex   不重繪 books/index.html；預設會重繪 (讓首頁學習地圖與 completed 同步)
  *   --dry-run      只印出將發生的變更，不實際落檔
  *
  * 本腳本不動 mindmap.json (刪 node 會牽動 edges、可能產生懸空邊，屬 topic-explorer 職責)。
@@ -162,7 +162,7 @@ function main() {
     console.log(`已將 "${topicId}" 加回 docs/todo.json。`);
   }
   if (reindex) {
-    console.log('已重繪 books/index.html（卡片與心智圖已同步，該節點轉回 pending）。');
+    console.log('已重繪 books/index.html（學習地圖 payload 已同步，該節點轉回 pending）。');
   }
 
   if (purgePage) {

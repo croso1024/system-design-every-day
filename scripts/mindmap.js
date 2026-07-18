@@ -9,6 +9,7 @@
  * Usage:
  *   node scripts/mindmap.js --action next [--last-topic <topic-id>]
  *   node scripts/mindmap.js --action generate-mermaid
+ *   node scripts/mindmap.js --action generate-learning-map
  */
 
 const fs = require('fs');
@@ -175,10 +176,14 @@ function recommendNext(lastTopicId) {
 /**
  * Compile the Mindmap DAG + Completed topics into an interactive, beautifully styled Mermaid diagram.
  *
- * @param {Array} [completedList] 已完成主題清單。呼叫端（buildBooksIndexHtml）應傳入手上那份
- *   in-memory 清單，讓節點狀態與卡片同源、與存檔時機解耦。省略時（如 CLI）才 fallback 讀磁碟。
- *   ── 這是修正「發佈當下 mermaid 節點落後成 pending」off-by-one bug 的關鍵：舊版無條件讀磁碟，
- *      而 generate.js 在 saveCompleted 之前就呼叫，導致最新主題節點讀到尚未存入的舊狀態。
+ * ⚠️ 保留作為獨立 CLI 工具（`--action generate-mermaid`）。自首頁改用 Cytoscape 學習地圖重構後，
+ *    首頁改由 `buildLearningMapData` 供給，`buildBooksIndexHtml` 已「不再」呼叫本函式；此處僅供
+ *    命令列查閱 Mermaid 語法之用。
+ *
+ * @param {Array} [completedList] 已完成主題清單。呼叫端可傳入手上那份 in-memory 清單，讓節點狀態
+ *   與呼叫端同源、與存檔時機解耦；省略時（如 CLI）才 fallback 讀磁碟。
+ *   ── 沿用與 `buildLearningMapData` 相同的 off-by-one 契約：避免「尚未 saveCompleted」的呼叫端把
+ *      最新主題節點讀成舊狀態（舊版無條件讀磁碟，而 generate.js 在 saveCompleted 之前就呼叫）。
  */
 function generateMermaid(completedList) {
   const mindmap = loadJSON(MINDMAP_PATH, { nodes: [], edges: [] });
@@ -218,12 +223,161 @@ function generateMermaid(completedList) {
   return mermaidCode;
 }
 
+/**
+ * Build a renderer-neutral Learning Map payload for the homepage Cytoscape view.
+ * Hierarchy: Root → Category → Topic.
+ * - categoryRelations: cross-category prerequisite/related, aggregated (related undirected-deduped).
+ * - topicRelations: same-category topic↔topic edges (shown only after cluster selection in the UI).
+ *
+ * @param {Array} [completedList] in-memory completed ledger (same off-by-one contract as generateMermaid)
+ */
+function buildLearningMapData(completedList) {
+  const mindmap = loadJSON(MINDMAP_PATH, { nodes: [], edges: [] });
+  const completed = completedList !== undefined ? completedList : loadJSON(COMPLETED_PATH, []);
+  const completedById = new Map(
+    (Array.isArray(completed) ? completed : [])
+      .filter((item) => item && typeof item.id === 'string')
+      .map((item) => [item.id, item])
+  );
+
+  const nodes = Array.isArray(mindmap.nodes) ? mindmap.nodes : [];
+  const edges = Array.isArray(mindmap.edges) ? mindmap.edges : [];
+
+  // mindmap 節點的 category 為必填（validate.js 會強制非空）。此 fallback 為 defense-in-depth：
+  // 即使遇到未經 validate 的無 category 節點，也把它歸入 'General'（對齊 generate.js 的預設），
+  // 而非讓它因找不到 category 而從學習地圖上「靜默消失」。合法資料下此函式輸出完全不受影響。
+  const nodeCategory = (node) =>
+    (node && typeof node.category === 'string' && node.category.trim()) ? node.category : 'General';
+
+  const categoryNames = [...new Set(nodes.map((node) => nodeCategory(node)))]
+    .sort((left, right) => left.localeCompare(right, 'zh-Hant'));
+
+  const categories = categoryNames.map((name, index) => ({
+    id: `category-${index}`,
+    name,
+    topicIds: [],
+  }));
+  const categoryIndexByName = new Map(categories.map((category, index) => [category.name, index]));
+
+  const sortedTopics = [...nodes].sort((left, right) => {
+    const categoryOrder = nodeCategory(left).localeCompare(nodeCategory(right), 'zh-Hant');
+    if (categoryOrder !== 0) return categoryOrder;
+    const titleOrder = String(left.title || '').localeCompare(String(right.title || ''), 'zh-Hant');
+    return titleOrder !== 0 ? titleOrder : String(left.id).localeCompare(String(right.id));
+  });
+
+  const topics = sortedTopics.map((node) => {
+    const meta = completedById.get(node.id);
+    const isDone = Boolean(meta);
+    const category = nodeCategory(node);
+    const categoryIndex = categoryIndexByName.get(category);
+    if (Number.isInteger(categoryIndex)) {
+      categories[categoryIndex].topicIds.push(node.id);
+    }
+
+    let path = null;
+    let completedAt = null;
+    if (isDone) {
+      completedAt = typeof meta.completed_at === 'string' ? meta.completed_at : null;
+      if (typeof meta.path === 'string' && meta.path) {
+        path = meta.path.replace(/^books\//, '');
+      } else {
+        path = `${node.id}/index.html`;
+      }
+    }
+
+    return {
+      id: node.id,
+      title: node.title,
+      category,
+      completed: isDone,
+      completed_at: completedAt,
+      path,
+    };
+  });
+
+  const topicById = new Map(topics.map((topic) => [topic.id, topic]));
+  const relationByKey = new Map();
+  const topicRelationByKey = new Map();
+
+  edges.forEach((edge) => {
+    if (edge.type !== 'prerequisite' && edge.type !== 'related') return;
+    const sourceTopic = topicById.get(edge.from);
+    const targetTopic = topicById.get(edge.to);
+    if (!sourceTopic || !targetTopic) return;
+
+    let sourceIndex = categoryIndexByName.get(sourceTopic.category);
+    let targetIndex = categoryIndexByName.get(targetTopic.category);
+    if (!Number.isInteger(sourceIndex) || !Number.isInteger(targetIndex)) return;
+
+    // Same-category: keep as topic-level relations for cluster-detail view.
+    if (sourceIndex === targetIndex) {
+      let fromId = edge.from;
+      let toId = edge.to;
+      if (edge.type === 'related' && fromId > toId) {
+        const swap = fromId;
+        fromId = toId;
+        toId = swap;
+      }
+      const topicKey = `${fromId}|${toId}|${edge.type}`;
+      if (!topicRelationByKey.has(topicKey)) {
+        topicRelationByKey.set(topicKey, {
+          source: fromId,
+          target: toId,
+          type: edge.type,
+          category: categories[sourceIndex].id,
+        });
+      }
+      return;
+    }
+
+    if (edge.type === 'related' && sourceIndex > targetIndex) {
+      const swap = sourceIndex;
+      sourceIndex = targetIndex;
+      targetIndex = swap;
+    }
+
+    const key = `${sourceIndex}|${targetIndex}|${edge.type}`;
+    const existing = relationByKey.get(key);
+    if (existing) {
+      existing.count += 1;
+    } else {
+      relationByKey.set(key, {
+        sourceCategory: categories[sourceIndex].id,
+        targetCategory: categories[targetIndex].id,
+        type: edge.type,
+        count: 1,
+      });
+    }
+  });
+
+  const categoryRelations = [...relationByKey.values()].sort((left, right) =>
+    left.sourceCategory.localeCompare(right.sourceCategory)
+    || left.targetCategory.localeCompare(right.targetCategory)
+    || left.type.localeCompare(right.type)
+  );
+
+  const topicRelations = [...topicRelationByKey.values()].sort((left, right) =>
+    left.source.localeCompare(right.source)
+    || left.target.localeCompare(right.target)
+    || left.type.localeCompare(right.type)
+  );
+
+  return {
+    root: { id: 'root-0', label: 'System Design\nEvery Day' },
+    categories,
+    topics,
+    categoryRelations,
+    topicRelations,
+  };
+}
+
 function main() {
   const args = parseArgs(process.argv);
   const action = args.action;
 
   if (!action) {
-    console.error('Usage: node scripts/mindmap.js --action <next|generate-mermaid> [--last-topic <id>]');
+    console.error('Usage: node scripts/mindmap.js --action <next|generate-mermaid|generate-learning-map> [--last-topic <id>]');
     process.exit(1);
   }
 
@@ -232,6 +386,8 @@ function main() {
   } else if (action === 'generate-mermaid') {
     const code = generateMermaid();
     console.log(code);
+  } else if (action === 'generate-learning-map') {
+    console.log(JSON.stringify(buildLearningMapData(), null, 2));
   } else {
     console.error(`Unknown action: ${action}`);
     process.exit(1);
@@ -241,4 +397,4 @@ function main() {
 if (require.main === module) {
   main();
 }
-module.exports = { generateMermaid };
+module.exports = { generateMermaid, buildLearningMapData };
