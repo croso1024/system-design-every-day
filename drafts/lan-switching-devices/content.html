@@ -62,6 +62,10 @@
   .lan-isp-row, .lan-core-row, .lan-host-row {
     display: flex; flex-wrap: wrap; justify-content: center; align-items: stretch; gap: 10px;
   }
+  .lan-branch-row {
+    display: flex; flex-wrap: wrap; justify-content: center; align-items: flex-start; gap: 28px;
+  }
+  .lan-branch { display: flex; flex-direction: column; align-items: center; gap: 10px; }
   .lan-node {
     border: 1.5px solid var(--border-strong); border-radius: var(--radius-sm);
     padding: 10px 12px; background: #fff; min-width: 108px; text-align: center;
@@ -259,6 +263,12 @@
   <p>同網段兩台主機通訊：封包只需要 Switch（以及兩端的 NIC）就能走完——Router 甚至不會看到這幀（除非鏡像或錯誤接線）。跨網段時，主機先把 Frame 的目的 MAC 設成<strong>預設閘道</strong>的 MAC，Switch 把幀送到 Router 埠，Router 拆開看 IP 再往下一跳封裝。</p>
 
   <div class="callout accent">
+    <div class="c-title"><span class="ic">前置</span>主機怎麼知道「目的 MAC」？——ARP</div>
+    <p>要送 Frame 就得先填目的 MAC，但主機手上通常只有 IP。<strong>ARP（Address Resolution Protocol）</strong>就是負責「IP → MAC」的查詢：主機在本地廣播域喊一聲「誰有 <code>192.168.1.20</code>？請告訴我你的 MAC」（廣播），持有該 IP 的主機單播回覆自己的 MAC，結果暫存在 <strong>ARP cache</strong>。<br>
+    關鍵分流：<strong>目的 IP 在同網段</strong> → ARP 問<em>對方本人</em>的 MAC，Frame 直送；<strong>目的 IP 跨網段</strong> → 主機改 ARP 問<em>預設閘道</em>的 MAC，把 Frame 交給 Router。這正是後面 demo 與速查表反覆出現「用 ARP 取對端 MAC」的來由。</p>
+  </div>
+
+  <div class="callout accent">
     <div class="c-title"><span class="ic">關鍵</span>「能 ping 通 Gateway」代表什麼</div>
     <p>代表 Host ↔ Switch ↔ Router 的 L2 路徑與 IP／遮罩設定大致正確。若 Gateway 通但外網不通，問題多半在路由、NAT、DNS 或 Modem／ISP——而不是「交換器壞了」。</p>
   </div>
@@ -317,7 +327,7 @@
 
   <div class="callout warn">
     <div class="c-title"><span class="ic">陷阱</span>環路沒開 STP</div>
-    <p>兩台 Switch 多餘線路形成環，廣播／未知單播會在環上無限放大（廣播風暴）。正式環境靠 Spanning Tree（或更現代的替代）阻斷多餘路徑；實驗室亂接最常見的「整個網段掛掉」就是這個。</p>
+    <p>兩台 Switch 多餘線路形成環，廣播／未知單播會在環上無限放大（廣播風暴）。因為 L2 的 Frame <strong>沒有 TTL</strong> 可以自然衰減，一旦成環就停不下來。正式環境靠 <strong>STP（Spanning Tree Protocol）</strong>：選出 Root Bridge、把會造成環路的多餘埠設為 blocking，邏輯上留一棵無環的樹；收斂較慢的原始 STP 現多由 <strong>RSTP（快速）／MSTP（多實例、每組 VLAN 一棵樹）</strong>取代。實驗室亂接最常見的「整個網段瞬間掛掉」就是沒開 STP 的環路。</p>
   </div>
 
   <div class="oneliner">
@@ -338,6 +348,31 @@
     <li><strong>Trunk 埠</strong>：接另一台 Switch／Router，可攜多個 VLAN 的 Tag。</li>
     <li><strong>原生 VLAN</strong>：Trunk 上未標籤流量所屬的 VLAN；兩邊必須一致，否則會有安全與互通問題。</li>
   </ul>
+
+  <p>差別具體長在 Frame 裡：VLAN 資訊靠一段 <strong>4-byte 的 802.1Q Tag</strong>（含 12-bit VLAN ID）插在 Src MAC 與 EtherType 之間。Access 埠對 Host 隱藏這件事，Trunk 埠才真正攜帶 Tag：</p>
+
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr><th>埠類型</th><th>線上的 Frame 樣貌</th><th>重點</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>Access（接 Host）</td>
+          <td><code>[Dst MAC][Src MAC][Type][Payload]</code>　<em>無 Tag</em></td>
+          <td>Host 不需懂 VLAN；Switch 在入口<strong>打 Tag</strong>、出口<strong>剝 Tag</strong></td>
+        </tr>
+        <tr>
+          <td>Trunk（接 Switch/Router）</td>
+          <td><code>[Dst MAC][Src MAC]</code><strong><code>[802.1Q VID=10]</code></strong><code>[Type][Payload]</code></td>
+          <td>多個 VLAN 共用一條線，靠 Tag 區分屬於哪個廣播域</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="cap">同一台 Switch 兩個 Access 埠設不同 VLAN，就像被隔成兩台實體交換器；要它們互通，Frame 得先走 Trunk 帶著 Tag 交給 L3。</p>
+
+  <p><strong>跨 VLAN 怎麼走？</strong>最經典的 <strong>Router-on-a-stick</strong>：Switch 用一條 Trunk 連到 Router，Router 上為每個 VLAN 開一個<strong>子介面（subinterface）</strong>各當該 VLAN 的 Gateway；封包上到 Router、換 VLAN Tag、再沿 Trunk 送回。L3 Switch 則把這件事收進機內的 <strong>SVI（VLAN 介面）</strong>，省去外接路由的一趟往返。</p>
 
   <div class="callout accent">
     <div class="c-title"><span class="ic">關鍵</span>VLAN ≠ 子網路，但實務常 1:1</div>
@@ -456,42 +491,43 @@
           <div class="lan-node router" data-node="router">
             <div class="nn">Router</div>
             <div class="nk">L3 · Gateway</div>
-            <div class="ni">192.168.1.1</div>
+            <div class="ni">.1.1 / .2.1</div>
           </div>
         </div>
-        <div class="lan-core-row">
-          <span class="lan-link-label" data-link="router-switch">↕</span>
-        </div>
-        <div class="lan-core-row">
-          <div class="lan-node switch" data-node="switch">
-            <div class="nn">Switch</div>
-            <div class="nk">L2 · MAC</div>
-            <div class="ni">VLAN 10</div>
+        <div class="lan-branch-row">
+          <div class="lan-branch">
+            <span class="lan-link-label" data-link="router-switch">↕ 192.168.1.0/24</span>
+            <div class="lan-node switch" data-node="switch">
+              <div class="nn">Switch</div>
+              <div class="nk">L2 · MAC</div>
+              <div class="ni">VLAN 10</div>
+            </div>
+            <span class="lan-link-label" data-link="switch-hosts">↕</span>
+            <div class="lan-host-row">
+              <div class="lan-node host" data-node="hostA">
+                <div class="nn">Host A</div>
+                <div class="nk">PC</div>
+                <div class="ni">.1.10 · MAC-A</div>
+              </div>
+              <div class="lan-node host" data-node="hostB">
+                <div class="nn">Host B</div>
+                <div class="nk">同網段</div>
+                <div class="ni">.1.20 · MAC-B</div>
+              </div>
+            </div>
           </div>
-        </div>
-        <div class="lan-core-row">
-          <span class="lan-link-label" data-link="switch-hosts">↕</span>
-        </div>
-        <div class="lan-host-row">
-          <div class="lan-node host" data-node="hostA">
-            <div class="nn">Host A</div>
-            <div class="nk">PC</div>
-            <div class="ni">.10 · MAC-A</div>
-          </div>
-          <div class="lan-node host" data-node="hostB">
-            <div class="nn">Host B</div>
-            <div class="nk">同網段</div>
-            <div class="ni">.20 · MAC-B</div>
-          </div>
-          <div class="lan-node host" data-node="hostC">
-            <div class="nn">Host C</div>
-            <div class="nk">另一網段</div>
-            <div class="ni">.50 · via GW</div>
+          <div class="lan-branch">
+            <span class="lan-link-label" data-link="router-segB">↕ 192.168.2.0/24</span>
+            <div class="lan-node host" data-node="hostC">
+              <div class="nn">Host C</div>
+              <div class="nk">另一網段</div>
+              <div class="ni">.2.50 · via GW</div>
+            </div>
           </div>
         </div>
       </div>
 
-      <div class="status-line" id="lan-status">選擇情境後按「下一步」，觀察封包路徑與 MAC 表。</div>
+      <div class="status-line" id="lan-status" aria-live="polite">選擇情境後按「下一步」，觀察封包路徑與 MAC 表。</div>
 
       <div class="lan-pkt-grid">
         <div class="lan-pkt" id="lan-pkt-l2">
