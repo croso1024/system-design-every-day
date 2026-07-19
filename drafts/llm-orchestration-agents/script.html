@@ -1,0 +1,248 @@
+<script>
+(function () {
+  "use strict";
+
+  var scenario = "normal";
+  var stepIdx = 0;
+
+  var wfStatusEl = document.getElementById("orch-wf-status");
+  var agStatusEl = document.getElementById("orch-ag-status");
+  var traceEl = document.getElementById("orch-ag-trace");
+  var captionEl = document.getElementById("orch-caption");
+  var btnNext = document.getElementById("orch-btn-next");
+  var btnReset = document.getElementById("orch-btn-reset");
+
+  var TAGS = {
+    thought: { cls: "thought", label: "Thought" },
+    action: { cls: "action", label: "Action" },
+    observation: { cls: "observation", label: "Observe" },
+    answer: { cls: "answer", label: "Answer" }
+  };
+
+  var SCENARIOS = {
+    normal: {
+      frames: [
+        {
+          wf: { hot: null, done: [], bad: [] },
+          wfStatus: "收到問題，固定 pipeline 準備啟動。",
+          trace: [],
+          agStatus: "收到問題，Agent 準備推理。",
+          caption: "同一個問題進來：左軌照既定步驟跑，右軌讓 LLM 現場決定下一步。"
+        },
+        {
+          wf: { hot: "intent", done: [], bad: [] },
+          wfStatus: "① 意圖分類 → 判定為『訂單追蹤』，進入固定流程。",
+          trace: [
+            { t: "thought", x: "使用者想知道訂單 #A1234 的到貨時間。第一步：先查訂單狀態。" }
+          ],
+          agStatus: "① Thought：規劃第一步。",
+          caption: "起手看似相同，但左軌是規則分類、右軌是 LLM 自由推理。"
+        },
+        {
+          wf: { hot: "order", done: ["intent"], bad: [] },
+          wfStatus: "② 查訂單 DB → 狀態＝已出貨，物流單號＝SF123。",
+          trace: [
+            { t: "thought", x: "使用者想知道訂單 #A1234 的到貨時間。第一步：先查訂單狀態。" },
+            { t: "action", x: "get_order(order_id=\"A1234\")" }
+          ],
+          agStatus: "② Action：呼叫 get_order 工具。",
+          caption: "右軌每個 Action 都是 LLM 當下決定要呼叫的，不是預先排好的。"
+        },
+        {
+          wf: { hot: "ship", done: ["intent", "order"], bad: [] },
+          wfStatus: "③ 查物流 API → 用 SF123 查得預計 7/21 送達。",
+          trace: [
+            { t: "thought", x: "使用者想知道訂單 #A1234 的到貨時間。第一步：先查訂單狀態。" },
+            { t: "action", x: "get_order(order_id=\"A1234\")" },
+            { t: "observation", x: "status=已出貨, tracking=SF123" },
+            { t: "thought", x: "已出貨且有物流單號，還需要到貨時效 → 再呼叫物流工具。" }
+          ],
+          agStatus: "③ Observation → Thought：讀完結果，決定再查物流。",
+          caption: "這一步右軌『多想了一輪』：先看觀察，再決定下一步。"
+        },
+        {
+          wf: { hot: "template", done: ["intent", "order", "ship"], bad: [] },
+          wfStatus: "④ 模板組裝 → 把訂單狀態與到貨日填入回覆模板。",
+          trace: [
+            { t: "thought", x: "使用者想知道訂單 #A1234 的到貨時間。第一步：先查訂單狀態。" },
+            { t: "action", x: "get_order(order_id=\"A1234\")" },
+            { t: "observation", x: "status=已出貨, tracking=SF123" },
+            { t: "thought", x: "已出貨且有物流單號，還需要到貨時效 → 再呼叫物流工具。" },
+            { t: "action", x: "get_shipping(tracking=\"SF123\")" },
+            { t: "observation", x: "預計 7/21 送達" }
+          ],
+          agStatus: "④ Action + Observation：查得到貨日。",
+          caption: "右軌走到這裡才確定總共要兩次工具呼叫——事前無法預知步數。"
+        },
+        {
+          wf: { hot: null, done: ["intent", "order", "ship", "template", "reply"], bad: [] },
+          wfStatus: "⑤ 回覆：『您的訂單已出貨，預計 7/21 送達。』——固定 5 步，每步都可預測。",
+          trace: [
+            { t: "thought", x: "使用者想知道訂單 #A1234 的到貨時間。第一步：先查訂單狀態。" },
+            { t: "action", x: "get_order(order_id=\"A1234\")" },
+            { t: "observation", x: "status=已出貨, tracking=SF123" },
+            { t: "thought", x: "已出貨且有物流單號，還需要到貨時效 → 再呼叫物流工具。" },
+            { t: "action", x: "get_shipping(tracking=\"SF123\")" },
+            { t: "observation", x: "預計 7/21 送達" },
+            { t: "answer", x: "您的訂單已出貨，預計 7/21 送達。" }
+          ],
+          agStatus: "⑤ Answer：判斷資訊已足夠 → 產生回覆（本次剛好也用了 2 次工具）。",
+          caption: "正常路徑下兩軌結論相同；差別是左軌路徑固定，右軌每一步都是 LLM 現場決策。"
+        }
+      ]
+    },
+    edge: {
+      frames: [
+        {
+          wf: { hot: null, done: [], bad: [] },
+          wfStatus: "收到同樣的問題，固定 pipeline 準備啟動。",
+          trace: [],
+          agStatus: "收到問題，Agent 準備推理。",
+          caption: "這次訂單還沒出貨（沒有物流單號），看兩軌怎麼應對同一個缺失。"
+        },
+        {
+          wf: { hot: "intent", done: [], bad: [] },
+          wfStatus: "① 意圖分類 → 同樣判為『訂單追蹤』，走同一條寫死的流程。",
+          trace: [
+            { t: "thought", x: "先查訂單 #A1234 的狀態。" }
+          ],
+          agStatus: "① Thought：先查訂單。",
+          caption: "左右起手一致——差異要到遇上缺失才會爆發。"
+        },
+        {
+          wf: { hot: "order", done: ["intent"], bad: [] },
+          wfStatus: "② 查訂單 DB → 狀態＝備貨中，預計出貨＝1–2 個工作天，物流單號＝（空）。",
+          trace: [
+            { t: "thought", x: "先查訂單 #A1234 的狀態。" },
+            { t: "action", x: "get_order(order_id=\"A1234\")" }
+          ],
+          agStatus: "② Action：查訂單。",
+          caption: "關鍵資料回來了：訂單存在，但還沒有物流單號。"
+        },
+        {
+          wf: { hot: null, done: ["intent", "order"], bad: ["ship"] },
+          wfStatus: "③ 查物流 API → pipeline 硬性下一步就是查物流，但沒有物流單號 → API 回錯。回覆模板本來就靠物流結果來填。",
+          trace: [
+            { t: "thought", x: "先查訂單 #A1234 的狀態。" },
+            { t: "action", x: "get_order(order_id=\"A1234\")" },
+            { t: "observation", x: "status=備貨中, est_ship=1–2 個工作天, tracking=(無)" },
+            { t: "thought", x: "尚未出貨、沒有物流單號，查物流沒有意義。改用訂單的預計出貨時間回答，不呼叫物流工具。" }
+          ],
+          agStatus: "③ Observation → Thought：Agent 察覺缺物流單號，自主決定跳過物流查詢。",
+          caption: "分岔點：左軌照表操課撞上缺失，右軌因為『讀懂了觀察』而改道。"
+        },
+        {
+          wf: { hot: null, done: ["intent", "order"], bad: ["ship", "template", "reply"] },
+          wfStatus: "④ 落入 fallback → 回覆模板是為『已出貨→填物流 ETA』設計的，沒有『備貨中』這條分支，只能降級回：『您的訂單備貨中，暫時無法提供到貨時間』。",
+          trace: [
+            { t: "thought", x: "先查訂單 #A1234 的狀態。" },
+            { t: "action", x: "get_order(order_id=\"A1234\")" },
+            { t: "observation", x: "status=備貨中, est_ship=1–2 個工作天, tracking=(無)" },
+            { t: "thought", x: "尚未出貨、沒有物流單號，查物流沒有意義。改用訂單的預計出貨時間回答，不呼叫物流工具。" },
+            { t: "answer", x: "您的訂單 #A1234 目前備貨中，預計 1–2 個工作天內出貨；出貨後我會提供物流追蹤資訊。" }
+          ],
+          agStatus: "④ Answer：Agent 用同一份訂單資訊（含預計出貨時間），給出真正有用的回覆。",
+          caption: "同一份『備貨中＋預計出貨』資料：左軌模板沒有這條分支只能降級，右軌據此給出完整回覆。"
+        },
+        {
+          wf: { hot: null, done: ["intent", "order"], bad: ["ship", "template", "reply"] },
+          wfStatus: "⑤ Workflow 撞牆 → 除非工程師『事先想到』備貨中且尚無物流單號這條分支並補上模板，否則固定流程遇到未預期路徑就只能降級。",
+          trace: [
+            { t: "thought", x: "先查訂單 #A1234 的狀態。" },
+            { t: "action", x: "get_order(order_id=\"A1234\")" },
+            { t: "observation", x: "status=備貨中, est_ship=1–2 個工作天, tracking=(無)" },
+            { t: "thought", x: "尚未出貨、沒有物流單號，查物流沒有意義。改用訂單的預計出貨時間回答，不呼叫物流工具。" },
+            { t: "answer", x: "您的訂單 #A1234 目前備貨中，預計 1–2 個工作天內出貨；出貨後我會提供物流追蹤資訊。" }
+          ],
+          agStatus: "⑤ 代價提醒：Agent 這個『跳過物流』的判斷是 LLM 現場推理，也可能判斷錯（幻覺）——正式環境需要護欄與可觀測性（見 s5）。",
+          caption: "自主性的價值與代價：Agent 能吃下長尾分支，但不可預測、需要護欄——正是下一章的主題。"
+        }
+      ]
+    }
+  };
+
+  function setText(el, text) {
+    if (el) el.textContent = text;
+  }
+
+  function renderWorkflow(wf) {
+    var nodes = document.querySelectorAll("#orch-wf-pipe .orch-node");
+    nodes.forEach(function (el) {
+      var id = el.getAttribute("data-wf");
+      el.classList.remove("hot", "done", "bad");
+      if (wf.done.indexOf(id) !== -1) el.classList.add("done");
+      if (wf.bad.indexOf(id) !== -1) el.classList.add("bad");
+      if (wf.hot === id) {
+        el.classList.remove("done", "bad");
+        el.classList.add("hot");
+      }
+    });
+  }
+
+  function renderTrace(trace) {
+    if (!traceEl) return;
+    traceEl.innerHTML = "";
+    if (!trace || !trace.length) {
+      var ph = document.createElement("div");
+      ph.className = "orch-trace-item empty";
+      ph.textContent = "Agent 待命，尚未推理。";
+      traceEl.appendChild(ph);
+      return;
+    }
+    trace.forEach(function (item) {
+      var meta = TAGS[item.t] || TAGS.thought;
+      var wrap = document.createElement("div");
+      wrap.className = "orch-trace-item " + meta.cls;
+      var tag = document.createElement("span");
+      tag.className = "tag";
+      tag.textContent = meta.label;
+      wrap.appendChild(tag);
+      wrap.appendChild(document.createTextNode(item.x));
+      traceEl.appendChild(wrap);
+    });
+  }
+
+  function renderStep() {
+    var frames = SCENARIOS[scenario].frames;
+    var frame = frames[stepIdx];
+    if (!frame) return;
+
+    renderWorkflow(frame.wf);
+    renderTrace(frame.trace);
+    setText(wfStatusEl, frame.wfStatus);
+    setText(agStatusEl, frame.agStatus);
+    setText(captionEl, frame.caption);
+
+    btnNext.disabled = stepIdx >= frames.length - 1;
+  }
+
+  function reset() {
+    stepIdx = 0;
+    renderStep();
+  }
+
+  function next() {
+    var frames = SCENARIOS[scenario].frames;
+    if (stepIdx < frames.length - 1) {
+      stepIdx += 1;
+      renderStep();
+    }
+  }
+
+  document.querySelectorAll("#demo-orch .seg button").forEach(function (btn) {
+    btn.addEventListener("click", function () {
+      document.querySelectorAll("#demo-orch .seg button").forEach(function (b) {
+        b.setAttribute("aria-pressed", "false");
+      });
+      btn.setAttribute("aria-pressed", "true");
+      scenario = btn.getAttribute("data-sc");
+      reset();
+    });
+  });
+
+  btnNext.addEventListener("click", next);
+  btnReset.addEventListener("click", reset);
+
+  reset();
+})();
+</script>
