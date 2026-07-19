@@ -1,0 +1,238 @@
+<script>
+(function () {
+  "use strict";
+
+  var TERMINAL = { final: 1, timed_out: 1, cancelled: 1, failed: 1 };
+
+  // 各情境：maxIter / budgetTotal / frames。
+  // frame 欄位：st(當前狀態) visited(已走過) iter budget msgs ckpt(checkpoint 標籤) tone(覆寫 active 色) status caption
+  var SCENARIOS = {
+    normal: {
+      maxIter: 5, budgetTotal: 30,
+      frames: [
+        { st: "pending", visited: [], iter: 0, budget: 30, msgs: 1, ckpt: "建立 job",
+          status: "請求受理：建立 job 與 idempotency key，狀態 = pending。context 目前只有使用者訊息（1 則）。",
+          caption: "狀態機起點。此刻若 client 重送相同請求，會命中同一個 idempotency key。" },
+        { st: "running", visited: ["pending"], iter: 1, budget: 28, msgs: 1, ckpt: "pending→running",
+          status: "① 狀態轉 running：把 context 送進 LLM（經 LLM Gateway）推理下一步。iteration = 1。",
+          caption: "第一次進 running：LLM 讀完使用者問題，準備決定要不要用工具。" },
+        { st: "tool_calls", visited: ["pending", "running"], iter: 1, budget: 26, msgs: 2, ckpt: "running→tool_calls",
+          status: "② LLM 決定呼叫 get_order(order_id=\"A1234\")，狀態轉 tool_calls。runtime 執行工具（模型不碰真實系統）。context = 2 則。",
+          caption: "決策與執行分離：模型只輸出意圖，runtime 才真的去查 DB。" },
+        { st: "running", visited: ["pending", "running", "tool_calls"], iter: 2, budget: 24, msgs: 3, ckpt: "tool_calls→running",
+          status: "③ 工具結果回寫（status=已出貨, tracking=SF123），狀態轉回 running 續推理。iteration = 2、context = 3 則。",
+          caption: "running ⇄ tool_calls 的一次來回，就是一輪 Agent Loop；context 隨之增長。" },
+        { st: "final", visited: ["pending", "running", "tool_calls"], iter: 2, budget: 22, msgs: 4, ckpt: "→ final ✓",
+          status: "④ LLM 判斷資訊足夠，輸出最終答案：『您的訂單已出貨，預計 7/21 送達。』狀態 = final（終態，job 可回收）。",
+          caption: "抵達終態。試試「模擬 client 重試」，看 idempotency 如何避免整段重跑。" }
+      ]
+    },
+    multi: {
+      maxIter: 5, budgetTotal: 30,
+      frames: [
+        { st: "pending", visited: [], iter: 0, budget: 30, msgs: 1, ckpt: "建立 job",
+          status: "請求受理，狀態 = pending。這次會需要兩個工具，正好觀察 context 怎麼一路長大。",
+          caption: "同一個請求，這次示範多輪工具往返。" },
+        { st: "running", visited: ["pending"], iter: 1, budget: 28, msgs: 1, ckpt: "pending→running",
+          status: "① running：LLM 推理，決定先查訂單。iteration = 1。",
+          caption: "第一輪推理。" },
+        { st: "tool_calls", visited: ["pending", "running"], iter: 1, budget: 26, msgs: 2, ckpt: "running→tool_calls",
+          status: "② tool_calls：執行 get_order(\"A1234\")。context = 2 則。",
+          caption: "第一個工具。" },
+        { st: "running", visited: ["pending", "running", "tool_calls"], iter: 2, budget: 23, msgs: 3, ckpt: "tool_calls→running",
+          status: "③ 回寫（已出貨, tracking=SF123）→ running。LLM 看到有物流單號，決定再查物流時效。iteration = 2、context = 3 則。",
+          caption: "讀完第一個結果，模型自己決定還要再查一次。" },
+        { st: "tool_calls", visited: ["pending", "running", "tool_calls"], iter: 2, budget: 20, msgs: 4, ckpt: "running→tool_calls",
+          status: "④ tool_calls：執行 get_shipping(\"SF123\")。context = 4 則。",
+          caption: "第二個工具——步數事前無法預知，這是 Agent 的特性。" },
+        { st: "running", visited: ["pending", "running", "tool_calls"], iter: 3, budget: 17, msgs: 5, ckpt: "tool_calls→running",
+          status: "⑤ 回寫（預計 7/21 送達）→ running。iteration = 3、context = 5 則——注意每輪 context 都在變大。",
+          caption: "context 膨脹具象化：走越多輪，每次送進 LLM 的 token 越多、越慢越貴（s3）。" },
+        { st: "final", visited: ["pending", "running", "tool_calls"], iter: 3, budget: 15, msgs: 6, ckpt: "→ final ✓",
+          status: "⑥ final：資訊足夠，回覆『已出貨，預計 7/21 送達』。本次共 3 iteration、2 次工具、context 長到 6 則。",
+          caption: "多輪版終態。對照『正常完成』：同一種請求，步數與 context 都可能不同。" }
+      ]
+    },
+    toolfail: {
+      maxIter: 5, budgetTotal: 30,
+      frames: [
+        { st: "pending", visited: [], iter: 0, budget: 30, msgs: 1, ckpt: "建立 job",
+          status: "請求受理，狀態 = pending。這次物流工具會出錯，看 runtime 怎麼不讓整個請求死掉。",
+          caption: "示範工具失敗時的韌性。" },
+        { st: "running", visited: ["pending"], iter: 1, budget: 28, msgs: 1, ckpt: "pending→running",
+          status: "① running：先查訂單。iteration = 1。",
+          caption: "照常起手。" },
+        { st: "tool_calls", visited: ["pending", "running"], iter: 1, budget: 26, msgs: 2, ckpt: "running→tool_calls",
+          status: "② tool_calls：get_order(\"A1234\") 成功（已出貨, tracking=SF123）。",
+          caption: "第一個工具正常。" },
+        { st: "running", visited: ["pending", "running", "tool_calls"], iter: 2, budget: 23, msgs: 3, ckpt: "tool_calls→running",
+          status: "③ 回寫成功結果 → running。LLM 決定呼叫物流工具查時效。iteration = 2。",
+          caption: "準備呼叫第二個工具。" },
+        { st: "tool_calls", tone: "bad", visited: ["pending", "running", "tool_calls"], iter: 2, budget: 20, msgs: 4, ckpt: "工具錯誤已記錄",
+          status: "④ tool_calls：get_shipping(\"SF123\") 逾時／回錯！runtime 不讓整個請求 failed，而是把 error 當成一則 observation 回寫 context（s4）。",
+          caption: "關鍵韌性點：工具失敗 → 錯誤回餵，而非整個請求崩掉。" },
+        { st: "running", visited: ["pending", "running", "tool_calls"], iter: 3, budget: 17, msgs: 5, ckpt: "tool_calls→running",
+          status: "⑤ running：LLM 讀到物流查詢失敗，改用訂單既有的『預計出貨時間』作答，不再重試物流工具。iteration = 3。",
+          caption: "模型讀懂錯誤並換策略——這是 Agent 相對死板 pipeline 的價值。" },
+        { st: "final", visited: ["pending", "running", "tool_calls"], iter: 3, budget: 15, msgs: 6, ckpt: "→ final ✓",
+          status: "⑥ final：『您的訂單已出貨；物流時效暫時查詢不到，稍後可再確認。』在工具失敗下仍給出有用回覆。",
+          caption: "失敗被吸收成一次觀察，請求照樣抵達 final。" }
+      ]
+    },
+    timeout: {
+      maxIter: 5, budgetTotal: 12,
+      frames: [
+        { st: "pending", visited: [], iter: 0, budget: 12, msgs: 1, ckpt: "建立 job",
+          status: "請求受理，狀態 = pending。這次 wall-clock 預算只有 12s，且工具很慢——看預算怎麼被吃光。",
+          caption: "示範 wall-clock 逾時中止。" },
+        { st: "running", visited: ["pending"], iter: 1, budget: 10, msgs: 1, ckpt: "pending→running",
+          status: "① running：LLM 推理。iteration = 1、預算剩 10s。",
+          caption: "預算開始倒數。" },
+        { st: "tool_calls", visited: ["pending", "running"], iter: 1, budget: 6, msgs: 2, ckpt: "running→tool_calls",
+          status: "② tool_calls：呼叫一個很慢的工具，等待中……預算剩 6s。",
+          caption: "慢工具吃掉大半預算。" },
+        { st: "running", visited: ["pending", "running", "tool_calls"], iter: 2, budget: 3, msgs: 3, ckpt: "tool_calls→running",
+          status: "③ 回寫後 → running，LLM 還想再呼叫工具。iteration = 2、預算只剩 3s。",
+          caption: "距離逾時只剩一步。" },
+        { st: "timed_out", visited: ["pending", "running", "tool_calls"], iter: 2, budget: 0, msgs: 3, ckpt: "→ timed_out",
+          status: "④ wall-clock 預算耗盡！狀態機在下一個安全邊界檢查時中止，狀態 = timed_out（終態）。已送出的工具副作用無法收回（s5）。",
+          caption: "逾時中止：回傳明確失敗或部分結果，而不是無限燒 token。" }
+      ]
+    },
+    cancel: {
+      maxIter: 5, budgetTotal: 30,
+      frames: [
+        { st: "pending", visited: [], iter: 0, budget: 30, msgs: 1, ckpt: "建立 job",
+          status: "請求受理，狀態 = pending。這次會在工具執行到一半時，使用者按下停止。",
+          caption: "示範合作式取消。" },
+        { st: "running", visited: ["pending"], iter: 1, budget: 28, msgs: 1, ckpt: "pending→running",
+          status: "① running：LLM 決定呼叫一個會扣款的工具。iteration = 1。",
+          caption: "注意：這次的工具帶有不可逆副作用。" },
+        { st: "tool_calls", visited: ["pending", "running"], iter: 1, budget: 25, msgs: 2, ckpt: "running→tool_calls",
+          status: "② tool_calls：payment 工具執行中……此時使用者關閉頁面／按下停止，取消訊號進來（只設旗標，不硬砍）。",
+          caption: "取消訊號抵達，但工具已經在跑了。" },
+        { st: "cancelled", visited: ["pending", "running", "tool_calls"], iter: 1, budget: 24, msgs: 2, ckpt: "→ cancelled",
+          status: "③ 合作式取消：狀態機在下一個安全邊界檢查到旗標，乾淨停在 cancelled 並存檔。但 payment 若已送出，這筆扣款收不回——只能靠補償（退款）或冪等善後（s5）。",
+          caption: "取消止的是『未來的步驟』，不是『已發生的副作用』。" }
+      ]
+    }
+  };
+
+  var RETRY_MSG = {
+    final: "🔁 模擬 client 重試：偵測到相同 idempotency key，且原 job 狀態 = final。runtime 直接回傳既有結果，不重跑狀態機——get_order、扣款等副作用工具不會二次觸發。這就是 request 級冪等。",
+    other: function (st) {
+      return "🔁 模擬 client 重試：原 job 為 " + st + " 終態。帶相同 idempotency key 重放時，runtime 會先命中這個已結束的 job（回傳其終態結果）；即使改以續跑，也能依已記錄的 tool_call_id 跳過『已執行過』的副作用工具（tool-call 級冪等），避免重複扣款／建單。";
+    }
+  };
+
+  var scenario = "normal";
+  var stepIdx = 0;
+
+  var root = document.getElementById("demo-art-fsm");
+  var iterEl = document.getElementById("art-iter");
+  var iterMaxEl = document.getElementById("art-itermax");
+  var budgetEl = document.getElementById("art-budget");
+  var budgetTotalEl = document.getElementById("art-budgettotal");
+  var msgsEl = document.getElementById("art-msgs");
+  var ckptEl = document.getElementById("art-ckpt");
+  var statusEl = document.getElementById("art-status");
+  var captionEl = document.getElementById("art-caption");
+  var btnNext = document.getElementById("art-btn-next");
+  var btnRetry = document.getElementById("art-btn-retry");
+  var btnReset = document.getElementById("art-btn-reset");
+
+  function setText(el, text) { if (el) el.textContent = text; }
+
+  function toneOf(st, override) {
+    if (override) return "st-" + override;
+    if (st === "final") return "st-ok";
+    if (TERMINAL[st]) return "st-bad";   // timed_out / cancelled / failed
+    return "st-wait";                     // pending / running / tool_calls
+  }
+
+  function renderStates(frame) {
+    var nodes = root.querySelectorAll(".art-state");
+    nodes.forEach(function (el) {
+      var id = el.getAttribute("data-st");
+      el.classList.remove("st-idle", "st-visited", "st-wait", "st-ok", "st-bad");
+      if (id === frame.st) {
+        el.classList.add(toneOf(frame.st, frame.tone));
+      } else if (frame.visited.indexOf(id) !== -1) {
+        el.classList.add("st-visited");
+      } else {
+        el.classList.add("st-idle");
+      }
+    });
+  }
+
+  function renderMeters(sc, frame) {
+    setText(iterEl, frame.iter);
+    setText(iterMaxEl, sc.maxIter);
+    setText(budgetEl, frame.budget);
+    setText(budgetTotalEl, sc.budgetTotal);
+    setText(msgsEl, frame.msgs);
+
+    // 預算過低時轉紅
+    if (budgetEl) budgetEl.classList.toggle("warnv", frame.budget <= 2);
+
+    // checkpoint 標籤 + 綠色高亮
+    setText(ckptEl, frame.ckpt || "—");
+    var mv = ckptEl ? ckptEl.parentElement : null;
+    if (mv) mv.classList.toggle("ck-on", !!frame.ckpt);
+  }
+
+  function renderStep() {
+    var sc = SCENARIOS[scenario];
+    var frame = sc.frames[stepIdx];
+    if (!frame) return;
+
+    renderStates(frame);
+    renderMeters(sc, frame);
+    setText(statusEl, frame.status);
+    setText(captionEl, frame.caption);
+
+    btnNext.disabled = stepIdx >= sc.frames.length - 1;
+    btnRetry.disabled = !TERMINAL[frame.st];
+  }
+
+  function reset() {
+    stepIdx = 0;
+    renderStep();
+  }
+
+  function next() {
+    var frames = SCENARIOS[scenario].frames;
+    if (stepIdx < frames.length - 1) {
+      stepIdx += 1;
+      renderStep();
+    }
+  }
+
+  function retry() {
+    var frame = SCENARIOS[scenario].frames[stepIdx];
+    if (!frame || !TERMINAL[frame.st]) return;
+    if (frame.st === "final") {
+      setText(statusEl, RETRY_MSG.final);
+    } else {
+      setText(statusEl, RETRY_MSG.other(frame.st));
+    }
+  }
+
+  root.querySelectorAll(".seg button").forEach(function (btn) {
+    btn.addEventListener("click", function () {
+      root.querySelectorAll(".seg button").forEach(function (b) {
+        b.setAttribute("aria-pressed", "false");
+      });
+      btn.setAttribute("aria-pressed", "true");
+      scenario = btn.getAttribute("data-sc");
+      reset();
+    });
+  });
+
+  btnNext.addEventListener("click", next);
+  btnRetry.addEventListener("click", retry);
+  btnReset.addEventListener("click", reset);
+
+  reset();
+})();
+</script>
