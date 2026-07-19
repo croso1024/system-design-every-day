@@ -1,0 +1,171 @@
+<script>
+(function () {
+  "use strict";
+
+  // 五道關卡（決策鏈順序）。每個 frame 用 s 指定各關狀態：
+  // idle(未評估) / wait(檢查中) / ok(通過) / bad(攔截)；未列出者預設 idle。
+  var GATES = ["authn", "authz", "validate", "sandbox", "audit"];
+
+  var LOG_PLACEHOLDER =
+    "audit_log ▸ （尚未寫入——審計會在決策鏈結束時，無論放行或攔截都記一筆）";
+
+  var SCENARIOS = {
+    normal: {
+      frames: [
+        { s: {}, verdict: null,
+          status: "tool call 抵達 gateway：get_order(order_id=\"A1234\")。這是 U 本人的訂單、唯讀查詢。按「下一步」逐關檢查。" },
+        { s: { authn: "wait" }, verdict: "eval",
+          status: "① 認證中：識別呼叫主體——end-user = U（已登入）、agent = svc-support，驗證身分權杖……" },
+        { s: { authn: "ok", authz: "wait" }, verdict: "eval",
+          status: "認證通過。② 授權中：以『U 的權限』（on-behalf-of，而非 agent 的環境權限）評估這次呼叫……" },
+        { s: { authn: "ok", authz: "ok", validate: "wait" }, verdict: "eval",
+          status: "授權通過：U 具 orders:read scope，且 #A1234 的擁有者正是 U（資源歸屬對齊）。③ 校驗中：解析工具名與參數……" },
+        { s: { authn: "ok", authz: "ok", validate: "ok", sandbox: "wait" }, verdict: "eval",
+          status: "校驗通過：get_order 在 allowlist、參數過 schema。④ sandbox 執行中：在隔離環境內注入短命憑證去查訂單 DB……" },
+        { s: { authn: "ok", authz: "ok", validate: "ok", sandbox: "ok" }, verdict: "eval",
+          status: "sandbox 執行完成：egress 僅允許 orders-service、憑證用完即棄、結果回寫 context。四道實質關卡全過。" },
+        { s: { authn: "ok", authz: "ok", validate: "ok", sandbox: "ok", audit: "ok" }, verdict: "allow",
+          status: "⑤ 審計：寫入一筆不可竄改的 ALLOW 紀錄。最終判定 = ALLOW，工具已執行。",
+          log: "audit_log ▸ { ts, principal: \"user:U8842 on-behalf-of agent:svc-support\", tool: \"get_order\", args: { order_id: \"A1234\" }, decision: \"ALLOW\", policy: \"orders.read.self\" }" }
+      ]
+    },
+    overpriv: {
+      frames: [
+        { s: {}, verdict: null,
+          status: "tool call 抵達：issue_refund(order_id=\"A1234\", amount=5000)。前提：U 的退款上限（refund_max）是 $100。" },
+        { s: { authn: "wait" }, verdict: "eval",
+          status: "① 認證中：識別 end-user = U、agent = svc-support……" },
+        { s: { authn: "ok", authz: "wait" }, verdict: "eval",
+          status: "認證通過。② 授權中：檢查 U 能否對這張訂單退款、以及退這個金額……" },
+        { s: { authn: "ok", authz: "bad" }, verdict: "deny",
+          status: "② 授權 DENY：issue_refund 型別完全合法，但 amount=5000 超過 U 的退款上限 $100（參數級最小權限）。deny-by-default，立即短路——校驗與 sandbox 不再評估。" },
+        { s: { authn: "ok", authz: "bad", audit: "bad" }, verdict: "deny",
+          status: "⑤ 審計：即使被擋也要留證。最終判定 = DENY，工具未執行。注意 validate／sandbox 全程『未評估』——越權在第 02 關就被短路，沒有浪費昂貴資源。",
+          log: "audit_log ▸ { ts, principal: \"user:U8842\", tool: \"issue_refund\", args: { order_id: \"A1234\", amount: 5000 }, decision: \"DENY\", reason: \"insufficient_scope\", limit: \"refund_max=100\" }" }
+      ]
+    },
+    halluc: {
+      frames: [
+        { s: {}, verdict: null,
+          status: "tool call 抵達：get_order_details(order_id=\"A1234\")。但工具註冊表裡只有 get_order——這個工具名是模型『編』出來的（幻覺 tool call）。" },
+        { s: { authn: "wait" }, verdict: "eval",
+          status: "① 認證中：識別 end-user = U、agent = svc-support……" },
+        { s: { authn: "ok", authz: "wait" }, verdict: "eval",
+          status: "認證通過。② 授權中：這次呼叫『宣告』自己是讀取類操作，而 U 確實握有讀取 scope——授權放行（工具是否真實存在，留待第 03 關 allowlist 對照註冊表）……" },
+        { s: { authn: "ok", authz: "ok", validate: "wait" }, verdict: "eval",
+          status: "授權放行（宣告的讀取 scope 成立）。③ 校驗中：拿工具名去 allowlist 註冊表解析，對照『宣告』是否屬實……" },
+        { s: { authn: "ok", authz: "ok", validate: "bad" }, verdict: "deny",
+          status: "③ 校驗 DENY：get_order_details 不在工具註冊表 → 判定為幻覺工具，攔截。（同理，若是給合法工具湊出無效參數，會被 schema 擋下。）短路——不進 sandbox。" },
+        { s: { authn: "ok", authz: "ok", validate: "bad", audit: "bad" }, verdict: "deny",
+          status: "⑤ 審計：寫入 DENY 紀錄。最終判定 = DENY，工具未執行。這正是第一篇『把 tool call 當不可信輸入』——allowlist 就是幻覺工具的攔截點。",
+          log: "audit_log ▸ { ts, principal: \"user:U8842\", tool: \"get_order_details\", decision: \"DENY\", reason: \"unknown_tool\", hint: \"not in tool registry — hallucinated?\" }" }
+      ]
+    },
+    inject: {
+      frames: [
+        { s: {}, verdict: null,
+          status: "tool call 抵達：http_fetch(url=\"http://169.254.169.254/latest/meta-data/\")。這是對話中被注入的外部內容誘導模型發出的 SSRF——目標是偷取雲端 metadata 憑證。" },
+        { s: { authn: "wait" }, verdict: "eval",
+          status: "① 認證中：識別 end-user = U、agent = svc-support……" },
+        { s: { authn: "ok", authz: "wait" }, verdict: "eval",
+          status: "認證通過。② 授權中：http_fetch 是 agent 合法持有的工具能力（模型『有權』發 HTTP）……" },
+        { s: { authn: "ok", authz: "ok", validate: "wait" }, verdict: "eval",
+          status: "授權放行。③ 校驗中：http_fetch 在 allowlist、url 是合法字串（型別檢查通過）……" },
+        { s: { authn: "ok", authz: "ok", validate: "ok", sandbox: "wait" }, verdict: "eval",
+          status: "校驗通過——型別合法 ≠ 安全。參數層對這種內網目的地只能做 best-effort 黑名單（可被 DNS rebinding／redirect／編碼 IP 繞過），真正可靠的攔截點是 egress。④ sandbox 執行中：套用 egress 政策……" },
+        { s: { authn: "ok", authz: "ok", validate: "ok", sandbox: "bad" }, verdict: "deny",
+          status: "④ sandbox DENY：目的地 169.254.169.254（link-local / 雲端 metadata）不在 egress allowlist，連線被切斷——砍掉致命三要素的『外送』那條腿。憑證也從未進過模型 context。" },
+        { s: { authn: "ok", authz: "ok", validate: "ok", sandbox: "bad", audit: "bad" }, verdict: "deny",
+          status: "⑤ 審計：寫入 DENY 紀錄。最終判定 = DENY，未外送任何資料。關鍵教訓：authn／authz／校驗全過，注入仍被 sandbox 這道『最後防線』擋下——單靠輸入校驗不夠，縱深防禦才擋得住已攻陷模型判斷的 injection。",
+          log: "audit_log ▸ { ts, principal: \"user:U8842\", tool: \"http_fetch\", args: { url: \"http://169.254.169.254/latest/meta-data/\" }, decision: \"DENY\", reason: \"egress_blocked\", dest: \"link-local/metadata\" }" }
+      ]
+    }
+  };
+
+  var scenario = "normal";
+  var stepIdx = 0;
+
+  var root = document.getElementById("demo-tgw-chain");
+  var statusEl = document.getElementById("tgw-status");
+  var verdictEl = document.getElementById("tgw-verdict");
+  var logEl = document.getElementById("tgw-log");
+  var btnNext = document.getElementById("tgw-btn-next");
+  var btnReset = document.getElementById("tgw-btn-reset");
+
+  function setText(el, text) { if (el) el.textContent = text; }
+
+  function renderGates(frame) {
+    GATES.forEach(function (g) {
+      var el = root.querySelector('.tgw-gate[data-gate="' + g + '"]');
+      if (!el) return;
+      el.classList.remove("g-idle", "g-wait", "g-ok", "g-bad");
+      el.classList.add("g-" + (frame.s[g] || "idle"));
+    });
+  }
+
+  function renderVerdict(frame) {
+    verdictEl.classList.remove("v-allow", "v-deny");
+    if (frame.verdict === "allow") {
+      verdictEl.classList.add("v-allow");
+      setText(verdictEl, "ALLOW ✓ 已執行");
+    } else if (frame.verdict === "deny") {
+      verdictEl.classList.add("v-deny");
+      setText(verdictEl, "DENY ✕ 已攔截");
+    } else if (frame.verdict === "eval") {
+      setText(verdictEl, "評估中…");
+    } else {
+      setText(verdictEl, "尚未判定");
+    }
+  }
+
+  function renderLog(frame) {
+    logEl.classList.remove("allow", "deny");
+    if (frame.log) {
+      setText(logEl, frame.log);
+      logEl.classList.add(frame.verdict === "allow" ? "allow" : "deny");
+    } else {
+      setText(logEl, LOG_PLACEHOLDER);
+    }
+  }
+
+  function renderStep() {
+    var frames = SCENARIOS[scenario].frames;
+    var frame = frames[stepIdx];
+    if (!frame) return;
+    renderGates(frame);
+    renderVerdict(frame);
+    renderLog(frame);
+    setText(statusEl, frame.status);
+    btnNext.disabled = stepIdx >= frames.length - 1;
+  }
+
+  function reset() {
+    stepIdx = 0;
+    renderStep();
+  }
+
+  function next() {
+    var frames = SCENARIOS[scenario].frames;
+    if (stepIdx < frames.length - 1) {
+      stepIdx += 1;
+      renderStep();
+    }
+  }
+
+  root.querySelectorAll(".seg button").forEach(function (btn) {
+    btn.addEventListener("click", function () {
+      root.querySelectorAll(".seg button").forEach(function (b) {
+        b.setAttribute("aria-pressed", "false");
+      });
+      btn.setAttribute("aria-pressed", "true");
+      scenario = btn.getAttribute("data-sc");
+      reset();
+    });
+  });
+
+  btnNext.addEventListener("click", next);
+  btnReset.addEventListener("click", reset);
+
+  reset();
+})();
+</script>
