@@ -1,0 +1,400 @@
+<script>
+(function () {
+  "use strict";
+
+  // frame 欄位：
+  //   ph(當前階段 init/discovery/invoke，null=尚未開始) active(要高亮的角色) tone(wait/ok/bad)
+  //   dir(訊息方向文字) kind(request/response/notification/result/error/host，null=無徽章)
+  //   json(訊息內容文字) status(狀態列) caption(圖說)
+
+  // ── 交握 + 探索，三情境共用（frame 0〜5）──
+  var F_IDLE = {
+    ph: null, active: [], tone: "wait",
+    dir: "尚未開始", kind: null,
+    json: "// 選一個情境，按「下一步」送出第一則訊息。",
+    status: "這條 session 的 Host 內含一個連到 weather-server 的 Client。按「下一步」開始交握。",
+    caption: "三階段：交握 → 探索 → 呼叫回寫。全程都是 Client↔Server 的 JSON-RPC 往返。"
+  };
+
+  var COMMON = [
+    F_IDLE,
+    {
+      ph: "init", active: ["client", "server"], tone: "wait",
+      dir: "Client → Server", kind: "request",
+      json: [
+        "{",
+        '  "jsonrpc": "2.0",',
+        '  "id": 1,',
+        '  "method": "initialize",',
+        '  "params": {',
+        '    "protocolVersion": "2025-11-25",',
+        '    "capabilities": { "sampling": {}, "roots": { "listChanged": true } },',
+        '    "clientInfo": { "name": "chat-host", "version": "1.0.0" }',
+        "  }",
+        "}"
+      ].join("\n"),
+      status: "① 交握開始：Client 送出 initialize，宣告自己支援的協定版本、能力與 clientInfo。",
+      caption: "initialize 是每條 session 的第一則訊息——先談協定版本與能力，再談別的。"
+    },
+    {
+      ph: "init", active: ["server", "client"], tone: "wait",
+      dir: "Server → Client", kind: "response",
+      json: [
+        "{",
+        '  "jsonrpc": "2.0",',
+        '  "id": 1,',
+        '  "result": {',
+        '    "protocolVersion": "2025-11-25",',
+        '    "capabilities": { "tools": { "listChanged": true } },',
+        '    "serverInfo": { "name": "weather-server", "version": "2.3.1" }',
+        "  }",
+        "}"
+      ].join("\n"),
+      status: "② Server 回應：確認採用 2025-11-25，並宣告支援 tools 能力（listChanged=true 表示工具清單變動時會通知）。",
+      caption: "版本與能力是「協商」出來的——這正是協定能向前相容演進的關鍵。"
+    },
+    {
+      ph: "init", active: ["client", "server"], tone: "wait",
+      dir: "Client → Server", kind: "notification",
+      json: [
+        "{",
+        '  "jsonrpc": "2.0",',
+        '  "method": "notifications/initialized"',
+        "}"
+      ].join("\n"),
+      status: "③ Client 送出 initialized 通知（notification 無 id、不需回應）。交握完成，session 正式開始。",
+      caption: "無 id 就是 notification：單向、不等回應。交握到此為止。"
+    },
+    {
+      ph: "discovery", active: ["client", "server"], tone: "wait",
+      dir: "Client → Server", kind: "request",
+      json: [
+        "{",
+        '  "jsonrpc": "2.0",',
+        '  "id": 2,',
+        '  "method": "tools/list",',
+        '  "params": {}',
+        "}"
+      ].join("\n"),
+      status: "④ 探索：Client 送出 tools/list，問 Server「你有哪些工具？」（可帶分頁 cursor）。",
+      caption: "Client 事前並不知道 Server 有什麼——接下來才會知道。"
+    },
+    {
+      ph: "discovery", active: ["server", "client"], tone: "wait",
+      dir: "Server → Client", kind: "response",
+      json: [
+        "{",
+        '  "jsonrpc": "2.0",',
+        '  "id": 2,',
+        '  "result": {',
+        '    "tools": [',
+        "      {",
+        '        "name": "get_weather",',
+        '        "description": "查詢指定城市的目前天氣",',
+        '        "inputSchema": {',
+        '          "type": "object",',
+        '          "properties": { "location": { "type": "string" } },',
+        '          "required": ["location"]',
+        "        }",
+        "      }",
+        "    ]",
+        "  }",
+        "}"
+      ].join("\n"),
+      status: "⑤ Server 自我描述：回傳工具清單。這裡只有一個 get_weather，含 name、description 與 inputSchema。",
+      caption: "這一步就是 discovery 的靈魂：工具的 schema 由 Server 執行期給出，不必寫死在應用裡。"
+    }
+  ];
+
+  // ── 各情境的呼叫階段（frame 6 起）──
+  var TAILS = {
+    normal: [
+      {
+        ph: "invoke", active: ["client", "host"], tone: "wait",
+        dir: "Client → Host（內部）", kind: "host",
+        json: [
+          "// Host 內部（非 MCP 協定訊息）：",
+          "// LLM 讀到 get_weather 的 description 與 inputSchema，",
+          '// 依使用者問題「台北現在天氣？」決定呼叫它，並填入 arguments：',
+          '//   { location: "Taipei" }'
+        ].join("\n"),
+        status: "⑥ 工具選擇發生在 Host 內部：LLM 看著剛發現的 get_weather，決定呼叫它並填好參數。",
+        caption: "注意：選哪個工具、填什麼參數是「模型控制」、發生在 Host 內，不是 MCP 線上的訊息。"
+      },
+      {
+        ph: "invoke", active: ["client", "server"], tone: "wait",
+        dir: "Client → Server", kind: "request",
+        json: [
+          "{",
+          '  "jsonrpc": "2.0",',
+          '  "id": 3,',
+          '  "method": "tools/call",',
+          '  "params": {',
+          '    "name": "get_weather",',
+          '    "arguments": { "location": "Taipei" }',
+          "  }",
+          "}"
+        ].join("\n"),
+        status: "⑦ 呼叫：Client 送出 tools/call，帶上工具名與參數。真正去查天氣的是 Server，不是模型。",
+        caption: "tools/call 就是把模型的「意圖」變成 Server 上一次真實執行——決策與執行分離。"
+      },
+      {
+        ph: "invoke", active: ["server", "client"], tone: "ok",
+        dir: "Server → Client", kind: "result",
+        json: [
+          "{",
+          '  "jsonrpc": "2.0",',
+          '  "id": 3,',
+          '  "result": {',
+          '    "content": [',
+          '      { "type": "text", "text": "台北目前 31°C，多雲。" }',
+          "    ],",
+          '    "isError": false',
+          "  }",
+          "}"
+        ].join("\n"),
+        status: "⑧ 回寫：Server 把結果放在 result.content[]，isError=false。Client 交回 Host，餵給 LLM 生成最終回答。",
+        caption: "一次完整的 discovery → invoke → result 就此收尾——正好接上第二篇狀態機的 tool_calls → running 回寫。"
+      }
+    ],
+    toolerr: [
+      {
+        ph: "invoke", active: ["client", "host"], tone: "wait",
+        dir: "Client → Host（內部）", kind: "host",
+        json: [
+          "// Host 內部：LLM 決定呼叫 get_weather，",
+          "// 但把城市參數誤填成 'Taipeh'（拼寫錯誤）：",
+          '//   { location: "Taipeh" }'
+        ].join("\n"),
+        status: "⑥ LLM 選了 get_weather，但參數填錯——把 Taipei 拼成了 Taipeh。看 Server 怎麼回。",
+        caption: "模型不是永遠可靠：這次它填了一個查不到的城市名。"
+      },
+      {
+        ph: "invoke", active: ["client", "server"], tone: "wait",
+        dir: "Client → Server", kind: "request",
+        json: [
+          "{",
+          '  "jsonrpc": "2.0",',
+          '  "id": 3,',
+          '  "method": "tools/call",',
+          '  "params": {',
+          '    "name": "get_weather",',
+          '    "arguments": { "location": "Taipeh" }',
+          "  }",
+          "}"
+        ].join("\n"),
+        status: "⑦ 呼叫：tools/call 送出，但 arguments 帶著拼錯的城市名。工具名合法、參數值有問題。",
+        caption: "注意：工具本身是存在的（合法呼叫），問題出在參數值——這決定了它會是哪一種錯誤。"
+      },
+      {
+        ph: "invoke", active: ["server", "client"], tone: "bad",
+        dir: "Server → Client", kind: "result",
+        json: [
+          "{",
+          '  "jsonrpc": "2.0",',
+          '  "id": 3,',
+          '  "result": {',
+          '    "content": [',
+          '      { "type": "text", "text": "查無此城市：\'Taipeh\'。請確認拼寫。" }',
+          "    ],",
+          '    "isError": true',
+          "  }",
+          "}"
+        ].join("\n"),
+        status: "⑧ 工具執行錯誤：這仍是一個 result（不是 JSON-RPC error），只是 isError=true，並帶回一句「可行動」的訊息。",
+        caption: "tool execution error：工具跑了、但業務上失敗。關鍵是它回的是「模型讀得懂、能據以修正」的訊息。"
+      },
+      {
+        ph: "invoke", active: ["client", "server"], tone: "wait",
+        dir: "Client → Server", kind: "request",
+        json: [
+          "{",
+          '  "jsonrpc": "2.0",',
+          '  "id": 4,',
+          '  "method": "tools/call",',
+          '  "params": {',
+          '    "name": "get_weather",',
+          '    "arguments": { "location": "Taipei" }',
+          "  }",
+          "}"
+        ].join("\n"),
+        status: "⑨ 自我修正：LLM 讀到「請確認拼寫」，把參數改成正確的 Taipei，重送一次 tools/call（新 id=4）。",
+        caption: "這就是 tool execution error 的價值——錯誤訊息餵回模型，模型自己改參數重試（呼應第二篇的錯誤回餵）。"
+      },
+      {
+        ph: "invoke", active: ["server", "client"], tone: "ok",
+        dir: "Server → Client", kind: "result",
+        json: [
+          "{",
+          '  "jsonrpc": "2.0",',
+          '  "id": 4,',
+          '  "result": {',
+          '    "content": [',
+          '      { "type": "text", "text": "台北目前 31°C，多雲。" }',
+          "    ],",
+          '    "isError": false',
+          "  }",
+          "}"
+        ].join("\n"),
+        status: "⑩ 修正後成功：isError=false，回傳天氣結果。工具執行錯誤被模型自己吸收、繞過了。",
+        caption: "對照「協定錯誤」情境：同樣是失敗，但這種能自我修正、那種不能。"
+      }
+    ],
+    protoerr: [
+      {
+        ph: "invoke", active: ["client", "host"], tone: "wait",
+        dir: "Client → Host（內部）", kind: "host",
+        json: [
+          "// Host 內部：LLM 卻決定呼叫 get_forecast，",
+          "// 但回顧 ⑤ 的 tools/list——清單裡只有 get_weather，",
+          "// 根本沒有 get_forecast。這是一個「幻覺」出來的工具名。"
+        ].join("\n"),
+        status: "⑥ LLM 決定呼叫 get_forecast——但這個工具不在剛剛發現的清單裡（清單只有 get_weather）。",
+        caption: "模型有時會「幻覺」出一個不存在的工具名。看協定層怎麼回應這種不合法請求。"
+      },
+      {
+        ph: "invoke", active: ["client", "server"], tone: "wait",
+        dir: "Client → Server", kind: "request",
+        json: [
+          "{",
+          '  "jsonrpc": "2.0",',
+          '  "id": 3,',
+          '  "method": "tools/call",',
+          '  "params": {',
+          '    "name": "get_forecast",',
+          '    "arguments": { "location": "Taipei" }',
+          "  }",
+          "}"
+        ].join("\n"),
+        status: "⑦ 呼叫：tools/call 送出 name=get_forecast——一個 Server 根本沒註冊的工具。",
+        caption: "工具名不存在：這不是「參數錯」，是「請求本身不合法」。"
+      },
+      {
+        ph: "invoke", active: ["server", "client"], tone: "bad",
+        dir: "Server → Client", kind: "error",
+        json: [
+          "{",
+          '  "jsonrpc": "2.0",',
+          '  "id": 3,',
+          '  "error": {',
+          '    "code": -32602,',
+          '    "message": "Unknown tool: get_forecast"',
+          "  }",
+          "}"
+        ].join("\n"),
+        status: "⑧ 協定錯誤：Server 回的是 JSON-RPC error 物件（不是 result），code -32602（JSON-RPC 的 Invalid params）——問題出在請求本身、而非工具的執行結果。",
+        caption: "protocol error vs tool execution error：前者「請求不合法」（模型較難自我修正）、後者「工具跑了但出錯」（可修正）。「幻覺工具該被擋下」屬第三篇 allowlist 的安全政策；這裡呈現的是協定層的錯誤回報機制。"
+      }
+    ]
+  };
+
+  var SCENARIOS = {
+    normal: COMMON.concat(TAILS.normal),
+    toolerr: COMMON.concat(TAILS.toolerr),
+    protoerr: COMMON.concat(TAILS.protoerr)
+  };
+
+  var KIND_LABEL = {
+    request: "REQUEST", response: "RESPONSE", notification: "NOTIFICATION",
+    result: "RESULT", error: "ERROR", host: "HOST 內部"
+  };
+  var PH_ORDER = ["init", "discovery", "invoke"];
+
+  var scenario = "normal";
+  var stepIdx = 0;
+
+  var root = document.getElementById("demo-mcp-flow");
+  var laneEls = root.querySelectorAll(".mcp-lane");
+  var phaseEls = root.querySelectorAll(".mcp-phase");
+  var wireEl = document.getElementById("mcp-wire");
+  var dirEl = document.getElementById("mcp-wire-dir");
+  var kindEl = document.getElementById("mcp-wire-kind");
+  var jsonEl = document.getElementById("mcp-json");
+  var statusEl = document.getElementById("mcp-status");
+  var captionEl = document.getElementById("mcp-caption");
+  var btnNext = document.getElementById("mcp-btn-next");
+  var btnReset = document.getElementById("mcp-btn-reset");
+
+  function setText(el, text) { if (el) el.textContent = text; }
+
+  function renderPhases(frame) {
+    var curIdx = frame.ph ? PH_ORDER.indexOf(frame.ph) : -1;
+    phaseEls.forEach(function (el) {
+      var idx = PH_ORDER.indexOf(el.getAttribute("data-ph"));
+      el.classList.remove("ph-done", "ph-active", "ph-bad");
+      if (curIdx === -1) return;
+      if (idx < curIdx) {
+        el.classList.add("ph-done");
+      } else if (idx === curIdx) {
+        el.classList.add("ph-active");
+        if (frame.tone === "bad") el.classList.add("ph-bad");
+      }
+    });
+  }
+
+  function renderLanes(frame) {
+    laneEls.forEach(function (el) {
+      var role = el.getAttribute("data-role");
+      el.classList.remove("mcp-on", "mcp-on-wait", "mcp-on-ok", "mcp-on-bad");
+      if (frame.active.indexOf(role) !== -1) {
+        el.classList.add("mcp-on", "mcp-on-" + frame.tone);
+      }
+    });
+  }
+
+  function renderWire(frame) {
+    wireEl.classList.remove("tone-wait", "tone-ok", "tone-bad");
+    wireEl.classList.add("tone-" + frame.tone);
+    setText(dirEl, frame.dir);
+    if (frame.kind) {
+      kindEl.style.display = "";
+      kindEl.className = "mcp-wire-kind k-" + frame.kind;
+      setText(kindEl, KIND_LABEL[frame.kind] || frame.kind);
+    } else {
+      kindEl.style.display = "none";
+    }
+    setText(jsonEl, frame.json);
+  }
+
+  function renderStep() {
+    var frames = SCENARIOS[scenario];
+    var frame = frames[stepIdx];
+    if (!frame) return;
+    renderPhases(frame);
+    renderLanes(frame);
+    renderWire(frame);
+    setText(statusEl, frame.status);
+    setText(captionEl, frame.caption);
+    btnNext.disabled = stepIdx >= frames.length - 1;
+  }
+
+  function reset() {
+    stepIdx = 0;
+    renderStep();
+  }
+
+  function next() {
+    var frames = SCENARIOS[scenario];
+    if (stepIdx < frames.length - 1) {
+      stepIdx += 1;
+      renderStep();
+    }
+  }
+
+  root.querySelectorAll(".seg button").forEach(function (btn) {
+    btn.addEventListener("click", function () {
+      root.querySelectorAll(".seg button").forEach(function (b) {
+        b.setAttribute("aria-pressed", "false");
+      });
+      btn.setAttribute("aria-pressed", "true");
+      scenario = btn.getAttribute("data-sc");
+      reset();
+    });
+  });
+
+  btnNext.addEventListener("click", next);
+  btnReset.addEventListener("click", reset);
+
+  reset();
+})();
+</script>
