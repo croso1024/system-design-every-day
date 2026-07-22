@@ -1,0 +1,296 @@
+<script>
+(function () {
+  "use strict";
+
+  var HOPS = [
+    {
+      id: "h1",
+      phase: "ingest",
+      proto: "ORCH",
+      cls: "hop-orch",
+      title: "受理理賠 CLM-9912",
+      body: "使用者／上游系統把案件丟給 Claims Orchestrator（內部事件或 API，尚不需協定標籤）。",
+      actors: ["orch"]
+    },
+    {
+      id: "h2",
+      phase: "tools",
+      proto: "MCP",
+      cls: "hop-mcp",
+      title: "查保單與案件主檔",
+      body: "Orchestrator 經 MCP Client 呼叫 Policy／Claims MCP Server（tools/call），屬工具邊界。",
+      actors: ["orch", "tools"]
+    },
+    {
+      id: "h3",
+      phase: "delegate",
+      proto: "A2A",
+      cls: "hop-a2a",
+      title: "委派 Fraud Agent",
+      body: "讀 Agent Card → message/send 建立 Task。對等邊界：只傳業務意圖與案件摘要，不塞 MCP schema。",
+      actors: ["orch", "fraud"]
+    },
+    {
+      id: "h4",
+      phase: "delegate",
+      proto: "A2A",
+      cls: "hop-a2a",
+      title: "委派 Compliance Agent",
+      body: "同樣走 A2A Task。兩個專責 Agent 可並行；Orchestrator 只追蹤 Task 狀態與 Artifact。",
+      actors: ["orch", "comp"]
+    },
+    {
+      id: "h5",
+      phase: "inner",
+      proto: "MCP",
+      cls: "hop-mcp",
+      title: "Fraud 內部打特徵／黑名單工具",
+      body: "Fraud Agent 自己的 MCP tools（特徵商店、裝置指紋）。對 Orchestrator 不可見——正交邊界。",
+      actors: ["fraud", "tools"]
+    },
+    {
+      id: "h6",
+      phase: "inner",
+      proto: "MCP",
+      cls: "hop-mcp",
+      title: "Compliance 內部打政策引擎",
+      body: "Compliance 用 MCP 連政策／法規檢索。換掉內部工具不應弄破對外 A2A 契約。",
+      actors: ["comp", "tools"]
+    },
+    {
+      id: "h7",
+      phase: "merge",
+      proto: "A2A",
+      cls: "hop-a2a",
+      title: "回收 Artifact 並彙整",
+      body: "兩邊 Task completed，交回風險分數與合規意見 Artifact；Orchestrator 決定賠付／人工審核。",
+      actors: ["orch", "fraud", "comp"]
+    }
+  ];
+
+  // legacy scenario: hop 3 becomes ACP legacy then migrate note
+  var LEGACY_OVERRIDE = {
+    h3: {
+      proto: "ACP→A2A",
+      cls: "hop-acp",
+      title: "舊 Fraud 服務仍講 ACP",
+      body: "歷史 BeeAI／ACP 端點。正確做法：A2AServer 適配或遷移，而不是讓 Orchestrator 永久雙協定客戶端。",
+      note: "遺產視角：對等層出現 ACP 時，標成遷移項——短期適配、中期收斂到 A2A，避免雙 gateway 永駐。"
+    },
+    h7: {
+      note: "彙整前確認 Fraud 路徑已經適配器轉成 A2A Task／Artifact，對外觀測只看到一條對等標準。"
+    }
+  };
+
+  var ANTI_OVERRIDE = {
+    h3: {
+      proto: "反模式",
+      cls: "hop-acp",
+      title: "A2A Message 塞滿 MCP tool schema",
+      body: "把 tools/call 參數原樣塞進委派訊息——兩層黏死，Fraud 一換工具名就弄破契約。",
+      note: "反模式：對等訊息應是業務意圖（『評估 CLM-9912 詐欺風險』），不是對方內部的 MCP payload。"
+    },
+    h4: {
+      proto: "反模式",
+      cls: "hop-acp",
+      title: "為內部函式硬上 A2A",
+      body: "Compliance 若與 Orchestrator 同進程、永不跨團隊，硬包 Task 只是協定稅。",
+      note: "反模式：對等協定用在『真的跨邊界』；同進程直接呼叫往往更乾淨。"
+    },
+    h7: {
+      note: "若前面兩跳已破壞正交或濫上協定，彙整階段會同時承受契約脆弱與運維噪音——Demo 用來對照標準路徑。"
+    }
+  };
+
+  var NOTES = {
+    happy: [
+      "受理本身是編排入口：先別急著貼協定標籤，搞清誰是 Orchestrator。",
+      "工具層第一跳：保單／案件主檔用 MCP——這是資料存取，不是 Agent 委派。",
+      "對等層：Fraud 跨團隊 → A2A。只傳意圖與摘要，保持與 MCP 正交。",
+      "第二個對等委派：Compliance 同樣 A2A；可與 Fraud 並行，狀態各自追蹤。",
+      "專責內部：Fraud 的 MCP 扇出對委派方不可見——這正是分層的好處。",
+      "專責內部：Compliance 的政策工具也走 MCP；對外仍只暴露 Artifact。",
+      "收束：A2A 交卷 + Orchestrator 決策。整條流＝外 A2A、內 MCP 的共存範本。"
+    ],
+    legacy: [
+      "同樣從受理開始——遷移情境不改變業務，只改變對等層的歷史包袱。",
+      "工具層不變：主檔查詢仍是 MCP。",
+      "這裡出現 ACP 遺產：標成遷移項，用適配器對接，而不是新寫一套 ACP 客戶端邏輯。",
+      "Compliance 若已是 A2A，可與『適配中的 Fraud』並存於過渡期。",
+      "Fraud 內部工具仍是 MCP——遷移的是對等邊界，不是重寫所有工具。",
+      "Compliance 內部 MCP 照舊。",
+      "過渡期結束條件：觀測與客戶端只認 A2A；ACP gateway 可下線。"
+    ],
+    antipattern: [
+      "反模式路徑也從受理開始，方便和標準路徑逐跳對照。",
+      "工具層本身沒錯；後面才開始壞。",
+      "破壞正交：把 MCP schema 塞進 A2A——選型面試的高頻扣分點。",
+      "濫上對等協定：同進程也打 A2A，協定稅大於收益。",
+      "即便內部 MCP 正確，外層契約已脆——換工具就爆。",
+      "內層再正確也救不了外層的錯誤抽象。",
+      "對照結論：標準路徑是分層；反模式是黏層與過度協定化。"
+    ]
+  };
+
+  var root = document.getElementById("demo-acp-interop");
+  if (!root) return;
+
+  var flowEl = document.getElementById("acp-flow");
+  var annoEl = document.getElementById("acp-anno");
+  var whyEl = document.getElementById("acp-anno-why");
+  var statusEl = document.getElementById("acp-status");
+  var captionEl = document.getElementById("acp-caption");
+  var btnNext = document.getElementById("acp-btn-next");
+  var btnReset = document.getElementById("acp-btn-reset");
+  var seg = root.querySelector(".seg");
+  var phaseNodes = root.querySelectorAll(".acp-phase");
+  var actorNodes = root.querySelectorAll(".acp-actor");
+
+  var scenario = "happy";
+  var step = 0; // 0 = idle, 1..N = hop index+1
+
+  function hopView(h) {
+    var o = {
+      id: h.id,
+      phase: h.phase,
+      proto: h.proto,
+      cls: h.cls,
+      title: h.title,
+      body: h.body,
+      actors: h.actors.slice()
+    };
+    var ov = null;
+    if (scenario === "legacy" && LEGACY_OVERRIDE[h.id]) ov = LEGACY_OVERRIDE[h.id];
+    if (scenario === "antipattern" && ANTI_OVERRIDE[h.id]) ov = ANTI_OVERRIDE[h.id];
+    if (ov) {
+      if (ov.proto) o.proto = ov.proto;
+      if (ov.cls) o.cls = ov.cls;
+      if (ov.title) o.title = ov.title;
+      if (ov.body) o.body = ov.body;
+    }
+    return o;
+  }
+
+  function renderShell() {
+    flowEl.innerHTML = "";
+    HOPS.forEach(function (h) {
+      var v = hopView(h);
+      var div = document.createElement("div");
+      div.className = "acp-hop " + v.cls;
+      div.setAttribute("data-hop", v.id);
+      div.innerHTML =
+        '<div class="acp-hop-meta">' +
+          '<span class="acp-hop-id">' + v.id.toUpperCase() + "</span>" +
+          '<span class="acp-hop-proto">' + v.proto + "</span>" +
+        "</div>" +
+        '<div class="acp-hop-title">' + v.title + "</div>" +
+        '<div class="acp-hop-body">' + v.body + "</div>";
+      flowEl.appendChild(div);
+    });
+  }
+
+  function setPhases(active) {
+    var seen = false;
+    var reached = {};
+    if (active) reached[active] = true;
+    // mark done for phases before active in order
+    var order = ["ingest", "tools", "delegate", "inner", "merge"];
+    var ai = active ? order.indexOf(active) : -1;
+    phaseNodes.forEach(function (n) {
+      var ph = n.getAttribute("data-ph");
+      n.classList.remove("ph-active", "ph-done");
+      var idx = order.indexOf(ph);
+      if (ai < 0) return;
+      if (idx < ai) n.classList.add("ph-done");
+      else if (idx === ai) n.classList.add("ph-active");
+    });
+  }
+
+  function setActors(list) {
+    var set = {};
+    (list || []).forEach(function (a) { set[a] = true; });
+    actorNodes.forEach(function (n) {
+      var id = n.getAttribute("data-actor");
+      n.classList.toggle("act-on", !!set[id]);
+    });
+  }
+
+  function toneFor(cls) {
+    if (cls.indexOf("hop-mcp") >= 0) return "mcp";
+    if (cls.indexOf("hop-a2a") >= 0) return "a2a";
+    if (cls.indexOf("hop-acp") >= 0) return "acp";
+    return "orch";
+  }
+
+  function paint() {
+    var hops = flowEl.querySelectorAll(".acp-hop");
+    hops.forEach(function (el, i) {
+      el.classList.toggle("hop-on", step > 0 && i === step - 1);
+    });
+
+    if (step === 0) {
+      setPhases(null);
+      setActors([]);
+      annoEl.className = "acp-anno tone-orch";
+      whyEl.innerHTML = "選一個視角，按「下一步」開始標註這條理賠流程的協定邊界。";
+      statusEl.textContent = "選視角後按「下一步」，逐步為每一跳貼上 MCP／A2A／ACP 標籤。";
+      captionEl.textContent = "重點不是訊息 JSON，而是「這一跳為什麼落在這一層」——選型與共存策略。";
+      btnNext.disabled = false;
+      btnNext.textContent = "下一步";
+      return;
+    }
+
+    var base = HOPS[step - 1];
+    var v = hopView(base);
+    setPhases(v.phase);
+    setActors(v.actors);
+    annoEl.className = "acp-anno tone-" + toneFor(v.cls);
+
+    var note = NOTES[scenario][step - 1];
+    var ov = null;
+    if (scenario === "legacy" && LEGACY_OVERRIDE[base.id]) ov = LEGACY_OVERRIDE[base.id];
+    if (scenario === "antipattern" && ANTI_OVERRIDE[base.id]) ov = ANTI_OVERRIDE[base.id];
+    if (ov && ov.note) note = ov.note;
+
+    whyEl.innerHTML = "<b>" + v.proto + "</b> · " + note;
+    statusEl.textContent = "步驟 " + step + "／" + HOPS.length + "：" + v.title;
+    captionEl.textContent = v.body;
+
+    if (step >= HOPS.length) {
+      btnNext.textContent = "已結束";
+      btnNext.disabled = true;
+    } else {
+      btnNext.textContent = "下一步";
+      btnNext.disabled = false;
+    }
+  }
+
+  function reset() {
+    step = 0;
+    renderShell();
+    paint();
+  }
+
+  function next() {
+    if (step >= HOPS.length) return;
+    step += 1;
+    // re-render shell when scenario overrides titles (already rendered on scenario change)
+    paint();
+  }
+
+  seg.addEventListener("click", function (e) {
+    var btn = e.target.closest("button[data-sc]");
+    if (!btn) return;
+    scenario = btn.getAttribute("data-sc");
+    seg.querySelectorAll("button[data-sc]").forEach(function (b) {
+      b.setAttribute("aria-pressed", b === btn ? "true" : "false");
+    });
+    reset();
+  });
+
+  btnNext.addEventListener("click", next);
+  btnReset.addEventListener("click", reset);
+
+  reset();
+})();
+</script>
