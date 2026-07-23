@@ -1,6 +1,7 @@
 /* Homepage Learning Map runtime — inlined by scripts/lib/books.js */
 (() => {
   const ROOT_ID = 'root-0';
+  const RECENT_COMPLETED_LIMIT = 5;
   const TAU = Math.PI * 2;
   const EXTREME_ZOOM_RATIO = 0.45;
   const EXTREME_ZOOM_FLOOR = 0.22;
@@ -651,19 +652,79 @@
     });
   }
 
-  function renderInitialDocumentHint() {
-    el.documentsTitle.textContent = '分群文件';
+  function getRecentCompletedTopics() {
+    const topics = (state.payload && state.payload.topics) || [];
+    return topics
+      .filter((topic) => topic.completed && topic.path)
+      .slice()
+      .sort((a, b) => (b.completed_at || '').localeCompare(a.completed_at || ''))
+      .slice(0, RECENT_COMPLETED_LIMIT);
+  }
+
+  function renderRecentCompleted() {
+    el.documentsTitle.textContent = '最近完成';
     el.documentsSummary.textContent = '';
-    const hint = document.createElement('p');
-    hint.className = 'lm-documents-hint';
-    hint.textContent = '點選 category hub 或 topic satellite 以查看該分群文件。鍵盤使用者可在顯示清單後，以 Tab 移動至文件連結或「在圖上定位」按鈕。';
-    el.documentsBody.replaceChildren(hint);
+    const recent = getRecentCompletedTopics();
+    if (!recent.length) {
+      const hint = document.createElement('p');
+      hint.className = 'lm-documents-hint';
+      hint.textContent = '尚無已完成主題。';
+      el.documentsBody.replaceChildren(hint);
+      return;
+    }
+
+    const list = document.createElement('ul');
+    list.className = 'lm-document-list';
+    recent.forEach((topic) => {
+      const modeled = state.topicById.get(topic.id);
+      const categoryIndex = modeled && Number.isInteger(modeled.categoryIndex)
+        ? modeled.categoryIndex
+        : null;
+
+      const row = document.createElement('li');
+      row.className = 'lm-document-row';
+      row.dataset.topicId = topic.id;
+
+      const title = document.createElement('div');
+      title.className = 'lm-document-title';
+      const articleLink = document.createElement('a');
+      articleLink.href = topic.path;
+      articleLink.textContent = topic.title;
+      articleLink.setAttribute('data-completed-link', topic.path);
+      articleLink.setAttribute('aria-label', `閱讀已完成文件：${topic.title}`);
+      title.append(articleLink);
+
+      const meta = document.createElement('div');
+      meta.className = 'lm-document-meta';
+      meta.textContent = `${topic.category || 'General'} · 發佈日期：${topic.completed_at || 'N/A'}`;
+
+      const locate = document.createElement('button');
+      locate.type = 'button';
+      locate.className = 'lm-locate-button';
+      locate.textContent = '在圖上定位';
+      locate.setAttribute('aria-label', `在學習圖譜上選取 ${topic.title}`);
+      locate.addEventListener('click', () => {
+        if (!Number.isInteger(categoryIndex)) return;
+        selectCluster(categoryIndex, topic.id, true);
+        const graphNode = state.cy && state.cy.getElementById(topic.id);
+        if (graphNode && graphNode.length) {
+          state.cy.animate(
+            { center: { eles: graphNode }, zoom: Math.max(state.cy.zoom(), 0.72) },
+            { duration: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 0 : 220 }
+          );
+        }
+      });
+
+      row.append(title, meta, locate);
+      list.append(row);
+    });
+    el.documentsBody.replaceChildren(list);
   }
 
   function renderDocuments(scrollToSelected) {
     const category = categoryAt(state.selectedCategoryIndex);
     if (!category) {
-      renderInitialDocumentHint();
+      renderRecentCompleted();
       return;
     }
 
@@ -793,7 +854,7 @@
     state.keyboardCursor = -1;
     if (state.cy) state.cy.nodes().removeClass('keyboard-target');
     applySelectionStyles();
-    renderInitialDocumentHint();
+    renderRecentCompleted();
     if (announce) setStatus('已清除分群選取。');
   }
 
@@ -901,7 +962,7 @@
       buildModel(payload);
       el.mapContent.classList.remove('lm-hidden');
       initializeGraph();
-      renderInitialDocumentHint();
+      renderRecentCompleted();
       setStatus(`已載入 ${payload.topics.length} 個 topics、${state.categories.length} 個 categories。點選節點可聚焦分群。`);
     } catch (error) {
       // 圖譜載入失敗（CDN 失效 / cytoscape 未定義 / payload 解析失敗）→ 解除隱藏 server-rendered 後備清單。

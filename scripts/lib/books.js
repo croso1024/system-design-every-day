@@ -75,6 +75,8 @@ function readTemplate(filePath, label) {
   return fs.readFileSync(filePath, 'utf8');
 }
 
+const RECENT_COMPLETED_LIMIT = 5;
+
 /**
  * Server-rendered 後備清單：已完成文章的純 HTML `<a>` 連結。
  * 預設隱藏（.lm-hidden）；僅在 JS 停用（<noscript> 覆寫）或 Cytoscape / boot 失敗（前端解除隱藏）時顯示。
@@ -101,6 +103,42 @@ function buildFallbackListHtml(completed) {
   return `<ul class="lm-fallback-list">\n${rows}\n      </ul>`;
 }
 
+/**
+ * 首頁 `#lm-documents` 未選取分群時的 SSR 初值：最近完成 K 篇。
+ * 與 client `renderRecentCompleted` 同源規則（completed_at desc、limit 5）。
+ * 「在圖上定位」按鈕由 client boot 後掛上事件；SSR 先輸出結構避免閃爍。
+ */
+function buildRecentCompletedListHtml(completed) {
+  const recent = completed
+    .filter((item) => item && item.path)
+    .slice()
+    .sort((a, b) => (b.completed_at || '').localeCompare(a.completed_at || ''))
+    .slice(0, RECENT_COMPLETED_LIMIT);
+
+  if (!recent.length) {
+    return '            <p class="lm-documents-hint">尚無已完成主題。</p>';
+  }
+
+  const rows = recent.map((item) => {
+    const href = String(item.path || '').replace(/^books\//, '');
+    const title = escapeHtml(item.title || item.id);
+    const category = escapeHtml(item.category || 'General');
+    const date = escapeHtml(item.completed_at || 'N/A');
+    const safeHref = escapeHtml(href);
+    return [
+      '            <li class="lm-document-row">',
+      '              <div class="lm-document-title">',
+      `                <a href="${safeHref}" data-completed-link="${safeHref}" aria-label="閱讀已完成文件：${title}">${title}</a>`,
+      '              </div>',
+      `              <div class="lm-document-meta">${category} · 發佈日期：${date}</div>`,
+      `              <button type="button" class="lm-locate-button" aria-label="在學習圖譜上選取 ${title}">在圖上定位</button>`,
+      '            </li>'
+    ].join('\n');
+  }).join('\n');
+
+  return `            <ul class="lm-document-list">\n${rows}\n            </ul>`;
+}
+
 function buildBooksIndexHtml(completed) {
   // 傳入 in-memory completed，讓 graph payload 與 ledger 同源（勿讓 builder 自行讀磁碟，
   // 否則會在「尚未 saveCompleted」的呼叫端出現節點落後的 off-by-one bug）。
@@ -113,6 +151,7 @@ function buildBooksIndexHtml(completed) {
   const learningMapJs = readTemplate(HOME_MAP_JS_PATH, 'home-learning-map.js').replace(/<\/(script)/gi, '<\\/$1');
   const completedCount = completed.length;
   const fallbackListHtml = buildFallbackListHtml(completed);
+  const recentCompletedListHtml = buildRecentCompletedListHtml(completed);
 
   return `<!DOCTYPE html>
 <html lang="zh-Hant">
@@ -209,11 +248,11 @@ ${learningMapCss}
 
         <section id="lm-documents" class="lm-documents" aria-labelledby="lm-documents-title">
           <div class="lm-documents-header">
-            <h3 id="lm-documents-title">分群文件</h3>
+            <h3 id="lm-documents-title">最近完成</h3>
             <p id="lm-documents-summary" class="lm-documents-summary"></p>
           </div>
           <div id="lm-documents-body">
-            <p class="lm-documents-hint">點選 category hub 或 topic satellite 以查看該分群文件。</p>
+${recentCompletedListHtml}
           </div>
         </section>
       </div>
@@ -230,7 +269,7 @@ ${learningMapCss}
         <h2 class="text-xl font-semibold text-stone-800">知識圖譜總覽</h2>
         <span class="font-mono text-xs text-stone-400 bg-stone-100 px-3 py-1 rounded-full">${completedCount} completed · ${learningMapData.topics.length} topics</span>
       </div>
-      <p class="mt-2 text-sm text-stone-500">選取上方分群後，文件清單會顯示該 Category 的發佈日期或「尚未發佈」狀態。</p>
+      <p class="mt-2 text-sm text-stone-500">未選取分群時顯示最近完成文章；選取上方分群後，文件清單會切換為該 Category 的發佈日期或「尚未發佈」狀態。</p>
     </section>
   </main>
 
