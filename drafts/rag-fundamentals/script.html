@@ -1,0 +1,306 @@
+<script>
+(function () {
+  "use strict";
+
+  var scenario = "hit";
+  var stepIdx = 0;
+
+  var QUERY = "退貨期限是幾天？需要原包裝嗎？";
+
+  var statusEl = document.getElementById("rag-status");
+  var promptEl = document.getElementById("rag-prompt");
+  var answerEl = document.getElementById("rag-answer");
+  var queryEl = document.getElementById("rag-query-text");
+  var btnNext = document.getElementById("rag-btn-next");
+  var btnReset = document.getElementById("rag-btn-reset");
+  var phaseEls = document.querySelectorAll("#rag-phases .rag-phase");
+  var chunkEls = {
+    c1: document.getElementById("rag-c1"),
+    c2: document.getElementById("rag-c2"),
+    c3: document.getElementById("rag-c3")
+  };
+
+  var CHUNK_META = {
+    c1: "doc:policy-v3 · chunk#12",
+    c2: "doc:shipping-faq · chunk#3",
+    c3: "doc:promo-2024 · chunk#1"
+  };
+
+  var SCENARIOS = {
+    hit: {
+      label: "檢索命中",
+      steps: [
+        {
+          ph: null,
+          tone: "wait",
+          chunks: { c1: "idle", c2: "idle", c3: "idle" },
+          scores: { c1: "—", c2: "—", c3: "—" },
+          prompt: "// 待命：索引已建好。按「下一步」把使用者問題做成 query vector。",
+          answer: "（尚未生成）",
+          answerTone: "",
+          status: "情境「檢索命中」：知識庫裡有正確的退貨政策 chunk。開始走線上路徑。"
+        },
+        {
+          ph: "embed",
+          tone: "wait",
+          chunks: { c1: "idle", c2: "idle", c3: "idle" },
+          scores: { c1: "—", c2: "—", c3: "—" },
+          prompt: "embed(query) → q⃗\nquery = \"" + QUERY + "\"\n// 使用與建庫相同的 embedding 模型",
+          answer: "（尚未生成）",
+          answerTone: "",
+          status: "① Embed Query：問題進入與文件相同的向量空間。換模型就必須整庫重嵌——這裡假設一致。"
+        },
+        {
+          ph: "retrieve",
+          tone: "ok",
+          chunks: { c1: "hit", c2: "idle", c3: "idle" },
+          scores: { c1: "0.91", c2: "0.31", c3: "0.22" },
+          prompt: "retrieve(q⃗, k=2) → [chunk#12]\n// Top-1 明確命中退貨政策；其餘分數過低可丟棄",
+          answer: "（尚未生成）",
+          answerTone: "",
+          status: "② Retrieve：ANN 回傳 Top-k。policy-v3#12 分數最高且語義對題；配送 FAQ／舊促銷被壓下去。"
+        },
+        {
+          ph: "prompt",
+          tone: "ok",
+          chunks: { c1: "hit", c2: "idle", c3: "idle" },
+          scores: { c1: "0.91", c2: "0.31", c3: "0.22" },
+          prompt: [
+            "System: 只根據「上下文」回答；不足則說不知道。請標註來源。",
+            "Context:",
+            "[1] (policy-v3#12) 退貨須於到貨後 14 日內申請；商品須保持原包裝與完整配件。",
+            "User: " + QUERY
+          ].join("\n"),
+          answer: "（尚未生成）",
+          answerTone: "",
+          status: "③ Build Prompt：把命中 chunk 編成帶編號的 Context，再接上使用者問題。檢索結果成為生成條件。"
+        },
+        {
+          ph: "generate",
+          tone: "ok",
+          chunks: { c1: "hit", c2: "idle", c3: "idle" },
+          scores: { c1: "0.91", c2: "0.31", c3: "0.22" },
+          prompt: [
+            "System: 只根據「上下文」回答；不足則說不知道。請標註來源。",
+            "Context:",
+            "[1] (policy-v3#12) 退貨須於到貨後 14 日內申請；商品須保持原包裝與完整配件。",
+            "User: " + QUERY
+          ].join("\n"),
+          answer: "依政策：到貨後 14 日內可申請退貨，且需保留原包裝與完整配件。[來源: policy-v3#12]",
+          answerTone: "tone-ok",
+          status: "④ Generate：模型依 Context 作答並可引用來源。幻覺被「有依據」壓住——前提是檢索真的對。"
+        }
+      ]
+    },
+    weak: {
+      label: "弱相關／誤檢",
+      steps: [
+        {
+          ph: null,
+          tone: "wait",
+          chunks: { c1: "idle", c2: "idle", c3: "idle" },
+          scores: { c1: "—", c2: "—", c3: "—" },
+          prompt: "// 待命。此情境模擬切塊／索引品質不佳：真正政策 chunk 分數被擠掉。",
+          answer: "（尚未生成）",
+          answerTone: "",
+          status: "情境「弱相關／誤檢」：正確政策仍在庫裡，但檢索沒把它排進 Top-k（或分數被稀釋）。"
+        },
+        {
+          ph: "embed",
+          tone: "wait",
+          chunks: { c1: "idle", c2: "idle", c3: "idle" },
+          scores: { c1: "—", c2: "—", c3: "—" },
+          prompt: "embed(query) → q⃗\nquery = \"" + QUERY + "\"",
+          answer: "（尚未生成）",
+          answerTone: "",
+          status: "① Embed Query：步驟相同。問題不在 embedding，而在「庫裡的切塊與相似度排序」。"
+        },
+        {
+          ph: "retrieve",
+          tone: "lock",
+          chunks: { c1: "idle", c2: "weak", c3: "miss" },
+          scores: { c1: "0.44", c2: "0.58", c3: "0.55" },
+          prompt: "retrieve(q⃗, k=2) → [shipping-faq#3, promo-2024#1]\n// 誤把物流／促銷當退貨依據；真正的 policy#12 落在 k 外",
+          answer: "（尚未生成）",
+          answerTone: "",
+          status: "② Retrieve：Top-2 變成配送 FAQ 與舊促銷。語義「有一點像購物」，但不是退貨條款——典型誤檢。"
+        },
+        {
+          ph: "prompt",
+          tone: "lock",
+          chunks: { c1: "idle", c2: "weak", c3: "miss" },
+          scores: { c1: "0.44", c2: "0.58", c3: "0.55" },
+          prompt: [
+            "System: 只根據「上下文」回答；不足則說不知道。請標註來源。",
+            "Context:",
+            "[1] (shipping-faq#3) 標準配送時效為 2–4 個工作天；離島另計。",
+            "[2] (promo-2024#1) 雙十一滿額贈品活動已結束，贈品恕不補發。",
+            "User: " + QUERY
+          ].join("\n"),
+          answer: "（尚未生成）",
+          answerTone: "",
+          status: "③ Build Prompt：錯的 Context 仍被認真塞進窗口。RAG 不會自動知道「這些片段答不了題」。"
+        },
+        {
+          ph: "generate",
+          tone: "bad",
+          chunks: { c1: "idle", c2: "weak", c3: "miss" },
+          scores: { c1: "0.44", c2: "0.58", c3: "0.55" },
+          prompt: [
+            "System: 只根據「上下文」回答；不足則說不知道。請標註來源。",
+            "Context:",
+            "[1] (shipping-faq#3) 標準配送時效為 2–4 個工作天；離島另計。",
+            "[2] (promo-2024#1) 雙十一滿額贈品活動已結束，贈品恕不補發。",
+            "User: " + QUERY
+          ].join("\n"),
+          answer: "（風險）模型可能硬湊：「大約 2–4 天內聯絡客服…」——看起來有引用，事實卻錯。或在嚴格 system 下回答「上下文不足」。",
+          answerTone: "tone-bad",
+          status: "④ Generate：垃圾進、垃圾出。這正是後續要做 chunking／hybrid／rerank／evaluation 的理由——RAG 不是幻覺疫苗。"
+        }
+      ]
+    },
+    norag: {
+      label: "無 RAG（對照）",
+      steps: [
+        {
+          ph: null,
+          tone: "wait",
+          chunks: { c1: "idle", c2: "idle", c3: "idle" },
+          scores: { c1: "—", c2: "—", c3: "—" },
+          prompt: "// 對照組：不檢索、不組 Context，直接把問題丟給參數模型。",
+          answer: "（尚未生成）",
+          answerTone: "",
+          status: "情境「無 RAG」：跳過檢索。知識庫 chunks 全程不參與——對照私有／最新政策進不了模型的痛點。"
+        },
+        {
+          ph: "embed",
+          tone: "wait",
+          chunks: { c1: "idle", c2: "idle", c3: "idle" },
+          scores: { c1: "—", c2: "—", c3: "—" },
+          prompt: "// 本情境不做 query embedding／檢索。\n// （階段列僅作對照；實際路徑直接進 Generate）",
+          answer: "（尚未生成）",
+          answerTone: "",
+          status: "① 無 Embed／Retrieve：沒有外部知識通道。公司退貨政策若未進訓練語料，模型只能猜或拒答。"
+        },
+        {
+          ph: "retrieve",
+          tone: "bad",
+          chunks: { c1: "idle", c2: "idle", c3: "idle" },
+          scores: { c1: "—", c2: "—", c3: "—" },
+          prompt: "retrieve = ∅\n// 私有政策、最新版條款都不在權重裡",
+          answer: "（尚未生成）",
+          answerTone: "",
+          status: "② 無檢索：知識過時與私有資料問題同時爆炸——索引裡明明有 policy-v3，卻從未被讀取。"
+        },
+        {
+          ph: "prompt",
+          tone: "bad",
+          chunks: { c1: "idle", c2: "idle", c3: "idle" },
+          scores: { c1: "—", c2: "—", c3: "—" },
+          prompt: [
+            "System: 你是電商客服助理。",
+            "User: " + QUERY,
+            "",
+            "// 注意：沒有 Context 區塊"
+          ].join("\n"),
+          answer: "（尚未生成）",
+          answerTone: "",
+          status: "③ Prompt 只有問題：沒有可引用片段，也無法做 ACL 過濾——因為根本沒走到知識庫。"
+        },
+        {
+          ph: "generate",
+          tone: "bad",
+          chunks: { c1: "idle", c2: "idle", c3: "idle" },
+          scores: { c1: "—", c2: "—", c3: "—" },
+          prompt: [
+            "System: 你是電商客服助理。",
+            "User: " + QUERY,
+            "",
+            "// 注意：沒有 Context 區塊"
+          ].join("\n"),
+          answer: "（幻覺風險）「一般是 7 天鑑賞期，建議保留包裝…」——語氣自信，卻可能與貴司 14 日政策衝突，且無來源可稽核。",
+          answerTone: "tone-bad",
+          status: "④ Generate：這就是 RAG 要解的痛——幻覺、過時、私有知識。對照「檢索命中」情境即可感受到差距。"
+        }
+      ]
+    }
+  };
+
+  function setPhases(activePh, tone) {
+    phaseEls.forEach(function (el) {
+      var id = el.getAttribute("data-ph");
+      el.classList.remove("ph-active", "ph-done", "ph-bad", "ph-lock");
+      if (!activePh) return;
+      var order = ["embed", "retrieve", "prompt", "generate"];
+      var ai = order.indexOf(activePh);
+      var ei = order.indexOf(id);
+      if (ei < ai) el.classList.add("ph-done");
+      if (ei === ai) {
+        el.classList.add("ph-active");
+        if (tone === "bad") el.classList.add("ph-bad");
+        if (tone === "lock") el.classList.add("ph-lock");
+      }
+    });
+  }
+
+  function setChunks(states, scores) {
+    Object.keys(chunkEls).forEach(function (id) {
+      var el = chunkEls[id];
+      if (!el) return;
+      el.classList.remove("ch-hit", "ch-weak", "ch-miss", "ch-idle");
+      var st = states[id] || "idle";
+      el.classList.add("ch-" + st);
+      var score = scores[id] != null ? scores[id] : "—";
+      var meta = el.querySelector(".ck");
+      if (meta) meta.textContent = CHUNK_META[id] + " · score " + score;
+    });
+  }
+
+  function render() {
+    var steps = SCENARIOS[scenario].steps;
+    if (stepIdx >= steps.length) stepIdx = steps.length - 1;
+    var s = steps[stepIdx];
+
+    if (queryEl) queryEl.textContent = QUERY;
+    if (statusEl) statusEl.textContent = s.status;
+
+    promptEl.textContent = s.prompt;
+    promptEl.className = "rag-prompt tone-" + (s.tone || "wait");
+
+    answerEl.textContent = s.answer;
+    answerEl.className = "rag-answer" + (s.answerTone ? " " + s.answerTone : "");
+
+    setPhases(s.ph, s.tone);
+    setChunks(s.chunks, s.scores);
+
+    btnNext.disabled = stepIdx >= steps.length - 1;
+  }
+
+  function reset() {
+    stepIdx = 0;
+    render();
+  }
+
+  document.querySelectorAll("#demo-rag-flow .seg button").forEach(function (btn) {
+    btn.addEventListener("click", function () {
+      document.querySelectorAll("#demo-rag-flow .seg button").forEach(function (b) {
+        b.setAttribute("aria-pressed", b === btn ? "true" : "false");
+      });
+      scenario = btn.getAttribute("data-sc");
+      reset();
+    });
+  });
+
+  btnNext.addEventListener("click", function () {
+    var steps = SCENARIOS[scenario].steps;
+    if (stepIdx < steps.length - 1) {
+      stepIdx += 1;
+      render();
+    }
+  });
+
+  btnReset.addEventListener("click", reset);
+
+  reset();
+})();
+</script>
