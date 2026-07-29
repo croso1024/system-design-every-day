@@ -1,0 +1,212 @@
+<script>
+(function () {
+  "use strict";
+
+  var scenario = "fixed";
+  var ran = false;
+
+  var statusEl = document.getElementById("rch-status");
+  var chunksEl = document.getElementById("rch-chunks");
+  var verdictEl = document.getElementById("rch-verdict");
+  var btnRun = document.getElementById("rch-btn-run");
+  var btnReset = document.getElementById("rch-btn-reset");
+  var mStrat = document.getElementById("rch-m-strat");
+  var mScore = document.getElementById("rch-m-score");
+  var mAns = document.getElementById("rch-m-ans");
+  var segRoot = document.querySelector("#demo-rch-chunk .seg");
+
+  var STRATEGIES = {
+    fixed: {
+      label: "固定 · 無 overlap",
+      chunks: [
+        {
+          id: "A",
+          meta: "fixed#0–48 · no overlap",
+          body: "顧客可於到貨後 14 日內申請退貨。商品須保持原包",
+          score: 0.62,
+          tone: "bad"
+        },
+        {
+          id: "B",
+          meta: "fixed#48–96 · no overlap",
+          body: "裝與完整配件，且未經使用痕跡。電子票券與客製化商品不適用本條款。",
+          score: 0.71,
+          tone: "lock"
+        },
+        {
+          id: "C",
+          meta: "fixed#96–128 · no overlap",
+          body: "運費規則另見配送專章。",
+          score: 0.18,
+          tone: "idle"
+        }
+      ],
+      topId: "B",
+      topScore: "0.71",
+      answerability: "部分／易漏",
+      verdictTone: "tone-bad",
+      status: "無 overlap：切點落在「原包裝」中間。Top-1 只拿到後半句條件，卻缺「14 日」前提；例外商品在同塊但分數被稀釋敘事打斷。",
+      verdict: "判定：切斷失敗。命中塊缺完整條件句，模型容易漏答「要原包裝」或捏造期限。Overlap 或語意邊界可止血。"
+    },
+    overlap: {
+      label: "固定 · 有 overlap",
+      chunks: [
+        {
+          id: "A",
+          meta: "fixed#0–56 · overlap→B",
+          body: "顧客可於到貨後 14 日內申請退貨。商品須保持原包裝與完整配件，",
+          score: 0.84,
+          tone: "ok"
+        },
+        {
+          id: "B",
+          meta: "fixed#40–104 · overlap←A",
+          body: "商品須保持原包裝與完整配件，且未經使用痕跡。電子票券與客製化商品不適用本條款。",
+          score: 0.88,
+          tone: "ok"
+        },
+        {
+          id: "C",
+          meta: "fixed#88–128 · overlap←B",
+          body: "電子票券與客製化商品不適用本條款。運費規則另見配送專章。",
+          score: 0.55,
+          tone: "lock"
+        }
+      ],
+      topId: "B",
+      topScore: "0.88",
+      answerability: "可答（條件完整）",
+      verdictTone: "tone-lock",
+      status: "有 overlap：「原包裝＋未使用」完整落在至少一塊。Top-1 可答條件；例外條款在 Top-2／重疊區，通常再取 k=2 即可。",
+      verdict: "判定：邊界止血成功。條件句不再被切開；仍可能要 Top-k≥2 才能同時帶上「電子票券／客製化」例外。索引體積略增。"
+    },
+    parent: {
+      label: "語意 · Parent-Child",
+      chunks: [
+        {
+          id: "c1",
+          meta: "child · 退貨期限句 → parent§退貨",
+          body: "（小塊）到貨後 14 日內可申請退貨",
+          score: 0.79,
+          tone: "lock"
+        },
+        {
+          id: "c2",
+          meta: "child · 原包裝條件 → parent§退貨",
+          body: "（小塊）須保持原包裝與完整配件，且未經使用",
+          score: 0.93,
+          tone: "ok"
+        },
+        {
+          id: "c3",
+          meta: "child · 例外商品 → parent§退貨",
+          body: "（小塊）電子票券與客製化商品不適用",
+          score: 0.90,
+          tone: "ok"
+        },
+        {
+          id: "P",
+          meta: "parent§退貨（回填，去重後只送一次）",
+          body: "顧客可於到貨後 14 日內申請退貨。商品須保持原包裝與完整配件，且未經使用痕跡。電子票券與客製化商品不適用本條款。",
+          score: null,
+          tone: "ok"
+        }
+      ],
+      topId: "c2",
+      topScore: "0.93 → parent",
+      answerability: "可答且完整",
+      verdictTone: "tone-ok",
+      status: "Parent-Child：小塊精準命中「原包裝」與「例外」；回填同一 parent 去重後送進 Context，期限／條件／例外齊全。",
+      verdict: "判定：定位準、上下文夠。Child 負責分數，Parent 負責生成；比單純加大固定窗更不容易語義稀釋。"
+    }
+  };
+
+  function setMetrics(empty) {
+    if (empty) {
+      mStrat.textContent = "—";
+      mScore.textContent = "—";
+      mAns.textContent = "—";
+      return;
+    }
+    var s = STRATEGIES[scenario];
+    mStrat.textContent = s.label;
+    mScore.textContent = s.topScore;
+    mAns.textContent = s.answerability;
+  }
+
+  function renderChunks(mode) {
+    var s = STRATEGIES[scenario];
+    chunksEl.innerHTML = "";
+    s.chunks.forEach(function (c) {
+      var div = document.createElement("div");
+      div.className = "rch-chunk ns-idle";
+      div.setAttribute("data-cid", c.id);
+      var scoreTxt = c.score == null ? "回填" : String(c.score);
+      if (mode === "idle") scoreTxt = "—";
+      div.innerHTML =
+        '<div class="ck">chunk ' + c.id + " · " + c.meta + " · score " + scoreTxt + "</div>" +
+        "<span>" + c.body + "</span>";
+      if (mode === "waiting") {
+        div.className = "rch-chunk ns-wait";
+      } else if (mode === "result") {
+        div.className = "rch-chunk ns-" + c.tone;
+        if (c.score == null) {
+          div.querySelector(".ck").textContent =
+            "chunk " + c.id + " · " + c.meta + " · score 回填";
+        } else {
+          div.querySelector(".ck").textContent =
+            "chunk " + c.id + " · " + c.meta + " · score " + c.score.toFixed(2);
+        }
+      }
+      chunksEl.appendChild(div);
+    });
+  }
+
+  function resetView() {
+    ran = false;
+    statusEl.textContent =
+      "選擇切塊策略後按「執行檢索」，觀察同一查詢下各 chunk 的分數與可答性。";
+    verdictEl.className = "rch-verdict";
+    verdictEl.textContent =
+      "尚未執行。三種切法共用同一段原文與同一問題；差異只在「答案有沒有完整落在被命中的塊裡」。";
+    setMetrics(true);
+    renderChunks("idle");
+  }
+
+  function runRetrieve() {
+    ran = true;
+    var s = STRATEGIES[scenario];
+    renderChunks("waiting");
+    statusEl.textContent = "檢索中：依「" + s.label + "」策略嵌入 query 並取 Top-k…";
+    verdictEl.className = "rch-verdict";
+    verdictEl.textContent = "比對向量相似度、標記命中塊…";
+    setMetrics(true);
+
+    window.setTimeout(function () {
+      if (!ran) return;
+      renderChunks("result");
+      setMetrics(false);
+      statusEl.textContent = s.status;
+      verdictEl.className = "rch-verdict " + s.verdictTone;
+      verdictEl.textContent = s.verdict;
+    }, 280);
+  }
+
+  if (segRoot) {
+    segRoot.addEventListener("click", function (e) {
+      var btn = e.target.closest("button[data-sc]");
+      if (!btn) return;
+      scenario = btn.getAttribute("data-sc");
+      Array.prototype.forEach.call(segRoot.querySelectorAll("button[data-sc]"), function (b) {
+        b.setAttribute("aria-pressed", b === btn ? "true" : "false");
+      });
+      resetView();
+    });
+  }
+
+  if (btnRun) btnRun.addEventListener("click", runRetrieve);
+  if (btnReset) btnReset.addEventListener("click", resetView);
+
+  resetView();
+})();
+</script>
