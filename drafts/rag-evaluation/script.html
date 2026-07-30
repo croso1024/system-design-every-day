@@ -1,0 +1,229 @@
+<script>
+(function () {
+  "use strict";
+
+  var scenario = "weak";
+  var ran = false;
+
+  var statusEl = document.getElementById("rev-status");
+  var hitsEl = document.getElementById("rev-hits");
+  var answerEl = document.getElementById("rev-answer");
+  var verdictEl = document.getElementById("rev-verdict");
+  var btnRun = document.getElementById("rev-btn-run");
+  var btnReset = document.getElementById("rev-btn-reset");
+  var mSc = document.getElementById("rev-m-sc");
+  var mRec = document.getElementById("rev-m-rec");
+  var mPre = document.getElementById("rev-m-pre");
+  var sFaith = document.getElementById("rev-s-faith");
+  var sArel = document.getElementById("rev-s-arel");
+  var sCrel = document.getElementById("rev-s-crel");
+  var sHall = document.getElementById("rev-s-hall");
+  var segRoot = document.querySelector("#demo-rev-eval .seg");
+
+  var SCENARIOS = {
+    weak: {
+      label: "弱檢索 · Top-3 雜訊",
+      recall: "0/2",
+      precision: "0/3",
+      hits: [
+        {
+          meta: "rank#1 · promo-faq · score 0.81",
+          body: "本季滿額贈運費 ethereal；詳見活動頁。與退貨期限無關。",
+          tone: "bad",
+          gold: false
+        },
+        {
+          meta: "rank#2 · shipping · score 0.74",
+          body: "標準配送約 2–4 個工作天送達。到貨通知以簡訊為準。",
+          tone: "lock",
+          gold: false
+        },
+        {
+          meta: "rank#3 · old-policy-v1 · score 0.69",
+          body: "（過期）到貨後 7 日內可申請退貨。條款已廢止。",
+          tone: "bad",
+          gold: false
+        }
+      ],
+      answer: "依目前資料，到貨後大約 7 日內可以退貨；電子票券通常也能退，建議直接聯繫客服加急處理。",
+      faith: "1.2",
+      arel: "3.8",
+      crel: "1.5",
+      hall: "高",
+      faithCls: "bad",
+      arelCls: "warn",
+      crelCls: "bad",
+      hallCls: "bad",
+      verdictTone: "tone-bad",
+      status: "Top-3 無任一金標：命中促銷與過期條款。模型仍產出「完整答案」，期限 7 日與「票券可退」皆無據。",
+      verdict: "Judge：Faithfulness 極低、幻覺風險高。Answer Relevance 看起來還行——這正是只看最終答案會誤判「還不錯」的典型。"
+    },
+    vector: {
+      label: "純向量 · Top-3",
+      recall: "1/2",
+      precision: "1/3",
+      hits: [
+        {
+          meta: "rank#1 · policy-v3§退貨 · score 0.88",
+          body: "顧客可於到貨後 14 日內申請退貨。商品須保持原包裝與完整配件。",
+          tone: "ok",
+          gold: true
+        },
+        {
+          meta: "rank#2 · shipping · score 0.71",
+          body: "標準配送約 2–4 個工作天。運費規則另見配送專章。",
+          tone: "lock",
+          gold: false
+        },
+        {
+          meta: "rank#3 · promo-faq · score 0.66",
+          body: "會員可享延長鑑賞期活動（僅限指定 SKU）。",
+          tone: "bad",
+          gold: false
+        }
+      ],
+      answer: "到貨後 14 日內可申請退貨，且須保持原包裝。關於電子票券是否適用，本次檢索未涵蓋明確例外條款，建議再查退貨專章例外段。",
+      faith: "4.2",
+      arel: "3.5",
+      crel: "3.0",
+      hall: "中",
+      faithCls: "good",
+      arelCls: "warn",
+      crelCls: "warn",
+      hallCls: "warn",
+      verdictTone: "tone-lock",
+      status: "Recall 50%：金標 A（14 日）命中；金標 B（票券例外）未進 Top-3。答案對已知部分忠實，對缺證部分選擇保留。",
+      verdict: "Judge：Faithfulness 尚可（有拒答／不確定），但 Answer Relevance 因漏答票券例外而扣分。下一步應提高召回或加 keyword／metadata。"
+    },
+    hybrid: {
+      label: "過濾＋Rerank",
+      recall: "2/2",
+      precision: "2/3",
+      hits: [
+        {
+          meta: "rank#1 · policy-v3§退貨 · rerank 0.94",
+          body: "顧客可於到貨後 14 日內申請退貨。商品須保持原包裝與完整配件。",
+          tone: "ok",
+          gold: true
+        },
+        {
+          meta: "rank#2 · policy-v3§例外 · rerank 0.91",
+          body: "電子票券與客製化商品不適用本退貨條款。",
+          tone: "ok",
+          gold: true
+        },
+        {
+          meta: "rank#3 · policy-v3§運費 · rerank 0.55",
+          body: "退貨運費規則另見配送專章（弱相關，佔位）。",
+          tone: "lock",
+          gold: false
+        }
+      ],
+      answer: "到貨後 14 日內可申請退貨（須原包裝與完整配件）。電子票券與客製化商品不適用本退貨條款，故電子票券不能依此條款退貨。",
+      faith: "4.8",
+      arel: "4.7",
+      crel: "4.5",
+      hall: "低",
+      faithCls: "good",
+      arelCls: "good",
+      crelCls: "good",
+      hallCls: "good",
+      verdictTone: "tone-ok",
+      status: "兩金標皆入選；metadata 過濾掉過期政策，rerank 把例外條款抬到 Top-2。Context 乾淨，生成可完整覆蓋問題。",
+      verdict: "Judge：四軸分數同步上升。結論：品質躍升來自檢索設定，而非換更大的生成模型。"
+    }
+  };
+
+  function setScore(el, value, cls) {
+    el.textContent = value;
+    el.classList.remove("good", "warn", "bad");
+    if (cls) el.classList.add(cls);
+  }
+
+  function renderIdle() {
+    hitsEl.innerHTML = "";
+    answerEl.textContent = "尚未執行。三種設定共用同一問題與同一組金標；差異只在「撈到什麼」如何牽動生成與評分。";
+    verdictEl.textContent = "";
+    verdictEl.className = "rev-verdict";
+    mSc.textContent = "—";
+    mRec.textContent = "—";
+    mPre.textContent = "—";
+    setScore(sFaith, "—", "");
+    setScore(sArel, "—", "");
+    setScore(sCrel, "—", "");
+    setScore(sHall, "—", "");
+    statusEl.textContent = "選擇檢索設定後按「執行評測」，同一問題下對比 Recall／Precision 與生成面分數。";
+  }
+
+  function renderHits(hits, active) {
+    hitsEl.innerHTML = "";
+    hits.forEach(function (h) {
+      var div = document.createElement("div");
+      div.className = "rev-hit" + (active ? " active tone-" + h.tone : "");
+      var meta = document.createElement("div");
+      meta.className = "hm";
+      meta.textContent = h.meta + (h.gold ? " · GOLD" : "");
+      var body = document.createElement("div");
+      body.textContent = h.body;
+      div.appendChild(meta);
+      div.appendChild(body);
+      hitsEl.appendChild(div);
+    });
+  }
+
+  function run() {
+    var sc = SCENARIOS[scenario];
+    if (!sc) return;
+    ran = true;
+    statusEl.textContent = "評測中…";
+    renderHits(sc.hits, false);
+    setTimeout(function () {
+      renderHits(sc.hits, true);
+      mSc.textContent = sc.label;
+      mRec.textContent = sc.recall;
+      mPre.textContent = sc.precision;
+      setScore(sFaith, sc.faith, sc.faithCls);
+      setScore(sArel, sc.arel, sc.arelCls);
+      setScore(sCrel, sc.crel, sc.crelCls);
+      setScore(sHall, sc.hall, sc.hallCls);
+      answerEl.textContent = sc.answer;
+      verdictEl.textContent = sc.verdict;
+      verdictEl.className = "rev-verdict " + sc.verdictTone;
+      statusEl.textContent = sc.status;
+    }, 280);
+  }
+
+  function reset() {
+    ran = false;
+    scenario = "weak";
+    if (segRoot) {
+      var buttons = segRoot.querySelectorAll("button[data-sc]");
+      buttons.forEach(function (btn) {
+        btn.setAttribute("aria-pressed", btn.getAttribute("data-sc") === "weak" ? "true" : "false");
+      });
+    }
+    renderIdle();
+  }
+
+  if (segRoot) {
+    segRoot.addEventListener("click", function (e) {
+      var btn = e.target.closest("button[data-sc]");
+      if (!btn || !segRoot.contains(btn)) return;
+      scenario = btn.getAttribute("data-sc");
+      var buttons = segRoot.querySelectorAll("button[data-sc]");
+      buttons.forEach(function (b) {
+        b.setAttribute("aria-pressed", b === btn ? "true" : "false");
+      });
+      if (ran) run();
+      else {
+        statusEl.textContent = "已切換為「" + (SCENARIOS[scenario] && SCENARIOS[scenario].label) + "」。按「執行評測」查看分數。";
+      }
+    });
+  }
+
+  if (btnRun) btnRun.addEventListener("click", run);
+  if (btnReset) btnReset.addEventListener("click", reset);
+
+  renderIdle();
+})();
+</script>
