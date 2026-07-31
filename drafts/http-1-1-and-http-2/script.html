@@ -1,0 +1,216 @@
+<script>
+(function () {
+  "use strict";
+
+  /* ---------- 模型參數 ---------- */
+  var SETUP_RTT = 2;      // TCP 三向交握 1-RTT + TLS 交握 1-RTT
+  var SVC = 40;           // 單一資源獨佔一個並行槽時的傳輸時間（ms）
+  var SLOTS = 6;          // 等效頻寬：可同時吃滿的並行槽數
+  var ANIM = 1200;        // 動畫總長（ms）
+
+  var DEFAULTS = { rtt: 20, shard: 1, count: 12 };
+  var state = { rtt: DEFAULTS.rtt, shard: DEFAULTS.shard, count: DEFAULTS.count };
+
+  var KINDS = ["css", "js", "js", "img", "img", "img", "font", "img"];
+
+  var el = {
+    status: document.getElementById("httpx-status"),
+    countInput: document.getElementById("httpx-count"),
+    countVal: document.getElementById("httpx-count-val"),
+    btnPlay: document.getElementById("httpx-btn-play"),
+    btnReset: document.getElementById("httpx-btn-reset"),
+    h1Rows: document.getElementById("httpx-h1-rows"),
+    h2Rows: document.getElementById("httpx-h2-rows"),
+    h1Label: document.getElementById("httpx-h1-label"),
+    h1Total: document.getElementById("httpx-h1-total"),
+    h2Total: document.getElementById("httpx-h2-total"),
+    pConn: document.getElementById("httpx-p-conn"),
+    pHs1: document.getElementById("httpx-p-hs1"),
+    pHs2: document.getElementById("httpx-p-hs2"),
+    pQueued: document.getElementById("httpx-p-queued"),
+    pT1: document.getElementById("httpx-p-t1"),
+    pT2: document.getElementById("httpx-p-t2"),
+    pRatio: document.getElementById("httpx-p-ratio"),
+    pHdr: document.getElementById("httpx-p-hdr")
+  };
+
+  function seg(kind, from, to) { return { kind: kind, from: from, to: to }; }
+
+  /* ---------- HTTP/1.1：C 條連線，每條連線一次只跑一個請求 ---------- */
+  function simulateH1(n, rtt, conns) {
+    var docEnd = SETUP_RTT * rtt + rtt + SVC;
+    var rows = [{
+      label: "index.html", note: "c0", doc: true, end: docEnd,
+      segs: [seg("setup", 0, SETUP_RTT * rtt),
+             seg("wait", SETUP_RTT * rtt, SETUP_RTT * rtt + rtt),
+             seg("xfer", SETUP_RTT * rtt + rtt, docEnd)]
+    }];
+
+    var free = [], est = [], i;
+    for (i = 0; i < conns; i++) { free.push(docEnd); est.push(false); }
+    est[0] = true;                       // conn0 已在抓 HTML 時建立
+    var handshakes = 1, queued = 0, total = docEnd;
+
+    for (var k = 0; k < n; k++) {
+      var idx = 0;
+      for (i = 1; i < conns; i++) { if (free[i] < free[idx]) idx = i; }
+
+      var start = free[idx], segs = [], t = start;
+      if (start > docEnd + 0.001) { segs.push(seg("queue", docEnd, start)); queued++; }
+      if (!est[idx]) {
+        segs.push(seg("setup", t, t + SETUP_RTT * rtt));
+        t += SETUP_RTT * rtt; est[idx] = true; handshakes++;
+      }
+      segs.push(seg("wait", t, t + rtt)); t += rtt;
+      segs.push(seg("xfer", t, t + SVC)); t += SVC;
+      free[idx] = t;
+      if (t > total) total = t;
+
+      rows.push({
+        label: pad(k + 1) + " " + KINDS[k % KINDS.length],
+        note: "c" + idx, doc: false, end: t, segs: segs
+      });
+    }
+    return { rows: rows, total: total, handshakes: handshakes, queued: queued };
+  }
+
+  /* ---------- HTTP/2：單連線，N 個 stream 同時送出、共享頻寬 ---------- */
+  function simulateH2(n, rtt) {
+    var docEnd = SETUP_RTT * rtt + rtt + SVC;
+    var rows = [{
+      label: "index.html", note: "s1", doc: true, end: docEnd,
+      segs: [seg("setup", 0, SETUP_RTT * rtt),
+             seg("wait", SETUP_RTT * rtt, SETUP_RTT * rtt + rtt),
+             seg("xfer", SETUP_RTT * rtt + rtt, docEnd)]
+    }];
+
+    // 無優先序時伺服器平分頻寬：所有 stream 一起慢、一起完成
+    var dur = SVC * Math.max(1, n / SLOTS);
+    var end = docEnd + rtt + dur;
+
+    for (var k = 0; k < n; k++) {
+      rows.push({
+        label: pad(k + 1) + " " + KINDS[k % KINDS.length],
+        note: "s" + (2 * k + 3), doc: false, end: end,
+        segs: [seg("wait", docEnd, docEnd + rtt), seg("xfer", docEnd + rtt, end)]
+      });
+    }
+    return { rows: rows, total: end, handshakes: 1, queued: 0 };
+  }
+
+  function pad(v) { return (v < 10 ? "0" : "") + v; }
+  function ms(v) { return Math.round(v) + " ms"; }
+
+  /* ---------- 渲染 ---------- */
+  function renderRows(container, rows, scale) {
+    container.innerHTML = "";
+    rows.forEach(function (r) {
+      var row = document.createElement("div");
+      row.className = "httpx-row" + (r.doc ? " doc" : "");
+      row.setAttribute("title", r.label + "（" + r.note + "）· 完成於 " + ms(r.end));
+
+      var label = document.createElement("div");
+      label.className = "rl";
+      label.textContent = r.label + " " + r.note;
+      row.appendChild(label);
+
+      var track = document.createElement("div");
+      track.className = "httpx-track";
+      r.segs.forEach(function (s) {
+        var w = s.to - s.from;
+        if (w <= 0) return;
+        var bar = document.createElement("div");
+        bar.className = "httpx-bar " + s.kind;
+        bar.style.left = (s.from / scale * 100) + "%";
+        bar.style.width = Math.max(0.6, w / scale * 100) + "%";
+        bar.style.animationDelay = (s.from / scale * ANIM) + "ms";
+        bar.style.animationDuration = Math.max(70, w / scale * ANIM) + "ms";
+        track.appendChild(bar);
+      });
+      row.appendChild(track);
+      container.appendChild(row);
+    });
+  }
+
+  function render() {
+    var n = state.count, rtt = state.rtt, conns = 6 * state.shard;
+    var h1 = simulateH1(n, rtt, conns);
+    var h2 = simulateH2(n, rtt);
+    var scale = Math.max(h1.total, h2.total);
+
+    renderRows(el.h1Rows, h1.rows, scale);
+    renderRows(el.h2Rows, h2.rows, scale);
+
+    el.h1Label.textContent = state.shard > 1
+      ? "HTTP/1.1 · " + conns + " 連線（sharding ×2）"
+      : "HTTP/1.1 · " + conns + " 連線";
+    el.h1Total.textContent = ms(h1.total);
+    el.h2Total.textContent = ms(h2.total);
+
+    var ratio = h1.total / h2.total;
+    var hdr1 = (n + 1) * 780, hdr2 = 780 + n * 95;
+
+    el.pConn.textContent = conns + " 條";
+    el.pHs1.textContent = h1.handshakes + " 次（TCP + TLS）";
+    el.pHs2.textContent = "1 次";
+    el.pQueued.textContent = h1.queued + " / " + n + " 個";
+    el.pT1.textContent = ms(h1.total);
+    el.pT2.textContent = ms(h2.total);
+    el.pRatio.textContent = ratio.toFixed(2) + "× 快";
+    el.pRatio.className = "pv " + (ratio >= 1.15 ? "good" : "");
+    el.pHdr.textContent = Math.round(hdr1 / 1024) + " KB → " + Math.round(hdr2 / 1024) + " KB";
+
+    el.status.textContent =
+      "RTT " + rtt + "ms · " + n + " 個子資源｜HTTP/1.1（" + conns + " 連線）"
+      + ms(h1.total) + "、" + h1.handshakes + " 次交握、" + h1.queued + " 個請求被排隊擋住"
+      + "｜HTTP/2（單連線 " + n + " 個 stream）" + ms(h2.total) + "、1 次交握 → 快 "
+      + ratio.toFixed(2) + " 倍。HPACK 讓標頭從約 " + Math.round(hdr1 / 1024)
+      + " KB 降到約 " + Math.round(hdr2 / 1024) + " KB。";
+  }
+
+  /* ---------- 互動 ---------- */
+  function bindSeg(selector, attr, apply) {
+    var btns = document.querySelectorAll(selector + " button");
+    Array.prototype.forEach.call(btns, function (btn) {
+      btn.addEventListener("click", function () {
+        Array.prototype.forEach.call(btns, function (b) { b.setAttribute("aria-pressed", "false"); });
+        btn.setAttribute("aria-pressed", "true");
+        apply(parseInt(btn.getAttribute(attr), 10));
+        render();
+      });
+    });
+  }
+
+  function syncSeg(selector, attr, value) {
+    var btns = document.querySelectorAll(selector + " button");
+    Array.prototype.forEach.call(btns, function (b) {
+      b.setAttribute("aria-pressed", parseInt(b.getAttribute(attr), 10) === value ? "true" : "false");
+    });
+  }
+
+  bindSeg('#httpx-demo .seg[aria-label="網路情境切換"]', "data-rtt", function (v) { state.rtt = v; });
+  bindSeg('#httpx-demo .seg[aria-label="HTTP/1.1 連線策略切換"]', "data-shard", function (v) { state.shard = v; });
+
+  el.countInput.addEventListener("input", function () {
+    state.count = parseInt(el.countInput.value, 10);
+    el.countVal.textContent = state.count;
+    render();
+  });
+
+  el.btnPlay.addEventListener("click", render);
+
+  el.btnReset.addEventListener("click", function () {
+    state.rtt = DEFAULTS.rtt;
+    state.shard = DEFAULTS.shard;
+    state.count = DEFAULTS.count;
+    el.countInput.value = String(DEFAULTS.count);
+    el.countVal.textContent = DEFAULTS.count;
+    syncSeg('#httpx-demo .seg[aria-label="網路情境切換"]', "data-rtt", state.rtt);
+    syncSeg('#httpx-demo .seg[aria-label="HTTP/1.1 連線策略切換"]', "data-shard", state.shard);
+    render();
+  });
+
+  el.countVal.textContent = state.count;
+  render();
+})();
+</script>

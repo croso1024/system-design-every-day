@@ -1,0 +1,2653 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>HTTP/1.1 與 HTTP/2：語義、連線與多路復用 | System Design Every Day</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@300;400;500;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+  <script>
+    mermaid.initialize({
+      startOnLoad: true,
+      theme: 'default',
+      securityLevel: 'loose'
+    });
+  </script>
+  <style>
+    :root {
+      --bg: #ffffff;
+      --bg-soft: #fafaf9;
+      --text: #262a2f;
+      --text-2: #6b7078;
+      --text-3: #9aa0a8;
+      --border: #ecebe8;
+      --border-strong: #dedcd8;
+      --code-bg: #f6f5f3;
+      --accent: #3f6188;
+      --accent-soft: #eef2f7;
+      --accent-line: #cdd9e6;
+      --ok: #4d7d68;
+      --ok-soft: #eef4f1;
+      --warn: #a3743e;
+      --warn-soft: #f6f0e7;
+      --bad: #a8554f;
+      --bad-soft: #f6ecea;
+      --radius: 10px;
+      --radius-sm: 7px;
+      --maxw: 760px;
+      --sans: "Noto Sans TC", system-ui, -apple-system, "Segoe UI", sans-serif;
+      --mono: "JetBrains Mono", "SFMono-Regular", Menlo, Consolas, monospace;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    html {
+      scroll-behavior: smooth;
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      html {
+        scroll-behavior: auto;
+      }
+      * {
+        animation-duration: .001ms !important;
+        transition-duration: .001ms !important;
+      }
+    }
+
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font-family: var(--sans);
+      font-weight: 400;
+      font-size: 16px;
+      line-height: 1.78;
+      -webkit-font-smoothing: antialiased;
+      letter-spacing: .005em;
+    }
+
+    ::selection {
+      background: var(--accent-soft);
+    }
+
+    /* ---------- layout ---------- */
+    .wrap {
+      display: flex;
+      max-width: 1180px;
+      margin: 0 auto;
+      gap: 0;
+    }
+
+    .toc {
+      width: 248px;
+      flex: 0 0 248px;
+      position: sticky;
+      top: 0;
+      height: 100vh;
+      padding: 54px 22px 40px 28px;
+      overflow-y: auto;
+      border-right: 1px solid var(--border);
+      transition: width .2s ease, flex-basis .2s ease, padding .2s ease, opacity .15s ease, border-color .15s ease;
+    }
+
+    .toc-kicker {
+      font-family: var(--mono);
+      font-size: 11px;
+      letter-spacing: .14em;
+      text-transform: uppercase;
+      color: var(--text-3);
+      margin-bottom: 20px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+    }
+
+    /* desktop：側欄內收合鈕；mobile 隱藏（沿用既有 .toc-toggle） */
+    .toc-collapse {
+      display: none;
+      flex: 0 0 auto;
+      align-items: center;
+      justify-content: center;
+      width: 28px;
+      height: 28px;
+      padding: 0;
+      border: none;
+      background: none;
+      border-radius: 6px;
+      color: var(--text-2);
+      line-height: 1;
+      cursor: pointer;
+    }
+
+    .toc-collapse:hover {
+      color: var(--text);
+      background: var(--bg-soft);
+    }
+
+    .toc-collapse:focus-visible {
+      outline: 2px solid var(--accent);
+      outline-offset: 2px;
+    }
+
+    .toc-collapse svg {
+      display: block;
+    }
+
+    /* desktop：側欄收合後的展開鈕（預設隱藏） */
+    .toc-reopen {
+      display: none;
+      position: fixed;
+      top: 18px;
+      left: 18px;
+      z-index: 900;
+      align-items: center;
+      gap: 7px;
+      font-size: 12.5px;
+      line-height: 1;
+      color: var(--text-2);
+      background: var(--bg);
+      border: 1px solid var(--border-strong);
+      border-radius: 999px;
+      padding: 7px 13px 7px 11px;
+      box-shadow: 0 1px 3px rgba(0, 0, 0, .06), 0 4px 12px rgba(0, 0, 0, .04);
+      cursor: pointer;
+      transition: background .15s, border-color .15s, color .15s;
+    }
+
+    .toc-reopen:hover {
+      background: var(--bg-soft);
+      color: var(--text);
+      border-color: var(--text-3);
+    }
+
+    .toc-reopen svg {
+      flex: 0 0 auto;
+      display: block;
+    }
+
+    @media (min-width: 921px) {
+      .toc-collapse {
+        display: inline-flex;
+      }
+
+      body.toc-collapsed .toc {
+        width: 0;
+        flex-basis: 0;
+        padding: 0;
+        opacity: 0;
+        overflow: hidden;
+        border-right-color: transparent;
+        pointer-events: none;
+      }
+
+      body.toc-collapsed .toc-reopen {
+        display: inline-flex;
+      }
+    }
+
+    .toc-kicker a {
+      color: var(--text-3);
+      text-decoration: none;
+      border-bottom: none;
+      transition: color .15s;
+    }
+
+    .toc-kicker a:hover {
+      color: var(--text);
+    }
+
+    .toc-title {
+      font-size: 15px;
+      font-weight: 700;
+      line-height: 1.4;
+      margin: 0 0 24px;
+    }
+
+    .toc a {
+      display: flex;
+      gap: 10px;
+      align-items: baseline;
+      text-decoration: none;
+      color: var(--text-2);
+      font-size: 13.5px;
+      padding: 6px 10px;
+      border-radius: 6px;
+      line-height: 1.45;
+      transition: background .15s, color .15s;
+      border-bottom: none;
+    }
+
+    .toc a:hover {
+      background: var(--bg-soft);
+      color: var(--text);
+      border-bottom: none;
+    }
+
+    .toc a.active {
+      color: var(--accent);
+      background: var(--accent-soft);
+      font-weight: 500;
+      border-bottom: none;
+    }
+
+    .toc a .n {
+      font-family: var(--mono);
+      font-size: 11px;
+      color: var(--text-3);
+      flex: 0 0 18px;
+    }
+
+    .toc a.active .n {
+      color: var(--accent);
+    }
+
+    main {
+      flex: 1 1 auto;
+      min-width: 0;
+      padding: 0 40px;
+    }
+
+    .inner {
+      max-width: var(--maxw);
+      margin: 0 auto;
+      padding: 72px 0 140px;
+    }
+
+    /* ---------- hero ---------- */
+    .hero {
+      margin-bottom: 64px;
+    }
+
+    .hero .eyebrow {
+      font-family: var(--mono);
+      font-size: 12px;
+      letter-spacing: .16em;
+      text-transform: uppercase;
+      color: var(--accent);
+      margin-bottom: 18px;
+    }
+
+    .hero h1 {
+      font-size: 40px;
+      line-height: 1.18;
+      font-weight: 700;
+      margin: 0 0 18px;
+      letter-spacing: -.01em;
+    }
+
+    .hero .lede {
+      font-size: 18px;
+      line-height: 1.7;
+      color: var(--text-2);
+      font-weight: 300;
+      margin: 0;
+      max-width: 620px;
+    }
+
+    .hero .meta {
+      margin-top: 28px;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+
+    .tag {
+      font-family: var(--mono);
+      font-size: 12px;
+      color: var(--text-2);
+      border: 1px solid var(--border-strong);
+      padding: 4px 11px;
+      border-radius: 999px;
+      background: var(--bg-soft);
+    }
+
+    /* ---------- sections ---------- */
+    section {
+      padding-top: 30px;
+      scroll-margin-top: 24px;
+    }
+
+    .sec-head {
+      display: flex;
+      align-items: baseline;
+      gap: 14px;
+      margin: 0 0 8px;
+    }
+
+    .sec-num {
+      font-family: var(--mono);
+      font-size: 13px;
+      color: var(--text-3);
+      font-weight: 500;
+      padding-top: 6px;
+      flex: 0 0 auto;
+    }
+
+    h2 {
+      font-size: 27px;
+      font-weight: 700;
+      line-height: 1.3;
+      margin: 0;
+      letter-spacing: -.01em;
+    }
+
+    .sec-sub {
+      color: var(--text-2);
+      font-size: 15px;
+      margin: 2px 0 28px 0;
+      font-weight: 300;
+    }
+
+    h3 {
+      font-size: 18.5px;
+      font-weight: 700;
+      margin: 38px 0 12px;
+      line-height: 1.45;
+    }
+
+    h4 {
+      font-size: 15.5px;
+      font-weight: 700;
+      margin: 26px 0 8px;
+      color: var(--text);
+    }
+
+    p {
+      margin: 0 0 16px;
+    }
+
+    a {
+      color: var(--accent);
+      text-decoration: none;
+      border-bottom: 1px solid var(--accent-line);
+      transition: border-color .15s;
+    }
+
+    a:hover {
+      border-color: var(--accent);
+    }
+
+    strong {
+      font-weight: 700;
+    }
+
+    em {
+      font-style: normal;
+      background: var(--accent-soft);
+      padding: 0 4px;
+      border-radius: 4px;
+      font-weight: 500;
+      color: #2f4d6e;
+    }
+
+    hr.div {
+      border: none;
+      border-top: 1px solid var(--border);
+      margin: 46px 0;
+    }
+
+    ul, ol {
+      margin: 0 0 18px;
+      padding-left: 22px;
+    }
+
+    li {
+      margin: 7px 0;
+      padding-left: 4px;
+    }
+
+    li::marker {
+      color: var(--text-3);
+    }
+
+    code {
+      font-family: var(--mono);
+      font-size: .86em;
+      background: var(--code-bg);
+      padding: 2px 6px;
+      border-radius: 5px;
+      color: #43494f;
+    }
+
+    pre {
+      background: var(--code-bg);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 16px 18px;
+      overflow-x: auto;
+      margin: 0 0 20px;
+      line-height: 1.6;
+    }
+
+    pre code {
+      background: none;
+      padding: 0;
+      font-size: 13px;
+    }
+
+    /* ---------- math notation ---------- */
+    /* 行內數學變數，如 W、R、N。本站不載入 MathJax/KaTeX，請勿使用 $...$ 或 \[...\] LaTeX 分隔符。 */
+    var {
+      font-family: var(--mono);
+      font-style: normal;
+      font-weight: 500;
+      color: var(--accent);
+    }
+
+    /* 區塊數學公式，置中等寬呈現，記得將 > < & 轉義為 &gt; &lt; &amp;。 */
+    .formula {
+      font-family: var(--mono);
+      font-size: 15px;
+      text-align: center;
+      background: var(--bg-soft);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      padding: 14px 18px;
+      margin: 0 0 20px;
+      color: var(--text);
+      letter-spacing: .03em;
+      overflow-x: auto;
+    }
+
+    /* ---------- callouts ---------- */
+    .callout {
+      border: 1px solid var(--border);
+      border-left: 3px solid var(--border-strong);
+      background: var(--bg-soft);
+      border-radius: var(--radius-sm);
+      padding: 15px 18px;
+      margin: 0 0 22px;
+      font-size: 14.5px;
+    }
+
+    .callout .c-title {
+      font-weight: 700;
+      font-size: 13px;
+      letter-spacing: .02em;
+      margin-bottom: 5px;
+      display: flex;
+      gap: 7px;
+      align-items: center;
+    }
+
+    .callout p:last-child {
+      margin-bottom: 0;
+    }
+
+    .callout.accent {
+      border-left-color: var(--accent);
+      background: var(--accent-soft);
+    }
+
+    .callout.accent .c-title {
+      color: #2f4d6e;
+    }
+
+    .callout.warn {
+      border-left-color: var(--warn);
+      background: var(--warn-soft);
+    }
+
+    .callout.warn .c-title {
+      color: var(--warn);
+    }
+
+    .callout .ic {
+      font-family: var(--mono);
+      font-size: 11px;
+      border: 1px solid currentColor;
+      border-radius: 4px;
+      padding: 0 4px;
+      line-height: 1.5;
+      opacity: .8;
+    }
+
+    .oneliner {
+      border: 1px dashed var(--accent-line);
+      border-radius: var(--radius-sm);
+      padding: 13px 16px;
+      margin: 0 0 22px;
+      font-size: 14.5px;
+      background: #fbfcfd;
+    }
+
+    .oneliner b {
+      font-family: var(--mono);
+      font-size: 11px;
+      letter-spacing: .08em;
+      color: var(--accent);
+      display: block;
+      margin-bottom: 4px;
+      text-transform: uppercase;
+    }
+
+    /* ---------- tables ---------- */
+    .tbl-wrap {
+      overflow-x: auto;
+      margin: 0 0 24px;
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+    }
+
+    table {
+      border-collapse: collapse;
+      width: 100%;
+      font-size: 14px;
+      min-width: 520px;
+    }
+
+    th, td {
+      text-align: left;
+      padding: 11px 14px;
+      border-bottom: 1px solid var(--border);
+      vertical-align: top;
+    }
+
+    th {
+      font-weight: 700;
+      background: var(--bg-soft);
+      font-size: 12.5px;
+      letter-spacing: .02em;
+      color: var(--text-2);
+      position: sticky;
+      top: 0;
+    }
+
+    tr:last-child td {
+      border-bottom: none;
+    }
+
+    td.hl {
+      background: var(--accent-soft);
+    }
+
+    .cap {
+      font-size: 12.5px;
+      color: var(--text-3);
+      margin: -12px 0 26px;
+      font-family: var(--mono);
+    }
+
+    /* ---------- interactive shell ---------- */
+    .demo {
+      border: 1px solid var(--border-strong);
+      border-radius: var(--radius);
+      background: var(--bg);
+      margin: 24px 0 26px;
+      overflow: hidden;
+    }
+
+    .demo-bar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      flex-wrap: wrap;
+      padding: 13px 16px;
+      border-bottom: 1px solid var(--border);
+      background: var(--bg-soft);
+    }
+
+    .demo-bar .label {
+      font-family: var(--mono);
+      font-size: 11px;
+      letter-spacing: .1em;
+      text-transform: uppercase;
+      color: var(--text-3);
+    }
+
+    .demo-body {
+      padding: 20px 18px;
+    }
+
+    .seg {
+      display: inline-flex;
+      border: 1px solid var(--border-strong);
+      border-radius: 999px;
+      overflow: hidden;
+      background: var(--bg);
+    }
+
+    .seg button {
+      border: none;
+      background: none;
+      font-family: var(--sans);
+      font-size: 12.5px;
+      color: var(--text-2);
+      padding: 6px 14px;
+      cursor: pointer;
+      transition: background .15s, color .15s;
+    }
+
+    .seg button:hover {
+      color: var(--text);
+    }
+
+    .seg button[aria-pressed="true"] {
+      background: var(--accent);
+      color: #fff;
+    }
+
+    .btn {
+      font-family: var(--sans);
+      font-size: 13px;
+      border: 1px solid var(--border-strong);
+      background: var(--bg);
+      color: var(--text);
+      padding: 7px 16px;
+      border-radius: 7px;
+      cursor: pointer;
+      transition: background .15s, border-color .15s;
+    }
+
+    .btn:hover {
+      background: var(--bg-soft);
+      border-color: var(--text-3);
+    }
+
+    .btn.primary {
+      background: var(--accent);
+      color: #fff;
+      border-color: var(--accent);
+    }
+
+    .btn.primary:hover {
+      background: #365578;
+    }
+
+    .btn:disabled {
+      opacity: .4;
+      cursor: not-allowed;
+    }
+
+    .btn:focus-visible, .seg button:focus-visible, .toc a:focus-visible, a:focus-visible,
+    summary:focus-visible {
+      outline: 2px solid var(--accent);
+      outline-offset: 2px;
+      border-radius: 4px;
+    }
+
+    .status-line {
+      font-size: 13.5px;
+      color: var(--text-2);
+      min-height: 42px;
+      margin-top: 14px;
+      background: var(--bg-soft);
+      border-radius: var(--radius-sm);
+      padding: 10px 13px;
+      border: 1px solid var(--border);
+    }
+
+    .status-line b {
+      color: var(--text);
+    }
+
+    .legend {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 14px;
+      font-size: 11.5px;
+      color: var(--text-2);
+      margin-top: 14px;
+      font-family: var(--mono);
+    }
+
+    .legend span {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .dot {
+      width: 9px;
+      height: 9px;
+      border-radius: 3px;
+      display: inline-block;
+      border: 1px solid rgba(0, 0, 0, .08);
+    }
+
+    /* node states used across diagrams */
+    .nstate-idle {
+      fill: #fff;
+      stroke: var(--border-strong);
+    }
+
+    .ns-idle {
+      background: #fff;
+      border-color: var(--border-strong);
+    }
+
+    .ns-lock {
+      background: var(--warn-soft);
+      border-color: var(--warn);
+    }
+
+    .ns-ok {
+      background: var(--ok-soft);
+      border-color: var(--ok);
+    }
+
+    .ns-bad {
+      background: var(--bad-soft);
+      border-color: var(--bad);
+    }
+
+    .ns-wait {
+      background: var(--accent-soft);
+      border-color: var(--accent);
+    }
+
+    /* spectrum */
+    .spectrum {
+      position: relative;
+      margin: 26px 6px 10px;
+    }
+
+    .spec-track {
+      height: 4px;
+      border-radius: 2px;
+      background: linear-gradient(90deg, #9fb6cf, #e7e5e1 50%, #c9d8c9);
+      position: relative;
+    }
+
+    .spec-ends {
+      display: flex;
+      justify-content: space-between;
+      font-family: var(--mono);
+      font-size: 11px;
+      color: var(--text-2);
+      margin-top: 10px;
+    }
+
+    .spec-mark {
+      position: absolute;
+      top: -12px;
+      transform: translateX(-50%);
+      cursor: pointer;
+      text-align: center;
+      background: none;
+      border: none;
+      padding: 0;
+    }
+
+    .spec-mark .pin {
+      width: 18px;
+      height: 18px;
+      border-radius: 50%;
+      background: #fff;
+      border: 2px solid var(--border-strong);
+      margin: 0 auto;
+      transition: border-color .15s, transform .15s, box-shadow .15s;
+      display: block;
+    }
+
+    .spec-mark .pn {
+      font-family: var(--mono);
+      font-size: 12px;
+      margin-top: 8px;
+      color: var(--text-2);
+      font-weight: 500;
+      white-space: nowrap;
+      display: block;
+    }
+
+    .spec-mark[aria-pressed="true"] .pin {
+      border-color: var(--accent);
+      transform: scale(1.18);
+      box-shadow: 0 0 0 4px var(--accent-soft);
+    }
+
+    .spec-mark[aria-pressed="true"] .pn {
+      color: var(--accent);
+    }
+
+    .spec-panel {
+      margin-top: 34px;
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 18px;
+      background: var(--bg-soft);
+    }
+
+    .spec-panel h4 {
+      margin: 0 0 4px;
+    }
+
+    .spec-panel .pmeta {
+      font-family: var(--mono);
+      font-size: 12px;
+      color: var(--text-3);
+      margin-bottom: 14px;
+    }
+
+    .bars {
+      display: grid;
+      grid-template-columns: 78px 1fr 56px;
+      gap: 9px 12px;
+      align-items: center;
+    }
+
+    .bars .blabel {
+      font-size: 13px;
+      color: var(--text-2);
+    }
+
+    .bars .btrack {
+      height: 8px;
+      background: #e9e7e3;
+      border-radius: 4px;
+      overflow: hidden;
+    }
+
+    .bars .bfill {
+      height: 100%;
+      border-radius: 4px;
+      background: var(--accent);
+      transition: width .4s ease;
+    }
+
+    .bars .bval {
+      font-family: var(--mono);
+      font-size: 11px;
+      color: var(--text-2);
+      text-align: right;
+    }
+
+    /* generic actor diagram */
+    .actors {
+      display: flex;
+      gap: 12px;
+      flex-wrap: wrap;
+    }
+
+    .actor {
+      flex: 1 1 0;
+      min-width: 96px;
+      border: 1.5px solid var(--border-strong);
+      border-radius: var(--radius-sm);
+      padding: 11px 10px;
+      text-align: center;
+      background: #fff;
+      transition: background .25s, border-color .25s;
+    }
+
+    .actor .aname {
+      font-weight: 700;
+      font-size: 13px;
+    }
+
+    .actor .arole {
+      font-family: var(--mono);
+      font-size: 10.5px;
+      color: var(--text-3);
+      margin-top: 2px;
+    }
+
+    .actor .astate {
+      font-size: 11.5px;
+      margin-top: 8px;
+      font-family: var(--mono);
+      color: var(--text-2);
+      min-height: 16px;
+    }
+
+    .coordinator {
+      border-style: dashed;
+    }
+
+    .flowsteps {
+      margin-top: 16px;
+    }
+
+    .stepitem {
+      display: flex;
+      gap: 11px;
+      font-size: 13.5px;
+      padding: 7px 0;
+      color: var(--text-3);
+      border-top: 1px solid var(--border);
+    }
+
+    .stepitem:first-child {
+      border-top: none;
+    }
+
+    .stepitem.done {
+      color: var(--text);
+    }
+
+    .stepitem.cur {
+      color: var(--text);
+      font-weight: 500;
+    }
+
+    .stepitem .sx {
+      font-family: var(--mono);
+      font-size: 11px;
+      flex: 0 0 26px;
+      color: var(--text-3);
+      padding-top: 2px;
+    }
+
+    .stepitem.cur .sx {
+      color: var(--accent);
+    }
+
+    /* timeline lab (TCC) */
+    .tl-scenarios {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      margin-bottom: 6px;
+    }
+
+    .tl-opt {
+      display: flex;
+      gap: 11px;
+      align-items: flex-start;
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      padding: 10px 13px;
+      cursor: pointer;
+      background: #fff;
+      transition: border-color .15s, background .15s;
+    }
+
+    .tl-opt:hover {
+      background: var(--bg-soft);
+    }
+
+    .tl-opt[aria-pressed="true"] {
+      border-color: var(--accent);
+      background: var(--accent-soft);
+    }
+
+    .tl-opt .tlname {
+      font-weight: 700;
+      font-size: 13.5px;
+    }
+
+    .tl-opt .tldesc {
+      font-size: 12.5px;
+      color: var(--text-2);
+      margin-top: 2px;
+    }
+
+    .tl-opt .tlbadge {
+      font-family: var(--mono);
+      font-size: 10px;
+      border: 1px solid var(--border-strong);
+      border-radius: 4px;
+      padding: 1px 5px;
+      color: var(--text-3);
+      flex: 0 0 auto;
+      margin-top: 1px;
+    }
+
+    .tl-result {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
+      margin-top: 16px;
+    }
+
+    @media (max-width: 560px) {
+      .tl-result {
+        grid-template-columns: 1fr;
+      }
+    }
+
+    .tl-card {
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      padding: 13px 14px;
+      font-size: 13px;
+    }
+
+    .tl-card .tch {
+      font-family: var(--mono);
+      font-size: 11px;
+      letter-spacing: .06em;
+      text-transform: uppercase;
+      margin-bottom: 8px;
+      color: var(--text-3);
+    }
+
+    .tl-card.naive {
+      border-left: 3px solid var(--bad);
+    }
+
+    .tl-card.fixed {
+      border-left: 3px solid var(--ok);
+    }
+
+    .tl-card .verdict {
+      font-weight: 700;
+      margin-top: 8px;
+      font-size: 13px;
+    }
+
+    .tl-card.naive .verdict {
+      color: var(--bad);
+    }
+
+    .tl-card.fixed .verdict {
+      color: var(--ok);
+    }
+
+    /* saga chain */
+    .saga-chain {
+      display: flex;
+      flex-direction: column;
+      gap: 0;
+      margin-top: 8px;
+    }
+
+    .saga-step {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .saga-box {
+      flex: 1 1 auto;
+      border: 1.5px solid var(--border-strong);
+      border-radius: var(--radius-sm);
+      padding: 10px 13px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      background: #fff;
+      transition: .25s;
+    }
+
+    .saga-box .sgn {
+      font-weight: 600;
+      font-size: 13.5px;
+    }
+
+    .saga-box .sgs {
+      font-family: var(--mono);
+      font-size: 11px;
+      color: var(--text-3);
+    }
+
+    .saga-arrow {
+      height: 18px;
+      width: 2px;
+      background: var(--border-strong);
+      margin-left: 18px;
+    }
+
+    .saga-pick {
+      font-size: 12.5px;
+      color: var(--text-2);
+      margin: 4px 0 10px;
+    }
+
+    .saga-pick select {
+      font-family: var(--sans);
+      font-size: 13px;
+      padding: 5px 8px;
+      border: 1px solid var(--border-strong);
+      border-radius: 6px;
+      background: #fff;
+      color: var(--text);
+    }
+
+    /* outbox toggle */
+    .ob-stage {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      margin-top: 8px;
+    }
+
+    .ob-row {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      font-size: 13px;
+    }
+
+    .ob-chip {
+      border: 1.5px solid var(--border-strong);
+      border-radius: var(--radius-sm);
+      padding: 9px 12px;
+      background: #fff;
+      font-size: 13px;
+      transition: .25s;
+      flex: 0 0 auto;
+    }
+
+    .ob-chip .obt {
+      font-weight: 600;
+    }
+
+    .ob-chip .obs {
+      font-family: var(--mono);
+      font-size: 10.5px;
+      color: var(--text-3);
+    }
+
+    .ob-flow {
+      font-family: var(--mono);
+      font-size: 11px;
+      color: var(--text-3);
+    }
+
+    /* wizard */
+    .wiz-q {
+      margin-bottom: 16px;
+    }
+
+    .wiz-q .wq {
+      font-size: 14px;
+      font-weight: 600;
+      margin-bottom: 8px;
+    }
+
+    .wiz-opts {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+
+    .wiz-opts button {
+      font-family: var(--sans);
+      font-size: 13px;
+      border: 1px solid var(--border-strong);
+      background: #fff;
+      color: var(--text-2);
+      padding: 7px 14px;
+      border-radius: 7px;
+      cursor: pointer;
+      transition: .15s;
+    }
+
+    .wiz-opts button:hover {
+      border-color: var(--text-3);
+      color: var(--text);
+    }
+
+    .wiz-opts button[aria-pressed="true"] {
+      background: var(--accent);
+      color: #fff;
+      border-color: var(--accent);
+    }
+
+    .wiz-result {
+      margin-top: 18px;
+      border: 1px solid var(--accent-line);
+      border-radius: var(--radius);
+      padding: 16px 18px;
+      background: var(--accent-soft);
+      font-size: 14px;
+      display: none;
+    }
+
+    .wiz-result.show {
+      display: block;
+    }
+
+    .wiz-result .wr-pick {
+      font-size: 17px;
+      font-weight: 700;
+      color: #2f4d6e;
+      margin-bottom: 6px;
+    }
+
+    .wiz-result .wr-why {
+      color: #3a5572;
+    }
+
+    /* FAQ */
+    details.faq {
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      margin-bottom: 10px;
+      background: #fff;
+      overflow: hidden;
+    }
+
+    details.faq summary {
+      cursor: pointer;
+      padding: 14px 16px;
+      font-weight: 600;
+      font-size: 14.5px;
+      list-style: none;
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      align-items: center;
+    }
+
+    details.faq summary::-webkit-details-marker {
+      display: none;
+    }
+
+    details.faq summary .q {
+      font-family: var(--mono);
+      font-size: 11px;
+      color: var(--accent);
+      flex: 0 0 auto;
+    }
+
+    details.faq summary .chev {
+      transition: transform .2s;
+      color: var(--text-3);
+      flex: 0 0 auto;
+      font-size: 13px;
+    }
+
+    details.faq[open] summary .chev {
+      transform: rotate(90deg);
+    }
+
+    details.faq .ans {
+      padding: 0 16px 16px;
+      font-size: 14px;
+      color: var(--text-2);
+    }
+
+    details.faq .ans p {
+      margin: 0 0 10px;
+    }
+
+    details.faq .ans p:last-child {
+      margin: 0;
+    }
+
+    .trap {
+      display: flex;
+      gap: 10px;
+      font-size: 14px;
+      margin: 9px 0;
+    }
+
+    .trap .tn {
+      font-family: var(--mono);
+      font-size: 11px;
+      color: var(--bad);
+      flex: 0 0 auto;
+      border: 1px solid var(--bad-soft);
+      background: var(--bad-soft);
+      border-radius: 4px;
+      padding: 1px 6px;
+      height: fit-content;
+      margin-top: 2px;
+    }
+
+    /* mobile responsive */
+    .toc-toggle {
+      display: none;
+    }
+
+    @media (max-width: 920px) {
+      .wrap {
+        flex-direction: column;
+      }
+      .toc {
+        position: static;
+        width: auto;
+        height: auto;
+        border-right: none;
+        border-bottom: 1px solid var(--border);
+        padding: 18px 22px;
+        transition: none;
+      }
+      .toc-title {
+        margin-bottom: 0;
+      }
+      .toc-kicker {
+        margin-bottom: 10px;
+      }
+      .toc-nav {
+        display: none;
+        margin-top: 16px;
+      }
+      .toc-nav.open {
+        display: block;
+      }
+      .toc-toggle {
+        display: inline-block;
+        margin-top: 10px;
+      }
+      .toc-collapse,
+      .toc-reopen {
+        display: none !important;
+      }
+      main {
+        padding: 0 22px;
+      }
+      .inner {
+        padding: 40px 0 100px;
+      }
+      .hero h1 {
+        font-size: 31px;
+      }
+    }
+
+    @media print {
+      .toc-reopen { display: none !important; }
+    }
+
+    @media (max-width: 480px) {
+      body {
+        font-size: 15px;
+      }
+      .hero h1 {
+        font-size: 27px;
+      }
+      h2 {
+        font-size: 23px;
+      }
+      .demo-body {
+        padding: 16px 13px;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <!-- ===================== TOC SIDEBAR ===================== -->
+    <nav class="toc" id="toc-panel" aria-label="目錄">
+      <div class="toc-kicker">
+        <a href="../index.html">← 返回目錄</a>
+        <button class="toc-collapse" type="button" aria-expanded="true" aria-controls="toc-panel"
+                aria-label="收合目錄" title="收合目錄">
+          <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor"
+               stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M15 18l-6-6 6-6"/>
+          </svg>
+        </button>
+      </div>
+      <div class="toc-title">HTTP/1.1 與 HTTP/2：語義、連線與多路復用</div>
+      <button class="btn toc-toggle" type="button" aria-expanded="false" aria-controls="toc-nav">目錄 ▾</button>
+      <div class="toc-nav" id="toc-nav">
+        <a href="#s1"><span class="n">01</span>總覽與定位</a>
+        <a href="#s2"><span class="n">02</span>方法語義：安全、冪等與重試</a>
+        <a href="#s3"><span class="n">03</span>狀態碼與標頭：寫給中間層看的契約</a>
+        <a href="#s4"><span class="n">04</span>快取與 proxy：最快的請求是沒發出的請求</a>
+        <a href="#s5"><span class="n">05</span>連線重用：keep-alive、六條連線與 pipelining 的失敗</a>
+        <a href="#s6"><span class="n">06</span>HTTP/2：二進位框架、多路復用與它沒解決的那一半</a>
+        <a href="#s7"><span class="n">07</span>互動 · HTTP/1.1 vs HTTP/2 載入瀑布圖</a>
+        <a href="#s8"><span class="n">08</span>面試折衷與實務選型</a>
+      </div>
+    </nav>
+    <button class="btn toc-reopen" type="button" aria-expanded="true" aria-controls="toc-panel"
+            aria-label="展開目錄" title="展開目錄">
+      <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor"
+           stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M9 18l6-6-6-6"/>
+      </svg>
+      <span>目錄</span>
+    </button>
+
+    <!-- ===================== MAIN CONTENT ===================== -->
+    <main>
+      <div class="inner">
+        <style>
+  /* 本篇專屬：httpx-* 命名空間，不覆蓋全站 base 類別 */
+  #httpx-root {
+    --httpx-sem: #3f6188; --httpx-sem-soft: #eef2f7; --httpx-conn: #a3743e; --httpx-conn-soft: #f6f0e7;
+    --httpx-h2: #4d7d68; --httpx-h2-soft: #eef4f1; --httpx-warn: #a8554f; --httpx-warn-soft: #f6ecea;
+    --httpx-neutral: #7a5a8e; --httpx-neutral-soft: #f3eef6;
+  }
+  .httpx-sub { font-weight: 700; font-size: 14px; margin: 20px 0 6px; padding-left: 10px; border-left: 3px solid var(--accent); color: var(--text); }
+  .httpx-eras { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin: 12px 0 6px; }
+  @media (max-width: 900px) { .httpx-eras { grid-template-columns: 1fr 1fr; } }
+  @media (max-width: 520px) { .httpx-eras { grid-template-columns: 1fr; } }
+  .httpx-era { border: 1px solid var(--border); border-left-width: 4px; border-radius: var(--radius-sm); padding: 12px 14px; background: #fff; }
+  .httpx-era.e1 { border-left-color: var(--httpx-sem); background: var(--httpx-sem-soft); }
+  .httpx-era.e2 { border-left-color: var(--httpx-conn); background: var(--httpx-conn-soft); }
+  .httpx-era.e3 { border-left-color: var(--httpx-h2); background: var(--httpx-h2-soft); }
+  .httpx-era.e4 { border-left-color: var(--httpx-neutral); background: var(--httpx-neutral-soft); }
+  .httpx-era .et { font-weight: 700; font-size: 13.5px; margin-bottom: 2px; }
+  .httpx-era .ek { font-family: var(--mono); font-size: 11px; color: var(--text-3); margin-bottom: 6px; letter-spacing: .04em; }
+  .httpx-era .es { font-size: 12.5px; color: var(--text-2); line-height: 1.6; }
+
+  .httpx-flow { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin: 10px 0; font-family: var(--mono); font-size: 12px; }
+  .httpx-chip { border: 1px solid var(--border-strong); border-radius: 6px; padding: 6px 10px; background: #fff; font-weight: 600; }
+  .httpx-chip.cli { background: var(--httpx-sem-soft); border-color: var(--httpx-sem); color: var(--httpx-sem); }
+  .httpx-chip.srv { background: var(--httpx-h2-soft); border-color: var(--httpx-h2); color: var(--httpx-h2); }
+  .httpx-chip.mid { background: var(--httpx-conn-soft); border-color: var(--httpx-conn); color: var(--httpx-conn); }
+  .httpx-chip.op { background: var(--bg-soft); color: var(--text-3); border-style: dashed; font-weight: 500; }
+
+  /* stream / message / frame 三層 */
+  .httpx-layers { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin: 12px 0 6px; }
+  @media (max-width: 760px) { .httpx-layers { grid-template-columns: 1fr; } }
+  .httpx-layer { border: 1px solid var(--border); border-top: 3px solid var(--httpx-h2); border-radius: var(--radius-sm); padding: 12px 14px; background: #fff; }
+  .httpx-layer .lt { font-weight: 700; font-size: 13.5px; margin-bottom: 2px; }
+  .httpx-layer .lk { font-family: var(--mono); font-size: 11px; color: var(--text-3); margin-bottom: 7px; }
+  .httpx-layer .ls { font-size: 12.5px; color: var(--text-2); line-height: 1.6; }
+
+  /* frame 位元欄位示意 */
+  .httpx-frame { display: flex; flex-wrap: wrap; gap: 4px; margin: 12px 0 6px; }
+  .httpx-frame .ff { font-family: var(--mono); font-size: 11.5px; padding: 8px 6px; text-align: center; border: 1px solid var(--border-strong); border-radius: 6px; background: #fff; color: var(--text-2); }
+  .httpx-frame .ff.len { flex: 3; background: var(--httpx-sem-soft); border-color: var(--httpx-sem); color: var(--httpx-sem); }
+  .httpx-frame .ff.typ { flex: 1.2; background: var(--httpx-conn-soft); border-color: var(--httpx-conn); color: var(--httpx-conn); }
+  .httpx-frame .ff.flg { flex: 1.2; background: var(--bg-soft); }
+  .httpx-frame .ff.sid { flex: 4; background: var(--httpx-h2-soft); border-color: var(--httpx-h2); color: var(--httpx-h2); }
+  .httpx-frame .ff.pay { flex: 100%; background: var(--bg-soft); border-style: dashed; }
+
+  /* 交錯示意 */
+  .httpx-weave { display: flex; flex-wrap: wrap; gap: 4px; margin: 10px 0 4px; }
+  .httpx-cell { font-family: var(--mono); font-size: 11px; padding: 5px 8px; border-radius: 5px; border: 1px solid var(--border-strong); background: #fff; color: var(--text-2); }
+  .httpx-cell.s1 { background: var(--httpx-sem-soft); border-color: var(--httpx-sem); color: var(--httpx-sem); }
+  .httpx-cell.s3 { background: var(--httpx-h2-soft); border-color: var(--httpx-h2); color: var(--httpx-h2); }
+  .httpx-cell.s5 { background: var(--httpx-conn-soft); border-color: var(--httpx-conn); color: var(--httpx-conn); }
+  .httpx-cell.lost { background: var(--httpx-warn-soft); border-color: var(--httpx-warn); color: var(--httpx-warn); text-decoration: line-through; }
+  .httpx-cell.note { border-style: dashed; color: var(--text-3); background: var(--bg-soft); }
+
+  /* Demo */
+  .httpx-seg-row { display: flex; flex-wrap: wrap; gap: 8px; }
+  .httpx-ctrl { display: flex; flex-wrap: wrap; gap: 10px; margin: 10px 0 8px; align-items: center; }
+  .httpx-slider { display: flex; align-items: center; gap: 8px; font-size: 12.5px; color: var(--text-2); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 6px 10px; background: var(--bg-soft); }
+  .httpx-slider input[type="range"] { width: 130px; accent-color: var(--accent); }
+  .httpx-slider b { font-family: var(--mono); font-size: 13px; color: var(--accent); min-width: 22px; text-align: right; }
+  .httpx-wf-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 10px; }
+  @media (max-width: 760px) { .httpx-wf-grid { grid-template-columns: 1fr; } }
+  .httpx-wf-panel { border: 1px solid var(--border); border-radius: var(--radius-sm); background: #fff; padding: 10px 12px; }
+  .httpx-wf-panel .wf-head { display: flex; justify-content: space-between; align-items: baseline; font-family: var(--mono); font-size: 11px; color: var(--text-3); letter-spacing: .06em; text-transform: uppercase; border-bottom: 1px dashed var(--border); padding-bottom: 6px; margin-bottom: 8px; }
+  .httpx-wf-panel .wf-head .wf-total { font-size: 12.5px; font-weight: 700; color: var(--text); letter-spacing: 0; }
+  .httpx-row { display: flex; align-items: center; gap: 6px; height: 15px; }
+  .httpx-row .rl { font-family: var(--mono); font-size: 10px; color: var(--text-3); width: 62px; flex: none; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .httpx-row.doc .rl { color: var(--accent); font-weight: 700; }
+  .httpx-track { position: relative; flex: 1; height: 9px; background: var(--bg-soft); border-radius: 3px; overflow: hidden; }
+  .httpx-bar { position: absolute; top: 0; height: 9px; border-radius: 2px; transform-origin: left center; animation: httpx-grow 320ms ease-out both; }
+  .httpx-bar.queue { background: repeating-linear-gradient(45deg, #f0efec, #f0efec 3px, #e3e1dc 3px, #e3e1dc 6px); }
+  .httpx-bar.setup { background: var(--warn); opacity: .55; }
+  .httpx-bar.wait { background: var(--accent); opacity: .42; }
+  .httpx-bar.xfer { background: var(--ok); }
+  @keyframes httpx-grow { from { transform: scaleX(0); } to { transform: scaleX(1); } }
+  .httpx-panels { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 12px; }
+  @media (max-width: 640px) { .httpx-panels { grid-template-columns: 1fr; } }
+  .httpx-panel { border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 12px; background: #fff; }
+  .httpx-panel .pt { font-size: 11px; color: var(--text-3); letter-spacing: .06em; text-transform: uppercase; font-family: var(--mono); margin-bottom: 8px; }
+  .httpx-panel .prow { display: flex; justify-content: space-between; gap: 8px; font-family: var(--mono); font-size: 12px; padding: 4px 0; border-bottom: 1px dashed var(--border); }
+  .httpx-panel .prow:last-child { border-bottom: none; }
+  .httpx-panel .pk { color: var(--text-3); white-space: nowrap; }
+  .httpx-panel .pv { color: var(--text); font-weight: 600; text-align: right; }
+  .httpx-panel .pv.good { color: var(--ok); }
+  .httpx-panel .pv.bad { color: var(--bad); }
+</style>
+
+<div id="httpx-root">
+
+<section id="s1">
+  <div class="sec-head"><span class="sec-num">01</span><h2>總覽與定位</h2></div>
+  <p class="sec-sub">HTTP 是通道上的語法與語義；HTTP/2 一個方法、一個狀態碼都沒改，它換掉的是這些語義在線上怎麼編碼、怎麼共用連線。</p>
+
+  <p><strong>HTTP（HyperText Transfer Protocol）</strong>是一個無狀態的請求／回應協定：客戶端送出一個<strong>方法</strong>加一個<strong>目標資源</strong>加一組<strong>標頭</strong>（可能還有 body），伺服器回一個<strong>狀態碼</strong>加一組標頭（可能還有 body）。就這樣，三十年沒變。</p>
+
+  <div class="callout accent">
+    <div class="c-title"><span class="ic">座標</span>接上一篇的斷點：通道打通了，但還沒人說話</div>
+    <p>上一篇把一條加密、且能驗證對方身分的通道建了起來，然後停在一個問題上：
+    <strong>通道上要用什麼語法提出請求、怎麼表達結果、怎麼重複利用同一條連線。</strong>本篇就是這一層。<br>
+    銜接點其實已經在上一篇留好了：<strong>ALPN</strong>——客戶端在 <code>ClientHello</code> 送出 <code>h2, http/1.1</code>，
+    伺服器在 <code>EncryptedExtensions</code> 回覆選中的那一個。所以「這條連線上跑 HTTP/1.1 還是 HTTP/2」，
+    在 TLS 交握結束的那一刻就已經定案，不需要任何額外往返，也<strong>不是</strong>先跑 HTTP/1.1 再升級。
+    上一篇那個「邊緣終止 TLS 的元件有沒有開 ALPN <code>h2</code>」的開關，就是本篇後半場的入口。</p>
+  </div>
+
+  <p>要讀懂 HTTP 的版本史，只需要抓住一個分界：<strong>語義（semantics）</strong>與<strong>傳輸表示法（wire format）</strong>是兩件事。IETF 在 2022 年的改版把這件事寫進了文件結構本身——RFC 9110 只講語義（方法、狀態碼、標頭、快取、條件請求），RFC 9112／9113／9114 分別講 HTTP/1.1、HTTP/2、HTTP/3 <em>怎麼把同一套語義送上線</em>。</p>
+
+  <div class="httpx-eras">
+    <div class="httpx-era e1">
+      <div class="et">HTTP/1.0</div>
+      <div class="ek">1996 · RFC 1945</div>
+      <div class="es">有了標頭與狀態碼，但<strong>一個請求一條連線</strong>。每張圖片都要重付一次 TCP 交握。</div>
+    </div>
+    <div class="httpx-era e2">
+      <div class="et">HTTP/1.1</div>
+      <div class="ek">1997 / 2022 · RFC 9112</div>
+      <div class="es">語義的定稿版本：持久連線、<code>Host</code> 必填、chunked、快取驗證。<strong>並行度＝連線數。</strong></div>
+    </div>
+    <div class="httpx-era e3">
+      <div class="et">HTTP/2</div>
+      <div class="ek">2015 / 2022 · RFC 9113</div>
+      <div class="es">同一套語義、全新的二進位框架層：單連線多路復用、HPACK 頭部壓縮、per-stream 流量控制。</div>
+    </div>
+    <div class="httpx-era e4">
+      <div class="et">HTTP/3</div>
+      <div class="ek">2022 · RFC 9114</div>
+      <div class="es">還是同一套語義，但底下的 TCP 被換掉了。<strong>本篇最後會說明為什麼非換不可</strong>，細節留給下一篇。</div>
+    </div>
+  </div>
+
+  <p>把這件事講得更白一點：<strong>HTTP/2 沒有新增任何一個方法、任何一個狀態碼</strong>。你的 <code>GET /users/1</code> 在 HTTP/1.1 與 HTTP/2 上是同一個請求、同一個語義、同一份快取規則；差別只在它被編碼成一串 ASCII 文字，還是一組帶著 Stream ID 的二進位 frame。這也是為什麼本篇要先把語義講完整——<strong>語義是穩定的資產，傳輸表示法才是每十年換一次的部分</strong>。</p>
+
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr><th>層次</th><th>由誰定義</th><th>版本間是否改變</th><th>對應本篇章節</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>語義：方法、狀態碼、標頭、快取</td><td class="hl">RFC 9110（版本無關）</td><td>幾乎不變</td><td>s2 – s4</td></tr>
+        <tr><td>連線管理：重用、並行、關閉</td><td class="hl">各版本自訂</td><td class="hl">每版都大改</td><td>s5、s6</td></tr>
+        <tr><td>訊息編碼：如何切出一則訊息</td><td class="hl">各版本自訂</td><td class="hl">文字 → 二進位 frame</td><td>s5、s6</td></tr>
+        <tr><td>底層傳輸</td><td>TCP（1.1／2）、QUIC（3）</td><td>HTTP/3 才換</td><td>s6 收尾</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="cap">這張表就是本篇的地圖：上半場（s2–s5）處理「語義與 HTTP/1.1 的連線模型」，下半場（s6）處理「HTTP/2 怎麼重寫中間兩列」，而最後一列的鬆動，就是下一篇的主題。</p>
+
+  <div class="oneliner">
+    <b>一句話答法</b>HTTP 是無狀態的請求／回應語義層；HTTP/1.1 與 HTTP/2 共用同一套方法、狀態碼與快取語義，差別只在訊息如何編碼與連線如何共用——所以「升級到 HTTP/2」不會改變任何一行業務語義，只會改變延遲曲線。
+  </div>
+</section>
+
+<section id="s2">
+  <div class="sec-head"><span class="sec-num">02</span><h2>方法語義：安全、冪等與重試</h2></div>
+  <p class="sec-sub">方法不是「動詞的美學選擇」，而是一份對中間層的承諾：這個請求能不能重試、能不能被快取、能不能被預先抓取。</p>
+
+  <p>HTTP 方法上掛著三個正交的性質，決定了瀏覽器、proxy、CDN、重試中介、甚至 TLS 層敢對它做什麼：</p>
+
+  <ul>
+    <li><strong>安全（Safe）</strong>：語義上是唯讀的，不預期改變伺服器狀態。安全的方法可以被爬蟲、瀏覽器預先抓取（prefetch）、鏈路預熱隨意觸發。</li>
+    <li><strong>冪等（Idempotent）</strong>：<strong>同一個請求送一次與連續送 N 次，對伺服器狀態的最終影響相同。</strong>上一篇談 0-RTT 時只給了這個定義的一半，這裡是完整版——注意它約束的是<em>伺服器狀態</em>，不是<em>回應內容</em>。</li>
+    <li><strong>可快取（Cacheable）</strong>：回應在滿足新鮮度條件時可以被存下來重複使用。</li>
+  </ul>
+
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr><th>方法</th><th>安全</th><th>冪等</th><th>可快取</th><th>語義重點</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><code>GET</code></td><td class="hl">是</td><td class="hl">是</td><td class="hl">是</td><td>取得表徵。不該有副作用，帶 body 的 GET 屬未定義行為</td></tr>
+        <tr><td><code>HEAD</code></td><td class="hl">是</td><td class="hl">是</td><td class="hl">是</td><td>同 GET 但不回 body，用來探測大小／存在性／有效性</td></tr>
+        <tr><td><code>OPTIONS</code></td><td class="hl">是</td><td class="hl">是</td><td>否</td><td>查詢能力；CORS preflight 的載體</td></tr>
+        <tr><td><code>PUT</code></td><td>否</td><td class="hl">是</td><td>否</td><td><strong>整份替換</strong>目標資源。送十次與送一次結果相同，所以冪等</td></tr>
+        <tr><td><code>DELETE</code></td><td>否</td><td class="hl">是</td><td>否</td><td>刪除。第二次刪已不存在的東西，狀態仍相同</td></tr>
+        <tr><td><code>POST</code></td><td>否</td><td>否</td><td>條件性</td><td>把 body 交給資源「處理」——語義最寬鬆，也因此最不可重試</td></tr>
+        <tr><td><code>PATCH</code></td><td>否</td><td>否<span style="color:var(--text-3)">（可設計成是）</span></td><td>否</td><td>部分更新。<code>{"count": 5}</code> 冪等，<code>{"op":"increment"}</code> 不冪等</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="cap">RFC 9110 的原始矩陣。實務上最常被搞混的是最後兩列：<strong>PATCH 的冪等性取決於你的 patch 格式怎麼設計，協定不替你保證</strong>。</p>
+
+  <div class="callout accent">
+    <div class="c-title"><span class="ic">關鍵</span>冪等 ≠ 每次回應都一樣</div>
+    <p><code>DELETE /orders/42</code> 第一次回 <code>204 No Content</code>，第二次回 <code>404 Not Found</code>——
+    <strong>回應不同，但它仍然是冪等的</strong>，因為執行完之後「訂單 42 不存在」這個伺服器狀態沒有再變。
+    同理 <code>PUT</code> 第一次可能回 <code>201 Created</code>、第二次回 <code>200 OK</code>。<br>
+    這個區分之所以重要，是因為<strong>冪等性的用途就是決定「能不能安全地重試」</strong>：
+    客戶端在逾時或連線斷掉時，根本不知道請求有沒有抵達伺服器。若方法是冪等的，重送最壞的情況只是白做一次；
+    若不是，重送就可能變成兩筆訂單。</p>
+  </div>
+
+  <p>把這條線接回上一篇就完整了。TLS 1.3 的 <strong>0-RTT early data</strong> 可以被攻擊者原封不動重放，伺服器在交握完成前沒有任何新鮮性證據可以分辨。所以那時的結論是「<strong>early data 只該放冪等請求</strong>」——現在你知道這句話的精確含義了：<em>放進 early data 的請求，必須是被重放一百次也不會多出一筆訂單的那種</em>。而 HTTP 這一層提供的對應訊號是 <code>425 Too Early</code>：</p>
+
+  <div class="httpx-flow">
+    <span class="httpx-chip cli">ClientHello + early data</span>
+    <span class="httpx-chip op">▶ 交握未完成就送出請求</span>
+    <span class="httpx-chip srv">425 Too Early</span>
+    <span class="httpx-chip op">▶「我不在這個階段處理它」</span>
+    <span class="httpx-chip cli">交握完成後重送</span>
+  </div>
+
+  <p><code>425</code> 是伺服器對「我還不確定這是不是重放」的標準回覆，客戶端<strong>必須</strong>在交握完成後以正常方式重送。它讓「要不要冒重放風險」這個決定從 TLS 層下放到 HTTP 層：反向代理可以只對 <code>GET</code>／<code>HEAD</code> 放行 early data，對其餘方法一律回 <code>425</code>。這是一個很好的例子——<strong>傳輸層的安全折衷，最後要靠應用層的語義來兜底</strong>。</p>
+
+  <div class="callout warn">
+    <div class="c-title"><span class="ic">陷阱</span>冪等是「語義承諾」，不是「自動實現」</div>
+    <p>協定說 <code>PUT</code> 冪等，但如果你的 handler 每次被呼叫都往稽核表插一筆、發一封信、扣一次庫存，
+    那它<strong>在事實上就不冪等</strong>——你只是騙了中間層。反向的問題更常見：<code>POST /orders</code> 天生不冪等，
+    但業務上又必須容忍重試（網路斷線、使用者連點、上游 retry 中介）。標準解法是<strong>由應用自己補上冪等層</strong>：
+    客戶端產生一個 <code>Idempotency-Key</code>，伺服器以它為鍵記錄「這個請求已處理過，結果是這個」，重複進來就直接回放先前的結果。
+    支付與金流 API 幾乎清一色採用這個模式。<br>
+    另外兩個高頻誤用：<strong>用 <code>GET</code> 做有副作用的操作</strong>（<code>GET /users/1/delete</code>）——
+    爬蟲、瀏覽器 prefetch、防毒軟體的連結掃描都會替你按下去；<strong>用 <code>POST</code> 做查詢</strong>——
+    換來的是不可快取、不可安全重試、不能收藏成 URL。</p>
+  </div>
+
+  <div class="oneliner">
+    <b>一句話答法</b>方法的安全性決定「能不能被隨意觸發」，冪等性決定「能不能安全重試」——冪等看的是伺服器狀態不是回應內容，所以 DELETE 回 404 仍然冪等；POST 不冪等時就用 Idempotency-Key 由應用層自己補，而 TLS 0-RTT 只放冪等請求、其餘回 425 Too Early，正是這條規則的直接應用。
+  </div>
+</section>
+
+<section id="s3">
+  <div class="sec-head"><span class="sec-num">03</span><h2>狀態碼與標頭：寫給中間層看的契約</h2></div>
+  <p class="sec-sub">狀態碼不是給前端 <code>if</code> 判斷用的裝飾——CDN、proxy、瀏覽器、重試中介都會照它決定要不要快取、要不要重試、要不要換方法。</p>
+
+  <p>五個類別各自有明確的行為語義，而不只是「分類」：</p>
+
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr><th>類別</th><th>語義</th><th>中間層會做什麼</th><th>值得記住的成員</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><code>1xx</code></td><td class="hl">中間資訊，尚未完成</td><td>轉發，並繼續等真正的最終回應</td><td><code>100 Continue</code>、<code>101 Switching Protocols</code>、<code>103 Early Hints</code></td></tr>
+        <tr><td><code>2xx</code></td><td class="hl">成功</td><td><code>200</code>／<code>203</code>／<code>204</code>／<code>206</code> 預設可快取</td><td><code>200</code>、<code>201</code>、<code>202</code>（已受理但未完成）、<code>204</code>、<code>206</code></td></tr>
+        <tr><td><code>3xx</code></td><td class="hl">需要進一步動作</td><td>瀏覽器自動跟隨；<code>304</code> 由快取接管</td><td><code>301</code>／<code>308</code>（永久）、<code>302</code>／<code>307</code>（暫時）、<code>304</code></td></tr>
+        <tr><td><code>4xx</code></td><td class="hl">請求本身有問題</td><td>不該自動重試（<code>408</code>／<code>429</code> 例外）</td><td><code>400</code>、<code>401</code>、<code>403</code>、<code>404</code>、<code>409</code>、<code>422</code>、<code>425</code>、<code>429</code></td></tr>
+        <tr><td><code>5xx</code></td><td class="hl">伺服器端失敗</td><td>對冪等方法可退避重試</td><td><code>500</code>、<code>502</code>、<code>503</code>、<code>504</code></td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="cap"><code>101</code> 這一列先記著：它是「把這條 HTTP 連線換成另一個協定」的正式訊號，WebSocket 就是靠它起家——<strong>篇 5 會完整處理</strong>，本篇只需知道這個機制存在。</p>
+
+  <div class="callout warn">
+    <div class="c-title"><span class="ic">陷阱</span>五個高頻誤用</div>
+    <p><strong>1. <code>200</code> 包著錯誤。</strong><code>{"success": false, "error": "..."}</code> 配 <code>200</code>——
+    等於告訴 CDN「這是個成功回應，快取它」，也讓所有監控、重試中介、SLO 儀表看到 100% 成功率。<br>
+    <strong>2. 一律用 <code>302</code> 導向。</strong>歷史上 <code>301</code>／<code>302</code> 被普遍實作成「重導時把 POST 改寫成 GET 並丟掉 body」。
+    需要保留方法與 body 時必須用 <code>307</code>（暫時）／<code>308</code>（永久）。<br>
+    <strong>3. <code>401</code> 與 <code>403</code> 不分。</strong><code>401</code> 是「你還沒證明你是誰」（<strong>必須</strong>附 <code>WWW-Authenticate</code>，客戶端可重試）；
+    <code>403</code> 是「我知道你是誰，但你不能做這件事」（重試沒有意義）。<br>
+    <strong>4. 限流回 <code>503</code> 而不是 <code>429</code>。</strong><code>429 Too Many Requests</code> 配 <code>Retry-After</code>
+    才是給客戶端的可行動訊號；<code>503</code> 會被上游解讀成「整個服務掛了」而觸發熔斷。<br>
+    <strong>5. <code>502</code>／<code>504</code> 混用。</strong><code>502</code> 是上游回了無效回應，<code>504</code> 是上游逾時沒回——
+    這一字之差決定你該去看應用日誌還是去看逾時設定與慢查詢。</p>
+  </div>
+
+  <p class="httpx-sub">標頭：Host 與 SNI 的時序對照</p>
+
+  <p>HTTP/1.1 相對 1.0 最重要的一個強制規定是 <code>Host</code> 必填。原因很單純：請求行裡只有路徑（<code>GET /index.html</code>），伺服器單看 TCP 連線根本不知道你要的是這台機器上的哪個網站。<code>Host</code> 讓一個 IP、一個 port 上住得下幾千個網域——虛擬主機、反向代理的後端選擇、CDN 的多租戶全靠它。</p>
+
+  <p>而上一篇的 <strong>SNI</strong> 做的是「同一件事的更早一步」。兩者放在一起看，時序就清楚了：</p>
+
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr><th>面向</th><th>SNI（TLS 層）</th><th><code>Host</code> / <code>:authority</code>（HTTP 層）</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>出現時機</td><td class="hl">TLS <code>ClientHello</code>，交握最開頭</td><td class="hl">交握完成後的第一個請求裡</td></tr>
+        <tr><td>可見性</td><td>明文（路徑上的設備都讀得到）</td><td>已在 TLS 通道內加密</td></tr>
+        <tr><td>用途</td><td>伺服器據此<strong>選哪張憑證</strong></td><td>伺服器據此<strong>選哪個虛擬主機／後端</strong></td></tr>
+        <tr><td>誰能靠它路由</td><td>L4 負載均衡器（不必解密）</td><td>L7 反向代理（必須先終止 TLS）</td></tr>
+        <tr><td>HTTP/2 的形式</td><td>不變</td><td class="hl">改用 <code>:authority</code> pseudo-header</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="cap">兩者<strong>可以不一致</strong>——這正是 domain fronting 的原理，也是一整類路由錯誤與安全繞過的根源。正經的邊緣元件會強制校驗「SNI 與 Host 是否相符」。</p>
+
+  <p class="httpx-sub">標頭：逐跳（hop-by-hop）與端到端</p>
+
+  <p>大部分標頭是<strong>端到端</strong>的：proxy 應該原封不動轉發。但有一小類是<strong>逐跳</strong>的，只描述「這一段連線」的性質，proxy 必須把它們剝掉再自己重新產生：<code>Connection</code>、<code>Keep-Alive</code>、<code>TE</code>、<code>Trailer</code>、<code>Transfer-Encoding</code>、<code>Upgrade</code>、<code>Proxy-Authorization</code>。</p>
+
+  <p>其中 <code>Connection: Upgrade</code> 搭配 <code>101 Switching Protocols</code>，是 HTTP/1.1 內建的「換協定」出口：雙方同意之後，這條 TCP 連線就不再說 HTTP 了。WebSocket 走的正是這條路——<strong>細節留給篇 5</strong>。值得在這裡先記一筆的是：<strong>HTTP/2 直接禁止了整組 <code>Connection</code> 系列標頭</strong>，因為連線管理已經下沉到框架層，用 frame 而不是用標頭表達。這也是為什麼 WebSocket 在 HTTP/2 上必須改用另一套機制。</p>
+
+  <p>最後是訊息邊界。篇 1 已經定調過：<strong>TCP 只給你位元組串流，不保證訊息邊界，framing 是應用自己的事</strong>。HTTP/1.1 的答案有兩種——<code>Content-Length</code> 明確告知長度，或 <code>Transfer-Encoding: chunked</code> 以「長度前綴的區塊 + 一個 0 長度區塊收尾」串流未知長度的內容。看一次原始報文最有感：</p>
+
+<pre><code>GET /api/orders/42 HTTP/1.1        &lt;- 請求行：方法 目標 版本
+Host: api.example.com              &lt;- 必填，決定虛擬主機
+If-None-Match: "v7-9c1f"           &lt;- 條件請求（s4）
+Accept-Encoding: gzip, br
+                                   &lt;- 空行 = 標頭結束（CRLF CRLF 是 framing 邊界）
+
+HTTP/1.1 304 Not Modified          &lt;- 狀態行
+ETag: "v7-9c1f"                    &lt;- 版本一致，不必回 body
+Cache-Control: max-age=60
+Connection: keep-alive             &lt;- 逐跳標頭，proxy 會剝掉重寫</code></pre>
+  <p class="cap">整則訊息就是純 ASCII 文字，靠 <code>\r\n</code> 分行、空行分隔標頭與 body。好讀好除錯，代價是<strong>解析成本高、無法壓縮標頭、也無法在同一條連線上交錯兩則訊息</strong>——這三點正是 HTTP/2 要動刀的地方。</p>
+
+  <div class="oneliner">
+    <b>一句話答法</b>狀態碼是給中間層的行為契約（可不可快取、能不能重試、要不要換方法），所以 200 包錯誤、302 當 307 用、429 寫成 503 都是實質 bug；標頭則分端到端與逐跳兩類，Host 是 HTTP 層的虛擬主機選擇器、對應 TLS 層更早發生的 SNI，而 CRLF 空行與 Content-Length／chunked 就是 HTTP/1.1 的 framing 方案。
+  </div>
+</section>
+
+<section id="s4">
+  <div class="sec-head"><span class="sec-num">04</span><h2>快取與 proxy：最快的請求是沒發出的請求</h2></div>
+  <p class="sec-sub">HTTP 快取只回答兩個問題：這份東西還新鮮嗎（不用問伺服器）？過期了的話，它真的變了嗎（問一句就好）？</p>
+
+  <p>這兩個問題對應兩套機制，很多人把它們混成一團：</p>
+
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr><th>機制</th><th>回答的問題</th><th>成本</th><th>關鍵標頭</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><strong>新鮮度 Freshness</strong></td><td class="hl">還在有效期內嗎？</td><td class="hl">零——完全不發請求</td><td><code>Cache-Control: max-age</code>、<code>Expires</code>、<code>Age</code></td></tr>
+        <tr><td><strong>驗證 Validation</strong></td><td class="hl">過期了，內容真的變了嗎？</td><td>一次往返，但省下 body</td><td><code>ETag</code> ／ <code>If-None-Match</code>、<code>Last-Modified</code> ／ <code>If-Modified-Since</code></td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="cap">關鍵差異：<strong>新鮮度省的是整個 RTT，驗證只省 body</strong>。在高延遲鏈路上，一個 <code>304</code> 跟一個 <code>200</code> 的延遲幾乎一樣——所以能靠 <code>max-age</code> 解決的，就別靠 <code>ETag</code>。</p>
+
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr><th><code>Cache-Control</code> 指令</th><th>實際意思</th><th>典型用法</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><code>max-age=N</code></td><td class="hl">N 秒內都算新鮮，任何快取都可直接用</td><td>靜態資源</td></tr>
+        <tr><td><code>s-maxage=N</code></td><td class="hl">只對共用快取（CDN／proxy）生效，覆蓋 max-age</td><td>「CDN 存 1 小時、瀏覽器只存 1 分鐘」</td></tr>
+        <tr><td><code>no-cache</code></td><td class="hl">可以存，但<strong>每次使用前都要先驗證</strong></td><td>HTML 入口文件</td></tr>
+        <tr><td><code>no-store</code></td><td class="hl">完全不准寫進任何儲存</td><td>含個資／權杖的回應</td></tr>
+        <tr><td><code>private</code> ／ <code>public</code></td><td>只有瀏覽器可存 ／ 共用快取也可存</td><td>登入後的個人化頁面用 <code>private</code></td></tr>
+        <tr><td><code>immutable</code></td><td>在有效期內連使用者按重新整理都不重新驗證</td><td>帶雜湊檔名的 JS／CSS</td></tr>
+        <tr><td><code>stale-while-revalidate=N</code></td><td class="hl">過期後 N 秒內先回舊的，背景默默更新</td><td>用延遲換一點點新鮮度</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="cap"><strong><code>no-cache</code> 不是「不要快取」</strong>——那是 <code>no-store</code>。這組命名是 HTTP 最經典的誤導之一，也是面試高頻題。</p>
+
+  <p><strong>ETag</strong> 是伺服器給某份表徵的版本識別碼，可以是內容雜湊、版本號或任何不透明字串。客戶端下次帶 <code>If-None-Match: "v7-9c1f"</code> 回來，伺服器比對後若沒變就回 <code>304 Not Modified</code>（無 body）。相對地 <code>Last-Modified</code> 只有秒級精度，同一秒內的兩次修改分不出來，且對「內容相同但重新產生」的檔案會誤判——<strong>兩者並存時 ETag 優先</strong>。</p>
+
+  <div class="callout accent">
+    <div class="c-title"><span class="ic">關鍵</span>Vary：快取鍵不只是 URL</div>
+    <p>共用快取以「方法 + URL」為鍵，但同一個 URL 可能因為請求標頭不同而回不一樣的內容（壓縮格式、語言、裝置）。
+    <code>Vary</code> 就是伺服器告訴快取：<strong>「把這些標頭也算進快取鍵」</strong>。
+    <code>Vary: Accept-Encoding</code> 是必備的（否則可能把 br 壓縮的內容餵給不支援的客戶端）；
+    但 <code>Vary: User-Agent</code> 幾乎等於關掉快取——User-Agent 的取值近乎無限，命中率會直接歸零。
+    需要依裝置分流時，正確做法是<strong>在邊緣把 UA 正規化成少數幾個值</strong>再 Vary。</p>
+  </div>
+
+  <p class="httpx-sub">proxy 與 CDN：快取住在哪一層</p>
+
+  <div class="httpx-flow">
+    <span class="httpx-chip cli">Browser<br>私有快取</span>
+    <span class="httpx-chip op">→</span>
+    <span class="httpx-chip mid">Forward Proxy<br>（客戶端側 · 出口管控）</span>
+    <span class="httpx-chip op">→</span>
+    <span class="httpx-chip mid">CDN Edge<br>（共用快取 · 地理分散）</span>
+    <span class="httpx-chip op">→</span>
+    <span class="httpx-chip mid">Reverse Proxy<br>（LB · TLS 終止）</span>
+    <span class="httpx-chip op">→</span>
+    <span class="httpx-chip srv">Origin</span>
+  </div>
+
+  <p>三種 proxy 的差別在「替誰工作」：<strong>forward proxy</strong> 站在客戶端這一側（企業出口、爬蟲池），客戶端知道它存在；<strong>reverse proxy</strong> 站在伺服器這一側（Nginx、Envoy、ALB），客戶端以為它就是伺服器；<strong>CDN</strong> 本質上是一大群地理分散的 reverse proxy，額外加上共用快取與就近接入。<code>private</code> 與 <code>public</code> 這組指令，決定的正是「中間那三格能不能存你的回應」。</p>
+
+  <div class="callout warn">
+    <div class="c-title"><span class="ic">陷阱</span>要快取，就得先終止 TLS</div>
+    <p>上一篇比較過 TLS 的三種終止位置。這裡是它的直接後果：<strong>CDN 若不終止 TLS，就讀不到 URL 與 <code>Cache-Control</code>，什麼都快取不了</strong>——
+    passthrough 模式下它只是一個看得到明文 SNI 的 L4 轉發器。所以「用 CDN 加速」與「端到端加密不讓 CDN 看到內容」這兩個需求
+    在架構上是直接衝突的，必須明確取捨（或改用邊緣運算把敏感邏輯留在自己手上）。<br>
+    另一個常見事故：<strong>把帶 <code>Set-Cookie</code> 或個人化內容的回應標成 <code>public</code></strong>，
+    然後 CDN 把 A 使用者的頁面回給 B 使用者。凡是有身分的回應，預設就該是 <code>private</code> 或 <code>no-store</code>。</p>
+  </div>
+
+  <p>實務上的標準組合非常固定，值得直接背下來：</p>
+
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr><th>資源類型</th><th>建議策略</th><th>為什麼</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>帶雜湊檔名的 JS／CSS／字型</td><td class="hl"><code>max-age=31536000, immutable</code></td><td>URL 已含內容版本，內容變＝URL 變，永遠不需要重新驗證</td></tr>
+        <tr><td>HTML 入口文件</td><td class="hl"><code>no-cache</code> ＋ ETag</td><td>必須每次確認，才能讓上面那條「永久快取」安全成立</td></tr>
+        <tr><td>API 的 GET 回應</td><td class="hl">短 <code>max-age</code> ＋ <code>stale-while-revalidate</code></td><td>擋住尖峰重複查詢，同時不讓資料太舊</td></tr>
+        <tr><td>登入後的個人化內容</td><td class="hl"><code>private, no-store</code></td><td>絕不能落進任何共用快取</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="cap">這套組合叫 <strong>cache busting</strong>：把版本資訊放進 URL，用一個必須驗證的 HTML 去指向一堆永遠不必驗證的資源。它讓「快取失效」這個分散式系統難題退化成「改一個檔名」。</p>
+
+  <div class="oneliner">
+    <b>一句話答法</b>HTTP 快取分新鮮度與驗證兩層：max-age 命中連請求都不發，ETag／304 只省 body 不省 RTT；no-cache 是「用前必驗」而非「不要快取」，Vary 決定快取鍵，而 private／public 決定 CDN 這類共用快取能不能存——想讓 CDN 快取，就必須讓它終止 TLS。
+  </div>
+</section>
+
+<section id="s5">
+  <div class="sec-head"><span class="sec-num">05</span><h2>連線重用：keep-alive、六條連線與 pipelining 的失敗</h2></div>
+  <p class="sec-sub">HTTP/1.1 的並行不是「一條連線裡並行」，而是「開更多條連線」——這句話就是 HTTP/2 存在的全部理由。</p>
+
+  <p>HTTP/1.0 的模型是一請求一連線：每張圖片、每個 JS 檔都要重付一次三向交握（外加 TLS 的一趟交握）。
+  HTTP/1.1 把<strong>持久連線（persistent connection，俗稱 keep-alive）</strong>變成預設：
+  回應送完連線不關，下一個請求直接沿用，除非明確送出 <code>Connection: close</code>。</p>
+
+  <p>省下的不只是交握的 RTT。篇 1 談壅塞控制時說過，新連線的 <var>cwnd</var> 從很小的初始值開始 slow start，要好幾個 RTT 才長到能吃滿頻寬。<strong>一條用過的熱連線，它的壅塞視窗已經長大了</strong>——這是連線重用最容易被忽略、但在大檔案傳輸上收益最明顯的一塊。</p>
+
+  <p>可是持久連線只解決了「重用」，沒解決「並行」。HTTP/1.1 的訊息語法要求<strong>一條連線上同時只能有一個進行中的請求／回應交換</strong>：送出請求 → 等回應完整收完 → 才能送下一個。於是：</p>
+
+  <div class="formula">HTTP/1.1 的並行度 = 同時開著的 TCP 連線數</div>
+
+  <p>瀏覽器給出的答案是：<strong>對同一個 origin（scheme + host + port）最多開 6 條</strong>。
+  這個數字不是規範規定的（RFC 2616 當年甚至建議 2 條），而是各家瀏覽器多年調校出來的經驗值。為什麼不開更多？</p>
+
+  <ul>
+    <li><strong>每條連線都要各自付交握成本</strong>：TCP 一趟、TLS 一趟，還要各自從頭 slow start。</li>
+    <li><strong>連線之間互相搶頻寬</strong>：同一條瓶頸鏈路上開 30 條連線，總吞吐不會變成 30 倍，只會讓壅塞控制彼此打架、丟包率上升。</li>
+    <li><strong>伺服器成本是線性的</strong>：每條連線一個 file descriptor、一組收發緩衝、一份 TLS 狀態（篇 1 談 backpressure 時算過這筆帳）。</li>
+    <li><strong>對 origin 不公平</strong>：瀏覽器不能讓單一分頁把伺服器的連線池吃光。</li>
+  </ul>
+
+  <p>「6」這個上限，直接催生了整整一個世代的前端最佳實踐——而它們現在幾乎都是反模式：</p>
+
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr><th>HTTP/1.1 時代的解法</th><th>在繞開什麼</th><th>代價</th><th>在 HTTP/2 下</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><strong>Domain Sharding</strong>（拆成 <code>img1/img2.example.com</code>）</td><td class="hl">每 origin 6 條的上限</td><td>多付 DNS 查詢、TCP／TLS 交握，連線互搶頻寬</td><td class="hl">有害——把單一連線拆散，多路復用失效</td></tr>
+        <tr><td><strong>檔案合併</strong>（bundle、CSS sprites）</td><td class="hl">請求數量</td><td>改一個字就要重下整包，快取粒度變粗</td><td>多半不必要，細粒度快取更划算</td></tr>
+        <tr><td><strong>Base64 內嵌</strong>（inline 圖片／字型）</td><td class="hl">請求數量</td><td>體積膨脹約 33%，且無法獨立快取</td><td>不建議</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="cap">這三列是同一個模式：<strong>當協定的限制無法改變時，工程界就用架構去繞。</strong>而當協定終於改了，這些繞法就會反過來變成負擔——升級 HTTP/2 卻忘了拆掉 sharding，是最典型的「升級了卻沒變快」。</p>
+
+  <p class="httpx-sub">pipelining：一個看起來完美、卻全面失敗的答案</p>
+
+  <p>HTTP/1.1 其實提供過一個「一條連線裡並行」的方案：<strong>pipelining</strong>——
+  不等回應就把多個請求連續送出，伺服器再按順序把回應一個個送回來。理論上一趟 RTT 就能發完所有請求。它徹底失敗了，原因有四層：</p>
+
+  <ol>
+    <li><strong>回應必須按請求的順序回。</strong>HTTP/1.1 的訊息沒有任何識別碼，接收端只能靠「順序」把回應對回請求。
+    於是第一個請求若是一支慢查詢，後面九個明明早就算完，也只能排隊等它——這就是 <strong>HoL Blocking</strong>，
+    篇 1 已經完整定義過的那個現象，在應用層的第一次現身。</li>
+    <li><strong>中間設備實作破碎。</strong>大量 proxy、防火牆與伺服器不正確處理 pipelined 請求，會亂序、截斷或直接斷線。</li>
+    <li><strong>失敗處理是惡夢。</strong>連線中斷時，客戶端不知道那批請求裡哪些已被處理——對非冪等方法完全無法安全重送（s2 的規則在這裡發威）。</li>
+    <li><strong>收益有限。</strong>它省的是請求送出的 RTT，卻完全不能改善隊頭那個慢請求造成的阻塞。</li>
+  </ol>
+
+  <p>結果是所有主流瀏覽器最終預設關閉 pipelining，RFC 9112 也明確不再鼓勵。
+  <strong>這個失敗留下的教訓非常明確：想在一條連線裡並行，就必須讓每則訊息帶上自己的識別碼，並允許回應亂序完成。</strong>
+  這句話，一字不差，就是 HTTP/2 的設計綱領。</p>
+
+<pre><code>$ curl -v --http1.1 https://api.example.com/a https://api.example.com/b
+
+*   Trying 93.184.216.34:443...
+* SSL connection using TLSv1.3 / TLS_AES_128_GCM_SHA256
+* ALPN: server accepted http/1.1        # 版本在 TLS 交握就定了（篇 2）
+&gt; GET /a HTTP/1.1
+&gt; Host: api.example.com
+&lt; HTTP/1.1 200 OK
+&lt; Content-Length: 1024
+* Connection #0 to host api.example.com left intact   # keep-alive：不關
+* Re-using existing connection #0                      # 第二個請求沿用，省掉 TCP+TLS
+&gt; GET /b HTTP/1.1                                      # 但必須等 /a 收完才送得出去</code></pre>
+  <p class="cap"><code>Re-using existing connection</code> 是持久連線在做事的證據。注意最後一行的註解——<strong>重用不等於並行</strong>：<code>/b</code> 是在 <code>/a</code> 的回應完整收完之後才送出的。要真正並行，curl 只能再開一條連線。</p>
+
+  <div class="oneliner">
+    <b>一句話答法</b>HTTP/1.1 靠持久連線省掉重複交握與 slow start，但一條連線同時只跑一個請求，所以並行度等於連線數、瀏覽器對每個 origin 開 6 條；pipelining 想在單連線裡並行卻因為「回應必須按序返回」而撞上 HoL Blocking、又被中間設備打壞，最終全面棄用——它的失敗直接定義了 HTTP/2 的目標：每則訊息要有識別碼、回應要能亂序完成。
+  </div>
+</section>
+
+<section id="s6">
+  <div class="sec-head"><span class="sec-num">06</span><h2>HTTP/2：二進位框架、多路復用與它沒解決的那一半</h2></div>
+  <p class="sec-sub">同一套語義，換一種送法：把文字換成 frame、把 6 條連線收成 1 條——然後撞上一堵它自己拆不掉的牆。</p>
+
+  <p class="httpx-sub">1 · 二進位框架層：把訊息切成有標籤的小塊</p>
+
+  <p>HTTP/2 在 TLS 與 HTTP 語義之間插入一個新的層：<strong>二進位框架層（Binary Framing Layer）</strong>。應用看到的還是「請求／回應」，但真正送上線的是一連串固定格式的 <strong>frame</strong>，每個 frame 前面是 9 個位元組的標頭：</p>
+
+  <div class="httpx-frame">
+    <div class="ff len">Length (24 bits)</div>
+    <div class="ff typ">Type (8)</div>
+    <div class="ff flg">Flags (8)</div>
+    <div class="ff sid">R (1) + Stream Identifier (31 bits)</div>
+    <div class="ff pay">Frame Payload（0 … Length 個位元組）</div>
+  </div>
+  <p class="cap">這正是篇 1 說的<strong>長度前綴 framing</strong>：接收端先讀 9 個位元組，就知道這個 frame 有多長、屬於哪個 stream，不必像 HTTP/1.1 那樣掃描 <code>\r\n\r\n</code>。解析從「字串搜尋」變成「讀固定欄位」，快且不會有歧義。</p>
+
+  <p>常用的 frame 類型分兩群：<strong>承載訊息的</strong>（<code>HEADERS</code> 帶標頭、<code>DATA</code> 帶 body、<code>CONTINUATION</code> 接續過長的標頭）與
+  <strong>管理連線的</strong>（<code>SETTINGS</code> 協商參數、<code>WINDOW_UPDATE</code> 流量控制、<code>RST_STREAM</code> 取消單一 stream、
+  <code>GOAWAY</code> 優雅關閉連線、<code>PING</code> 存活與 RTT 量測）。
+  <strong>注意 <code>RST_STREAM</code> 這個能力在 HTTP/1.1 根本不存在</strong>：那時要取消一個進行中的請求，唯一辦法是把整條 TCP 連線砍掉。</p>
+
+  <p class="httpx-sub">2 · stream / message / frame：多路復用的三層結構</p>
+
+  <div class="httpx-layers">
+    <div class="httpx-layer">
+      <div class="lt">Stream</div>
+      <div class="lk">31-bit ID · 雙向 · 可獨立取消</div>
+      <div class="ls">一條 TCP 連線裡的虛擬通道。客戶端發起用<strong>奇數</strong> ID、伺服器用<strong>偶數</strong>，因此不會撞號。一個請求／回應交換佔用一個 stream。</div>
+    </div>
+    <div class="httpx-layer">
+      <div class="lt">Message</div>
+      <div class="lk">= 一個完整的請求或回應</div>
+      <div class="ls">語義上的單位，對應 RFC 9110 的那套方法與狀態碼。由一個 <code>HEADERS</code> 加零到多個 <code>DATA</code> 組成。</div>
+    </div>
+    <div class="httpx-layer">
+      <div class="lt">Frame</div>
+      <div class="lk">最小傳輸單位 · 標頭含 Stream ID</div>
+      <div class="ls">因為每個 frame 都標明自己屬於哪個 stream，<strong>不同 stream 的 frame 可以任意交錯</strong>，接收端照 ID 重組即可。</div>
+    </div>
+  </div>
+
+  <div class="httpx-weave">
+    <span class="httpx-cell s1">S1 HEADERS</span>
+    <span class="httpx-cell s3">S3 HEADERS</span>
+    <span class="httpx-cell s5">S5 HEADERS</span>
+    <span class="httpx-cell s3">S3 DATA</span>
+    <span class="httpx-cell s1">S1 DATA</span>
+    <span class="httpx-cell s5">S5 DATA</span>
+    <span class="httpx-cell s3">S3 DATA(END)</span>
+    <span class="httpx-cell s1">S1 DATA(END)</span>
+  </div>
+  <p class="cap">同一條 TCP 連線上的位元組順序。三個請求同時在飛，而且 <strong>S3 先完成</strong>——這在 HTTP/1.1 是不可能的（pipelining 必須按序回）。<strong>這就是多路復用</strong>：篇 1 定義過這個詞，這裡是它在應用層最完整的實現。</p>
+
+  <p>用 <code>nghttp -nv</code> 可以直接看到 frame 層的往返：</p>
+
+<pre><code>$ nghttp -nv https://example.com/
+
+[0.021] send SETTINGS frame &lt;length=12, flags=0x00, stream_id=0&gt;
+[0.021] send HEADERS  frame &lt;length=41, flags=0x25, stream_id=1&gt;    # 請求 /
+        :method: GET  :scheme: https  :authority: example.com       # pseudo-header
+[0.093] recv HEADERS  frame &lt;length=97, flags=0x04, stream_id=1&gt;
+[0.093] recv DATA     frame &lt;length=1300, flags=0x00, stream_id=1&gt;
+[0.094] send HEADERS  frame &lt;length=8,  flags=0x25, stream_id=3&gt;    # 解析出子資源後
+[0.094] send HEADERS  frame &lt;length=9,  flags=0x25, stream_id=5&gt;    # 三個請求一口氣送出
+[0.094] send HEADERS  frame &lt;length=9,  flags=0x25, stream_id=7&gt;    # 不必等任何回應
+[0.158] recv DATA     frame &lt;length=1300, flags=0x00, stream_id=5&gt;  # 5 先回
+[0.161] recv DATA     frame &lt;length=1300, flags=0x00, stream_id=3&gt;  # 3 後回 → 亂序完成
+[0.162] recv WINDOW_UPDATE frame &lt;length=4, flags=0x00, stream_id=0&gt; # 連線層歸還額度</code></pre>
+  <p class="cap">注意兩個細節：<strong>(1)</strong> 三個 <code>HEADERS</code> 在同一毫秒送出，<code>stream_id</code> 全是奇數（客戶端發起）；後續標頭只剩 8–9 位元組，因為 HPACK 已把重複欄位換成索引。<strong>(2)</strong> stream 5 的資料比 stream 3 早回——<strong>回應順序與請求順序脫鉤了</strong>，這件事在 HTTP/1.1 做不到。</p>
+
+  <div class="formula">HTTP/2 的並行度 = SETTINGS_MAX_CONCURRENT_STREAMS（常見預設 100 ～ 250）</div>
+
+  <p>從「6 條連線」跳到「一條連線上百個 stream」，帶來的連鎖收益比想像中多：連線數從 6 降到 1，
+  交握成本只付一次、壅塞視窗只養一次；伺服器的連線數與記憶體壓力大幅下降；
+  而 s5 那三個時代性 workaround（sharding／合併／內嵌）全部失去意義。</p>
+
+  <p class="httpx-sub">3 · HPACK：因為標頭真的太浪費了</p>
+
+  <p>做一次算術就懂為什麼要壓標頭。一個現代網頁載入 100 個資源，每個請求都要重送一遍
+  <code>Cookie</code>、<code>User-Agent</code>、<code>Accept</code>、<code>Accept-Language</code>、<code>Referer</code>——
+  這些欄位在同一次載入中<strong>幾乎一模一樣</strong>，加起來常有 800 位元組到 1.5 KB。100 個請求就是<strong>近百 KB 的純重複</strong>，
+  而且 HTTP/1.1 的 <code>Content-Encoding</code> 只壓 body，壓不到標頭。</p>
+
+  <p>SPDY 曾經直接拿 gzip 壓標頭，結果被 CRIME 攻擊打穿——攻擊者透過觀察壓縮後的長度變化，可以逐位元組猜出 Cookie。
+  （上一篇提過 TLS 1.3 直接刪掉壓縮功能，正是同一個教訓。）
+  <strong>HPACK</strong>（RFC 7541）是重新設計的答案，三個機制疊在一起：</p>
+
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr><th>機制</th><th>作法</th><th>效果</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><strong>靜態表</strong></td><td class="hl">預先定義 61 個最常見的標頭項目（<code>:method: GET</code>、<code>accept-encoding: gzip, deflate</code>…）</td><td>常見標頭壓成<strong>一個位元組的索引</strong></td></tr>
+        <tr><td><strong>動態表</strong></td><td class="hl">連線層級、收發雙方同步維護的表；第一次送完整內容並雙方一起寫入，之後只送索引</td><td>Cookie、User-Agent 這種長而不變的欄位<strong>只送一次</strong></td></tr>
+        <tr><td><strong>Huffman 編碼</strong></td><td class="hl">對必須送出的字串值做靜態 Huffman 編碼</td><td>URL 路徑等新值再省 20–30%</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="cap">實測上 HPACK 常能把標頭壓到原本的一到兩成。它也保留了防禦選項：敏感欄位（例如帶權杖的自訂標頭）可以標記為<strong>不進動態表、且禁止中間層索引</strong>，避免重演 CRIME 那種壓縮側信道。</p>
+
+  <div class="callout warn">
+    <div class="c-title"><span class="ic">陷阱</span>動態表是「連線狀態」，這件事有後座力</div>
+    <p>動態表要求收發雙方對「第 N 號索引是什麼」有<strong>完全一致的認知</strong>，因此 HPACK 隱含了<strong>標頭區塊必須嚴格按序處理</strong>的假設——
+    這在 TCP 上不成問題（TCP 本來就保證順序），但一旦底層換成允許亂序交付的傳輸協定就會直接崩潰。
+    HTTP/3 因此必須把 HPACK 改成 QPACK，用額外的機制處理「索引還沒同步就先收到引用」的情況。<strong>細節留給下一篇</strong>，這裡只需記住：
+    <em>頭部壓縮的設計，被底層傳輸的順序保證綁住了。</em><br>
+    營運面也有一坑：<code>SETTINGS_HEADER_TABLE_SIZE</code> 是<strong>每條連線</strong>的記憶體。在一台扛數萬條連線的 gateway 上調大它，
+    乘出來的數字很可觀。</p>
+  </div>
+
+  <p class="httpx-sub">4 · 流量控制：HTTP/2 有自己的一層，而且與 TCP 是兩件事</p>
+
+  <p>把所有 stream 塞進一條 TCP 連線，會冒出一個 HTTP/1.1 沒有的問題：
+  <strong>一個慢速消費的 stream，會把整條連線的緩衝吃光</strong>——想像瀏覽器同時下載一支影片和一份 JSON，
+  影片的 <code>DATA</code> frame 如果無限制地灌進來，JSON 就沒有緩衝空間可用了。</p>
+
+  <p>所以 HTTP/2 自建了一套<strong>流量控制</strong>，形式與篇 1 的滑動視窗一樣（接收端宣告可接收多少位元組，發送端不得超過），
+  但它是<strong>credit-based</strong>：接收端用 <code>WINDOW_UPDATE</code> frame 主動歸還額度，且分兩個層級——<strong>per-stream</strong> 與 <strong>per-connection</strong>。
+  和 TCP 的 <var>rwnd</var> 疊在一起就是這樣：</p>
+
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr><th>層</th><th>控制單位</th><th>誰在調節</th><th>預設值</th><th>調不好會怎樣</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>TCP 流量控制</td><td class="hl">整條連線的位元組</td><td>核心（<var>rwnd</var> ／ socket 緩衝）</td><td>由核心自動調校</td><td>吞吐撞上 BDP 上限</td></tr>
+        <tr><td>HTTP/2 connection 視窗</td><td class="hl">這條 HTTP/2 連線的所有 DATA</td><td>HTTP/2 實作</td><td>65,535 位元組</td><td>整條連線被限速</td></tr>
+        <tr><td>HTTP/2 stream 視窗</td><td class="hl">單一 stream 的 DATA</td><td>HTTP/2 實作</td><td>65,535 位元組</td><td>單一大檔傳輸被限速</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="cap">注意兩件事：<strong>(1)</strong> 只有 <code>DATA</code> frame 受流量控制，<code>HEADERS</code> 與控制類 frame 不受。
+  <strong>(2)</strong> 那個 64 KB 的預設值是 2015 年訂的，在今天的長肥管線上小得可笑——篇 1 算過 BDP：
+  100 Mbps × 100 ms 的鏈路，<strong>光是把管線填滿就要 1.25 MB</strong>。這就是為什麼 gRPC 大量傳輸的第一個調優動作，永遠是把視窗調大。</p>
+
+  <p>換個角度看，這整套機制就是篇 1 那條 backpressure 因果鏈在應用層的重演：
+  <strong>接收端來不及消費 → 不歸還額度 → 發送端被迫停下來</strong>。差別在於 HTTP/2 讓這件事可以<em>精確到單一 stream</em>，
+  而不是像 TCP 那樣只能一刀切整條連線。</p>
+
+  <p class="httpx-sub">5 · 優先序與 server push：兩個被現實否決的設計</p>
+
+  <p>多路復用帶來一個新問題：一百個 stream 同時要頻寬，先送誰？HTTP/2 原本的答案是一棵
+  <strong>優先序依賴樹</strong>（<code>PRIORITY</code> frame，可宣告「stream A 依賴 stream B」並附權重）。
+  它太複雜了：伺服器實作參差、瀏覽器送出的樹各不相同、中間 proxy 常直接忽略。
+  <strong>RFC 9113 已將整套依賴樹標為 deprecated</strong>，取而代之的是 RFC 9218 的 <code>Priority</code> 標頭——
+  只有 <code>u</code>（緊急度 0–7）與 <code>i</code>（是否可漸進呈現）兩個參數，簡單到大家真的做得對。</p>
+
+  <p>優先序失效的後果在下一節的 demo 裡看得見：<strong>沒有優先序時，伺服器傾向平分頻寬，於是所有資源同時緩慢地下載、同時完成</strong>——
+  總完成時間可能不錯，但「第一個能用的資源」出現得比 HTTP/1.1 還晚。這正是 HTTP/2 早期評測時常見的爭議。</p>
+
+  <p><strong>Server Push</strong> 則是更著名的失敗。設計意圖很合理：伺服器回 HTML 時就順手把 CSS 與 JS
+  用 <code>PUSH_PROMISE</code> 推過去，省掉客戶端解析完 HTML 再來要的那一趟 RTT。實際上它輸在三件事：</p>
+
+  <ul>
+    <li><strong>伺服器不知道客戶端的快取裡有什麼。</strong>回頭客早就存好了那些檔案，推過去的每個位元組都是純浪費，
+    而且是在最寶貴的連線初期浪費。（曾有 Cache Digest 提案想解決，未能標準化。）</li>
+    <li><strong>它與優先序打架。</strong>被推送的資源會跟客戶端真正想要的資源搶頻寬，反而拖慢關鍵路徑。</li>
+    <li><strong>幾乎沒人用對。</strong>大規模量測顯示多數部署的效果是負的。Chrome 在 106 版（2022）移除支援，主流伺服器隨後跟進。</li>
+  </ul>
+
+  <p>取代它的是 <code>103 Early Hints</code>：伺服器在真正的回應還沒算完之前，先回一則 <code>1xx</code>
+  告訴瀏覽器「你等一下會需要這幾個資源，可以先去 preload」。<strong>差別在於誰做決定</strong>——
+  push 是伺服器強塞，Early Hints 是伺服器建議、客戶端查完自己的快取再決定要不要抓。後者贏了。</p>
+
+  <div class="callout accent">
+    <div class="c-title"><span class="ic">關鍵</span>gRPC：把 HTTP/2 當成傳輸層來用</div>
+    <p>gRPC 不是「跑在 HTTP 上的 RPC」，它是<strong>直接把 HTTP/2 的 stream 當成 RPC 的基礎設施</strong>：
+    一個 RPC 呼叫佔一個 stream，因此天生支援四種模式——unary、server streaming、client streaming、bidirectional streaming；
+    metadata 走 <code>HEADERS</code>；而最終的錯誤碼 <code>grpc-status</code> 走 <strong>trailer</strong>（訊息結束後才送的標頭），
+    這樣才能在串流跑完之後才回報結果——<strong>HTTP/1.1 對 trailer 的支援太差，所以 gRPC 從一開始就沒有 HTTP/1.1 版本</strong>。
+    連帶的硬性要求是：<strong>ALPN 必須協商到 <code>h2</code></strong>（上一篇那張表的最後一列）。
+    這也解釋了為什麼瀏覽器不能直接講 gRPC——瀏覽器的 fetch API 給不了對 HTTP/2 frame 的精細控制，
+    只能靠 gRPC-Web 加一層 proxy 轉換。</p>
+  </div>
+
+  <p class="httpx-sub">6 · 關鍵轉折：解掉的是應用層 HoL，沒解掉的是 TCP 層 HoL</p>
+
+  <p>把前面幾節收攏起來：HTTP/2 確實把 <strong>s5 那個 pipelining 的隊頭阻塞</strong>解決得乾乾淨淨。
+  每個 frame 都帶 Stream ID，回應可以亂序完成，一支慢查詢再也卡不住其他請求。<strong>應用層的 HoL Blocking，結案。</strong></p>
+
+  <p>但是往下看一層，問題還在原地。篇 1 說得很清楚：<strong>TCP 對上層提供的是一條「不掉、不亂」的有序位元組串流</strong>。
+  「不亂」這個保證是有成本的——當某個 segment 遺失，接收端核心即使已經收到了它後面的所有資料，
+  也<strong>必須把它們扣在緩衝裡</strong>，不能交給應用，直到遺失的那一段被重傳補齊為止。TCP 沒有辦法「跳過」一個洞。</p>
+
+  <div class="httpx-weave">
+    <span class="httpx-cell s1">S1 DATA</span>
+    <span class="httpx-cell lost">S3 DATA（遺失）</span>
+    <span class="httpx-cell s5">S5 DATA</span>
+    <span class="httpx-cell s1">S1 DATA</span>
+    <span class="httpx-cell s5">S5 DATA</span>
+    <span class="httpx-cell note">↑ 這四個 frame 都已抵達，卻全部交不上去</span>
+  </div>
+  <p class="cap">S3 的一個封包遺失，後面所有已經安全抵達的位元組——包括完全無關的 S1 與 S5——都被扣在 TCP 接收緩衝裡等它。<strong>HTTP/2 的多路復用在傳輸層是隱形的：TCP 只看得到一條位元組串流，看不到裡面有幾個 stream。</strong></p>
+
+  <div class="callout warn">
+    <div class="c-title"><span class="ic">陷阱</span>在高丟包鏈路上，HTTP/2 可能比 HTTP/1.1 慢</div>
+    <p>這是反直覺但真實的結論。HTTP/1.1 的 6 條連線是<strong>六條彼此獨立的 TCP 位元組串流</strong>——
+    其中一條掉包停等，另外五條照跑不誤。HTTP/2 把所有東西收攏進<strong>一條</strong>連線，等於把所有雞蛋放進同一個籃子：
+    <strong>任何一個封包遺失，全部 stream 一起停等。</strong><br>
+    所以在乾淨的機房網路裡 HTTP/2 幾乎全面獲勝，但在丟包率高的行動網路、擁擠的公共 Wi-Fi 上，
+    多路復用的收益會被 TCP 的 HoL Blocking 吃掉一大塊，甚至轉為負值。<strong>這不是實作問題，是架構問題</strong>——
+    HTTP/2 在自己的層級上已經做對了每一件事。</p>
+  </div>
+
+  <p>問題出在哪，答案已經很清楚：<strong>不在 HTTP/2，而在它腳下那個「單一有序位元組串流」的抽象。</strong>
+  只要傳輸層還是 TCP，多路復用就永遠只能做到一半——上層分得再開，到了下層還是被壓回一條必須按序交付的隊伍。</p>
+
+  <div class="oneliner">
+    <b>一句話答法</b>HTTP/2 用二進位框架層把訊息切成帶 Stream ID 的 frame，於是同一條連線上的請求可以交錯傳輸、亂序完成，並靠 HPACK 消掉重複標頭、靠 per-stream 流量控制避免單一 stream 吃光緩衝；它徹底解決了應用層的 HoL Blocking，卻解不掉 TCP 層的——一個封包遺失，所有 stream 一起停等，因為 TCP 看不見裡面有幾條 stream。
+  </div>
+</section>
+
+<section id="s7">
+  <div class="sec-head"><span class="sec-num">07</span><h2>互動 · HTTP/1.1 vs HTTP/2 載入瀑布圖</h2></div>
+  <p class="sec-sub">同一批資源、同一條網路，只換連線模型：看「排隊」與「交握」這兩筆帳到底吃掉多少時間。</p>
+
+  <p>下面的模擬器把同一次頁面載入丟給兩種協定並排跑。流程固定：先抓 HTML 文件，解析出 <var>N</var> 個子資源，
+  然後 <strong>HTTP/1.1</strong> 把它們分派給最多 6 條連線（每條新連線都要先付 TCP + TLS 交握），
+  <strong>HTTP/2</strong> 則在同一條既有連線上開 <var>N</var> 個 stream 一次全部送出。
+  兩邊共用同一條時間軸，所以長度可以直接比較。</p>
+
+  <p>兩個切換鈕分別對應本篇的兩個結論：<strong>網路情境</strong>驗證「HTTP/2 的收益與 RTT 成正比」，
+  <strong>連線策略</strong>則讓你親眼看到 domain sharding 當年為什麼有效、以及它為什麼在 HTTP/2 時代變成負擔。</p>
+
+  <div class="demo" id="httpx-demo">
+    <div class="demo-bar">
+      <span class="label">互動 · HTTP/1.1 vs HTTP/2 載入瀑布圖</span>
+      <span class="label" style="text-transform:none;font-family:var(--sans);font-size:12px;color:var(--text-2)">拉動資源數量、切換情境，看兩條時間軸的差距</span>
+    </div>
+    <div class="demo-body">
+      <div class="httpx-seg-row">
+        <div class="seg" role="group" aria-label="網路情境切換">
+          <button data-rtt="20" aria-pressed="true">同區域 · RTT 20ms</button>
+          <button data-rtt="150" aria-pressed="false">跨洲 · RTT 150ms</button>
+        </div>
+        <div class="seg" role="group" aria-label="HTTP/1.1 連線策略切換">
+          <button data-shard="1" aria-pressed="true">單一 origin · 6 連線</button>
+          <button data-shard="2" aria-pressed="false">Domain Sharding ×2 · 12 連線</button>
+        </div>
+      </div>
+
+      <div class="httpx-ctrl">
+        <label class="httpx-slider" for="httpx-count">
+          <span>子資源數量</span>
+          <input type="range" id="httpx-count" min="4" max="24" step="1" value="12">
+          <b id="httpx-count-val">12</b>
+        </label>
+        <button class="btn primary" id="httpx-btn-play">重新載入</button>
+        <button class="btn" id="httpx-btn-reset">重置</button>
+        <div class="legend">
+          <span><i class="dot ns-idle"></i>排隊等連線</span>
+          <span><i class="dot ns-lock"></i>TCP + TLS 交握</span>
+          <span><i class="dot ns-wait"></i>請求飛行 + 伺服器處理</span>
+          <span><i class="dot ns-ok"></i>內容傳輸</span>
+        </div>
+      </div>
+
+      <div class="status-line" id="httpx-status">拉動滑桿或切換情境即可重算；按「重新載入」重播動畫。</div>
+
+      <div class="httpx-wf-grid">
+        <div class="httpx-wf-panel">
+          <div class="wf-head"><span id="httpx-h1-label">HTTP/1.1 · 6 連線</span><span class="wf-total" id="httpx-h1-total">—</span></div>
+          <div id="httpx-h1-rows"></div>
+        </div>
+        <div class="httpx-wf-panel">
+          <div class="wf-head"><span>HTTP/2 · 單連線多路復用</span><span class="wf-total" id="httpx-h2-total">—</span></div>
+          <div id="httpx-h2-rows"></div>
+        </div>
+      </div>
+
+      <div class="httpx-panels">
+        <div class="httpx-panel">
+          <div class="pt">連線與交握成本</div>
+          <div class="prow"><span class="pk">HTTP/1.1 連線數</span><span class="pv" id="httpx-p-conn">—</span></div>
+          <div class="prow"><span class="pk">HTTP/1.1 交握次數</span><span class="pv bad" id="httpx-p-hs1">—</span></div>
+          <div class="prow"><span class="pk">HTTP/2 交握次數</span><span class="pv good" id="httpx-p-hs2">1</span></div>
+          <div class="prow"><span class="pk">被排隊擋住的請求</span><span class="pv" id="httpx-p-queued">—</span></div>
+        </div>
+        <div class="httpx-panel">
+          <div class="pt">結果對比</div>
+          <div class="prow"><span class="pk">HTTP/1.1 總耗時</span><span class="pv" id="httpx-p-t1">—</span></div>
+          <div class="prow"><span class="pk">HTTP/2 總耗時</span><span class="pv good" id="httpx-p-t2">—</span></div>
+          <div class="prow"><span class="pk">加速比</span><span class="pv" id="httpx-p-ratio">—</span></div>
+          <div class="prow"><span class="pk">標頭位元組（估算）</span><span class="pv" id="httpx-p-hdr">—</span></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <p class="cap">四個值得停下來比對的畫面：<strong>(1)</strong> 保持 12 個資源，把 RTT 從 20ms 切到 150ms——
+  HTTP/1.1 的階梯整個被拉長，加速比從約 1.3 倍跳到約 1.6 倍：<strong>省下的每一格都是 RTT，所以延遲越高、收益越大</strong>。
+  <strong>(2)</strong> 把資源數拉到 24，看 HTTP/1.1 那側出現明顯的<strong>四層階梯</strong>——每一階就是一批 6 個請求在排隊等連線空出來。
+  <strong>(3)</strong> 打開 domain sharding：階梯確實變少了（這就是它當年有效的原因），但橘色的交握段暴增到 12 條——
+  <strong>你是用交握成本換排隊成本</strong>，而 HTTP/2 兩筆都不用付。
+  <strong>(4)</strong> 看 HTTP/2 那側：所有綠色傳輸段<strong>幾乎同時開始、同時結束</strong>——這正是 s6 說的「沒有優先序時伺服器平分頻寬」，
+  總時間漂亮，但「第一個可用資源」出現得不早。這也是 <code>Priority</code> 標頭想修的問題。</p>
+
+  <div class="callout warn">
+    <div class="c-title"><span class="ic">說明</span>這個模型刻意不注入丟包</div>
+    <p>本 demo 假設網路是乾淨的，只比較<strong>連線數與排隊</strong>這一個變因，所以你看到的是 HTTP/2 的最佳情況。
+    真實世界還有另一個變因會反過來咬 HTTP/2：封包遺失。<strong>那正是 s6 最後談的 TCP HoL Blocking，也是下一篇 demo 的主題</strong>——
+    在那裡我們才會打開丟包開關，看單連線多路復用的另一面。此外本模型也簡化了頻寬爭用（sharding 的實際收益會比這裡顯示的更小）。</p>
+  </div>
+
+  <div class="oneliner">
+    <b>一句話答法</b>HTTP/1.1 的時間軸是「六格一批」的階梯，時間花在等連線與重複交握；HTTP/2 一次把所有請求送出去，省下的正是這兩筆——而且 RTT 越高、資源越多，省得越多，這也是為什麼行動端與跨區服務升級 HTTP/2 的收益最明顯。
+  </div>
+</section>
+
+<section id="s8">
+  <div class="sec-head"><span class="sec-num">08</span><h2>面試折衷與實務選型</h2></div>
+  <p class="sec-sub">HTTP 的面試題很少問「GET 是什麼」，而是問「你這個 API 為什麼能重試」「這份資源為什麼快取得住」「升級 HTTP/2 之後為什麼沒變快」。</p>
+
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr><th>決策點</th><th>選項</th><th>Trade-off</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>API 的寫入方法</td><td class="hl">PUT（整份替換）vs POST + Idempotency-Key</td><td>PUT 天生冪等、中間層敢重試，但要求客戶端持有完整資源；POST 語義自由卻得自己實作冪等層與結果快取</td></tr>
+        <tr><td>快取策略</td><td class="hl">版本化 URL + 長 max-age vs 短 max-age + ETag</td><td>前者命中率最高、完全不發請求，但要求建置流程產生雜湊檔名；後者省事卻每次都付一個 RTT</td></tr>
+        <tr><td>驗證器</td><td class="hl">ETag vs Last-Modified</td><td>ETag 精確但要伺服器算雜湊或維護版本；Last-Modified 便宜卻只有秒級精度、且對重新產生的檔案會誤判</td></tr>
+        <tr><td>重試策略</td><td class="hl">只重試冪等方法 vs 全部重試</td><td>全部重試會製造重複訂單；只重試冪等方法則要接受非冪等請求的失敗必須上拋——這就是 Idempotency-Key 的存在理由</td></tr>
+        <tr><td>連線協定</td><td class="hl">HTTP/1.1 vs HTTP/2</td><td>HTTP/2 在多資源、高 RTT 下大勝；但在丟包鏈路上會被 TCP HoL 吃掉收益，而且單連線也意味著 L4 負載均衡的分流粒度變粗</td></tr>
+        <tr><td>負載均衡層</td><td class="hl">L4（讀 SNI）vs L7（終止 TLS 讀 Host／:authority）</td><td>L4 不解密、成本低，但看不到路徑、無法做 HTTP/2 的 per-stream 分流與快取；L7 功能全開，代價是憑證管理與內網段明文</td></tr>
+        <tr><td>後端到後端</td><td class="hl">REST over HTTP/2 vs gRPC</td><td>gRPC 有 schema、雙向串流與 trailer 狀態碼，但強制 h2、瀏覽器不可直達、除錯工具鏈較重；REST 通用、可快取、人人看得懂</td></tr>
+        <tr><td>HTTP/2 調優</td><td class="hl">預設 64KB 視窗 vs 調大</td><td>調大能吃滿高 BDP 鏈路，但緩衝記憶體 × 連線數會線性膨脹——這是吞吐與記憶體的直接交換</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="cap">共同結構：<strong>語義層的每個決策都在買「中間層願意替你做什麼」</strong>——冪等性買重試，快取標頭買 CDN，狀態碼買正確的錯誤處理。傳輸層的決策則清一色在延遲、吞吐與維運複雜度之間挑兩個。</p>
+
+  <div class="callout accent">
+    <div class="c-title"><span class="ic">面試</span>高頻追問怎麼答</div>
+    <p><strong>Q：PUT 和 POST 差在哪？</strong>
+    答：不是「更新 vs 新增」，而是冪等 vs 不冪等——PUT 是整份替換，送十次結果相同，所以中間層敢自動重試；POST 語義由伺服器定義，重試可能產生重複副作用。<br>
+    <strong>Q：DELETE 第二次回 404，還算冪等嗎？</strong>
+    答：算。冪等約束的是伺服器狀態，不是回應內容——刪完之後「那筆資料不存在」這件事沒有再改變。<br>
+    <strong>Q：<code>no-cache</code> 和 <code>no-store</code> 差在哪？</strong>
+    答：<code>no-cache</code> 可以存，但每次使用前都要向伺服器驗證（多半換到一個 304）；<code>no-store</code> 是完全不准落地，用於含敏感資料的回應。<br>
+    <strong>Q：為什麼瀏覽器對同一個網域只開 6 條連線？</strong>
+    答：因為 HTTP/1.1 一條連線同時只能跑一個請求，並行度＝連線數；但連線再多會各自付交握與 slow start、互相搶頻寬、加重伺服器負擔，6 是經驗折衷。<br>
+    <strong>Q：HTTP/2 為什麼比 HTTP/1.1 快？</strong>
+    答：三件事——單連線多路復用消掉請求排隊與重複交握、HPACK 消掉重複標頭、二進位 framing 讓解析更便宜。收益與 RTT 及資源數成正比。<br>
+    <strong>Q：升級了 HTTP/2 卻沒變快，可能是什麼原因？</strong>
+    答：先確認 ALPN 真的協商到 <code>h2</code>（邊緣沒開就一路 HTTP/1.1）；再檢查是不是還留著 domain sharding 或超大 bundle 這些 1.1 時代的 workaround；最後看網路品質——丟包高的鏈路上 TCP HoL 會吃掉多路復用的收益。<br>
+    <strong>Q：HTTP/2 有多路復用，為什麼還會塞住？</strong>
+    答：它解的是應用層 HoL，TCP 層的還在。所有 stream 都在同一條有序位元組串流上，一個封包遺失就全部一起等。</p>
+  </div>
+
+  <p>把本篇收攏成一句：<strong>HTTP 的語義三十年沒變，變的一直是「怎麼把這些語義送過去」</strong>。
+  方法與狀態碼是給中間層的契約，快取標頭決定誰能替你省掉一趟往返，
+  而連線模型從「一請求一連線」走到「六條連線」再走到「一條連線上百個 stream」，每一步都在追同一件事：<strong>把請求之間不必要的等待砍掉</strong>。</p>
+
+  <p>但砍到最後，剩下一個砍不動的。HTTP/2 把六條連線收攏成一條，代價是<strong>所有 stream 都躺在同一條 TCP 位元組串流上——丟一個封包，全部一起等</strong>。
+  問題不出在 HTTP/2，而出在它腳下那個「有序位元組串流」的抽象：<strong>只要傳輸層仍然是 TCP，多路復用就永遠只做到一半</strong>。
+  下一篇處理這件事，而且用的是最徹底的辦法——<strong>不要 TCP 了</strong>。</p>
+
+  <p>還有另一件 HTTP 做不到的事，比 HoL Blocking 更根本：
+  從 HTTP/1.1 到 HTTP/2，<strong>每一個位元組的流動都始於客戶端的一次請求</strong>。
+  server push 是唯一一次打破它的嘗試，而它失敗了——因為它推的仍然是「客戶端接下來會請求的東西」，
+  而不是「伺服器現在想說的話」。當伺服器需要主動開口——推播、行情跳動、聊天訊息、協作游標——
+  請求／回應這個模型就到頂了。<strong>篇 5 會從 s3 提過的那個 <code>101 Switching Protocols</code> 出發，把這條連線變成真正雙向的。</strong></p>
+
+  <div class="oneliner">
+    <b>一句話答法</b>選型時語義層買的是「中間層願意替你做什麼」（冪等買重試、快取標頭買 CDN、狀態碼買正確的錯誤處理），傳輸層買的是延遲；HTTP/2 用單連線多路復用買到最大一筆延遲收益，但它把所有 stream 綁在同一條 TCP 串流上，也因此把 HoL Blocking 從應用層推到了傳輸層——那是下一代協定要動刀的地方。
+  </div>
+</section>
+
+</div>
+
+      </div>
+    </main>
+  </div>
+
+  <script>
+    "use strict";
+    document.addEventListener("DOMContentLoaded", function () {
+      /* ===== TOC scrollspy, mobile accordion & desktop collapse ===== */
+      (function () {
+        var links = Array.prototype.slice.call(document.querySelectorAll(".toc-nav a"));
+        var map = {};
+        links.forEach(function (a) {
+          var href = a.getAttribute("href");
+          if (href && href.startsWith("#")) {
+            map[href.slice(1)] = a;
+          }
+        });
+        var secs = links.map(function (a) {
+          var href = a.getAttribute("href");
+          return href && href.startsWith("#") ? document.getElementById(href.slice(1)) : null;
+        }).filter(Boolean);
+
+        if (secs.length > 0 && typeof IntersectionObserver !== "undefined") {
+          var obs = new IntersectionObserver(function (entries) {
+            entries.forEach(function (e) {
+              if (e.isIntersecting) {
+                links.forEach(function (l) { l.classList.remove("active"); });
+                var act = map[e.target.id];
+                if (act) act.classList.add("active");
+              }
+            });
+          }, { rootMargin: "-20% 0px -70% 0px", threshold: 0 });
+          secs.forEach(function (s) { obs.observe(s); });
+        }
+
+        /* mobile：目錄 accordion（≤920px） */
+        var toggle = document.querySelector(".toc-toggle");
+        var nav = document.querySelector(".toc-nav");
+        if (toggle && nav) {
+          toggle.addEventListener("click", function () {
+            var open = nav.classList.toggle("open");
+            toggle.setAttribute("aria-expanded", open ? "true" : "false");
+          });
+          nav.addEventListener("click", function (e) {
+            if (e.target.closest("a") && window.innerWidth <= 920) {
+              nav.classList.remove("open");
+              toggle.setAttribute("aria-expanded", "false");
+            }
+          });
+        }
+
+        /* desktop：收合側欄（預設展開；不持久化） */
+        var collapseBtn = document.querySelector(".toc-collapse");
+        var reopenBtn = document.querySelector(".toc-reopen");
+        function setTocCollapsed(collapsed) {
+          document.body.classList.toggle("toc-collapsed", collapsed);
+          if (collapseBtn) collapseBtn.setAttribute("aria-expanded", collapsed ? "false" : "true");
+          if (reopenBtn) reopenBtn.setAttribute("aria-expanded", collapsed ? "false" : "true");
+          if (collapsed && reopenBtn) reopenBtn.focus();
+          else if (!collapsed && collapseBtn) collapseBtn.focus();
+        }
+        if (collapseBtn) {
+          collapseBtn.addEventListener("click", function () { setTocCollapsed(true); });
+        }
+        if (reopenBtn) {
+          reopenBtn.addEventListener("click", function () { setTocCollapsed(false); });
+        }
+      })();
+    });
+  </script>
+
+  
+<script>
+(function () {
+  "use strict";
+
+  /* ---------- 模型參數 ---------- */
+  var SETUP_RTT = 2;      // TCP 三向交握 1-RTT + TLS 交握 1-RTT
+  var SVC = 40;           // 單一資源獨佔一個並行槽時的傳輸時間（ms）
+  var SLOTS = 6;          // 等效頻寬：可同時吃滿的並行槽數
+  var ANIM = 1200;        // 動畫總長（ms）
+
+  var DEFAULTS = { rtt: 20, shard: 1, count: 12 };
+  var state = { rtt: DEFAULTS.rtt, shard: DEFAULTS.shard, count: DEFAULTS.count };
+
+  var KINDS = ["css", "js", "js", "img", "img", "img", "font", "img"];
+
+  var el = {
+    status: document.getElementById("httpx-status"),
+    countInput: document.getElementById("httpx-count"),
+    countVal: document.getElementById("httpx-count-val"),
+    btnPlay: document.getElementById("httpx-btn-play"),
+    btnReset: document.getElementById("httpx-btn-reset"),
+    h1Rows: document.getElementById("httpx-h1-rows"),
+    h2Rows: document.getElementById("httpx-h2-rows"),
+    h1Label: document.getElementById("httpx-h1-label"),
+    h1Total: document.getElementById("httpx-h1-total"),
+    h2Total: document.getElementById("httpx-h2-total"),
+    pConn: document.getElementById("httpx-p-conn"),
+    pHs1: document.getElementById("httpx-p-hs1"),
+    pHs2: document.getElementById("httpx-p-hs2"),
+    pQueued: document.getElementById("httpx-p-queued"),
+    pT1: document.getElementById("httpx-p-t1"),
+    pT2: document.getElementById("httpx-p-t2"),
+    pRatio: document.getElementById("httpx-p-ratio"),
+    pHdr: document.getElementById("httpx-p-hdr")
+  };
+
+  function seg(kind, from, to) { return { kind: kind, from: from, to: to }; }
+
+  /* ---------- HTTP/1.1：C 條連線，每條連線一次只跑一個請求 ---------- */
+  function simulateH1(n, rtt, conns) {
+    var docEnd = SETUP_RTT * rtt + rtt + SVC;
+    var rows = [{
+      label: "index.html", note: "c0", doc: true, end: docEnd,
+      segs: [seg("setup", 0, SETUP_RTT * rtt),
+             seg("wait", SETUP_RTT * rtt, SETUP_RTT * rtt + rtt),
+             seg("xfer", SETUP_RTT * rtt + rtt, docEnd)]
+    }];
+
+    var free = [], est = [], i;
+    for (i = 0; i < conns; i++) { free.push(docEnd); est.push(false); }
+    est[0] = true;                       // conn0 已在抓 HTML 時建立
+    var handshakes = 1, queued = 0, total = docEnd;
+
+    for (var k = 0; k < n; k++) {
+      var idx = 0;
+      for (i = 1; i < conns; i++) { if (free[i] < free[idx]) idx = i; }
+
+      var start = free[idx], segs = [], t = start;
+      if (start > docEnd + 0.001) { segs.push(seg("queue", docEnd, start)); queued++; }
+      if (!est[idx]) {
+        segs.push(seg("setup", t, t + SETUP_RTT * rtt));
+        t += SETUP_RTT * rtt; est[idx] = true; handshakes++;
+      }
+      segs.push(seg("wait", t, t + rtt)); t += rtt;
+      segs.push(seg("xfer", t, t + SVC)); t += SVC;
+      free[idx] = t;
+      if (t > total) total = t;
+
+      rows.push({
+        label: pad(k + 1) + " " + KINDS[k % KINDS.length],
+        note: "c" + idx, doc: false, end: t, segs: segs
+      });
+    }
+    return { rows: rows, total: total, handshakes: handshakes, queued: queued };
+  }
+
+  /* ---------- HTTP/2：單連線，N 個 stream 同時送出、共享頻寬 ---------- */
+  function simulateH2(n, rtt) {
+    var docEnd = SETUP_RTT * rtt + rtt + SVC;
+    var rows = [{
+      label: "index.html", note: "s1", doc: true, end: docEnd,
+      segs: [seg("setup", 0, SETUP_RTT * rtt),
+             seg("wait", SETUP_RTT * rtt, SETUP_RTT * rtt + rtt),
+             seg("xfer", SETUP_RTT * rtt + rtt, docEnd)]
+    }];
+
+    // 無優先序時伺服器平分頻寬：所有 stream 一起慢、一起完成
+    var dur = SVC * Math.max(1, n / SLOTS);
+    var end = docEnd + rtt + dur;
+
+    for (var k = 0; k < n; k++) {
+      rows.push({
+        label: pad(k + 1) + " " + KINDS[k % KINDS.length],
+        note: "s" + (2 * k + 3), doc: false, end: end,
+        segs: [seg("wait", docEnd, docEnd + rtt), seg("xfer", docEnd + rtt, end)]
+      });
+    }
+    return { rows: rows, total: end, handshakes: 1, queued: 0 };
+  }
+
+  function pad(v) { return (v < 10 ? "0" : "") + v; }
+  function ms(v) { return Math.round(v) + " ms"; }
+
+  /* ---------- 渲染 ---------- */
+  function renderRows(container, rows, scale) {
+    container.innerHTML = "";
+    rows.forEach(function (r) {
+      var row = document.createElement("div");
+      row.className = "httpx-row" + (r.doc ? " doc" : "");
+      row.setAttribute("title", r.label + "（" + r.note + "）· 完成於 " + ms(r.end));
+
+      var label = document.createElement("div");
+      label.className = "rl";
+      label.textContent = r.label + " " + r.note;
+      row.appendChild(label);
+
+      var track = document.createElement("div");
+      track.className = "httpx-track";
+      r.segs.forEach(function (s) {
+        var w = s.to - s.from;
+        if (w <= 0) return;
+        var bar = document.createElement("div");
+        bar.className = "httpx-bar " + s.kind;
+        bar.style.left = (s.from / scale * 100) + "%";
+        bar.style.width = Math.max(0.6, w / scale * 100) + "%";
+        bar.style.animationDelay = (s.from / scale * ANIM) + "ms";
+        bar.style.animationDuration = Math.max(70, w / scale * ANIM) + "ms";
+        track.appendChild(bar);
+      });
+      row.appendChild(track);
+      container.appendChild(row);
+    });
+  }
+
+  function render() {
+    var n = state.count, rtt = state.rtt, conns = 6 * state.shard;
+    var h1 = simulateH1(n, rtt, conns);
+    var h2 = simulateH2(n, rtt);
+    var scale = Math.max(h1.total, h2.total);
+
+    renderRows(el.h1Rows, h1.rows, scale);
+    renderRows(el.h2Rows, h2.rows, scale);
+
+    el.h1Label.textContent = state.shard > 1
+      ? "HTTP/1.1 · " + conns + " 連線（sharding ×2）"
+      : "HTTP/1.1 · " + conns + " 連線";
+    el.h1Total.textContent = ms(h1.total);
+    el.h2Total.textContent = ms(h2.total);
+
+    var ratio = h1.total / h2.total;
+    var hdr1 = (n + 1) * 780, hdr2 = 780 + n * 95;
+
+    el.pConn.textContent = conns + " 條";
+    el.pHs1.textContent = h1.handshakes + " 次（TCP + TLS）";
+    el.pHs2.textContent = "1 次";
+    el.pQueued.textContent = h1.queued + " / " + n + " 個";
+    el.pT1.textContent = ms(h1.total);
+    el.pT2.textContent = ms(h2.total);
+    el.pRatio.textContent = ratio.toFixed(2) + "× 快";
+    el.pRatio.className = "pv " + (ratio >= 1.15 ? "good" : "");
+    el.pHdr.textContent = Math.round(hdr1 / 1024) + " KB → " + Math.round(hdr2 / 1024) + " KB";
+
+    el.status.textContent =
+      "RTT " + rtt + "ms · " + n + " 個子資源｜HTTP/1.1（" + conns + " 連線）"
+      + ms(h1.total) + "、" + h1.handshakes + " 次交握、" + h1.queued + " 個請求被排隊擋住"
+      + "｜HTTP/2（單連線 " + n + " 個 stream）" + ms(h2.total) + "、1 次交握 → 快 "
+      + ratio.toFixed(2) + " 倍。HPACK 讓標頭從約 " + Math.round(hdr1 / 1024)
+      + " KB 降到約 " + Math.round(hdr2 / 1024) + " KB。";
+  }
+
+  /* ---------- 互動 ---------- */
+  function bindSeg(selector, attr, apply) {
+    var btns = document.querySelectorAll(selector + " button");
+    Array.prototype.forEach.call(btns, function (btn) {
+      btn.addEventListener("click", function () {
+        Array.prototype.forEach.call(btns, function (b) { b.setAttribute("aria-pressed", "false"); });
+        btn.setAttribute("aria-pressed", "true");
+        apply(parseInt(btn.getAttribute(attr), 10));
+        render();
+      });
+    });
+  }
+
+  function syncSeg(selector, attr, value) {
+    var btns = document.querySelectorAll(selector + " button");
+    Array.prototype.forEach.call(btns, function (b) {
+      b.setAttribute("aria-pressed", parseInt(b.getAttribute(attr), 10) === value ? "true" : "false");
+    });
+  }
+
+  bindSeg('#httpx-demo .seg[aria-label="網路情境切換"]', "data-rtt", function (v) { state.rtt = v; });
+  bindSeg('#httpx-demo .seg[aria-label="HTTP/1.1 連線策略切換"]', "data-shard", function (v) { state.shard = v; });
+
+  el.countInput.addEventListener("input", function () {
+    state.count = parseInt(el.countInput.value, 10);
+    el.countVal.textContent = state.count;
+    render();
+  });
+
+  el.btnPlay.addEventListener("click", render);
+
+  el.btnReset.addEventListener("click", function () {
+    state.rtt = DEFAULTS.rtt;
+    state.shard = DEFAULTS.shard;
+    state.count = DEFAULTS.count;
+    el.countInput.value = String(DEFAULTS.count);
+    el.countVal.textContent = DEFAULTS.count;
+    syncSeg('#httpx-demo .seg[aria-label="網路情境切換"]', "data-rtt", state.rtt);
+    syncSeg('#httpx-demo .seg[aria-label="HTTP/1.1 連線策略切換"]', "data-shard", state.shard);
+    render();
+  });
+
+  el.countVal.textContent = state.count;
+  render();
+})();
+</script>
+
+
+<!-- FULLSCREEN-FEATURE:START -->
+<style>
+  .fs-toggle {
+    position: fixed;
+    top: 18px;
+    right: 18px;
+    z-index: 1000;
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    font-family: var(--sans, system-ui, -apple-system, "Segoe UI", sans-serif);
+    font-size: 12.5px;
+    line-height: 1;
+    color: var(--text-2, #6b7078);
+    background: var(--bg, #ffffff);
+    border: 1px solid var(--border-strong, #dedcd8);
+    border-radius: 999px;
+    padding: 7px 13px 7px 11px;
+    cursor: pointer;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, .06), 0 4px 12px rgba(0, 0, 0, .04);
+    transition: background .15s, border-color .15s, color .15s;
+  }
+
+  .fs-toggle:hover {
+    background: var(--bg-soft, #fafaf9);
+    color: var(--text, #262a2f);
+    border-color: var(--text-3, #9aa0a8);
+  }
+
+  .fs-toggle:focus-visible {
+    outline: 2px solid var(--accent, #3f6188);
+    outline-offset: 2px;
+  }
+
+  .fs-toggle[aria-pressed="true"] {
+    background: var(--accent, #3f6188);
+    color: #fff;
+    border-color: var(--accent, #3f6188);
+  }
+
+  .fs-toggle .fs-ic {
+    flex: 0 0 auto;
+    display: block;
+  }
+
+  @media print {
+    .fs-toggle { display: none !important; }
+  }
+
+  @media (max-width: 480px) {
+    .fs-toggle { padding: 8px; }
+    .fs-toggle .fs-label { display: none; }
+  }
+</style>
+<button id="fs-toggle-btn" class="fs-toggle" type="button" aria-pressed="false"
+        aria-label="切換全螢幕檢視 (快捷鍵 F)" title="全螢幕檢視 (F)">
+  <svg class="fs-ic fs-ic-expand" viewBox="0 0 24 24" width="15" height="15" fill="none"
+       stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+    <path d="M8 3H5a2 2 0 0 0-2 2v3m18 0V5a2 2 0 0 0-2-2h-3m0 18h3a2 2 0 0 0 2-2v-3M3 16v3a2 2 0 0 0 2 2h3"/>
+  </svg>
+  <svg class="fs-ic fs-ic-compress" viewBox="0 0 24 24" width="15" height="15" fill="none"
+       stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="display:none">
+    <path d="M8 3v3a2 2 0 0 1-2 2H3m18 0h-3a2 2 0 0 1-2-2V3m0 18v-3a2 2 0 0 1 2-2h3M3 16h3a2 2 0 0 1 2 2v3"/>
+  </svg>
+  <span class="fs-label">全螢幕</span>
+</button>
+<script>
+  "use strict";
+  (function () {
+    var btn = document.getElementById("fs-toggle-btn");
+    if (!btn) return;
+    var docEl = document.documentElement;
+    var canFs = !!(docEl.requestFullscreen || docEl.webkitRequestFullscreen);
+    // 不支援 Fullscreen API (如 iPhone Safari) → 隱藏按鈕，避免壞掉的 UI
+    if (!canFs) { btn.style.display = "none"; return; }
+
+    var expandIc = btn.querySelector(".fs-ic-expand");
+    var compressIc = btn.querySelector(".fs-ic-compress");
+    var label = btn.querySelector(".fs-label");
+
+    function isFs() {
+      return !!(document.fullscreenElement || document.webkitFullscreenElement);
+    }
+    function enter() {
+      if (docEl.requestFullscreen) docEl.requestFullscreen();
+      else if (docEl.webkitRequestFullscreen) docEl.webkitRequestFullscreen();
+    }
+    function exit() {
+      if (document.exitFullscreen) document.exitFullscreen();
+      else if (document.webkitExitFullscreen) document.webkitExitFullscreen();
+    }
+    function toggle() { isFs() ? exit() : enter(); }
+    function sync() {
+      var on = isFs();
+      btn.setAttribute("aria-pressed", on ? "true" : "false");
+      if (label) label.textContent = on ? "離開全螢幕" : "全螢幕";
+      if (expandIc) expandIc.style.display = on ? "none" : "block";
+      if (compressIc) compressIc.style.display = on ? "block" : "none";
+    }
+
+    btn.addEventListener("click", toggle);
+    document.addEventListener("fullscreenchange", sync);
+    document.addEventListener("webkitfullscreenchange", sync);
+    document.addEventListener("keydown", function (e) {
+      if (e.key !== "f" && e.key !== "F") return;
+      if (e.metaKey || e.ctrlKey || e.altKey) return;
+      var t = e.target;
+      var tag = t && t.tagName ? t.tagName.toUpperCase() : "";
+      if (tag === "INPUT" || tag === "TEXTAREA" || (t && t.isContentEditable)) return;
+      e.preventDefault();
+      toggle();
+    });
+    sync();
+  })();
+</script>
+<!-- FULLSCREEN-FEATURE:END -->
+</body>
+</html>
