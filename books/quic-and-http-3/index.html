@@ -1,0 +1,2605 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>QUIC 與 HTTP/3：新世代傳輸協定 | System Design Every Day</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@300;400;500;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+  <script>
+    mermaid.initialize({
+      startOnLoad: true,
+      theme: 'default',
+      securityLevel: 'loose'
+    });
+  </script>
+  <style>
+    :root {
+      --bg: #ffffff;
+      --bg-soft: #fafaf9;
+      --text: #262a2f;
+      --text-2: #6b7078;
+      --text-3: #9aa0a8;
+      --border: #ecebe8;
+      --border-strong: #dedcd8;
+      --code-bg: #f6f5f3;
+      --accent: #3f6188;
+      --accent-soft: #eef2f7;
+      --accent-line: #cdd9e6;
+      --ok: #4d7d68;
+      --ok-soft: #eef4f1;
+      --warn: #a3743e;
+      --warn-soft: #f6f0e7;
+      --bad: #a8554f;
+      --bad-soft: #f6ecea;
+      --radius: 10px;
+      --radius-sm: 7px;
+      --maxw: 760px;
+      --sans: "Noto Sans TC", system-ui, -apple-system, "Segoe UI", sans-serif;
+      --mono: "JetBrains Mono", "SFMono-Regular", Menlo, Consolas, monospace;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    html {
+      scroll-behavior: smooth;
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      html {
+        scroll-behavior: auto;
+      }
+      * {
+        animation-duration: .001ms !important;
+        transition-duration: .001ms !important;
+      }
+    }
+
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font-family: var(--sans);
+      font-weight: 400;
+      font-size: 16px;
+      line-height: 1.78;
+      -webkit-font-smoothing: antialiased;
+      letter-spacing: .005em;
+    }
+
+    ::selection {
+      background: var(--accent-soft);
+    }
+
+    /* ---------- layout ---------- */
+    .wrap {
+      display: flex;
+      max-width: 1180px;
+      margin: 0 auto;
+      gap: 0;
+    }
+
+    .toc {
+      width: 248px;
+      flex: 0 0 248px;
+      position: sticky;
+      top: 0;
+      height: 100vh;
+      padding: 54px 22px 40px 28px;
+      overflow-y: auto;
+      border-right: 1px solid var(--border);
+      transition: width .2s ease, flex-basis .2s ease, padding .2s ease, opacity .15s ease, border-color .15s ease;
+    }
+
+    .toc-kicker {
+      font-family: var(--mono);
+      font-size: 11px;
+      letter-spacing: .14em;
+      text-transform: uppercase;
+      color: var(--text-3);
+      margin-bottom: 20px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+    }
+
+    /* desktop：側欄內收合鈕；mobile 隱藏（沿用既有 .toc-toggle） */
+    .toc-collapse {
+      display: none;
+      flex: 0 0 auto;
+      align-items: center;
+      justify-content: center;
+      width: 28px;
+      height: 28px;
+      padding: 0;
+      border: none;
+      background: none;
+      border-radius: 6px;
+      color: var(--text-2);
+      line-height: 1;
+      cursor: pointer;
+    }
+
+    .toc-collapse:hover {
+      color: var(--text);
+      background: var(--bg-soft);
+    }
+
+    .toc-collapse:focus-visible {
+      outline: 2px solid var(--accent);
+      outline-offset: 2px;
+    }
+
+    .toc-collapse svg {
+      display: block;
+    }
+
+    /* desktop：側欄收合後的展開鈕（預設隱藏） */
+    .toc-reopen {
+      display: none;
+      position: fixed;
+      top: 18px;
+      left: 18px;
+      z-index: 900;
+      align-items: center;
+      gap: 7px;
+      font-size: 12.5px;
+      line-height: 1;
+      color: var(--text-2);
+      background: var(--bg);
+      border: 1px solid var(--border-strong);
+      border-radius: 999px;
+      padding: 7px 13px 7px 11px;
+      box-shadow: 0 1px 3px rgba(0, 0, 0, .06), 0 4px 12px rgba(0, 0, 0, .04);
+      cursor: pointer;
+      transition: background .15s, border-color .15s, color .15s;
+    }
+
+    .toc-reopen:hover {
+      background: var(--bg-soft);
+      color: var(--text);
+      border-color: var(--text-3);
+    }
+
+    .toc-reopen svg {
+      flex: 0 0 auto;
+      display: block;
+    }
+
+    @media (min-width: 921px) {
+      .toc-collapse {
+        display: inline-flex;
+      }
+
+      body.toc-collapsed .toc {
+        width: 0;
+        flex-basis: 0;
+        padding: 0;
+        opacity: 0;
+        overflow: hidden;
+        border-right-color: transparent;
+        pointer-events: none;
+      }
+
+      body.toc-collapsed .toc-reopen {
+        display: inline-flex;
+      }
+    }
+
+    .toc-kicker a {
+      color: var(--text-3);
+      text-decoration: none;
+      border-bottom: none;
+      transition: color .15s;
+    }
+
+    .toc-kicker a:hover {
+      color: var(--text);
+    }
+
+    .toc-title {
+      font-size: 15px;
+      font-weight: 700;
+      line-height: 1.4;
+      margin: 0 0 24px;
+    }
+
+    .toc a {
+      display: flex;
+      gap: 10px;
+      align-items: baseline;
+      text-decoration: none;
+      color: var(--text-2);
+      font-size: 13.5px;
+      padding: 6px 10px;
+      border-radius: 6px;
+      line-height: 1.45;
+      transition: background .15s, color .15s;
+      border-bottom: none;
+    }
+
+    .toc a:hover {
+      background: var(--bg-soft);
+      color: var(--text);
+      border-bottom: none;
+    }
+
+    .toc a.active {
+      color: var(--accent);
+      background: var(--accent-soft);
+      font-weight: 500;
+      border-bottom: none;
+    }
+
+    .toc a .n {
+      font-family: var(--mono);
+      font-size: 11px;
+      color: var(--text-3);
+      flex: 0 0 18px;
+    }
+
+    .toc a.active .n {
+      color: var(--accent);
+    }
+
+    main {
+      flex: 1 1 auto;
+      min-width: 0;
+      padding: 0 40px;
+    }
+
+    .inner {
+      max-width: var(--maxw);
+      margin: 0 auto;
+      padding: 72px 0 140px;
+    }
+
+    /* ---------- hero ---------- */
+    .hero {
+      margin-bottom: 64px;
+    }
+
+    .hero .eyebrow {
+      font-family: var(--mono);
+      font-size: 12px;
+      letter-spacing: .16em;
+      text-transform: uppercase;
+      color: var(--accent);
+      margin-bottom: 18px;
+    }
+
+    .hero h1 {
+      font-size: 40px;
+      line-height: 1.18;
+      font-weight: 700;
+      margin: 0 0 18px;
+      letter-spacing: -.01em;
+    }
+
+    .hero .lede {
+      font-size: 18px;
+      line-height: 1.7;
+      color: var(--text-2);
+      font-weight: 300;
+      margin: 0;
+      max-width: 620px;
+    }
+
+    .hero .meta {
+      margin-top: 28px;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+
+    .tag {
+      font-family: var(--mono);
+      font-size: 12px;
+      color: var(--text-2);
+      border: 1px solid var(--border-strong);
+      padding: 4px 11px;
+      border-radius: 999px;
+      background: var(--bg-soft);
+    }
+
+    /* ---------- sections ---------- */
+    section {
+      padding-top: 30px;
+      scroll-margin-top: 24px;
+    }
+
+    .sec-head {
+      display: flex;
+      align-items: baseline;
+      gap: 14px;
+      margin: 0 0 8px;
+    }
+
+    .sec-num {
+      font-family: var(--mono);
+      font-size: 13px;
+      color: var(--text-3);
+      font-weight: 500;
+      padding-top: 6px;
+      flex: 0 0 auto;
+    }
+
+    h2 {
+      font-size: 27px;
+      font-weight: 700;
+      line-height: 1.3;
+      margin: 0;
+      letter-spacing: -.01em;
+    }
+
+    .sec-sub {
+      color: var(--text-2);
+      font-size: 15px;
+      margin: 2px 0 28px 0;
+      font-weight: 300;
+    }
+
+    h3 {
+      font-size: 18.5px;
+      font-weight: 700;
+      margin: 38px 0 12px;
+      line-height: 1.45;
+    }
+
+    h4 {
+      font-size: 15.5px;
+      font-weight: 700;
+      margin: 26px 0 8px;
+      color: var(--text);
+    }
+
+    p {
+      margin: 0 0 16px;
+    }
+
+    a {
+      color: var(--accent);
+      text-decoration: none;
+      border-bottom: 1px solid var(--accent-line);
+      transition: border-color .15s;
+    }
+
+    a:hover {
+      border-color: var(--accent);
+    }
+
+    strong {
+      font-weight: 700;
+    }
+
+    em {
+      font-style: normal;
+      background: var(--accent-soft);
+      padding: 0 4px;
+      border-radius: 4px;
+      font-weight: 500;
+      color: #2f4d6e;
+    }
+
+    hr.div {
+      border: none;
+      border-top: 1px solid var(--border);
+      margin: 46px 0;
+    }
+
+    ul, ol {
+      margin: 0 0 18px;
+      padding-left: 22px;
+    }
+
+    li {
+      margin: 7px 0;
+      padding-left: 4px;
+    }
+
+    li::marker {
+      color: var(--text-3);
+    }
+
+    code {
+      font-family: var(--mono);
+      font-size: .86em;
+      background: var(--code-bg);
+      padding: 2px 6px;
+      border-radius: 5px;
+      color: #43494f;
+    }
+
+    pre {
+      background: var(--code-bg);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 16px 18px;
+      overflow-x: auto;
+      margin: 0 0 20px;
+      line-height: 1.6;
+    }
+
+    pre code {
+      background: none;
+      padding: 0;
+      font-size: 13px;
+    }
+
+    /* ---------- math notation ---------- */
+    /* 行內數學變數，如 W、R、N。本站不載入 MathJax/KaTeX，請勿使用 $...$ 或 \[...\] LaTeX 分隔符。 */
+    var {
+      font-family: var(--mono);
+      font-style: normal;
+      font-weight: 500;
+      color: var(--accent);
+    }
+
+    /* 區塊數學公式，置中等寬呈現，記得將 > < & 轉義為 &gt; &lt; &amp;。 */
+    .formula {
+      font-family: var(--mono);
+      font-size: 15px;
+      text-align: center;
+      background: var(--bg-soft);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      padding: 14px 18px;
+      margin: 0 0 20px;
+      color: var(--text);
+      letter-spacing: .03em;
+      overflow-x: auto;
+    }
+
+    /* ---------- callouts ---------- */
+    .callout {
+      border: 1px solid var(--border);
+      border-left: 3px solid var(--border-strong);
+      background: var(--bg-soft);
+      border-radius: var(--radius-sm);
+      padding: 15px 18px;
+      margin: 0 0 22px;
+      font-size: 14.5px;
+    }
+
+    .callout .c-title {
+      font-weight: 700;
+      font-size: 13px;
+      letter-spacing: .02em;
+      margin-bottom: 5px;
+      display: flex;
+      gap: 7px;
+      align-items: center;
+    }
+
+    .callout p:last-child {
+      margin-bottom: 0;
+    }
+
+    .callout.accent {
+      border-left-color: var(--accent);
+      background: var(--accent-soft);
+    }
+
+    .callout.accent .c-title {
+      color: #2f4d6e;
+    }
+
+    .callout.warn {
+      border-left-color: var(--warn);
+      background: var(--warn-soft);
+    }
+
+    .callout.warn .c-title {
+      color: var(--warn);
+    }
+
+    .callout .ic {
+      font-family: var(--mono);
+      font-size: 11px;
+      border: 1px solid currentColor;
+      border-radius: 4px;
+      padding: 0 4px;
+      line-height: 1.5;
+      opacity: .8;
+    }
+
+    .oneliner {
+      border: 1px dashed var(--accent-line);
+      border-radius: var(--radius-sm);
+      padding: 13px 16px;
+      margin: 0 0 22px;
+      font-size: 14.5px;
+      background: #fbfcfd;
+    }
+
+    .oneliner b {
+      font-family: var(--mono);
+      font-size: 11px;
+      letter-spacing: .08em;
+      color: var(--accent);
+      display: block;
+      margin-bottom: 4px;
+      text-transform: uppercase;
+    }
+
+    /* ---------- tables ---------- */
+    .tbl-wrap {
+      overflow-x: auto;
+      margin: 0 0 24px;
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+    }
+
+    table {
+      border-collapse: collapse;
+      width: 100%;
+      font-size: 14px;
+      min-width: 520px;
+    }
+
+    th, td {
+      text-align: left;
+      padding: 11px 14px;
+      border-bottom: 1px solid var(--border);
+      vertical-align: top;
+    }
+
+    th {
+      font-weight: 700;
+      background: var(--bg-soft);
+      font-size: 12.5px;
+      letter-spacing: .02em;
+      color: var(--text-2);
+      position: sticky;
+      top: 0;
+    }
+
+    tr:last-child td {
+      border-bottom: none;
+    }
+
+    td.hl {
+      background: var(--accent-soft);
+    }
+
+    .cap {
+      font-size: 12.5px;
+      color: var(--text-3);
+      margin: -12px 0 26px;
+      font-family: var(--mono);
+    }
+
+    /* ---------- interactive shell ---------- */
+    .demo {
+      border: 1px solid var(--border-strong);
+      border-radius: var(--radius);
+      background: var(--bg);
+      margin: 24px 0 26px;
+      overflow: hidden;
+    }
+
+    .demo-bar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      flex-wrap: wrap;
+      padding: 13px 16px;
+      border-bottom: 1px solid var(--border);
+      background: var(--bg-soft);
+    }
+
+    .demo-bar .label {
+      font-family: var(--mono);
+      font-size: 11px;
+      letter-spacing: .1em;
+      text-transform: uppercase;
+      color: var(--text-3);
+    }
+
+    .demo-body {
+      padding: 20px 18px;
+    }
+
+    .seg {
+      display: inline-flex;
+      border: 1px solid var(--border-strong);
+      border-radius: 999px;
+      overflow: hidden;
+      background: var(--bg);
+    }
+
+    .seg button {
+      border: none;
+      background: none;
+      font-family: var(--sans);
+      font-size: 12.5px;
+      color: var(--text-2);
+      padding: 6px 14px;
+      cursor: pointer;
+      transition: background .15s, color .15s;
+    }
+
+    .seg button:hover {
+      color: var(--text);
+    }
+
+    .seg button[aria-pressed="true"] {
+      background: var(--accent);
+      color: #fff;
+    }
+
+    .btn {
+      font-family: var(--sans);
+      font-size: 13px;
+      border: 1px solid var(--border-strong);
+      background: var(--bg);
+      color: var(--text);
+      padding: 7px 16px;
+      border-radius: 7px;
+      cursor: pointer;
+      transition: background .15s, border-color .15s;
+    }
+
+    .btn:hover {
+      background: var(--bg-soft);
+      border-color: var(--text-3);
+    }
+
+    .btn.primary {
+      background: var(--accent);
+      color: #fff;
+      border-color: var(--accent);
+    }
+
+    .btn.primary:hover {
+      background: #365578;
+    }
+
+    .btn:disabled {
+      opacity: .4;
+      cursor: not-allowed;
+    }
+
+    .btn:focus-visible, .seg button:focus-visible, .toc a:focus-visible, a:focus-visible,
+    summary:focus-visible {
+      outline: 2px solid var(--accent);
+      outline-offset: 2px;
+      border-radius: 4px;
+    }
+
+    .status-line {
+      font-size: 13.5px;
+      color: var(--text-2);
+      min-height: 42px;
+      margin-top: 14px;
+      background: var(--bg-soft);
+      border-radius: var(--radius-sm);
+      padding: 10px 13px;
+      border: 1px solid var(--border);
+    }
+
+    .status-line b {
+      color: var(--text);
+    }
+
+    .legend {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 14px;
+      font-size: 11.5px;
+      color: var(--text-2);
+      margin-top: 14px;
+      font-family: var(--mono);
+    }
+
+    .legend span {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .dot {
+      width: 9px;
+      height: 9px;
+      border-radius: 3px;
+      display: inline-block;
+      border: 1px solid rgba(0, 0, 0, .08);
+    }
+
+    /* node states used across diagrams */
+    .nstate-idle {
+      fill: #fff;
+      stroke: var(--border-strong);
+    }
+
+    .ns-idle {
+      background: #fff;
+      border-color: var(--border-strong);
+    }
+
+    .ns-lock {
+      background: var(--warn-soft);
+      border-color: var(--warn);
+    }
+
+    .ns-ok {
+      background: var(--ok-soft);
+      border-color: var(--ok);
+    }
+
+    .ns-bad {
+      background: var(--bad-soft);
+      border-color: var(--bad);
+    }
+
+    .ns-wait {
+      background: var(--accent-soft);
+      border-color: var(--accent);
+    }
+
+    /* spectrum */
+    .spectrum {
+      position: relative;
+      margin: 26px 6px 10px;
+    }
+
+    .spec-track {
+      height: 4px;
+      border-radius: 2px;
+      background: linear-gradient(90deg, #9fb6cf, #e7e5e1 50%, #c9d8c9);
+      position: relative;
+    }
+
+    .spec-ends {
+      display: flex;
+      justify-content: space-between;
+      font-family: var(--mono);
+      font-size: 11px;
+      color: var(--text-2);
+      margin-top: 10px;
+    }
+
+    .spec-mark {
+      position: absolute;
+      top: -12px;
+      transform: translateX(-50%);
+      cursor: pointer;
+      text-align: center;
+      background: none;
+      border: none;
+      padding: 0;
+    }
+
+    .spec-mark .pin {
+      width: 18px;
+      height: 18px;
+      border-radius: 50%;
+      background: #fff;
+      border: 2px solid var(--border-strong);
+      margin: 0 auto;
+      transition: border-color .15s, transform .15s, box-shadow .15s;
+      display: block;
+    }
+
+    .spec-mark .pn {
+      font-family: var(--mono);
+      font-size: 12px;
+      margin-top: 8px;
+      color: var(--text-2);
+      font-weight: 500;
+      white-space: nowrap;
+      display: block;
+    }
+
+    .spec-mark[aria-pressed="true"] .pin {
+      border-color: var(--accent);
+      transform: scale(1.18);
+      box-shadow: 0 0 0 4px var(--accent-soft);
+    }
+
+    .spec-mark[aria-pressed="true"] .pn {
+      color: var(--accent);
+    }
+
+    .spec-panel {
+      margin-top: 34px;
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 18px;
+      background: var(--bg-soft);
+    }
+
+    .spec-panel h4 {
+      margin: 0 0 4px;
+    }
+
+    .spec-panel .pmeta {
+      font-family: var(--mono);
+      font-size: 12px;
+      color: var(--text-3);
+      margin-bottom: 14px;
+    }
+
+    .bars {
+      display: grid;
+      grid-template-columns: 78px 1fr 56px;
+      gap: 9px 12px;
+      align-items: center;
+    }
+
+    .bars .blabel {
+      font-size: 13px;
+      color: var(--text-2);
+    }
+
+    .bars .btrack {
+      height: 8px;
+      background: #e9e7e3;
+      border-radius: 4px;
+      overflow: hidden;
+    }
+
+    .bars .bfill {
+      height: 100%;
+      border-radius: 4px;
+      background: var(--accent);
+      transition: width .4s ease;
+    }
+
+    .bars .bval {
+      font-family: var(--mono);
+      font-size: 11px;
+      color: var(--text-2);
+      text-align: right;
+    }
+
+    /* generic actor diagram */
+    .actors {
+      display: flex;
+      gap: 12px;
+      flex-wrap: wrap;
+    }
+
+    .actor {
+      flex: 1 1 0;
+      min-width: 96px;
+      border: 1.5px solid var(--border-strong);
+      border-radius: var(--radius-sm);
+      padding: 11px 10px;
+      text-align: center;
+      background: #fff;
+      transition: background .25s, border-color .25s;
+    }
+
+    .actor .aname {
+      font-weight: 700;
+      font-size: 13px;
+    }
+
+    .actor .arole {
+      font-family: var(--mono);
+      font-size: 10.5px;
+      color: var(--text-3);
+      margin-top: 2px;
+    }
+
+    .actor .astate {
+      font-size: 11.5px;
+      margin-top: 8px;
+      font-family: var(--mono);
+      color: var(--text-2);
+      min-height: 16px;
+    }
+
+    .coordinator {
+      border-style: dashed;
+    }
+
+    .flowsteps {
+      margin-top: 16px;
+    }
+
+    .stepitem {
+      display: flex;
+      gap: 11px;
+      font-size: 13.5px;
+      padding: 7px 0;
+      color: var(--text-3);
+      border-top: 1px solid var(--border);
+    }
+
+    .stepitem:first-child {
+      border-top: none;
+    }
+
+    .stepitem.done {
+      color: var(--text);
+    }
+
+    .stepitem.cur {
+      color: var(--text);
+      font-weight: 500;
+    }
+
+    .stepitem .sx {
+      font-family: var(--mono);
+      font-size: 11px;
+      flex: 0 0 26px;
+      color: var(--text-3);
+      padding-top: 2px;
+    }
+
+    .stepitem.cur .sx {
+      color: var(--accent);
+    }
+
+    /* timeline lab (TCC) */
+    .tl-scenarios {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      margin-bottom: 6px;
+    }
+
+    .tl-opt {
+      display: flex;
+      gap: 11px;
+      align-items: flex-start;
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      padding: 10px 13px;
+      cursor: pointer;
+      background: #fff;
+      transition: border-color .15s, background .15s;
+    }
+
+    .tl-opt:hover {
+      background: var(--bg-soft);
+    }
+
+    .tl-opt[aria-pressed="true"] {
+      border-color: var(--accent);
+      background: var(--accent-soft);
+    }
+
+    .tl-opt .tlname {
+      font-weight: 700;
+      font-size: 13.5px;
+    }
+
+    .tl-opt .tldesc {
+      font-size: 12.5px;
+      color: var(--text-2);
+      margin-top: 2px;
+    }
+
+    .tl-opt .tlbadge {
+      font-family: var(--mono);
+      font-size: 10px;
+      border: 1px solid var(--border-strong);
+      border-radius: 4px;
+      padding: 1px 5px;
+      color: var(--text-3);
+      flex: 0 0 auto;
+      margin-top: 1px;
+    }
+
+    .tl-result {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
+      margin-top: 16px;
+    }
+
+    @media (max-width: 560px) {
+      .tl-result {
+        grid-template-columns: 1fr;
+      }
+    }
+
+    .tl-card {
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      padding: 13px 14px;
+      font-size: 13px;
+    }
+
+    .tl-card .tch {
+      font-family: var(--mono);
+      font-size: 11px;
+      letter-spacing: .06em;
+      text-transform: uppercase;
+      margin-bottom: 8px;
+      color: var(--text-3);
+    }
+
+    .tl-card.naive {
+      border-left: 3px solid var(--bad);
+    }
+
+    .tl-card.fixed {
+      border-left: 3px solid var(--ok);
+    }
+
+    .tl-card .verdict {
+      font-weight: 700;
+      margin-top: 8px;
+      font-size: 13px;
+    }
+
+    .tl-card.naive .verdict {
+      color: var(--bad);
+    }
+
+    .tl-card.fixed .verdict {
+      color: var(--ok);
+    }
+
+    /* saga chain */
+    .saga-chain {
+      display: flex;
+      flex-direction: column;
+      gap: 0;
+      margin-top: 8px;
+    }
+
+    .saga-step {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .saga-box {
+      flex: 1 1 auto;
+      border: 1.5px solid var(--border-strong);
+      border-radius: var(--radius-sm);
+      padding: 10px 13px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      background: #fff;
+      transition: .25s;
+    }
+
+    .saga-box .sgn {
+      font-weight: 600;
+      font-size: 13.5px;
+    }
+
+    .saga-box .sgs {
+      font-family: var(--mono);
+      font-size: 11px;
+      color: var(--text-3);
+    }
+
+    .saga-arrow {
+      height: 18px;
+      width: 2px;
+      background: var(--border-strong);
+      margin-left: 18px;
+    }
+
+    .saga-pick {
+      font-size: 12.5px;
+      color: var(--text-2);
+      margin: 4px 0 10px;
+    }
+
+    .saga-pick select {
+      font-family: var(--sans);
+      font-size: 13px;
+      padding: 5px 8px;
+      border: 1px solid var(--border-strong);
+      border-radius: 6px;
+      background: #fff;
+      color: var(--text);
+    }
+
+    /* outbox toggle */
+    .ob-stage {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      margin-top: 8px;
+    }
+
+    .ob-row {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      font-size: 13px;
+    }
+
+    .ob-chip {
+      border: 1.5px solid var(--border-strong);
+      border-radius: var(--radius-sm);
+      padding: 9px 12px;
+      background: #fff;
+      font-size: 13px;
+      transition: .25s;
+      flex: 0 0 auto;
+    }
+
+    .ob-chip .obt {
+      font-weight: 600;
+    }
+
+    .ob-chip .obs {
+      font-family: var(--mono);
+      font-size: 10.5px;
+      color: var(--text-3);
+    }
+
+    .ob-flow {
+      font-family: var(--mono);
+      font-size: 11px;
+      color: var(--text-3);
+    }
+
+    /* wizard */
+    .wiz-q {
+      margin-bottom: 16px;
+    }
+
+    .wiz-q .wq {
+      font-size: 14px;
+      font-weight: 600;
+      margin-bottom: 8px;
+    }
+
+    .wiz-opts {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+
+    .wiz-opts button {
+      font-family: var(--sans);
+      font-size: 13px;
+      border: 1px solid var(--border-strong);
+      background: #fff;
+      color: var(--text-2);
+      padding: 7px 14px;
+      border-radius: 7px;
+      cursor: pointer;
+      transition: .15s;
+    }
+
+    .wiz-opts button:hover {
+      border-color: var(--text-3);
+      color: var(--text);
+    }
+
+    .wiz-opts button[aria-pressed="true"] {
+      background: var(--accent);
+      color: #fff;
+      border-color: var(--accent);
+    }
+
+    .wiz-result {
+      margin-top: 18px;
+      border: 1px solid var(--accent-line);
+      border-radius: var(--radius);
+      padding: 16px 18px;
+      background: var(--accent-soft);
+      font-size: 14px;
+      display: none;
+    }
+
+    .wiz-result.show {
+      display: block;
+    }
+
+    .wiz-result .wr-pick {
+      font-size: 17px;
+      font-weight: 700;
+      color: #2f4d6e;
+      margin-bottom: 6px;
+    }
+
+    .wiz-result .wr-why {
+      color: #3a5572;
+    }
+
+    /* FAQ */
+    details.faq {
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      margin-bottom: 10px;
+      background: #fff;
+      overflow: hidden;
+    }
+
+    details.faq summary {
+      cursor: pointer;
+      padding: 14px 16px;
+      font-weight: 600;
+      font-size: 14.5px;
+      list-style: none;
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      align-items: center;
+    }
+
+    details.faq summary::-webkit-details-marker {
+      display: none;
+    }
+
+    details.faq summary .q {
+      font-family: var(--mono);
+      font-size: 11px;
+      color: var(--accent);
+      flex: 0 0 auto;
+    }
+
+    details.faq summary .chev {
+      transition: transform .2s;
+      color: var(--text-3);
+      flex: 0 0 auto;
+      font-size: 13px;
+    }
+
+    details.faq[open] summary .chev {
+      transform: rotate(90deg);
+    }
+
+    details.faq .ans {
+      padding: 0 16px 16px;
+      font-size: 14px;
+      color: var(--text-2);
+    }
+
+    details.faq .ans p {
+      margin: 0 0 10px;
+    }
+
+    details.faq .ans p:last-child {
+      margin: 0;
+    }
+
+    .trap {
+      display: flex;
+      gap: 10px;
+      font-size: 14px;
+      margin: 9px 0;
+    }
+
+    .trap .tn {
+      font-family: var(--mono);
+      font-size: 11px;
+      color: var(--bad);
+      flex: 0 0 auto;
+      border: 1px solid var(--bad-soft);
+      background: var(--bad-soft);
+      border-radius: 4px;
+      padding: 1px 6px;
+      height: fit-content;
+      margin-top: 2px;
+    }
+
+    /* mobile responsive */
+    .toc-toggle {
+      display: none;
+    }
+
+    @media (max-width: 920px) {
+      .wrap {
+        flex-direction: column;
+      }
+      .toc {
+        position: static;
+        width: auto;
+        height: auto;
+        border-right: none;
+        border-bottom: 1px solid var(--border);
+        padding: 18px 22px;
+        transition: none;
+      }
+      .toc-title {
+        margin-bottom: 0;
+      }
+      .toc-kicker {
+        margin-bottom: 10px;
+      }
+      .toc-nav {
+        display: none;
+        margin-top: 16px;
+      }
+      .toc-nav.open {
+        display: block;
+      }
+      .toc-toggle {
+        display: inline-block;
+        margin-top: 10px;
+      }
+      .toc-collapse,
+      .toc-reopen {
+        display: none !important;
+      }
+      main {
+        padding: 0 22px;
+      }
+      .inner {
+        padding: 40px 0 100px;
+      }
+      .hero h1 {
+        font-size: 31px;
+      }
+    }
+
+    @media print {
+      .toc-reopen { display: none !important; }
+    }
+
+    @media (max-width: 480px) {
+      body {
+        font-size: 15px;
+      }
+      .hero h1 {
+        font-size: 27px;
+      }
+      h2 {
+        font-size: 23px;
+      }
+      .demo-body {
+        padding: 16px 13px;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <!-- ===================== TOC SIDEBAR ===================== -->
+    <nav class="toc" id="toc-panel" aria-label="目錄">
+      <div class="toc-kicker">
+        <a href="../index.html">← 返回目錄</a>
+        <button class="toc-collapse" type="button" aria-expanded="true" aria-controls="toc-panel"
+                aria-label="收合目錄" title="收合目錄">
+          <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor"
+               stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M15 18l-6-6 6-6"/>
+          </svg>
+        </button>
+      </div>
+      <div class="toc-title">QUIC 與 HTTP/3：新世代傳輸協定</div>
+      <button class="btn toc-toggle" type="button" aria-expanded="false" aria-controls="toc-nav">目錄 ▾</button>
+      <div class="toc-nav" id="toc-nav">
+        <a href="#s1"><span class="n">01</span>總覽與定位</a>
+        <a href="#s2"><span class="n">02</span>在 UDP 上重建 transport：那張工作清單的交卷</a>
+        <a href="#s3"><span class="n">03</span>交握合一：內建 TLS 1.3、1-RTT 與 0-RTT</a>
+        <a href="#s4"><span class="n">04</span>Stream 獨立性、遺失復原與兩級流量控制</a>
+        <a href="#s5"><span class="n">05</span>Connection Migration：連線識別脫離五元組</a>
+        <a href="#s6"><span class="n">06</span>HTTP/3：同一套語義，換一套映射</a>
+        <a href="#s7"><span class="n">07</span>互動 · TCP HoL vs QUIC stream 獨立性</a>
+        <a href="#s8"><span class="n">08</span>面試折衷與實務選型</a>
+      </div>
+    </nav>
+    <button class="btn toc-reopen" type="button" aria-expanded="true" aria-controls="toc-panel"
+            aria-label="展開目錄" title="展開目錄">
+      <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor"
+           stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M9 18l6-6-6-6"/>
+      </svg>
+      <span>目錄</span>
+    </button>
+
+    <!-- ===================== MAIN CONTENT ===================== -->
+    <main>
+      <div class="inner">
+        <style>
+  /* 本篇專屬：quic-* 命名空間，不覆蓋全站 base 類別 */
+  #quic-root {
+    --quic-tcp: #a8554f; --quic-tcp-soft: #f6ecea;
+    --quic-q: #4d7d68; --quic-q-soft: #eef4f1;
+    --quic-sem: #3f6188; --quic-sem-soft: #eef2f7;
+    --quic-warn: #a3743e; --quic-warn-soft: #f6f0e7;
+    --quic-neutral: #7a5a8e; --quic-neutral-soft: #f3eef6;
+  }
+  .quic-sub { font-weight: 700; font-size: 14px; margin: 20px 0 6px; padding-left: 10px; border-left: 3px solid var(--accent); color: var(--text); }
+
+  /* 協定堆疊對照 */
+  .quic-stacks { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin: 12px 0 6px; }
+  @media (max-width: 640px) { .quic-stacks { grid-template-columns: 1fr; } }
+  .quic-stack { border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 12px; background: #fff; }
+  .quic-stack .st { font-weight: 700; font-size: 13.5px; margin-bottom: 8px; }
+  .quic-stack.old .st { color: var(--quic-tcp); }
+  .quic-stack.new .st { color: var(--quic-q); }
+  .quic-layer { border: 1px solid var(--border-strong); border-radius: 6px; padding: 8px 10px; margin-bottom: 5px; font-family: var(--mono); font-size: 11.5px; background: var(--bg-soft); color: var(--text-2); }
+  .quic-layer b { font-family: var(--sans); font-size: 12.5px; color: var(--text); }
+  .quic-layer.hi { background: var(--quic-q-soft); border-color: var(--quic-q); }
+  .quic-layer.hi b { color: var(--quic-q); }
+  .quic-layer.old-hi { background: var(--quic-tcp-soft); border-color: var(--quic-tcp); }
+  .quic-layer.old-hi b { color: var(--quic-tcp); }
+
+  /* chips */
+  .quic-flow { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin: 10px 0; font-family: var(--mono); font-size: 12px; }
+  .quic-chip { border: 1px solid var(--border-strong); border-radius: 6px; padding: 6px 10px; background: #fff; font-weight: 600; }
+  .quic-chip.d { background: var(--quic-sem-soft); border-color: var(--quic-sem); color: var(--quic-sem); }
+  .quic-chip.c { background: var(--quic-q-soft); border-color: var(--quic-q); color: var(--quic-q); }
+  .quic-chip.m { background: var(--quic-warn-soft); border-color: var(--quic-warn); color: var(--quic-warn); }
+  .quic-chip.op { background: var(--bg-soft); color: var(--text-3); border-style: dashed; font-weight: 500; }
+
+  /* 封包欄位示意 */
+  .quic-pkt { display: flex; flex-wrap: wrap; gap: 4px; margin: 10px 0 4px; }
+  .quic-pkt .pf { font-family: var(--mono); font-size: 11px; padding: 8px 6px; text-align: center; border: 1px solid var(--border-strong); border-radius: 6px; background: #fff; color: var(--text-2); }
+  .quic-pkt .pf.inv { background: var(--quic-sem-soft); border-color: var(--quic-sem); color: var(--quic-sem); }
+  .quic-pkt .pf.enc { background: var(--quic-q-soft); border-color: var(--quic-q); color: var(--quic-q); }
+  .quic-pkt .pf.pay { flex: 100%; background: var(--quic-q-soft); border-color: var(--quic-q); color: var(--quic-q); border-style: dashed; }
+  .quic-pkt .pf.f1 { flex: 1; } .quic-pkt .pf.f2 { flex: 2; } .quic-pkt .pf.f3 { flex: 3; }
+
+  /* 交錯示意（對照篇 3） */
+  .quic-weave { display: flex; flex-wrap: wrap; gap: 4px; margin: 10px 0 4px; }
+  .quic-cell { font-family: var(--mono); font-size: 11px; padding: 5px 8px; border-radius: 5px; border: 1px solid var(--border-strong); background: #fff; color: var(--text-2); }
+  .quic-cell.a { background: var(--quic-sem-soft); border-color: var(--quic-sem); color: var(--quic-sem); }
+  .quic-cell.b { background: var(--quic-warn-soft); border-color: var(--quic-warn); color: var(--quic-warn); }
+  .quic-cell.c { background: var(--quic-q-soft); border-color: var(--quic-q); color: var(--quic-q); }
+  .quic-cell.lost { background: var(--quic-tcp-soft); border-color: var(--quic-tcp); color: var(--quic-tcp); text-decoration: line-through; }
+  .quic-cell.note { border-style: dashed; color: var(--text-3); background: var(--bg-soft); }
+
+  /* Demo */
+  .quic-ctrl { display: flex; flex-wrap: wrap; gap: 10px; margin: 10px 0 8px; align-items: center; }
+  .quic-wire { display: flex; flex-wrap: wrap; gap: 5px; margin: 8px 0 2px; }
+  .quic-pk { font-family: var(--mono); font-size: 11px; padding: 6px 8px; border-radius: 5px; border: 1px solid var(--border-strong); background: #fff; color: var(--text-2); cursor: pointer; user-select: none; transition: background .15s, border-color .15s; }
+  .quic-pk:hover { border-color: var(--accent); }
+  .quic-pk.sent { background: var(--bg-soft); }
+  .quic-pk.mark { background: var(--quic-tcp-soft); border-color: var(--quic-tcp); color: var(--quic-tcp); font-weight: 700; }
+  .quic-pk.rtx { background: var(--warn-soft); border-color: var(--warn); color: var(--warn); font-weight: 700; }
+  .quic-lanes { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 10px; }
+  @media (max-width: 760px) { .quic-lanes { grid-template-columns: 1fr; } }
+  .quic-lane { border: 1px solid var(--border); border-radius: var(--radius-sm); background: #fff; padding: 10px 12px; }
+  .quic-lane.tcp { border-top: 3px solid var(--quic-tcp); }
+  .quic-lane.q { border-top: 3px solid var(--quic-q); }
+  .quic-lane .lane-head { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; font-family: var(--mono); font-size: 11px; color: var(--text-3); letter-spacing: .05em; border-bottom: 1px dashed var(--border); padding-bottom: 6px; margin-bottom: 8px; }
+  .quic-lane .lane-head b { font-size: 12.5px; color: var(--text); letter-spacing: 0; }
+  .quic-srow { display: flex; align-items: center; gap: 6px; margin-bottom: 5px; }
+  .quic-srow .sl { font-family: var(--mono); font-size: 10.5px; color: var(--text-3); width: 62px; flex: none; }
+  .quic-box { flex: 1; font-family: var(--mono); font-size: 10.5px; text-align: center; padding: 5px 2px; border-radius: 4px; border: 1px solid var(--border-strong); background: #fff; color: var(--text-3); }
+  .quic-box.st-ok { background: var(--ok-soft); border-color: var(--ok); color: var(--ok); }
+  .quic-box.st-held { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); }
+  .quic-box.st-lost { background: var(--bad-soft); border-color: var(--bad); color: var(--bad); }
+  .quic-note { font-size: 11.5px; color: var(--text-2); margin-top: 8px; padding-top: 7px; border-top: 1px dashed var(--border); line-height: 1.5; }
+  .quic-note b { color: var(--text); }
+  .quic-mig { display: flex; flex-direction: column; gap: 6px; }
+  .quic-mig .mrow { font-family: var(--mono); font-size: 11.5px; padding: 6px 8px; border-radius: 5px; border: 1px solid var(--border); background: var(--bg-soft); color: var(--text-2); }
+  .quic-mig .mrow.on { background: var(--accent-soft); border-color: var(--accent); color: var(--text); }
+  .quic-mig .mrow.bad { background: var(--bad-soft); border-color: var(--bad); color: var(--bad); }
+  .quic-mig .mrow.ok { background: var(--ok-soft); border-color: var(--ok); color: var(--ok); }
+  .quic-panels { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 12px; }
+  @media (max-width: 640px) { .quic-panels { grid-template-columns: 1fr; } }
+  .quic-panel { border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 12px; background: #fff; }
+  .quic-panel .pt { font-size: 11px; color: var(--text-3); letter-spacing: .06em; text-transform: uppercase; font-family: var(--mono); margin-bottom: 8px; }
+  .quic-panel .prow { display: flex; justify-content: space-between; gap: 8px; font-family: var(--mono); font-size: 12px; padding: 4px 0; border-bottom: 1px dashed var(--border); }
+  .quic-panel .prow:last-child { border-bottom: none; }
+  .quic-panel .pk { color: var(--text-3); white-space: nowrap; }
+  .quic-panel .pv { color: var(--text); font-weight: 600; text-align: right; }
+  .quic-panel .pv.good { color: var(--ok); }
+  .quic-panel .pv.bad { color: var(--bad); }
+</style>
+
+<div id="quic-root">
+
+<section id="s1">
+  <div class="sec-head"><span class="sec-num">01</span><h2>總覽與定位</h2></div>
+  <p class="sec-sub">QUIC 不是「HTTP 的新版本號」，而是一個跑在 UDP 上的通用傳輸協定；HTTP/3 只是它第一個、也最大的客戶。</p>
+
+  <p>上一篇停在一句話上：問題不出在 HTTP/2，而出在它腳下那個<strong>「有序位元組串流」的抽象</strong>——只要傳輸層仍然是 TCP，多路復用就永遠只做到一半。本篇兌現那句「不要 TCP 了」。</p>
+
+  <p>值得先把「一半」是哪一半講精確。HTTP/2 在自己的層級上做得無可挑剔：每個 frame 都帶 Stream ID，回應可以亂序完成。但這個「亂序」只存在於 HTTP/2 的視野裡——<strong>交到 TCP 手上時，它們被壓成了一條必須按序交付的隊伍</strong>。TCP 對上層的承諾是「不掉、不亂」，而「不亂」意味著它不能跳過任何一個洞：中間少一段，後面所有已經安全抵達的位元組都得扣在核心緩衝裡等。TCP 不知道那些位元組屬於三個互不相干的 stream，因為<strong>位元組串流這個抽象本身就沒有「裡面有幾條 stream」這個概念</strong>。</p>
+
+  <div class="callout accent">
+    <div class="c-title"><span class="ic">座標</span>接上一篇的斷點：把有序保證的粒度改掉</div>
+    <p>要解掉這件事，只有兩條路：讓 TCP 學會「部分有序交付」，或者不要 TCP。<strong>前者被證明走不通</strong>——TCP 跑在核心裡、被全球的中間設備（NAT、防火牆、負載均衡器）盯著看，任何新選項都可能被丟棄或改寫，光是讓一個新版本普及就要十年以上。<br>
+    於是 <strong>QUIC</strong> 選了第二條路：躲進 <strong>UDP</strong> 這個中間設備不敢多管的載體裡，在使用者空間把可靠傳輸整套重做一遍，而且<strong>這一次讓有序保證的粒度從「整條連線」降到「單一 stream」</strong>。這正是本系列篇 1 那句話的兌現——「需要 stream 之間互不阻塞、或需要換網不斷線時，只能在 UDP 上重做」。</p>
+  </div>
+
+  <p>QUIC 由 RFC 9000（傳輸）、RFC 9001（與 TLS 1.3 的整合）、RFC 9002（遺失偵測與壅塞控制）三份文件定義，另有 RFC 8999 規定「哪些欄位永遠不會變」。把它與舊堆疊並排看，最直觀：</p>
+
+  <div class="quic-stacks">
+    <div class="quic-stack old">
+      <div class="st">HTTP/2 的堆疊 · 四層各管各的</div>
+      <div class="quic-layer"><b>HTTP/2</b>　framing、多路復用、HPACK、兩級流量控制</div>
+      <div class="quic-layer"><b>TLS 1.3</b>　交握、record layer、加密</div>
+      <div class="quic-layer old-hi"><b>TCP</b>　連線、可靠性、<strong>單一有序位元組串流</strong>、壅塞控制（核心）</div>
+      <div class="quic-layer"><b>IP</b></div>
+    </div>
+    <div class="quic-stack new">
+      <div class="st">HTTP/3 的堆疊 · 中間兩層被合併重寫</div>
+      <div class="quic-layer"><b>HTTP/3</b>　framing、QPACK（多路復用下沉了）</div>
+      <div class="quic-layer hi"><b>QUIC</b>　連線、<strong>獨立 stream</strong>、可靠性、壅塞控制、<strong>內建 TLS 1.3</strong>（使用者空間）</div>
+      <div class="quic-layer"><b>UDP</b>　只提供 port 分流與 checksum</div>
+      <div class="quic-layer"><b>IP</b></div>
+    </div>
+  </div>
+  <p class="cap">注意 HTTP/3 那一格<strong>變薄了</strong>：多路復用、流量控制、連線管理全部下沉進 QUIC。這是本篇的主軸——<strong>不是 HTTP 學會了新把戲，而是傳輸層終於提供了 HTTP/2 一直想要卻要不到的東西</strong>。</p>
+
+  <div class="callout warn">
+    <div class="c-title"><span class="ic">陷阱</span>「QUIC＝HTTP/3」是本篇最該戒掉的說法</div>
+    <p>QUIC 是<strong>通用傳輸協定</strong>，位置等同 TCP，不綁任何應用層語義。HTTP/3（RFC 9114）只是「把 HTTP 語義映射到 QUIC」的那一份規格。已經在用 QUIC 的其他客戶包括：<strong>DNS over QUIC</strong>（RFC 9250，繼 DoT／DoH 之後的第三種加密 DNS）、<strong>WebTransport</strong>（瀏覽器直接使用 QUIC stream 與 datagram）、<strong>MASQUE</strong>（RFC 9298，用 HTTP 通道代理 UDP 流量）、以及 SMB over QUIC。<br>
+    面試被問到時，把「QUIC 在哪一層、HTTP/3 在哪一層」講清楚，遠比背出 0-RTT 加分。</p>
+  </div>
+
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr><th>職責</th><th>HTTP/2 堆疊由誰負責</th><th>HTTP/3 堆疊由誰負責</th><th>本篇章節</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>連線建立與金鑰協商</td><td>TCP 交握 + TLS 交握（兩趟）</td><td class="hl">QUIC 交握（合併成一趟）</td><td>s3</td></tr>
+        <tr><td>可靠性與遺失復原</td><td>TCP（核心）</td><td class="hl">QUIC（使用者空間，可換演算法）</td><td>s2、s4</td></tr>
+        <tr><td>多路復用與有序保證</td><td>HTTP/2 分 stream，TCP 又壓回一條</td><td class="hl">QUIC stream，彼此完全獨立</td><td>s4</td></tr>
+        <tr><td>流量控制</td><td>TCP <var>rwnd</var> + HTTP/2 兩級，共三層</td><td class="hl">QUIC 兩級（HTTP/3 不再自己做）</td><td>s4</td></tr>
+        <tr><td>連線識別</td><td>五元組（換網即斷）</td><td class="hl">Connection ID（換網不斷）</td><td>s5</td></tr>
+        <tr><td>標頭壓縮</td><td>HPACK（依賴嚴格順序）</td><td class="hl">QPACK（容忍亂序）</td><td>s6</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="cap">這張表就是本篇地圖。每一列的右欄都不是「HTTP/3 的新功能」，而是<strong>QUIC 的能力</strong>——HTTP/3 只是第一個把它們用起來的協定。</p>
+
+  <div class="oneliner">
+    <b>一句話答法</b>QUIC 是跑在 UDP 上、內建 TLS 1.3 的通用傳輸協定，它把有序交付的粒度從「整條連線」降到「單一 stream」，並用 Connection ID 取代五元組；HTTP/3 只是把 HTTP 語義映射到 QUIC 的那份規格，語義一行都沒改。
+  </div>
+</section>
+
+<section id="s2">
+  <div class="sec-head"><span class="sec-num">02</span><h2>在 UDP 上重建 transport：那張工作清單的交卷</h2></div>
+  <p class="sec-sub">篇 1 列過「在 UDP 上造輪子」的五項工作。QUIC 就是那張清單被認真做完的樣子——而且每一項都趁機改掉了 TCP 想改卻改不動的地方。</p>
+
+  <p>篇 1 談 UDP 時列了一張表：TCP 直接給你的東西，在 UDP 上全部得自己做。當時說那是「所有在 UDP 上造輪子的專案的工作清單，每一列都是實打實的工程量」。現在把 QUIC 的答案填進去：</p>
+
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr><th>需求</th><th>篇 1：UDP 上要自己做</th><th>QUIC 怎麼交卷</th><th>相對 TCP 的改動</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>知道對方收到了</td><td>自訂應用層 ACK 與序號</td><td class="hl"><code>ACK</code> frame，可攜帶多段 ACK Range</td><td>等於<strong>強制版 SACK</strong>，且多回報一個 ACK Delay 讓 RTT 估得更準</td></tr>
+        <tr><td>補回遺失資料</td><td>自行重送，或用 FEC 冗餘編碼</td><td class="hl">重傳「資料」而不是「封包」</td><td>遺失的內容<strong>換一個新的 packet number 重送</strong>，消掉 TCP 的重傳歧義</td></tr>
+        <tr><td>順序正確</td><td>自帶序號並在應用層重排</td><td class="hl">每個 stream 各自持有 byte offset</td><td><strong>排序只在 stream 內部生效</strong>——本篇的核心，見 s4</td></tr>
+        <tr><td>不壓垮網路</td><td>自行實作速率估計與退讓</td><td class="hl">完整壅塞控制（RFC 9002）</td><td>演算法在使用者空間，換 CUBIC／BBR 不必動核心</td></tr>
+        <tr><td>連線概念</td><td>自訂 session id（好處：換網不斷線）</td><td class="hl"><strong>Connection ID</strong></td><td>連線識別脫離五元組，換網不斷線，見 s5</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="cap">五列全數交卷。<strong>重點在最右欄</strong>：QUIC 不是把 TCP 原封不動搬到 UDP 上，而是趁著「反正要重寫一遍」，把 TCP 因為相容性包袱而動不了的設計一次改掉。</p>
+
+  <p class="quic-sub">1 · 兩層資料單位：packet 裝 frame</p>
+
+  <p>QUIC 有兩個容易混淆的層級。一個 UDP 資料報裡放<strong>一個或多個 QUIC packet</strong>（交握期間常把不同加密等級的 packet 併在同一個資料報送出，稱為 coalescing）；每個 QUIC packet 的 payload 裡則放<strong>一串 frame</strong>。真正表達語義的是 frame，packet 只是加密與遺失偵測的單位：</p>
+
+  <div class="quic-flow">
+    <span class="quic-chip d">STREAM</span>
+    <span class="quic-chip d">CRYPTO</span>
+    <span class="quic-chip d">DATAGRAM</span>
+    <span class="quic-chip op">承載資料</span>
+    <span class="quic-chip c">ACK</span>
+    <span class="quic-chip c">PING</span>
+    <span class="quic-chip op">確認與探測</span>
+    <span class="quic-chip m">MAX_DATA</span>
+    <span class="quic-chip m">MAX_STREAM_DATA</span>
+    <span class="quic-chip m">MAX_STREAMS</span>
+    <span class="quic-chip op">流量控制</span>
+    <span class="quic-chip m">RESET_STREAM</span>
+    <span class="quic-chip m">STOP_SENDING</span>
+    <span class="quic-chip m">NEW_CONNECTION_ID</span>
+    <span class="quic-chip m">PATH_CHALLENGE</span>
+    <span class="quic-chip op">連線管理</span>
+  </div>
+  <p class="cap">對照篇 3 的 HTTP/2 frame 型別表，你會發現<strong>大半是同名的</strong>——因為 HTTP/2 當年在應用層做的那些事，現在被搬到傳輸層做了一遍。差別是這裡的 <code>MAX_STREAM_DATA</code> 管的是傳輸層的 stream，不是 HTTP 的 stream。</p>
+
+  <p class="quic-sub">2 · 一個 packet 長什麼樣：明文只剩不變量</p>
+
+  <div class="quic-pkt">
+    <div class="pf inv f1">Header Form + 版本</div>
+    <div class="pf inv f2">Destination Connection ID</div>
+    <div class="pf inv f2">Source Connection ID</div>
+    <div class="pf enc f1">Packet Number 🔒</div>
+    <div class="pf pay">Payload：一串 frame 🔒（STREAM、ACK、MAX_DATA …）</div>
+  </div>
+  <p class="cap">交握期的 Long Header 大致如此；交握完成後的 1-RTT packet 只剩「首位元組 + Destination Connection ID + 受保護的 Packet Number + 加密 payload」，連版本欄位都不再出現。<strong>藍色是路徑上看得見的部分，綠色連 packet number 都經過 header protection 加密。</strong></p>
+
+  <div class="callout accent">
+    <div class="c-title"><span class="ic">關鍵</span>為什麼連 packet number 都要加密？——ossification</div>
+    <p><strong>Ossification（骨化）</strong>：只要一個欄位在路徑上是明文，中間設備遲早會依賴它；一旦依賴形成，這個欄位就再也改不動了。TCP 就是這樣被凍住的——某些防火牆會丟棄帶有未知選項的封包、某些 NAT 會改寫序號、某些設備會把它看不懂的封包直接砍掉。結果是 TCP Fast Open、Multipath TCP 這類改良推了十幾年仍難以普及。<br>
+    QUIC 的對策是<strong>把「可見」變成一種明確授權</strong>：RFC 8999 只宣告極少數欄位為<em>不變量</em>（首位元的 Header Form、版本欄位、Connection ID 的位置與長度），其餘一律加密——連 packet number 都套上 header protection。<strong>中間設備不可能依賴一個它看不到的欄位，於是協定保住了未來繼續演進的權利。</strong>這個決定的帳單會在 s8 出現：你自己的 SRE 也一樣看不到。</p>
+  </div>
+
+  <p class="quic-sub">3 · 順手修掉的 TCP 老問題：重傳歧義</p>
+
+  <p>TCP 的序號綁在<strong>位元組位置</strong>上，所以重傳的封包會沿用原本的序號。這帶來一個經典麻煩：收到 ACK 時，發送端無法分辨它確認的是<strong>原始封包</strong>還是<strong>重傳封包</strong>，RTT 樣本因此可能算錯一整個重傳逾時（TCP 的處理是 Karn 演算法——乾脆放棄重傳封包的 RTT 樣本，等於白白丟掉觀測值）。</p>
+
+  <p>QUIC 把兩件事拆開：<strong>packet number 單調遞增、永不重複</strong>，資料在哪個 stream 的哪個位置則由 <code>STREAM</code> frame 自己的 offset 表達。同一段資料重傳時會裝進一個<strong>編號更大的新 packet</strong>。於是每個 ACK 都精確對應唯一一次傳送，RTT 樣本永遠乾淨，遺失判定也不再有歧義。</p>
+
+  <div class="callout warn">
+    <div class="c-title"><span class="ic">補充</span>三個 packet number space</div>
+    <p>QUIC 的 packet number 不是全連線一個序列，而是分成 <strong>Initial／Handshake／Application Data</strong> 三個獨立空間，各自編號、各自確認。理由是這三種 packet 用不同的金鑰保護，且到達順序無法保證——交握期的 packet 與 1-RTT packet 混在一起編號會讓遺失偵測失去意義。這也是為什麼 QUIC 的遺失偵測邏輯要對每個空間各跑一份。</p>
+  </div>
+
+  <div class="oneliner">
+    <b>一句話答法</b>QUIC 在 UDP 上把 ACK、重傳、排序、壅塞控制、連線識別整套重做，並趁機修掉 TCP 的相容性包袱——packet number 單調遞增消掉重傳歧義、多段 ACK Range 等於強制 SACK、除了 RFC 8999 的不變量以外全部加密以避免 ossification。
+  </div>
+</section>
+
+<section id="s3">
+  <div class="sec-head"><span class="sec-num">03</span><h2>交握合一：內建 TLS 1.3、1-RTT 與 0-RTT</h2></div>
+  <p class="sec-sub">篇 2 留了一個問題：如果傳輸層的交握與加密的交握本來就是同一件事，為什麼要分兩次做？這一節是它的答案。</p>
+
+  <p>篇 2 在結尾算過一筆帳，並在後面加了一句挑釁：</p>
+
+  <div class="formula">首位元組之前（TCP + TLS 1.3）= 三向交握 1-RTT + TLS 交握 1-RTT = 2-RTT</div>
+
+  <p>這 2-RTT 的成因很單純：<strong>TCP 交握完成之前，TLS 連一個位元組都送不出去</strong>——因為 TLS 是「跑在」TCP 之上的另一層。兩層各自有自己的握手儀式，而它們協商的其實是同一件事的兩半：一半是「我們要通訊」（序號、視窗、選項），另一半是「我們要安全地通訊」（金鑰、身分、參數）。</p>
+
+  <p>QUIC 的處理不是「把 TLS 跑在 QUIC 上」，而是<strong>把 TLS 1.3 嵌進 QUIC 內部</strong>（RFC 9001）。具體來說：TLS 交握訊息裝在 <code>CRYPTO</code> frame 裡跟著 QUIC packet 一起飛，<strong>TLS 的 record layer 被整個拿掉</strong>，TLS 只負責產出金鑰，加密與完整性保護由 QUIC 的 packet protection 執行。結果是一趟往返同時完成四件事：</p>
+
+  <div class="quic-flow">
+    <span class="quic-chip d">建立連線狀態</span>
+    <span class="quic-chip op">+</span>
+    <span class="quic-chip d">ECDHE 金鑰協商與身分驗證</span>
+    <span class="quic-chip op">+</span>
+    <span class="quic-chip d">ALPN 選定 h3</span>
+    <span class="quic-chip op">+</span>
+    <span class="quic-chip d">交換 transport parameters</span>
+  </div>
+
+  <div class="formula">首位元組之前（QUIC）= 交握 1-RTT；resumption + 0-RTT 時 = 0-RTT</div>
+
+  <p>那個 <strong>transport parameters</strong> 是 QUIC 特有的一環：初始流量控制視窗、最多可開幾個 stream、閒置逾時、是否停用 connection migration、伺服器的 preferred address……這些在 TCP 世界裡分散在核心參數與 TCP 選項的東西，現在跟著加密的交握一起協商，<strong>中間設備既看不到也改不掉</strong>。</p>
+
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr><th>階段</th><th>TCP + TLS 1.3</th><th>QUIC</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>首次連線到可送應用資料</td><td>2-RTT</td><td class="hl">1-RTT</td></tr>
+        <tr><td>Resumption（不帶 early data）</td><td>2-RTT（TCP 那趟省不掉）</td><td class="hl">1-RTT</td></tr>
+        <tr><td>Resumption + 0-RTT</td><td>1-RTT（仍要先建 TCP）</td><td class="hl">0-RTT</td></tr>
+        <tr><td>誰保護資料完整性</td><td>TLS record layer</td><td class="hl">QUIC packet protection</td></tr>
+        <tr><td>交握內容對中間設備</td><td>TCP 選項明文、SNI 明文</td><td class="hl">除不變量外全加密</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="cap">最值得記的是第二列：<strong>在 TCP 上，session resumption 永遠省不掉那趟 TCP 交握</strong>——篇 2 說過「單純的 resumption 仍是 1-RTT，省的是憑證傳輸與非對稱簽章」，加上 TCP 那趟之後，首位元組前<strong>還是 2-RTT</strong>。QUIC 沒有這個下限，因為它根本沒有「另一層的交握」要等。</p>
+
+  <p class="quic-sub">0-RTT：加密面完全沿用篇 2，傳輸面多一個問題要處理</p>
+
+  <p>QUIC 的 0-RTT 就是 TLS 1.3 的 0-RTT：同一套 PSK ticket、同一份 early data、<strong>同樣的兩個結構性代價（無前向保密、可被重放）與同樣的三層防守（單次票券／時效窗＋重放偵測／應用層只放冪等請求）</strong>。篇 2 已經把成因與防線論證完整，這裡不重複——結論一模一樣：<em>early data 只能承載被重放一百次也不會多出一筆訂單的請求</em>，而 HTTP 這一層對應的訊號仍是 <code>425 Too Early</code>。</p>
+
+  <p>QUIC 真正額外新增的，是一個<strong>傳輸層才有的問題：位址驗證</strong>。TCP 的三向交握順便證明了「客戶端真的收得到送往這個 IP 的封包」（因為它必須回 ACK 才建得成連線）。UDP 沒有這道程序，攻擊者可以偽造來源 IP 發出一個小小的 Initial packet，讓伺服器把大量交握資料（憑證鏈動輒數 KB）轟向受害者——這就是<strong>放大攻擊（Amplification Attack）</strong>。QUIC 用三道機制堵住：</p>
+
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr><th>機制</th><th>作法</th><th>代價</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><strong>Anti-amplification limit</strong></td><td class="hl">位址驗證完成前，伺服器送出的位元組不得超過收到的 3 倍</td><td>憑證鏈太大時交握會被迫分批，多花往返</td></tr>
+        <tr><td><strong>Initial packet 補齊</strong></td><td class="hl">客戶端的 Initial packet 必須 padding 到至少 1200 位元組</td><td>浪費一點頻寬，換來 3 倍上限有實際意義，順便確保路徑撐得住 1200</td></tr>
+        <tr><td><strong>Retry + token</strong></td><td class="hl">伺服器可回一個 Retry packet 要求客戶端帶 token 再來一次，token 即位址證明</td><td><strong>多付一個 RTT</strong>；通常只在被攻擊時才啟用</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="formula">位址驗證完成前：伺服器送出位元組 &le; 3 &times; 已收到位元組</div>
+
+  <p>伺服器還可以用 <code>NEW_TOKEN</code> frame 事先發一張 token 給客戶端，讓<strong>下一次</strong>連線一開始就帶著位址證明，直接跳過 Retry 那趟。這與篇 2 的 session ticket 是不同的東西：<strong>ticket 證明「你是上次那個人」，token 證明「你真的在這個 IP 上」</strong>，兩者可以同時使用。</p>
+
+  <div class="oneliner">
+    <b>一句話答法</b>QUIC 把 TLS 1.3 嵌進傳輸交握（訊息走 <code>CRYPTO</code> frame、record layer 拿掉），所以連線建立、金鑰協商、ALPN 與 transport parameters 在同一趟完成，首次連線 1-RTT、resumption 可到 0-RTT；0-RTT 的重放風險與 TLS 完全相同，QUIC 額外要處理的是 UDP 特有的放大攻擊，靠 3 倍上限、Initial padding 與 Retry token 三道防線。
+  </div>
+</section>
+
+<section id="s4">
+  <div class="sec-head"><span class="sec-num">04</span><h2>Stream 獨立性、遺失復原與兩級流量控制</h2></div>
+  <p class="sec-sub">這是 QUIC 相對 HTTP/2 最核心的一項：讓多路復用真正做到底——並且要誠實說明它沒解掉什麼。</p>
+
+  <p class="quic-sub">1 · 有序保證的粒度</p>
+
+  <p>QUIC 的 stream 由一個 62 位元的變長整數識別，<strong>最低兩個位元直接編碼了語義</strong>：一個位元表示「誰發起的」（客戶端／伺服器），另一個位元表示「雙向還是單向」。所以篇 3 那個「客戶端用奇數、伺服器用偶數」的約定在這裡被吸收進 ID 本身，而且多出了單向 stream 這個新工具——s6 的 QPACK 與 control stream 全都靠它。</p>
+
+  <p>真正的關鍵只有一句話：</p>
+
+  <div class="formula">QUIC 的有序交付保證，只在單一 stream 內部成立</div>
+
+  <p>Stream A 的資料遺失，只會擋住 stream A 後續的資料；stream B、C 已抵達的部分照樣立刻交給應用。把篇 3 那張圖重畫一次就看得很清楚：</p>
+
+  <div class="quic-weave">
+    <span class="quic-cell a">S-A DATA ✓交付</span>
+    <span class="quic-cell lost">S-B DATA（遺失）</span>
+    <span class="quic-cell c">S-C DATA ✓交付</span>
+    <span class="quic-cell a">S-A DATA ✓交付</span>
+    <span class="quic-cell b">S-B DATA ⏸等 B 補洞</span>
+    <span class="quic-cell c">S-C DATA ✓交付</span>
+    <span class="quic-cell note">↑ 只有 S-B 停等，A 與 C 完全不受影響</span>
+  </div>
+  <p class="cap">對照篇 3 的同一張圖：在 TCP 上，那六格<strong>全部</strong>要扣在核心緩衝裡等。差別不在 HTTP 這一層做了什麼，而在下面那一層願不願意承認「這些位元組其實不相干」。</p>
+
+  <div class="callout warn">
+    <div class="c-title"><span class="ic">陷阱</span>QUIC 沒有消滅 HoL Blocking，它縮小了 HoL Blocking 的作用範圍</div>
+    <p>這題面試很愛追問，答「QUIC 解決了 HoL Blocking」會被扣分。精確的說法是<strong>「消掉了傳輸層跨 stream 的那一種」</strong>，以下三種仍然存在：<br>
+    <strong>1. Stream 內部的 HoL 依舊存在</strong>——而且是刻意保留的。單一 stream 內仍然有序，所以一支大檔下載掉包時，該 stream 一樣要等重傳。如果你的流量本來就是「一條大 stream」，QUIC 在這一項上幫不了忙。<br>
+    <strong>2. 壅塞控制仍然是全連線一份。</strong>Stream 獨立不等於免疫丟包——路徑嚴重擁塞時，壅塞視窗縮小會讓<em>所有</em> stream 一起變慢，只是不會互相「停等」。<br>
+    <strong>3. QPACK 可能重新引入 stream 級的阻塞</strong>（s6 會說明，而且那是可調的）。</p>
+  </div>
+
+  <p class="quic-sub">2 · 遺失復原：把 TCP 的補丁重寫成內建設計</p>
+
+  <p>RFC 9002 的遺失偵測與 TCP 的觀念一脈相承（篇 1 已把快速重傳、RTO、SACK 講過），差別在於它是<strong>重新設計</strong>而不是三十年疊上去的補丁：</p>
+
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr><th>面向</th><th>TCP</th><th>QUIC（RFC 9002）</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>選擇性確認</td><td>SACK 是<strong>可選</strong>選項，且範圍數量受選項空間限制</td><td class="hl"><code>ACK</code> frame 內建多段 ACK Range，數量不受選項欄位擠壓</td></tr>
+        <tr><td>RTT 量測</td><td>重傳歧義 → Karn 演算法丟棄樣本</td><td class="hl">packet number 唯一，樣本永遠有效；再加上明確回報的 ACK Delay</td></tr>
+        <tr><td>遺失判定</td><td>3 個重複 ACK（快速重傳）</td><td class="hl">封包門檻（落後 3 個）<strong>或</strong>時間門檻（9/8 × 最近 RTT），兩者取先觸發</td></tr>
+        <tr><td>逾時重傳</td><td>RTO + Tail Loss Probe 等多個機制疊加</td><td class="hl">統一為 <strong>PTO</strong>（Probe Timeout），逾時先送探測而非立即崩掉壅塞視窗</td></tr>
+        <tr><td>壅塞控制演算法</td><td>核心提供，換演算法要動作業系統</td><td class="hl">使用者空間實作，可依服務特性換（CUBIC／BBR）甚至 A／B 測試</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="cap">最後一列在實務上被低估了：<strong>壅塞控制的迭代速度從「作業系統升級週期」變成「應用發版週期」</strong>。這是 QUIC 跑在使用者空間最被忽略的紅利，也是 s8 要跟 CPU 成本一起放上天秤的東西。</p>
+
+  <p class="quic-sub">3 · 流量控制：兩級，而且是絕對值</p>
+
+  <p>篇 3 那張表列了三層疊在一起的流量控制：TCP 的 <var>rwnd</var>、HTTP/2 的 connection 視窗、HTTP/2 的 stream 視窗。QUIC 把它收斂成兩級，而且 <strong>HTTP/3 不再有自己的流量控制</strong>——這一層整個下沉了：</p>
+
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr><th>層級</th><th>HTTP/2 堆疊</th><th>QUIC / HTTP/3 堆疊</th><th>差異重點</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>連線層</td><td>TCP <var>rwnd</var> ＋ HTTP/2 connection 視窗（預設 65,535）</td><td class="hl"><code>MAX_DATA</code></td><td>兩層併成一層</td></tr>
+        <tr><td>Stream 層</td><td>HTTP/2 stream 視窗（預設 65,535）</td><td class="hl"><code>MAX_STREAM_DATA</code></td><td>同樣是 credit-based</td></tr>
+        <tr><td>並行度</td><td><code>SETTINGS_MAX_CONCURRENT_STREAMS</code></td><td class="hl"><code>MAX_STREAMS</code> frame</td><td>從「一個設定值」變成<strong>可隨時追加的額度</strong></td></tr>
+        <tr><td>額度的表達方式</td><td><code>WINDOW_UPDATE</code> 送<strong>增量</strong></td><td class="hl">送<strong>絕對上限</strong></td><td>亂序或重複抵達也不會算錯，遺失一則只要下一則更大就自動追上</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="cap">最後一列是個小而漂亮的設計。HTTP/2 的增量式視窗必須靠 TCP 的可靠有序來保證不重不漏；QUIC 既然允許亂序，就把額度改成<strong>冪等的絕對值</strong>——「你最多可以送到第 N 個位元組」，收兩次或亂序收都不會出錯。<strong>這是「不能依賴順序」如何反過來讓設計變乾淨的典型例子。</strong></p>
+
+  <p>值得注意的是，篇 1 那條 backpressure 因果鏈（接收端不消費 → 不歸還額度 → 發送端停下來）在這裡完全成立，只是換了 frame 名稱。而 <code>RESET_STREAM</code>（我不送了）與 <code>STOP_SENDING</code>（你別送了）這對取消機制，比 HTTP/2 只有單一 <code>RST_STREAM</code> 更精確：<strong>取消一個下載時，你要表達的是「別再送」，而不是「這條 stream 出錯了」。</strong></p>
+
+  <div class="oneliner">
+    <b>一句話答法</b>QUIC 把有序保證的粒度縮到單一 stream，所以一個封包遺失只擋住它自己的 stream；遺失復原改用單調遞增的 packet number、內建多段 ACK Range 與統一的 PTO；流量控制收斂成 <code>MAX_DATA</code> ／ <code>MAX_STREAM_DATA</code> 兩級並改用絕對上限——但 stream 內部的 HoL 與全連線共用的壅塞控制都還在。
+  </div>
+</section>
+
+<section id="s5">
+  <div class="sec-head"><span class="sec-num">05</span><h2>Connection Migration：連線識別脫離五元組</h2></div>
+  <p class="sec-sub">篇 1 那張表的最後一列寫著「自訂 session id（好處：換網不斷線）」。這一節就是那個伏筆的兌現。</p>
+
+  <p>篇 1 定義過：一條 TCP 連線在核心裡的唯一識別是<strong>五元組</strong>（協定、來源 IP、來源 port、目的 IP、目的 port）。這個定義有個直接後果——<strong>只要來源位址變了，那就是另一條連線</strong>。手機從 Wi-Fi 走到 4G、筆電從有線切到無線、NAT 映射逾時後重新綁定，五元組全都會變，舊連線在伺服器眼裡瞬間變成陌生封包，只能重建：TCP 三向交握、TLS 交握、HTTP/2 的 SETTINGS 與 HPACK 動態表全部從零來過。</p>
+
+  <p>QUIC 的作法是把識別從「位址」換成一個<strong>與位址無關的標籤</strong>：</p>
+
+  <div class="quic-flow">
+    <span class="quic-chip d">TCP</span>
+    <span class="quic-chip op">連線 =</span>
+    <span class="quic-chip m">(協定, srcIP, srcPort, dstIP, dstPort)</span>
+    <span class="quic-chip op">位址一變就不是同一條</span>
+  </div>
+  <div class="quic-flow">
+    <span class="quic-chip c">QUIC</span>
+    <span class="quic-chip op">連線 =</span>
+    <span class="quic-chip m">Connection ID</span>
+    <span class="quic-chip op">位址可以隨便換</span>
+  </div>
+
+  <p><strong>Connection ID（CID）</strong>是一段不透明的位元組，由<strong>接收方自己挑選</strong>——「你要送封包給我，請在 Destination Connection ID 欄位寫這個值」。伺服器收到封包後不看來源 IP，直接用 DCID 查出對應的連線狀態。每一端還會透過 <code>NEW_CONNECTION_ID</code> frame 預先提供一批備用 CID，讓對方隨時可以換用。</p>
+
+  <p class="quic-sub">遷移不是「認得就好」，還有三件事要處理</p>
+
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr><th>顧慮</th><th>為什麼不能無腦接受</th><th>QUIC 的處理</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>位址欺騙</td><td>攻擊者可以偽稱「我搬到某個受害者 IP 了」，把大流量導向第三方</td><td class="hl"><strong>路徑驗證</strong>：送 <code>PATH_CHALLENGE</code>（隨機值），必須在新路徑上收到正確的 <code>PATH_RESPONSE</code></td></tr>
+        <tr><td>路徑特性全變了</td><td>新路徑的頻寬與 RTT 與舊路徑毫無關係，沿用舊估計會直接打爆</td><td class="hl"><strong>重置壅塞控制器與 RTT 估計</strong>，在新路徑上重新探測</td></tr>
+        <tr><td>可被關聯追蹤</td><td>若換網後沿用同一個 CID，路徑上的觀察者能把「Wi-Fi 的你」與「4G 的你」串起來</td><td class="hl">遷移時<strong>必須改用一個未曾在網路上出現過的 CID</strong></td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="cap">所以 connection migration 不是「換 IP 照跑」，而是「換 IP 之後走一段輕量的驗證與重新探測」——但這比完整重建連線便宜太多，而且<strong>應用層完全無感：stream 的進度、已解析的標頭、傳到一半的檔案全部保留</strong>。</p>
+
+  <p>幾個容易被追問的邊界：<strong>只有客戶端能主動遷移</strong>（伺服器要換位址得在交握時透過 <code>preferred_address</code> transport parameter 宣告）；連線也可以在交握時透過 <code>disable_active_migration</code> 直接關掉這個能力；此外 NAT 映射逾時後重新綁定造成的位址變化（篇 1 與 NAT 篇談過的 idle timeout）在 QUIC 這裡會被當成一次遷移自動處理，不再需要靠心跳硬撐著映射不放。</p>
+
+  <div class="callout warn">
+    <div class="c-title"><span class="ic">陷阱</span>Connection ID 把難題丟給了負載均衡器</div>
+    <p>傳統 L4 負載均衡器靠<strong>五元組雜湊</strong>決定把封包送到哪一台後端，這在 TCP 上運作良好，因為五元組在連線期間不變。QUIC 一旦遷移，五元組變了，雜湊值也變了——<strong>封包會被分派到一台根本沒有這條連線狀態的伺服器</strong>，而那台伺服器只能回一個 stateless reset，等於連線還是斷了。<br>
+    正解是 <strong>CID 感知路由</strong>：伺服器在挑選自己的 CID 時，把「我是哪一台後端」編碼進 CID 的前幾個位元組，負載均衡器只讀 CID 就能路由，完全不必解密。代價有兩個：CID 不再是純亂數，必須做加密混淆以免對外洩漏叢集拓撲；而且<strong>客戶端的第一個 Initial packet 的 DCID 是它自己隨機挑的</strong>，此時還沒有任何路由資訊，得另外處理（通常是對這類封包做五元組雜湊，並確保後續 Retry／握手封包一致）。<br>
+    <strong>這個結論在本系列篇 7 談長連線水平擴充時會再用到：QUIC 的 sticky 需求不是靠 cookie 或來源 IP，而是靠連線識別本身。</strong></p>
+  </div>
+
+  <p>另外補一個常被忽略的機制：<strong>stateless reset</strong>。伺服器重啟或狀態被淘汰後，它收到一個認不得的 CID 時無法用正常方式關閉連線（金鑰早就沒了），於是回送一個帶著 <em>stateless reset token</em> 的封包——這個 token 是交握時就給過客戶端的。客戶端一認出它，就知道「對面真的沒有我的狀態了」，立刻放棄並重連，而不是傻等到閒置逾時。</p>
+
+  <div class="oneliner">
+    <b>一句話答法</b>QUIC 用 Connection ID 取代五元組作為連線識別，所以切換網路、NAT 重新綁定都不會斷線；但遷移必須走 <code>PATH_CHALLENGE</code>／<code>PATH_RESPONSE</code> 路徑驗證、重置壅塞控制與 RTT 估計，並換一個新 CID 避免被關聯——代價是負載均衡器不能再用五元組雜湊，必須改成 CID 感知路由。
+  </div>
+</section>
+
+<section id="s6">
+  <div class="sec-head"><span class="sec-num">06</span><h2>HTTP/3：同一套語義，換一套映射</h2></div>
+  <p class="sec-sub">沿用篇 3 的分界——語義（RFC 9110）一行沒動，改的是 wire format，以及它對底層傳輸保證的假設。</p>
+
+  <p>篇 3 的版本表最後一列寫著「HTTP/3 還是同一套語義，TCP 被換掉了」。現在把它展開。<strong>HTTP/3（RFC 9114）沒有新增任何方法、任何狀態碼、任何快取規則。</strong>你的 <code>GET /users/1</code>、你的 <code>Cache-Control</code>、你的 <code>ETag</code>／<code>304</code>、你的冪等性推論全部原封不動——這正是篇 3 那句「語義是穩定的資產，傳輸表示法才是每十年換一次的部分」的第二次驗證。</p>
+
+  <p class="quic-sub">1 · 映射：一個請求佔一條 QUIC stream</p>
+
+  <p>HTTP/3 的核心映射只有一句：<strong>一次請求／回應交換 = 一條客戶端發起的雙向 QUIC stream</strong>。篇 3 的「Stream ID 奇偶約定」不再需要（QUIC 的 stream ID 自己編碼了發起者與方向），而 HTTP/2 的 frame 型別有一半被刪掉了——因為那些工作現在由 QUIC 做：</p>
+
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr><th>HTTP/2</th><th>HTTP/3</th><th>原因</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><code>HEADERS</code> / <code>DATA</code></td><td class="hl">保留</td><td>語義單位不變，但 <code>HEADERS</code> 改用 QPACK 編碼</td></tr>
+        <tr><td><code>SETTINGS</code> / <code>GOAWAY</code></td><td class="hl">保留</td><td>走一條專屬的<strong>單向 control stream</strong>；<code>GOAWAY</code> 的優雅關閉語義同篇 3</td></tr>
+        <tr><td><code>WINDOW_UPDATE</code></td><td>刪除</td><td>流量控制整個交給 QUIC 的 <code>MAX_DATA</code>／<code>MAX_STREAM_DATA</code></td></tr>
+        <tr><td><code>RST_STREAM</code></td><td>刪除</td><td>改用 QUIC 的 <code>RESET_STREAM</code>／<code>STOP_SENDING</code>（見 s4）</td></tr>
+        <tr><td><code>PRIORITY</code></td><td>刪除</td><td>改用 RFC 9218 的 <code>Priority</code> 標頭（<code>u</code>／<code>i</code>，篇 3 已介紹）</td></tr>
+        <tr><td><code>PING</code></td><td>刪除</td><td>QUIC 自己有 <code>PING</code> frame 與閒置逾時機制</td></tr>
+        <tr><td><code>PUSH_PROMISE</code></td><td>保留（但同樣乏人問津）</td><td>失敗原因篇 3 已論證完，換傳輸層並沒有改變那三個理由</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="cap">HTTP/3 的 frame 集合明顯比 HTTP/2 小——<strong>這是把責任下推到正確的層級之後應有的樣子</strong>。另外 HTTP/3 定義了幾條特殊用途的單向 stream，開頭第一個位元組是型別：control（<code>0x00</code>）、push（<code>0x01</code>）、QPACK encoder（<code>0x02</code>）、QPACK decoder（<code>0x03</code>）。</p>
+
+  <p class="quic-sub">2 · QPACK：為什麼 HPACK 在亂序傳輸下會崩潰</p>
+
+  <p>篇 3 埋過這個伏筆：HPACK 的動態表要求收發雙方對「第 N 號索引是什麼」有<strong>完全一致的認知</strong>，而這個一致性建立在一個隱含假設上——<strong>標頭區塊嚴格按照送出的順序被處理</strong>。在 TCP 上這是白拿的（TCP 本來就保證順序），但 QUIC 故意不保證：stream 8 的 <code>HEADERS</code> 完全可能比 stream 0 的先到。</p>
+
+  <p>如果照搬 HPACK 會發生什麼？編碼端在處理 stream 0 時往動態表插入了「<code>cookie: abc…</code>」成為第 62 號條目，接著在 stream 8 引用「第 62 號」。若 stream 8 先抵達，解碼端的表裡根本還沒有第 62 號——<strong>它要嘛解出錯的標頭（災難），要嘛只能停下來等 stream 0，而後者等於把剛剛買到的 stream 獨立性又整個賠回去</strong>。</p>
+
+  <p><strong>QPACK</strong>（RFC 9204）的解法是把「表的更新」與「表的使用」拆到不同 stream 上：</p>
+
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr><th>元件</th><th>方向</th><th>作用</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><strong>Encoder stream</strong>（<code>0x02</code>）</td><td class="hl">編碼端 → 解碼端</td><td>只送動態表的插入指令。這條 stream 內部有序，所以<strong>表的狀態演進是確定的</strong></td></tr>
+        <tr><td><strong>Decoder stream</strong>（<code>0x03</code>）</td><td class="hl">解碼端 → 編碼端</td><td>回報 Section Acknowledgment、Stream Cancellation、Insert Count Increment——讓編碼端知道<strong>對方的表追到哪了</strong></td></tr>
+        <tr><td><strong>Required Insert Count</strong></td><td class="hl">每個標頭區塊的前綴</td><td>宣告「要解開我，你的動態表至少得插入到第 N 筆」</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>於是流程變成：解碼端拿到一個標頭區塊，先看 Required Insert Count。若表已經追上就直接解；若還沒追上，<strong>只把這一條 stream 掛起（blocked stream），其他 stream 照常處理</strong>，等 encoder stream 上的插入指令補到就繼續。</p>
+
+  <div class="callout accent">
+    <div class="c-title"><span class="ic">關鍵</span>QPACK 把 HoL Blocking 從「結構性」變成「可調的」</div>
+    <p>最漂亮的設計在這裡：<code>SETTINGS_QPACK_BLOCKED_STREAMS</code> 宣告「我最多容忍幾條 stream 同時被掛起」。<strong>把它設成 0</strong>，編碼端就只准引用「已經被 decoder stream 確認收到」的條目，其餘一律送字面值——<strong>永遠不會阻塞，代價是壓縮率下降</strong>。設得大一點，壓縮率提高，但偶爾會有 stream 短暫掛起。<br>
+    這是一個乾淨的旋鈕：<strong>壓縮率 ⇄ 阻塞風險</strong>。對照 HPACK——在 HPACK 裡這根本不是選項，順序依賴是寫死在設計裡的。順帶一提，QPACK 的靜態表也從 HPACK 的 61 筆擴到 99 筆，並針對現代網頁常見的標頭重新挑選過。</p>
+  </div>
+
+  <p class="quic-sub">3 · 探索與 fallback：客戶端怎麼知道可以用 h3</p>
+
+  <p>這是 HTTP/3 部署上最反直覺的一點：<strong>你沒辦法「直接」用 HTTP/3 連上一個網站</strong>。URL 裡的 <code>https://</code> 沒有任何地方標示傳輸協定，而 UDP 443 是否可達更是無從預知。實務上有三個機制疊在一起：</p>
+
+  <ul>
+    <li><strong><code>Alt-Svc</code> 標頭</strong>（RFC 7838）：先用 HTTP/1.1 或 HTTP/2 連上，伺服器在回應裡附 <code>Alt-Svc: h3=":443"; ma=86400</code>，客戶端記下來，<em>下一次</em>才改走 h3。所以<strong>第一次連線幾乎一定是 TCP</strong>——這也意味著 h3 對「只來一次的訪客」幫助有限。</li>
+    <li><strong>HTTPS 資源紀錄</strong>（RFC 9460）：把 <code>alpn="h3"</code> 寫進 DNS。客戶端解析名稱時就知道對方支援 h3，<strong>第一次連線就能直接上</strong>——這正好回扣 <code>dns-deep-dive</code>：名稱解析不只回答「連哪個 IP」，也可以回答「怎麼連」。</li>
+    <li><strong>競速（happy eyeballs 式）</strong>：瀏覽器實務上會同時、或錯開數十毫秒發起 QUIC 與 TCP 兩種連線嘗試，誰先成功用誰、另一條丟棄。這樣在 UDP 被封鎖或限速的網路上不必空等逾時。形式上與 <code>dns-deep-dive</code> 提過的 IPv4／IPv6 Happy Eyeballs 完全一致，只是競速的對象從位址族換成了傳輸協定。</li>
+  </ul>
+
+<pre><code>$ curl --http3 -v https://cloudflare-quic.com/
+
+* Connected to cloudflare-quic.com port 443
+* ALPN: curl offers h3                       # 不是 h2，也不是 http/1.1
+* QUIC handshake complete (1-RTT)            # 「先建 TCP」這一步不存在了
+* Server certificate: CN=cloudflare-quic.com # 憑證鏈驗證與篇 2 完全相同
+* ALPN: server accepted h3
+* using HTTP/3
+&gt; GET / HTTP/3
+&gt; :authority: cloudflare-quic.com            # pseudo-header 與 HTTP/2 一模一樣
+&gt; :method: GET
+&lt; HTTP/3 200
+&lt; alt-svc: h3=":443"; ma=86400               # 「下次直接來 h3，這個資訊記 24 小時」</code></pre>
+  <p class="cap">兩個細節：<strong>(1)</strong> 請求行與 pseudo-header 和篇 3 的 HTTP/2 完全相同——再一次證明語義沒變。<strong>(2)</strong> curl 8 之後 <code>--http3</code> 會與 TCP 競速並在失敗時退回，<code>--http3-only</code> 才是強制不退回；用它來驗證「邊緣到底有沒有真的開 h3」最乾脆。</p>
+
+<pre><code>$ curl -sI https://example.com | grep -iE '^HTTP|alt-svc'
+HTTP/2 200                                   # 第一次連線仍然是 TCP + TLS + HTTP/2
+alt-svc: h3=":443"; ma=86400                 # 伺服器在此廣告 h3
+
+$ dig +short HTTPS example.com               # RFC 9460：把「怎麼連」寫進 DNS
+1 . alpn="h3,h2" ipv4hint=93.184.216.34      # 有這筆，第一次連線就能直接上 h3</code></pre>
+  <p class="cap">這兩條指令是排查「為什麼我的服務沒跑在 h3 上」的第一步：先確認邊緣有沒有吐 <code>Alt-Svc</code>，再確認 DNS 有沒有 HTTPS RR。</p>
+
+  <div class="oneliner">
+    <b>一句話答法</b>HTTP/3 沒改任何語義，只是把一次請求映射到一條 QUIC 雙向 stream，並刪掉 <code>WINDOW_UPDATE</code>／<code>RST_STREAM</code>／<code>PRIORITY</code>／<code>PING</code>（QUIC 已提供）；HPACK 因為依賴嚴格順序而必須換成 QPACK，用 encoder／decoder stream 同步動態表，並讓「阻塞風險 vs 壓縮率」變成一個可調參數；至於客戶端怎麼知道能用 h3，靠 <code>Alt-Svc</code>、DNS HTTPS RR 與競速三者疊加。
+  </div>
+</section>
+
+<section id="s7">
+  <div class="sec-head"><span class="sec-num">07</span><h2>互動 · TCP HoL vs QUIC stream 獨立性</h2></div>
+  <p class="sec-sub">同一批資料、同一個丟包位置，只換傳輸層：看「誰被卡住」與「換網之後誰還活著」。</p>
+
+  <p>下面的模擬器把<strong>三個 stream（A／B／C，各三塊資料）</strong>交錯送上線，兩側收到的封包順序完全相同，差別只在下面那一層是 TCP 還是 QUIC。<strong>點任何一個封包把它標記為將要遺失</strong>，再按「下一步」逐格推進，觀察兩側接收端能把多少資料交給應用。</p>
+
+  <p>第二個情境切到 <strong>connection migration</strong>：模擬使用者從 Wi-Fi 走到 4G，來源位址改變之後，兩側連線各自發生什麼事。</p>
+
+  <div class="demo" id="quic-demo">
+    <div class="demo-bar">
+      <span class="label">互動 · TCP HoL vs QUIC stream 獨立性</span>
+      <span class="label" style="text-transform:none;font-family:var(--sans);font-size:12px;color:var(--text-2)">先點一個封包標記遺失，再按「下一步」</span>
+    </div>
+    <div class="demo-body">
+      <div class="seg" role="group" aria-label="情境切換">
+        <button data-sc="loss" aria-pressed="true">注入丟包 · HoL 對比</button>
+        <button data-sc="mig" aria-pressed="false">切換網路 · Connection Migration</button>
+      </div>
+
+      <div class="quic-ctrl">
+        <button class="btn primary" id="quic-btn-next">下一步</button>
+        <button class="btn" id="quic-btn-reset">重置</button>
+        <div class="legend">
+          <span><i class="dot ns-idle"></i>尚未送出</span>
+          <span><i class="dot ns-ok"></i>已交付應用</span>
+          <span><i class="dot ns-wait"></i>已抵達但被扣住</span>
+          <span><i class="dot ns-bad"></i>遺失 / 重傳中</span>
+        </div>
+      </div>
+
+      <div class="status-line" id="quic-status">點一個封包標記為遺失（預設是 B2），再按「下一步」逐格推進。</div>
+
+      <div id="quic-loss-view">
+        <div class="quic-wire" id="quic-wire"></div>
+        <p class="cap">線上的送出順序（兩側完全相同）。紅色是被標記為遺失的那一個——點其他封包可以改。</p>
+
+        <div class="quic-lanes">
+          <div class="quic-lane tcp">
+            <div class="lane-head"><b>HTTP/2 over TCP</b><span id="quic-tcp-tag">單一有序位元組串流</span></div>
+            <div id="quic-tcp-rows"></div>
+            <div class="quic-note" id="quic-tcp-note">—</div>
+          </div>
+          <div class="quic-lane q">
+            <div class="lane-head"><b>HTTP/3 over QUIC</b><span id="quic-q-tag">三條獨立 stream</span></div>
+            <div id="quic-q-rows"></div>
+            <div class="quic-note" id="quic-q-note">—</div>
+          </div>
+        </div>
+
+        <div class="quic-panels">
+          <div class="quic-panel">
+            <div class="pt">TCP 側</div>
+            <div class="prow"><span class="pk">已交付應用</span><span class="pv" id="quic-m-tcp-ok">—</span></div>
+            <div class="prow"><span class="pk">扣在接收緩衝</span><span class="pv bad" id="quic-m-tcp-held">—</span></div>
+            <div class="prow"><span class="pk">停等中的 stream</span><span class="pv bad" id="quic-m-tcp-blk">—</span></div>
+          </div>
+          <div class="quic-panel">
+            <div class="pt">QUIC 側</div>
+            <div class="prow"><span class="pk">已交付應用</span><span class="pv good" id="quic-m-q-ok">—</span></div>
+            <div class="prow"><span class="pk">扣在重組緩衝</span><span class="pv" id="quic-m-q-held">—</span></div>
+            <div class="prow"><span class="pk">停等中的 stream</span><span class="pv good" id="quic-m-q-blk">—</span></div>
+          </div>
+        </div>
+      </div>
+
+      <div id="quic-mig-view" hidden>
+        <div class="quic-lanes">
+          <div class="quic-lane tcp">
+            <div class="lane-head"><b>HTTP/2 over TCP</b><span>五元組即連線</span></div>
+            <div class="quic-mig" id="quic-mig-tcp"></div>
+          </div>
+          <div class="quic-lane q">
+            <div class="lane-head"><b>HTTP/3 over QUIC</b><span>Connection ID 即連線</span></div>
+            <div class="quic-mig" id="quic-mig-q"></div>
+          </div>
+        </div>
+
+        <div class="quic-panels">
+          <div class="quic-panel">
+            <div class="pt">連線識別</div>
+            <div class="prow"><span class="pk">TCP 識別</span><span class="pv" id="quic-m-tcp-id">—</span></div>
+            <div class="prow"><span class="pk">QUIC 識別</span><span class="pv" id="quic-m-q-id">—</span></div>
+            <div class="prow"><span class="pk">目前網路</span><span class="pv" id="quic-m-net">Wi-Fi</span></div>
+          </div>
+          <div class="quic-panel">
+            <div class="pt">切網後的代價</div>
+            <div class="prow"><span class="pk">TCP 側成本</span><span class="pv bad" id="quic-m-tcp-cost">—</span></div>
+            <div class="prow"><span class="pk">QUIC 側成本</span><span class="pv good" id="quic-m-q-cost">—</span></div>
+            <div class="prow"><span class="pk">已傳輸進度</span><span class="pv" id="quic-m-progress">—</span></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <p class="cap">三個值得停下來比對的畫面：<strong>(1)</strong> 把遺失點設在 <strong>B2</strong>（第 5 個封包）並推到底——TCP 側只交付了 4 塊，後面 4 塊全部藍色（已抵達卻交不上去），三個 stream 全部停等；QUIC 側交付 7 塊，只有 B 停等。<strong>(2)</strong> 把遺失點改到 <strong>第 1 個封包 A1</strong>：TCP 側幾乎整條連線都被扣住（最極端的情況），QUIC 側依然只有 A 受影響。<strong>(3)</strong> 把遺失點改到<strong>最後一個封包</strong>：兩側幾乎沒有差別——<strong>HoL 的傷害與「洞出現得多早」成正比</strong>，這解釋了為什麼高丟包鏈路上 HTTP/2 的劣勢會被放大。</p>
+
+  <div class="callout warn">
+    <div class="c-title"><span class="ic">說明</span>這個模型簡化了什麼，以及它跟前兩個 demo 的分工</div>
+    <p>模型只保留「有序交付」這一個變因：不畫壅塞視窗、不畫 ACK 往返時序、重傳一律視為一次成功。真實情況下重傳需要至少一個 RTT，且 TCP 與 QUIC 的壅塞控制都會同時降速——<strong>所以請把它讀成「誰被卡住」的示意，不是效能量測</strong>。<br>
+    分工也刻意錯開：<strong>篇 1 的 demo</strong> 看的是<em>單一連線內</em>的重傳與排序緩衝怎麼運作；<strong>篇 3 的 demo</strong> 比的是<em>連線數與排隊</em>（乾淨網路、不注入丟包）；<strong>本篇</strong>比的是<em>丟包時 stream 之間的阻塞關係</em>。三者相加，才是完整的圖。</p>
+  </div>
+
+  <div class="oneliner">
+    <b>一句話答法</b>同一個丟包位置，TCP 側所有 stream 一起停等、後續已抵達的資料全被扣在核心緩衝，QUIC 側只有遺失資料所屬的那條 stream 停等；換網時 TCP 因五元組改變必須整條重建，QUIC 靠 Connection ID 認出同一條連線，只需路徑驗證與重置壅塞控制。
+  </div>
+</section>
+
+<section id="s8">
+  <div class="sec-head"><span class="sec-num">08</span><h2>面試折衷與實務選型</h2></div>
+  <p class="sec-sub">QUIC 的技術優勢很好講，難的是那四筆部署帳單：UDP 不一定通、CPU 更貴、看不見、以及負載均衡要重寫。</p>
+
+  <p>把前七節收攏成一句：<strong>QUIC 用「重寫整個傳輸層」換到了 stream 獨立、交握合一與連線可遷移</strong>。但這三項收益不是免費的，而且帳單多半落在<em>部署與維運</em>而不是協定本身。</p>
+
+  <p class="quic-sub">1 · 部署現實：四筆必須先算清楚的帳</p>
+
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr><th>問題</th><th>成因</th><th>後果與對策</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><strong>UDP 被封鎖或限速</strong></td><td>部分企業網路、老舊防火牆與電信設備只放行 TCP 443，或對 UDP 做嚴格限速</td><td class="hl">h3 永遠只能是<strong>機會性升級</strong>：TCP 路徑必須保留，客戶端要有競速與退回機制——<strong>你的邊緣得同時維運兩套 stack，這是硬成本</strong></td></tr>
+        <tr><td><strong>CPU 成本明顯較高</strong></td><td>跑在使用者空間、無法沿用 TCP 的網卡卸載；加密是 <strong>per-packet</strong>（約 1200 位元組一次）而非 TLS 的 per-record（可到 16KB 一次）；系統呼叫次數暴增</td><td class="hl">早期實測 CPU 約為 TLS/TCP 的兩倍，靠 UDP GSO／GRO、<code>sendmmsg</code> 批次化已大幅改善但仍較高。<strong>高吞吐靜態內容服務要實測再決定</strong></td></tr>
+        <tr><td><strong>可觀測性歸零</strong></td><td>s2 那個「除不變量外全加密」的決定，對<strong>你自己</strong>也一視同仁</td><td class="hl"><code>tcpdump</code> 只看得到 UDP 與 CID，<code>ss</code> 沒有 QUIC 連線表。要改用 <strong>qlog／qvis</strong>、<code>SSLKEYLOGFILE</code> 與伺服器端指標——<strong>把除錯手段換掉是遷移計畫的一部分</strong></td></tr>
+        <tr><td><strong>負載均衡要重寫</strong></td><td>五元組雜湊在 connection migration 後失效（s5）</td><td class="hl">改用 <strong>CID 感知路由</strong>：後端識別編碼進 CID 並加密混淆，並處理 Initial packet 的隨機 DCID</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="cap">要平衡地看，還有一筆<strong>反方向</strong>的帳常被漏掉：QUIC 跑在使用者空間，所以<strong>協定演進不再被作業系統升級週期綁架</strong>。瀏覽器、CDN、行動 App 可以自行升級傳輸層實作，換壅塞控制演算法只是發個版——而這正是 TCP 三十年來改不動的根本原因。<strong>「CPU 貴一點」與「演進快十年」是同一個決定的兩面。</strong></p>
+
+  <p class="quic-sub">2 · 選型表</p>
+
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr><th>決策點</th><th>選項</th><th>Trade-off</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>邊緣要不要開 h3</td><td class="hl">開（廣告 <code>Alt-Svc</code>）vs 只跑 h2</td><td>行動端、跨區、高丟包鏈路收益最大；代價是雙 stack 維運、CPU 與整套可觀測性重建。多數團隊的正解是「CDN 幫你開」而不是自建</td></tr>
+        <tr><td>第一次連線要不要也走 h3</td><td class="hl">只靠 <code>Alt-Svc</code> vs 加上 DNS HTTPS RR</td><td><code>Alt-Svc</code> 零成本但第一次一定是 TCP；HTTPS RR 能救到首次連線，代價是 DNS 設定多一筆、且需要客戶端支援</td></tr>
+        <tr><td>0-RTT</td><td class="hl">開 vs 關</td><td>與篇 2 結論相同：只放冪等請求、叢集要有重放偵測。QUIC 端額外要考慮位址驗證與 Retry token 的設定</td></tr>
+        <tr><td>L4 分流</td><td class="hl">五元組雜湊 vs CID 感知路由</td><td>前者在 migration 後直接送錯機器；後者要把後端識別編進 CID 並做加密混淆，避免對外洩漏叢集拓撲</td></tr>
+        <tr><td>內部服務之間</td><td class="hl">gRPC over HTTP/2 vs HTTP/3</td><td>機房內丟包低、RTT 低，<strong>HoL 本來就不是瓶頸</strong>，QUIC 收益小而 CPU 代價立刻可見；生態與除錯工具也還是 h2 成熟</td></tr>
+        <tr><td>大檔單流下載</td><td class="hl">h2 vs h3</td><td>單一 stream 沒有「跨 stream HoL」可解，差異主要來自交握成本與壅塞控制實作，不是 stream 獨立性</td></tr>
+        <tr><td>行動端長時間連線</td><td class="hl">TCP + 重連邏輯 vs QUIC migration</td><td>QUIC 在此優勢最大（切網、NAT 重綁都不斷）；但客戶端 SDK 與伺服器都要支援，且 LB 必須先解決 CID 路由</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="cap">共同結構：<strong>QUIC 的收益與「網路有多糟」成正比</strong>——丟包越高、RTT 越長、位址越容易變（行動端），收益越大；而它的成本與「你自己維運多少層」成正比。這也是為什麼公網面向使用者的邊緣普遍上了 h3，機房內部卻大多還在 h2。</p>
+
+  <div class="callout accent">
+    <div class="c-title"><span class="ic">面試</span>高頻追問怎麼答</div>
+    <p><strong>Q：QUIC 就是 HTTP/3 嗎？</strong>
+    答：不是。QUIC 是 UDP 之上的通用傳輸協定，位置等同 TCP；HTTP/3 只是把 HTTP 語義映射到 QUIC 的那份規格。DNS over QUIC、WebTransport、MASQUE 都是 QUIC 的其他客戶。<br>
+    <strong>Q：QUIC 為什麼比 TCP + TLS 少一個往返？</strong>
+    答：因為交握合一——TLS 訊息裝在 <code>CRYPTO</code> frame 裡跟著 QUIC 交握一起走，不需要先建 TCP 再談 TLS。而在 TCP 上，session resumption 也永遠省不掉那趟 TCP 交握。<br>
+    <strong>Q：QUIC 徹底消滅 HoL Blocking 了嗎？</strong>
+    答：只消滅了「傳輸層跨 stream」的那一種。stream 內部仍然有序、壅塞控制仍是全連線一份、QPACK 若允許引用未確認條目也可能造成 stream 掛起（可調）。<br>
+    <strong>Q：為什麼跑在 UDP 上，而不是定義一個新的 L4 協定？</strong>
+    答：middlebox。新的 IP 協定號在公網上幾乎過不去，UDP 是唯一有普遍通行權的資料報載體。同樣的理由也解釋了為什麼 QUIC 連 packet number 都加密——不給中間設備養成依賴的機會。<br>
+    <strong>Q：切換網路為什麼不斷線？</strong>
+    答：連線識別是 Connection ID 而不是五元組。但遷移要走 <code>PATH_CHALLENGE</code>／<code>PATH_RESPONSE</code> 驗證新路徑、重置壅塞控制與 RTT 估計，並換一個沒用過的 CID 避免被關聯追蹤。<br>
+    <strong>Q：升級 h3 之後沒變快，可能是什麼原因？</strong>
+    答：先確認真的協商到 h3（<code>Alt-Svc</code> 是機會性升級，第一次連線多半仍是 TCP，可用 <code>curl --http3-only</code> 驗證）；再看網路品質——低丟包低 RTT 的機房網路本來就沒多少 HoL 可省；最後看 CPU 有沒有變成新瓶頸。<br>
+    <strong>Q：HPACK 為什麼不能直接用在 HTTP/3？</strong>
+    答：動態表的索引一致性依賴「標頭區塊嚴格按序處理」，而 QUIC 刻意允許 stream 之間亂序。QPACK 把表的更新拆到專屬的 encoder／decoder stream，並用 Required Insert Count 讓最多幾條 stream 可被掛起變成可調參數。</p>
+  </div>
+
+  <p>把本篇收攏成一句：<strong>HTTP/2 已經在自己的層級上做對了每一件事，剩下的問題只能往下一層解</strong>。QUIC 的做法不是優化 TCP，而是承認「單一有序位元組串流」這個抽象本身不適合多路復用，然後在 UDP 上重新選了一組保證——每個 stream 各自有序、連線識別與位址脫鉤、交握與加密合而為一。代價是所有依附在 TCP 生態上的東西（網卡卸載、抓包工具、L4 負載均衡）都得重做一遍。</p>
+
+  <p>但把 transport 換掉，換到的仍然是<strong>同一種通訊模式的更好版本</strong>：客戶端問、伺服器答，只是問得更快、答得更不容易被卡住。有一整類需求它從頭到尾沒有碰——<strong>伺服器想在沒有人問的時候主動開口，而且要持續地講下去</strong>。這需要的不是更快的請求回應，而是一條真正的雙向長連線。下一篇進入 <strong>WebSocket</strong>：它的交握、framing、保活與重連，以及在 HTTP/3 世界裡的對應物（RFC 9220 的 Extended CONNECT over HTTP/3，以及直接吃 QUIC stream 與 datagram 的 WebTransport）——那些細節，留給篇 5。</p>
+
+  <div class="oneliner">
+    <b>一句話答法</b>選 QUIC 買的是「網路越糟收益越大」的三件事：stream 獨立、1-RTT／0-RTT 交握、連線可遷移；付的是雙 stack 維運、較高 CPU、歸零的可觀測性與必須重寫的 L4 負載均衡——所以公網邊緣普遍值得開，機房內部通常不划算。
+  </div>
+</section>
+
+</div>
+
+      </div>
+    </main>
+  </div>
+
+  <script>
+    "use strict";
+    document.addEventListener("DOMContentLoaded", function () {
+      /* ===== TOC scrollspy, mobile accordion & desktop collapse ===== */
+      (function () {
+        var links = Array.prototype.slice.call(document.querySelectorAll(".toc-nav a"));
+        var map = {};
+        links.forEach(function (a) {
+          var href = a.getAttribute("href");
+          if (href && href.startsWith("#")) {
+            map[href.slice(1)] = a;
+          }
+        });
+        var secs = links.map(function (a) {
+          var href = a.getAttribute("href");
+          return href && href.startsWith("#") ? document.getElementById(href.slice(1)) : null;
+        }).filter(Boolean);
+
+        if (secs.length > 0 && typeof IntersectionObserver !== "undefined") {
+          var obs = new IntersectionObserver(function (entries) {
+            entries.forEach(function (e) {
+              if (e.isIntersecting) {
+                links.forEach(function (l) { l.classList.remove("active"); });
+                var act = map[e.target.id];
+                if (act) act.classList.add("active");
+              }
+            });
+          }, { rootMargin: "-20% 0px -70% 0px", threshold: 0 });
+          secs.forEach(function (s) { obs.observe(s); });
+        }
+
+        /* mobile：目錄 accordion（≤920px） */
+        var toggle = document.querySelector(".toc-toggle");
+        var nav = document.querySelector(".toc-nav");
+        if (toggle && nav) {
+          toggle.addEventListener("click", function () {
+            var open = nav.classList.toggle("open");
+            toggle.setAttribute("aria-expanded", open ? "true" : "false");
+          });
+          nav.addEventListener("click", function (e) {
+            if (e.target.closest("a") && window.innerWidth <= 920) {
+              nav.classList.remove("open");
+              toggle.setAttribute("aria-expanded", "false");
+            }
+          });
+        }
+
+        /* desktop：收合側欄（預設展開；不持久化） */
+        var collapseBtn = document.querySelector(".toc-collapse");
+        var reopenBtn = document.querySelector(".toc-reopen");
+        function setTocCollapsed(collapsed) {
+          document.body.classList.toggle("toc-collapsed", collapsed);
+          if (collapseBtn) collapseBtn.setAttribute("aria-expanded", collapsed ? "false" : "true");
+          if (reopenBtn) reopenBtn.setAttribute("aria-expanded", collapsed ? "false" : "true");
+          if (collapsed && reopenBtn) reopenBtn.focus();
+          else if (!collapsed && collapseBtn) collapseBtn.focus();
+        }
+        if (collapseBtn) {
+          collapseBtn.addEventListener("click", function () { setTocCollapsed(true); });
+        }
+        if (reopenBtn) {
+          reopenBtn.addEventListener("click", function () { setTocCollapsed(false); });
+        }
+      })();
+    });
+  </script>
+
+  
+<script>
+(function () {
+  "use strict";
+
+  var STREAMS = ["A", "B", "C"];
+  /* 線上的送出順序：A1 B1 C1 A2 B2 C2 A3 B3 C3 */
+  var PACKETS = [];
+  (function build() {
+    for (var n = 1; n <= 3; n++) {
+      for (var s = 0; s < STREAMS.length; s++) {
+        PACKETS.push({ i: PACKETS.length + 1, s: STREAMS[s], n: n });
+      }
+    }
+  })();
+  var TOTAL = PACKETS.length;          /* 9 */
+  var LAST_STEP = TOTAL + 2;           /* 9 個封包 + 偵測重傳 + 重傳抵達 */
+
+  var scenario = "loss";
+  var step = 0;
+  var lostIdx = 5;                     /* 預設遺失 B2 */
+
+  var statusEl = document.getElementById("quic-status");
+  var lossView = document.getElementById("quic-loss-view");
+  var migView = document.getElementById("quic-mig-view");
+  var wireEl = document.getElementById("quic-wire");
+  var btnNext = document.getElementById("quic-btn-next");
+  var btnReset = document.getElementById("quic-btn-reset");
+
+  var MIG = [
+    {
+      status: "連線建立於 Wi-Fi，三個 stream 正在傳輸。兩側目前沒有差別。",
+      tcp: [
+        { t: "五元組 = (TCP, 10.0.1.7:51423, 93.184.x.x:443)", c: "on" },
+        { t: "HTTP/2 SETTINGS 已協商 · HPACK 動態表 62 筆", c: "" },
+        { t: "傳輸中：3 個 stream，進度 60%", c: "" }
+      ],
+      q: [
+        { t: "DCID = 0x8f3a91c2（與位址無關）", c: "on" },
+        { t: "備用 CID 已由 NEW_CONNECTION_ID 預先發放", c: "" },
+        { t: "傳輸中：3 個 stream，進度 60%", c: "" }
+      ],
+      p: { tcpId: "五元組（Wi-Fi）", qId: "DCID 0x8f3a91c2", net: "Wi-Fi", tcpCost: "—", qCost: "—", prog: "TCP 60% / QUIC 60%" }
+    },
+    {
+      status: "使用者走出門：Wi-Fi 斷開，切換到 4G。來源 IP 與 port 全部改變。",
+      tcp: [
+        { t: "來源位址變成 172.20.8.3:60112 → 五元組不再匹配", c: "bad" },
+        { t: "HTTP/2 SETTINGS 已協商 · HPACK 動態表 62 筆", c: "" },
+        { t: "傳輸中斷", c: "bad" }
+      ],
+      q: [
+        { t: "來源位址變成 172.20.8.3:60112，但 DCID 不變", c: "on" },
+        { t: "封包照樣寫 DCID = 0x8f3a91c2 送出", c: "on" },
+        { t: "傳輸暫緩，等待伺服器回應", c: "" }
+      ],
+      p: { tcpId: "五元組已失效", qId: "DCID 0x8f3a91c2（不變）", net: "4G（新位址）", tcpCost: "連線中斷", qCost: "尚未確定", prog: "TCP 60% / QUIC 60%" }
+    },
+    {
+      status: "伺服器收到來自新位址的封包。兩側的查表方式決定了結局。",
+      tcp: [
+        { t: "查五元組 → 找不到任何連線", c: "bad" },
+        { t: "回一個 RST，舊連線狀態被丟棄", c: "bad" },
+        { t: "應用層收到「連線被重置」", c: "bad" }
+      ],
+      q: [
+        { t: "查 DCID → 命中，就是原本那條連線", c: "ok" },
+        { t: "但不直接信任：送出 PATH_CHALLENGE（隨機值）", c: "on" },
+        { t: "在新路徑上等待 PATH_RESPONSE", c: "on" }
+      ],
+      p: { tcpId: "查無此連線", qId: "DCID 命中", net: "4G（新位址）", tcpCost: "RST", qCost: "路徑驗證中", prog: "TCP 60% / QUIC 60%" }
+    },
+    {
+      status: "TCP 側只能重建連線；QUIC 側完成路徑驗證，並重新探測新路徑的容量。",
+      tcp: [
+        { t: "重建：TCP 三向交握 1-RTT + TLS 交握 1-RTT", c: "bad" },
+        { t: "HTTP/2 SETTINGS 重新協商、HPACK 動態表歸零", c: "bad" },
+        { t: "已下載進度多半從頭來（除非應用自己做 Range 續傳）", c: "bad" }
+      ],
+      q: [
+        { t: "收到正確的 PATH_RESPONSE → 新路徑驗證通過", c: "ok" },
+        { t: "重置壅塞控制器與 RTT 估計（新路徑容量未知）", c: "on" },
+        { t: "stream 進度、已解析標頭全部保留", c: "ok" }
+      ],
+      p: { tcpId: "重建中", qId: "DCID 0x8f3a91c2", net: "4G（新位址）", tcpCost: "2-RTT + 狀態重來", qCost: "1 次路徑驗證", prog: "TCP 0% / QUIC 60%" }
+    },
+    {
+      status: "最後一步：QUIC 換用一個沒在網路上出現過的備用 CID，避免路徑上的觀察者把兩個位址串起來。",
+      tcp: [
+        { t: "新的五元組 = (TCP, 172.20.8.3:60112, 93.184.x.x:443)", c: "" },
+        { t: "重建完成，重新開始下載", c: "bad" },
+        { t: "總代價：2-RTT + 全部連線狀態重來", c: "bad" }
+      ],
+      q: [
+        { t: "改用備用 CID = 0x41d7be05（首次出現在網路上）", c: "ok" },
+        { t: "傳輸繼續，應用層完全無感", c: "ok" },
+        { t: "總代價：一次路徑驗證 + 壅塞控制重新探測", c: "ok" }
+      ],
+      p: { tcpId: "新五元組（新連線）", qId: "DCID 0x41d7be05", net: "4G（已驗證）", tcpCost: "2-RTT + 狀態全失", qCost: "1 次路徑驗證", prog: "TCP 0% / QUIC 60%（續傳）" }
+    }
+  ];
+
+  function setText(id, txt) {
+    var el = document.getElementById(id);
+    if (el) el.textContent = txt;
+  }
+
+  function pktLabel(p) {
+    return "#" + p.i + " S-" + p.s + p.n;
+  }
+
+  /* ---------- 丟包情境 ---------- */
+
+  function arrivedCount() {
+    return Math.min(step, TOTAL);
+  }
+
+  function isFixed() {
+    return step >= TOTAL + 2;
+  }
+
+  function tcpState(p) {
+    var t = arrivedCount();
+    if (isFixed()) return "ok";
+    if (p.i === lostIdx && t >= lostIdx) return "lost";
+    if (p.i > t) return "idle";
+    var deliveredUpto = t < lostIdx ? t : lostIdx - 1;
+    return p.i <= deliveredUpto ? "ok" : "held";
+  }
+
+  function quicArrived(i) {
+    if (isFixed()) return true;
+    if (i === lostIdx) return false;
+    return i <= arrivedCount();
+  }
+
+  function quicState(p) {
+    var t = arrivedCount();
+    if (!quicArrived(p.i)) return p.i <= t ? "lost" : "idle";
+    /* 同一條 stream 內，前面每一塊都到了才算交付 */
+    for (var k = 0; k < PACKETS.length; k++) {
+      var q = PACKETS[k];
+      if (q.s === p.s && q.n < p.n && !quicArrived(q.i)) return "held";
+    }
+    return "ok";
+  }
+
+  function renderWire() {
+    var html = "";
+    var t = arrivedCount();
+    for (var k = 0; k < PACKETS.length; k++) {
+      var p = PACKETS[k];
+      var cls = "quic-pk";
+      if (p.i === lostIdx) cls += step >= TOTAL + 1 ? " rtx" : " mark";
+      else if (p.i <= t) cls += " sent";
+      html += '<span class="' + cls + '" data-pk="' + p.i + '">' + pktLabel(p) + "</span>";
+    }
+    wireEl.innerHTML = html;
+  }
+
+  function renderLane(containerId, stateFn) {
+    var html = "";
+    var blocked = {};
+    var ok = 0, held = 0;
+    for (var s = 0; s < STREAMS.length; s++) {
+      var name = STREAMS[s];
+      html += '<div class="quic-srow"><span class="sl">Stream ' + name + "</span>";
+      for (var k = 0; k < PACKETS.length; k++) {
+        var p = PACKETS[k];
+        if (p.s !== name) continue;
+        var st = stateFn(p);
+        if (st === "ok") ok++;
+        if (st === "held") held++;
+        if (st === "held" || st === "lost") blocked[name] = true;
+        var label = st === "ok" ? "交付" : st === "held" ? "扣住" : st === "lost" ? "遺失" : "—";
+        html += '<span class="quic-box st-' + st + '">' + name + p.n + " " + label + "</span>";
+      }
+      html += "</div>";
+    }
+    document.getElementById(containerId).innerHTML = html;
+    return { ok: ok, held: held, blocked: Object.keys(blocked).length };
+  }
+
+  function lossStatus() {
+    var t = arrivedCount();
+    var lp = PACKETS[lostIdx - 1];
+    if (step === 0) {
+      return "目前標記遺失的是 " + pktLabel(lp) + "。點其他封包可以改，按「下一步」開始逐格推進。";
+    }
+    if (step <= TOTAL) {
+      var p = PACKETS[t - 1];
+      if (p.i === lostIdx) {
+        return pktLabel(p) + " 在路徑上遺失。從這一格開始，兩側的行為開始分岔。";
+      }
+      return pktLabel(p) + " 抵達。TCP 側只要洞還在，後面的資料一律扣在核心緩衝；QUIC 側只看它屬於哪條 stream。";
+    }
+    if (step === TOTAL + 1) {
+      return "兩側都偵測到破洞：TCP 靠重複 ACK，QUIC 靠 ACK frame 裡的 ACK Range 缺口。" +
+        pktLabel(lp) + " 重傳送出——QUIC 會用一個編號更大的新 packet 送同一份資料。";
+    }
+    return "重傳抵達。TCP 一次把緩衝裡積壓的資料全部交付（這段等待就是 HoL Blocking）；QUIC 只補上 Stream " +
+      lp.s + " 的缺口，另外兩條 stream 早就交付完畢。";
+  }
+
+  function renderLoss() {
+    renderWire();
+    var tcp = renderLane("quic-tcp-rows", tcpState);
+    var q = renderLane("quic-q-rows", quicState);
+
+    setText("quic-m-tcp-ok", tcp.ok + " / " + TOTAL + " 塊");
+    setText("quic-m-tcp-held", tcp.held + " 塊");
+    setText("quic-m-tcp-blk", tcp.blocked + " / 3 條");
+    setText("quic-m-q-ok", q.ok + " / " + TOTAL + " 塊");
+    setText("quic-m-q-held", q.held + " 塊");
+    setText("quic-m-q-blk", q.blocked + " / 3 條");
+
+    setText("quic-tcp-note", tcp.held > 0
+      ? "接收緩衝裡有 " + tcp.held + " 塊資料「已經安全抵達，卻交不上去」——因為 TCP 不能跳過洞，也看不見裡面有幾條 stream。"
+      : "沒有破洞，位元組串流連續交付。");
+    setText("quic-q-note", q.held > 0
+      ? "只有 Stream " + PACKETS[lostIdx - 1].s + " 在等自己的缺口；另外兩條 stream 的重組緩衝是乾淨的。"
+      : "三條 stream 各自重組，目前沒有任何一條在等。");
+
+    statusEl.textContent = lossStatus();
+  }
+
+  /* ---------- 遷移情境 ---------- */
+
+  function renderMigRows(containerId, rows) {
+    document.getElementById(containerId).innerHTML = rows.map(function (r) {
+      return '<div class="mrow ' + r.c + '">' + r.t + "</div>";
+    }).join("");
+  }
+
+  function renderMig() {
+    var d = MIG[Math.min(step, MIG.length - 1)];
+    renderMigRows("quic-mig-tcp", d.tcp);
+    renderMigRows("quic-mig-q", d.q);
+    setText("quic-m-tcp-id", d.p.tcpId);
+    setText("quic-m-q-id", d.p.qId);
+    setText("quic-m-net", d.p.net);
+    setText("quic-m-tcp-cost", d.p.tcpCost);
+    setText("quic-m-q-cost", d.p.qCost);
+    setText("quic-m-progress", d.p.prog);
+    statusEl.textContent = d.status;
+  }
+
+  /* ---------- 共用 ---------- */
+
+  function maxStep() {
+    return scenario === "loss" ? LAST_STEP : MIG.length - 1;
+  }
+
+  function render() {
+    var isLoss = scenario === "loss";
+    lossView.hidden = !isLoss;
+    migView.hidden = isLoss;
+    if (isLoss) renderLoss(); else renderMig();
+    btnNext.disabled = step >= maxStep();
+  }
+
+  function reset() {
+    step = 0;
+    render();
+  }
+
+  function next() {
+    if (step < maxStep()) {
+      step += 1;
+      render();
+    }
+  }
+
+  wireEl.addEventListener("click", function (ev) {
+    var target = ev.target.closest ? ev.target.closest(".quic-pk") : null;
+    if (!target) return;
+    var idx = parseInt(target.getAttribute("data-pk"), 10);
+    if (!idx) return;
+    lostIdx = idx;
+    step = 0;
+    render();
+    statusEl.textContent = "已把 " + pktLabel(PACKETS[idx - 1]) +
+      " 標記為遺失。按「下一步」推進，看兩側各自有多少資料交不上去。";
+  });
+
+  Array.prototype.forEach.call(
+    document.querySelectorAll("#quic-demo .seg button"),
+    function (btn) {
+      btn.addEventListener("click", function () {
+        Array.prototype.forEach.call(
+          document.querySelectorAll("#quic-demo .seg button"),
+          function (b) { b.setAttribute("aria-pressed", "false"); }
+        );
+        btn.setAttribute("aria-pressed", "true");
+        scenario = btn.getAttribute("data-sc");
+        reset();
+      });
+    }
+  );
+
+  btnNext.addEventListener("click", next);
+  btnReset.addEventListener("click", reset);
+
+  reset();
+})();
+</script>
+
+
+<!-- FULLSCREEN-FEATURE:START -->
+<style>
+  .fs-toggle {
+    position: fixed;
+    top: 18px;
+    right: 18px;
+    z-index: 1000;
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    font-family: var(--sans, system-ui, -apple-system, "Segoe UI", sans-serif);
+    font-size: 12.5px;
+    line-height: 1;
+    color: var(--text-2, #6b7078);
+    background: var(--bg, #ffffff);
+    border: 1px solid var(--border-strong, #dedcd8);
+    border-radius: 999px;
+    padding: 7px 13px 7px 11px;
+    cursor: pointer;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, .06), 0 4px 12px rgba(0, 0, 0, .04);
+    transition: background .15s, border-color .15s, color .15s;
+  }
+
+  .fs-toggle:hover {
+    background: var(--bg-soft, #fafaf9);
+    color: var(--text, #262a2f);
+    border-color: var(--text-3, #9aa0a8);
+  }
+
+  .fs-toggle:focus-visible {
+    outline: 2px solid var(--accent, #3f6188);
+    outline-offset: 2px;
+  }
+
+  .fs-toggle[aria-pressed="true"] {
+    background: var(--accent, #3f6188);
+    color: #fff;
+    border-color: var(--accent, #3f6188);
+  }
+
+  .fs-toggle .fs-ic {
+    flex: 0 0 auto;
+    display: block;
+  }
+
+  @media print {
+    .fs-toggle { display: none !important; }
+  }
+
+  @media (max-width: 480px) {
+    .fs-toggle { padding: 8px; }
+    .fs-toggle .fs-label { display: none; }
+  }
+</style>
+<button id="fs-toggle-btn" class="fs-toggle" type="button" aria-pressed="false"
+        aria-label="切換全螢幕檢視 (快捷鍵 F)" title="全螢幕檢視 (F)">
+  <svg class="fs-ic fs-ic-expand" viewBox="0 0 24 24" width="15" height="15" fill="none"
+       stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+    <path d="M8 3H5a2 2 0 0 0-2 2v3m18 0V5a2 2 0 0 0-2-2h-3m0 18h3a2 2 0 0 0 2-2v-3M3 16v3a2 2 0 0 0 2 2h3"/>
+  </svg>
+  <svg class="fs-ic fs-ic-compress" viewBox="0 0 24 24" width="15" height="15" fill="none"
+       stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="display:none">
+    <path d="M8 3v3a2 2 0 0 1-2 2H3m18 0h-3a2 2 0 0 1-2-2V3m0 18v-3a2 2 0 0 1 2-2h3M3 16h3a2 2 0 0 1 2 2v3"/>
+  </svg>
+  <span class="fs-label">全螢幕</span>
+</button>
+<script>
+  "use strict";
+  (function () {
+    var btn = document.getElementById("fs-toggle-btn");
+    if (!btn) return;
+    var docEl = document.documentElement;
+    var canFs = !!(docEl.requestFullscreen || docEl.webkitRequestFullscreen);
+    // 不支援 Fullscreen API (如 iPhone Safari) → 隱藏按鈕，避免壞掉的 UI
+    if (!canFs) { btn.style.display = "none"; return; }
+
+    var expandIc = btn.querySelector(".fs-ic-expand");
+    var compressIc = btn.querySelector(".fs-ic-compress");
+    var label = btn.querySelector(".fs-label");
+
+    function isFs() {
+      return !!(document.fullscreenElement || document.webkitFullscreenElement);
+    }
+    function enter() {
+      if (docEl.requestFullscreen) docEl.requestFullscreen();
+      else if (docEl.webkitRequestFullscreen) docEl.webkitRequestFullscreen();
+    }
+    function exit() {
+      if (document.exitFullscreen) document.exitFullscreen();
+      else if (document.webkitExitFullscreen) document.webkitExitFullscreen();
+    }
+    function toggle() { isFs() ? exit() : enter(); }
+    function sync() {
+      var on = isFs();
+      btn.setAttribute("aria-pressed", on ? "true" : "false");
+      if (label) label.textContent = on ? "離開全螢幕" : "全螢幕";
+      if (expandIc) expandIc.style.display = on ? "none" : "block";
+      if (compressIc) compressIc.style.display = on ? "block" : "none";
+    }
+
+    btn.addEventListener("click", toggle);
+    document.addEventListener("fullscreenchange", sync);
+    document.addEventListener("webkitfullscreenchange", sync);
+    document.addEventListener("keydown", function (e) {
+      if (e.key !== "f" && e.key !== "F") return;
+      if (e.metaKey || e.ctrlKey || e.altKey) return;
+      var t = e.target;
+      var tag = t && t.tagName ? t.tagName.toUpperCase() : "";
+      if (tag === "INPUT" || tag === "TEXTAREA" || (t && t.isContentEditable)) return;
+      e.preventDefault();
+      toggle();
+    });
+    sync();
+  })();
+</script>
+<!-- FULLSCREEN-FEATURE:END -->
+</body>
+</html>
