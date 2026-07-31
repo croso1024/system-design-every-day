@@ -1,0 +1,241 @@
+<script>
+(function () {
+  "use strict";
+
+  var scenario = "full";
+  var authMode = "server";
+  var stepIdx = 0;
+  var steps = [];
+
+  var statusEl = document.getElementById("tlsx-status");
+  var listEl = document.getElementById("tlsx-msgs");
+  var btnNext = document.getElementById("tlsx-btn-next");
+  var btnReset = document.getElementById("tlsx-btn-reset");
+
+  var ENC_LABEL = {
+    none: "未加密",
+    plain: "明文",
+    hs: "handshake key",
+    app: "application key",
+    early: "early data key"
+  };
+
+  var PANEL_IDS = {
+    key: "tlsx-p-key", fs: "tlsx-p-fs", srv: "tlsx-p-srv", cli: "tlsx-p-cli",
+    rtt: "tlsx-p-rtt", first: "tlsx-p-first", sig: "tlsx-p-sig", replay: "tlsx-p-replay"
+  };
+
+  var BASE_PANEL = {
+    key: "尚無", fs: "—", srv: "未驗證", cli: "未要求",
+    rtt: "0（尚未開始）", first: "尚未送出", sig: "0", replay: "無|ok"
+  };
+
+  function M(side, enc, name, chips, note, set, status) {
+    return {
+      side: side, enc: enc, name: name,
+      chips: chips ? chips.split("|") : [],
+      note: note, set: set || {}, status: status || note
+    };
+  }
+
+  function buildFull(mtls) {
+    var s = [];
+    s.push(M("sys", "none", "TCP 三向交握完成", "SYN|SYN+ACK|ACK",
+      "TLS 還沒開始——這 1 個 RTT 是 TCP 先付掉的，與 TLS 無關。", {},
+      "TCP 連線已建立。接下來 TLS 要在這條可靠但明文的通道上，插入自己的交握。"));
+    s.push(M("c", "plain", "ClientHello",
+      "client_random|key_share（X25519 臨時公鑰）|supported_versions=1.3|cipher_suites|signature_algorithms|server_name=api.example.com|alpn=[h2, http/1.1]",
+      "整則明文。SNI 與 ALPN 提議都在這裡，路徑上的中間設備看得到你要連哪個網域。key_share 是 1-RTT 的關鍵：先把臨時公鑰押上去，不必先問一輪「你支援什麼」。",
+      { key: "尚無（明文傳輸）" },
+      "客戶端一次把版本、密碼套件、臨時公鑰、SNI 與 ALPN 全部提出——並賭伺服器接受這個曲線群組。"));
+    s.push(M("s", "plain", "ServerHello",
+      "server_random|key_share（伺服器臨時公鑰）|cipher_suite=TLS_AES_128_GCM_SHA256",
+      "最後一則明文。送完之後雙方各自用「自己的臨時私鑰 × 對方的 key_share」算出同一把 ECDHE 共享密鑰，handshake 流量金鑰就緒。",
+      { key: "handshake traffic key", fs: "有（臨時 ECDHE）|ok", rtt: "進行中（第 1 趟）" },
+      "加密起點：ServerHello 之後的每一則交握訊息都被加密，包含接下來的憑證鏈。"));
+    s.push(M("s", "hs", "{EncryptedExtensions}", "alpn=h2|SNI 已接受",
+      "ALPN 協商結果在這裡回覆——你等一下跑 HTTP/2 還是 HTTP/1.1，其實在 TLS 交握就定案了。", {},
+      "第一則加密訊息：ALPN 結果與其餘不涉及憑證的擴充都放這裡。"));
+    if (mtls) {
+      s.push(M("s", "hs", "{CertificateRequest}", "signature_algorithms|certificate_authorities",
+        "伺服器要求客戶端也出示憑證——這一則就是 mTLS 與一般 HTTPS 的唯一分歧點。",
+        { cli: "已被要求|warn" },
+        "mTLS：伺服器反過來問「你又是誰」。"));
+    }
+    s.push(M("s", "hs", "{Certificate}", "leaf：SAN=api.example.com|intermediate CA",
+      "憑證鏈本身也被加密（TLS 1.2 時代這是明文）。Root 不會被傳送——它必須已經在客戶端的信任庫裡。", {},
+      "伺服器送出憑證鏈：leaf + 中繼。漏送中繼是最常見的部署事故。"));
+    s.push(M("s", "hs", "{CertificateVerify}", "sign(transcript, 憑證私鑰)",
+      "用憑證對應的私鑰對「到目前為止的交握紀錄」簽章，證明它真的持有私鑰——把別人的憑證抄來貼上，會在這一步失敗。",
+      { sig: "1" },
+      "把「持有憑證」與「持有私鑰」綁在一起的關鍵一步。"));
+    s.push(M("s", "hs", "{Finished}", "HMAC(transcript)",
+      "交握完整性檢查：中間若有人竄改過任何一則訊息，這個值就對不上。此時伺服器已可送出應用資料。", {},
+      "伺服器方向的交握結束。"));
+    s.push(M("sys", "hs", "客戶端驗證憑證鏈",
+      "鏈可達信任錨|SAN 名稱相符|有效期|EKU serverAuth|未吊銷",
+      "五項全過才繼續。名稱比對用的就是你在 DNS 查的那個名稱——DNS 就算被劫持，攻擊者也拿不出一張含該名稱、又能鏈到公開 Root 的憑證。",
+      { srv: "已驗證|ok" },
+      "驗證失敗就在這裡中止連線；curl -k 跳過的正是這一步。"));
+    if (mtls) {
+      s.push(M("c", "hs", "{Certificate} · {CertificateVerify}",
+        "client leaf：SAN=spiffe://…/checkout|sign(transcript, 客戶端私鑰)",
+        "客戶端做完全相同的事：出示憑證，再用私鑰簽 transcript。伺服器驗完鏈就取得對端的工作負載身分。",
+        { cli: "已驗證|ok", sig: "2" },
+        "mTLS：身分綁在連線上，因此不像 token 那樣可被複製重放。"));
+    }
+    s.push(M("c", "hs", "{Finished}", "HMAC(transcript)",
+      "客戶端方向的交握結束，之後雙方改用 application 流量金鑰。",
+      { key: "application traffic key" },
+      "交握完成，金鑰切換到 application traffic key。"));
+    s.push(M("c", "app", "Application Data（第一個請求）", "GET /v1/products",
+      "不必等伺服器任何回應——從 ClientHello 算起剛好一個來回。這就是 1-RTT 的具體意思。",
+      { rtt: "1-RTT", first: "TLS 1 個 RTT 之後" },
+      "第一個應用資料上路。TCP 1 RTT + TLS 1 RTT，就是首位元組之前的固定成本。"));
+    s.push(M("s", "app", "{NewSessionTicket} ×2", "PSK ticket（STEK 加密）|max_early_data_size",
+      "交握完成「之後」伺服器才發票券，供下一條連線做 session resumption。切到左邊第二個情境，看它怎麼被花掉。", {},
+      "票券已發出——下一條連線就能省掉憑證傳輸與非對稱簽章。"));
+    return s;
+  }
+
+  function buildResume(mtls) {
+    var s = [];
+    s.push(M("sys", "none", "前提：上一次交握留下的 PSK ticket",
+      "ticket（客戶端已快取）|resumption master secret",
+      "沒有票券就沒有 resumption。票券由伺服器的 ticket 金鑰（STEK）加密，叢集裡所有節點必須共用同一把才解得開。",
+      { srv: "待由 PSK 繼承" },
+      "本情境的前提：客戶端手上有一張還沒過期的票券。"));
+    s.push(M("sys", "none", "TCP 三向交握完成", "SYN|SYN+ACK|ACK",
+      "TCP 這 1 個 RTT 仍然躲不掉——0-RTT 指的是「TLS 不再額外增加往返」，不是「連線瞬間建立」。", {},
+      "TCP 已建立。注意 0-RTT 省的是 TLS 那一趟，不是 TCP 那一趟。"));
+    s.push(M("c", "plain", "ClientHello",
+      "pre_shared_key（出示 ticket）|psk_key_exchange_modes=psk_dhe_ke|key_share|early_data|server_name|alpn",
+      "仍然帶 key_share：交握完成後的流量要靠新的 ECDHE 重新取得前向保密。early_data 擴充則宣告「我接著就要送應用資料」。",
+      { key: "尚無（明文傳輸）" },
+      "出示票券，並宣告接下來要送 early data。"));
+    s.push(M("c", "early", "Early Data（0-RTT 應用資料）",
+      "GET /v1/products|以 PSK 導出的 early traffic key 加密",
+      "與 ClientHello 同一趟送出——延遲收益全部來自這裡。但這段沒有新鮮的 ECDHE 參與（無前向保密），伺服器在交握完成前也沒有任何新鮮性證據可以判斷它是不是舊封包的複本。",
+      { key: "early data key（PSK 導出）", fs: "無（僅 PSK）|bad",
+        first: "0 RTT（與 ClientHello 同行）|ok", replay: "高 · 只能放冪等請求|bad" },
+      "0-RTT 的收益與代價在同一則訊息裡：延遲歸零，但可被重放且無前向保密。"));
+    s.push(M("s", "plain", "ServerHello", "pre_shared_key=已選定|key_share|server_random",
+      "伺服器接受該 PSK，同時完成 ECDHE——交握完成後的流量因此重新具備前向保密。",
+      { key: "handshake traffic key", fs: "交握後恢復（psk_dhe_ke）|ok", rtt: "進行中（與應用資料並行）" },
+      "伺服器認可票券，並照常做一次 ECDHE。"));
+    s.push(M("s", "hs", "{EncryptedExtensions}", "early_data=已接受|alpn=h2",
+      "沒有 Certificate、沒有 CertificateVerify——伺服器身分由 PSK 繼承自上一次完整交握，因此省下憑證傳輸與非對稱簽章。伺服器也可以在這裡拒絕 early data，客戶端就必須在交握完成後重送。",
+      { srv: "由 PSK 繼承|ok" },
+      "resumption 真正省下的東西：整條憑證鏈與一次簽章驗證。"));
+    if (mtls) {
+      s.push(M("sys", "hs", "客戶端身分：同樣由 PSK 繼承",
+        "不重送 client Certificate|不重做 CertificateVerify",
+        "TLS 1.3 的 resumption 不會重跑客戶端驗證——身分綁在票券所代表的那一次完整交握上。因此票券的保護強度與有效期，實質上就是客戶端身分的有效期。",
+        { cli: "由 PSK 繼承|warn" },
+        "mTLS + resumption：客戶端憑證不重送，票券本身成了身分憑據。"));
+    }
+    s.push(M("s", "hs", "{Finished}", "HMAC(transcript)",
+      "交握完整性檢查，與完整交握相同。", {},
+      "伺服器方向的交握結束。"));
+    s.push(M("c", "hs", "{EndOfEarlyData} · {Finished}", "early data 結束宣告|HMAC(transcript)",
+      "宣告早期資料結束，之後改用 application 流量金鑰。",
+      { key: "application traffic key" },
+      "早期資料結束，金鑰切換到 application traffic key。"));
+    s.push(M("c", "app", "Application Data（後續請求）", "後續請求走一般加密通道",
+      "完成。相對完整交握省下 1 個 RTT、一次非對稱簽章，以及整條憑證鏈的傳輸與驗證。",
+      { rtt: "0-RTT（TLS 未額外往返）", sig: "0" },
+      "完成：TLS 沒有為這條連線多花任何一趟往返——代價已經記在「重放風險」那一欄。"));
+    return s;
+  }
+
+  function dirLabel(side) {
+    if (side === "c") return "C → S";
+    if (side === "s") return "S → C";
+    return "——";
+  }
+
+  function esc(t) {
+    return String(t).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  }
+
+  function renderList() {
+    if (!listEl) return;
+    listEl.innerHTML = steps.map(function (st, i) {
+      var cls = ["tlsx-msg", "e-" + st.enc];
+      cls.push(st.side === "c" ? "c2s" : st.side === "s" ? "s2c" : "sys");
+      if (i > stepIdx) cls.push("pending");
+      if (i === stepIdx) cls.push("cur");
+      var chips = st.chips.map(function (c) {
+        return '<span class="mchip">' + esc(c) + "</span>";
+      }).join("");
+      return '<div class="' + cls.join(" ") + '">' +
+        '<div class="mhead"><span class="mdir">' + dirLabel(st.side) + "</span>" +
+        '<span class="mname">' + esc(st.name) + "</span>" +
+        '<span class="mtag">' + ENC_LABEL[st.enc] + "</span></div>" +
+        '<div class="mchips">' + chips + "</div>" +
+        '<div class="mnote">' + esc(st.note) + "</div></div>";
+    }).join("");
+  }
+
+  function renderPanel() {
+    var state = {};
+    var k;
+    for (k in BASE_PANEL) { if (BASE_PANEL.hasOwnProperty(k)) state[k] = BASE_PANEL[k]; }
+    for (var i = 0; i <= stepIdx && i < steps.length; i++) {
+      var set = steps[i].set;
+      for (k in set) { if (set.hasOwnProperty(k)) state[k] = set[k]; }
+    }
+    for (k in PANEL_IDS) {
+      if (!PANEL_IDS.hasOwnProperty(k)) continue;
+      var el = document.getElementById(PANEL_IDS[k]);
+      if (!el) continue;
+      var parts = String(state[k]).split("|");
+      el.textContent = parts[0];
+      el.className = "pv" + (parts[1] ? " " + parts[1] : "");
+    }
+  }
+
+  function render() {
+    var st = steps[stepIdx];
+    if (statusEl && st) statusEl.textContent = st.status;
+    renderList();
+    renderPanel();
+    if (btnNext) btnNext.disabled = stepIdx >= steps.length - 1;
+  }
+
+  function rebuild() {
+    steps = scenario === "full" ? buildFull(authMode === "mtls") : buildResume(authMode === "mtls");
+    stepIdx = 0;
+    render();
+  }
+
+  function next() {
+    if (stepIdx < steps.length - 1) {
+      stepIdx += 1;
+      render();
+    }
+  }
+
+  function bindSeg(attr, onPick) {
+    var sel = '#tlsx-demo .seg button[data-' + attr + ']';
+    var btns = document.querySelectorAll(sel);
+    Array.prototype.forEach.call(btns, function (btn) {
+      btn.addEventListener("click", function () {
+        Array.prototype.forEach.call(document.querySelectorAll(sel), function (b) {
+          b.setAttribute("aria-pressed", "false");
+        });
+        btn.setAttribute("aria-pressed", "true");
+        onPick(btn.getAttribute("data-" + attr));
+      });
+    });
+  }
+
+  bindSeg("sc", function (v) { scenario = v; rebuild(); });
+  bindSeg("auth", function (v) { authMode = v; rebuild(); });
+
+  if (btnNext) btnNext.addEventListener("click", next);
+  if (btnReset) btnReset.addEventListener("click", rebuild);
+
+  rebuild();
+})();
+</script>
