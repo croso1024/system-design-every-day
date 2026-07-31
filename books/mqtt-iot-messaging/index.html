@@ -1,0 +1,2623 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>MQTT 與 IoT Pub/Sub Messaging | System Design Every Day</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@300;400;500;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+  <script>
+    mermaid.initialize({
+      startOnLoad: true,
+      theme: 'default',
+      securityLevel: 'loose'
+    });
+  </script>
+  <style>
+    :root {
+      --bg: #ffffff;
+      --bg-soft: #fafaf9;
+      --text: #262a2f;
+      --text-2: #6b7078;
+      --text-3: #9aa0a8;
+      --border: #ecebe8;
+      --border-strong: #dedcd8;
+      --code-bg: #f6f5f3;
+      --accent: #3f6188;
+      --accent-soft: #eef2f7;
+      --accent-line: #cdd9e6;
+      --ok: #4d7d68;
+      --ok-soft: #eef4f1;
+      --warn: #a3743e;
+      --warn-soft: #f6f0e7;
+      --bad: #a8554f;
+      --bad-soft: #f6ecea;
+      --radius: 10px;
+      --radius-sm: 7px;
+      --maxw: 760px;
+      --sans: "Noto Sans TC", system-ui, -apple-system, "Segoe UI", sans-serif;
+      --mono: "JetBrains Mono", "SFMono-Regular", Menlo, Consolas, monospace;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    html {
+      scroll-behavior: smooth;
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      html {
+        scroll-behavior: auto;
+      }
+      * {
+        animation-duration: .001ms !important;
+        transition-duration: .001ms !important;
+      }
+    }
+
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font-family: var(--sans);
+      font-weight: 400;
+      font-size: 16px;
+      line-height: 1.78;
+      -webkit-font-smoothing: antialiased;
+      letter-spacing: .005em;
+    }
+
+    ::selection {
+      background: var(--accent-soft);
+    }
+
+    /* ---------- layout ---------- */
+    .wrap {
+      display: flex;
+      max-width: 1180px;
+      margin: 0 auto;
+      gap: 0;
+    }
+
+    .toc {
+      width: 248px;
+      flex: 0 0 248px;
+      position: sticky;
+      top: 0;
+      height: 100vh;
+      padding: 54px 22px 40px 28px;
+      overflow-y: auto;
+      border-right: 1px solid var(--border);
+      transition: width .2s ease, flex-basis .2s ease, padding .2s ease, opacity .15s ease, border-color .15s ease;
+    }
+
+    .toc-kicker {
+      font-family: var(--mono);
+      font-size: 11px;
+      letter-spacing: .14em;
+      text-transform: uppercase;
+      color: var(--text-3);
+      margin-bottom: 20px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+    }
+
+    /* desktop：側欄內收合鈕；mobile 隱藏（沿用既有 .toc-toggle） */
+    .toc-collapse {
+      display: none;
+      flex: 0 0 auto;
+      align-items: center;
+      justify-content: center;
+      width: 28px;
+      height: 28px;
+      padding: 0;
+      border: none;
+      background: none;
+      border-radius: 6px;
+      color: var(--text-2);
+      line-height: 1;
+      cursor: pointer;
+    }
+
+    .toc-collapse:hover {
+      color: var(--text);
+      background: var(--bg-soft);
+    }
+
+    .toc-collapse:focus-visible {
+      outline: 2px solid var(--accent);
+      outline-offset: 2px;
+    }
+
+    .toc-collapse svg {
+      display: block;
+    }
+
+    /* desktop：側欄收合後的展開鈕（預設隱藏） */
+    .toc-reopen {
+      display: none;
+      position: fixed;
+      top: 18px;
+      left: 18px;
+      z-index: 900;
+      align-items: center;
+      gap: 7px;
+      font-size: 12.5px;
+      line-height: 1;
+      color: var(--text-2);
+      background: var(--bg);
+      border: 1px solid var(--border-strong);
+      border-radius: 999px;
+      padding: 7px 13px 7px 11px;
+      box-shadow: 0 1px 3px rgba(0, 0, 0, .06), 0 4px 12px rgba(0, 0, 0, .04);
+      cursor: pointer;
+      transition: background .15s, border-color .15s, color .15s;
+    }
+
+    .toc-reopen:hover {
+      background: var(--bg-soft);
+      color: var(--text);
+      border-color: var(--text-3);
+    }
+
+    .toc-reopen svg {
+      flex: 0 0 auto;
+      display: block;
+    }
+
+    @media (min-width: 921px) {
+      .toc-collapse {
+        display: inline-flex;
+      }
+
+      body.toc-collapsed .toc {
+        width: 0;
+        flex-basis: 0;
+        padding: 0;
+        opacity: 0;
+        overflow: hidden;
+        border-right-color: transparent;
+        pointer-events: none;
+      }
+
+      body.toc-collapsed .toc-reopen {
+        display: inline-flex;
+      }
+    }
+
+    .toc-kicker a {
+      color: var(--text-3);
+      text-decoration: none;
+      border-bottom: none;
+      transition: color .15s;
+    }
+
+    .toc-kicker a:hover {
+      color: var(--text);
+    }
+
+    .toc-title {
+      font-size: 15px;
+      font-weight: 700;
+      line-height: 1.4;
+      margin: 0 0 24px;
+    }
+
+    .toc a {
+      display: flex;
+      gap: 10px;
+      align-items: baseline;
+      text-decoration: none;
+      color: var(--text-2);
+      font-size: 13.5px;
+      padding: 6px 10px;
+      border-radius: 6px;
+      line-height: 1.45;
+      transition: background .15s, color .15s;
+      border-bottom: none;
+    }
+
+    .toc a:hover {
+      background: var(--bg-soft);
+      color: var(--text);
+      border-bottom: none;
+    }
+
+    .toc a.active {
+      color: var(--accent);
+      background: var(--accent-soft);
+      font-weight: 500;
+      border-bottom: none;
+    }
+
+    .toc a .n {
+      font-family: var(--mono);
+      font-size: 11px;
+      color: var(--text-3);
+      flex: 0 0 18px;
+    }
+
+    .toc a.active .n {
+      color: var(--accent);
+    }
+
+    main {
+      flex: 1 1 auto;
+      min-width: 0;
+      padding: 0 40px;
+    }
+
+    .inner {
+      max-width: var(--maxw);
+      margin: 0 auto;
+      padding: 72px 0 140px;
+    }
+
+    /* ---------- hero ---------- */
+    .hero {
+      margin-bottom: 64px;
+    }
+
+    .hero .eyebrow {
+      font-family: var(--mono);
+      font-size: 12px;
+      letter-spacing: .16em;
+      text-transform: uppercase;
+      color: var(--accent);
+      margin-bottom: 18px;
+    }
+
+    .hero h1 {
+      font-size: 40px;
+      line-height: 1.18;
+      font-weight: 700;
+      margin: 0 0 18px;
+      letter-spacing: -.01em;
+    }
+
+    .hero .lede {
+      font-size: 18px;
+      line-height: 1.7;
+      color: var(--text-2);
+      font-weight: 300;
+      margin: 0;
+      max-width: 620px;
+    }
+
+    .hero .meta {
+      margin-top: 28px;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+
+    .tag {
+      font-family: var(--mono);
+      font-size: 12px;
+      color: var(--text-2);
+      border: 1px solid var(--border-strong);
+      padding: 4px 11px;
+      border-radius: 999px;
+      background: var(--bg-soft);
+    }
+
+    /* ---------- sections ---------- */
+    section {
+      padding-top: 30px;
+      scroll-margin-top: 24px;
+    }
+
+    .sec-head {
+      display: flex;
+      align-items: baseline;
+      gap: 14px;
+      margin: 0 0 8px;
+    }
+
+    .sec-num {
+      font-family: var(--mono);
+      font-size: 13px;
+      color: var(--text-3);
+      font-weight: 500;
+      padding-top: 6px;
+      flex: 0 0 auto;
+    }
+
+    h2 {
+      font-size: 27px;
+      font-weight: 700;
+      line-height: 1.3;
+      margin: 0;
+      letter-spacing: -.01em;
+    }
+
+    .sec-sub {
+      color: var(--text-2);
+      font-size: 15px;
+      margin: 2px 0 28px 0;
+      font-weight: 300;
+    }
+
+    h3 {
+      font-size: 18.5px;
+      font-weight: 700;
+      margin: 38px 0 12px;
+      line-height: 1.45;
+    }
+
+    h4 {
+      font-size: 15.5px;
+      font-weight: 700;
+      margin: 26px 0 8px;
+      color: var(--text);
+    }
+
+    p {
+      margin: 0 0 16px;
+    }
+
+    a {
+      color: var(--accent);
+      text-decoration: none;
+      border-bottom: 1px solid var(--accent-line);
+      transition: border-color .15s;
+    }
+
+    a:hover {
+      border-color: var(--accent);
+    }
+
+    strong {
+      font-weight: 700;
+    }
+
+    em {
+      font-style: normal;
+      background: var(--accent-soft);
+      padding: 0 4px;
+      border-radius: 4px;
+      font-weight: 500;
+      color: #2f4d6e;
+    }
+
+    hr.div {
+      border: none;
+      border-top: 1px solid var(--border);
+      margin: 46px 0;
+    }
+
+    ul, ol {
+      margin: 0 0 18px;
+      padding-left: 22px;
+    }
+
+    li {
+      margin: 7px 0;
+      padding-left: 4px;
+    }
+
+    li::marker {
+      color: var(--text-3);
+    }
+
+    code {
+      font-family: var(--mono);
+      font-size: .86em;
+      background: var(--code-bg);
+      padding: 2px 6px;
+      border-radius: 5px;
+      color: #43494f;
+    }
+
+    pre {
+      background: var(--code-bg);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 16px 18px;
+      overflow-x: auto;
+      margin: 0 0 20px;
+      line-height: 1.6;
+    }
+
+    pre code {
+      background: none;
+      padding: 0;
+      font-size: 13px;
+    }
+
+    /* ---------- math notation ---------- */
+    /* 行內數學變數，如 W、R、N。本站不載入 MathJax/KaTeX，請勿使用 $...$ 或 \[...\] LaTeX 分隔符。 */
+    var {
+      font-family: var(--mono);
+      font-style: normal;
+      font-weight: 500;
+      color: var(--accent);
+    }
+
+    /* 區塊數學公式，置中等寬呈現，記得將 > < & 轉義為 &gt; &lt; &amp;。 */
+    .formula {
+      font-family: var(--mono);
+      font-size: 15px;
+      text-align: center;
+      background: var(--bg-soft);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      padding: 14px 18px;
+      margin: 0 0 20px;
+      color: var(--text);
+      letter-spacing: .03em;
+      overflow-x: auto;
+    }
+
+    /* ---------- callouts ---------- */
+    .callout {
+      border: 1px solid var(--border);
+      border-left: 3px solid var(--border-strong);
+      background: var(--bg-soft);
+      border-radius: var(--radius-sm);
+      padding: 15px 18px;
+      margin: 0 0 22px;
+      font-size: 14.5px;
+    }
+
+    .callout .c-title {
+      font-weight: 700;
+      font-size: 13px;
+      letter-spacing: .02em;
+      margin-bottom: 5px;
+      display: flex;
+      gap: 7px;
+      align-items: center;
+    }
+
+    .callout p:last-child {
+      margin-bottom: 0;
+    }
+
+    .callout.accent {
+      border-left-color: var(--accent);
+      background: var(--accent-soft);
+    }
+
+    .callout.accent .c-title {
+      color: #2f4d6e;
+    }
+
+    .callout.warn {
+      border-left-color: var(--warn);
+      background: var(--warn-soft);
+    }
+
+    .callout.warn .c-title {
+      color: var(--warn);
+    }
+
+    .callout .ic {
+      font-family: var(--mono);
+      font-size: 11px;
+      border: 1px solid currentColor;
+      border-radius: 4px;
+      padding: 0 4px;
+      line-height: 1.5;
+      opacity: .8;
+    }
+
+    .oneliner {
+      border: 1px dashed var(--accent-line);
+      border-radius: var(--radius-sm);
+      padding: 13px 16px;
+      margin: 0 0 22px;
+      font-size: 14.5px;
+      background: #fbfcfd;
+    }
+
+    .oneliner b {
+      font-family: var(--mono);
+      font-size: 11px;
+      letter-spacing: .08em;
+      color: var(--accent);
+      display: block;
+      margin-bottom: 4px;
+      text-transform: uppercase;
+    }
+
+    /* ---------- tables ---------- */
+    .tbl-wrap {
+      overflow-x: auto;
+      margin: 0 0 24px;
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+    }
+
+    table {
+      border-collapse: collapse;
+      width: 100%;
+      font-size: 14px;
+      min-width: 520px;
+    }
+
+    th, td {
+      text-align: left;
+      padding: 11px 14px;
+      border-bottom: 1px solid var(--border);
+      vertical-align: top;
+    }
+
+    th {
+      font-weight: 700;
+      background: var(--bg-soft);
+      font-size: 12.5px;
+      letter-spacing: .02em;
+      color: var(--text-2);
+      position: sticky;
+      top: 0;
+    }
+
+    tr:last-child td {
+      border-bottom: none;
+    }
+
+    td.hl {
+      background: var(--accent-soft);
+    }
+
+    .cap {
+      font-size: 12.5px;
+      color: var(--text-3);
+      margin: -12px 0 26px;
+      font-family: var(--mono);
+    }
+
+    /* ---------- interactive shell ---------- */
+    .demo {
+      border: 1px solid var(--border-strong);
+      border-radius: var(--radius);
+      background: var(--bg);
+      margin: 24px 0 26px;
+      overflow: hidden;
+    }
+
+    .demo-bar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      flex-wrap: wrap;
+      padding: 13px 16px;
+      border-bottom: 1px solid var(--border);
+      background: var(--bg-soft);
+    }
+
+    .demo-bar .label {
+      font-family: var(--mono);
+      font-size: 11px;
+      letter-spacing: .1em;
+      text-transform: uppercase;
+      color: var(--text-3);
+    }
+
+    .demo-body {
+      padding: 20px 18px;
+    }
+
+    .seg {
+      display: inline-flex;
+      border: 1px solid var(--border-strong);
+      border-radius: 999px;
+      overflow: hidden;
+      background: var(--bg);
+    }
+
+    .seg button {
+      border: none;
+      background: none;
+      font-family: var(--sans);
+      font-size: 12.5px;
+      color: var(--text-2);
+      padding: 6px 14px;
+      cursor: pointer;
+      transition: background .15s, color .15s;
+    }
+
+    .seg button:hover {
+      color: var(--text);
+    }
+
+    .seg button[aria-pressed="true"] {
+      background: var(--accent);
+      color: #fff;
+    }
+
+    .btn {
+      font-family: var(--sans);
+      font-size: 13px;
+      border: 1px solid var(--border-strong);
+      background: var(--bg);
+      color: var(--text);
+      padding: 7px 16px;
+      border-radius: 7px;
+      cursor: pointer;
+      transition: background .15s, border-color .15s;
+    }
+
+    .btn:hover {
+      background: var(--bg-soft);
+      border-color: var(--text-3);
+    }
+
+    .btn.primary {
+      background: var(--accent);
+      color: #fff;
+      border-color: var(--accent);
+    }
+
+    .btn.primary:hover {
+      background: #365578;
+    }
+
+    .btn:disabled {
+      opacity: .4;
+      cursor: not-allowed;
+    }
+
+    .btn:focus-visible, .seg button:focus-visible, .toc a:focus-visible, a:focus-visible,
+    summary:focus-visible {
+      outline: 2px solid var(--accent);
+      outline-offset: 2px;
+      border-radius: 4px;
+    }
+
+    .status-line {
+      font-size: 13.5px;
+      color: var(--text-2);
+      min-height: 42px;
+      margin-top: 14px;
+      background: var(--bg-soft);
+      border-radius: var(--radius-sm);
+      padding: 10px 13px;
+      border: 1px solid var(--border);
+    }
+
+    .status-line b {
+      color: var(--text);
+    }
+
+    .legend {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 14px;
+      font-size: 11.5px;
+      color: var(--text-2);
+      margin-top: 14px;
+      font-family: var(--mono);
+    }
+
+    .legend span {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .dot {
+      width: 9px;
+      height: 9px;
+      border-radius: 3px;
+      display: inline-block;
+      border: 1px solid rgba(0, 0, 0, .08);
+    }
+
+    /* node states used across diagrams */
+    .nstate-idle {
+      fill: #fff;
+      stroke: var(--border-strong);
+    }
+
+    .ns-idle {
+      background: #fff;
+      border-color: var(--border-strong);
+    }
+
+    .ns-lock {
+      background: var(--warn-soft);
+      border-color: var(--warn);
+    }
+
+    .ns-ok {
+      background: var(--ok-soft);
+      border-color: var(--ok);
+    }
+
+    .ns-bad {
+      background: var(--bad-soft);
+      border-color: var(--bad);
+    }
+
+    .ns-wait {
+      background: var(--accent-soft);
+      border-color: var(--accent);
+    }
+
+    /* spectrum */
+    .spectrum {
+      position: relative;
+      margin: 26px 6px 10px;
+    }
+
+    .spec-track {
+      height: 4px;
+      border-radius: 2px;
+      background: linear-gradient(90deg, #9fb6cf, #e7e5e1 50%, #c9d8c9);
+      position: relative;
+    }
+
+    .spec-ends {
+      display: flex;
+      justify-content: space-between;
+      font-family: var(--mono);
+      font-size: 11px;
+      color: var(--text-2);
+      margin-top: 10px;
+    }
+
+    .spec-mark {
+      position: absolute;
+      top: -12px;
+      transform: translateX(-50%);
+      cursor: pointer;
+      text-align: center;
+      background: none;
+      border: none;
+      padding: 0;
+    }
+
+    .spec-mark .pin {
+      width: 18px;
+      height: 18px;
+      border-radius: 50%;
+      background: #fff;
+      border: 2px solid var(--border-strong);
+      margin: 0 auto;
+      transition: border-color .15s, transform .15s, box-shadow .15s;
+      display: block;
+    }
+
+    .spec-mark .pn {
+      font-family: var(--mono);
+      font-size: 12px;
+      margin-top: 8px;
+      color: var(--text-2);
+      font-weight: 500;
+      white-space: nowrap;
+      display: block;
+    }
+
+    .spec-mark[aria-pressed="true"] .pin {
+      border-color: var(--accent);
+      transform: scale(1.18);
+      box-shadow: 0 0 0 4px var(--accent-soft);
+    }
+
+    .spec-mark[aria-pressed="true"] .pn {
+      color: var(--accent);
+    }
+
+    .spec-panel {
+      margin-top: 34px;
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 18px;
+      background: var(--bg-soft);
+    }
+
+    .spec-panel h4 {
+      margin: 0 0 4px;
+    }
+
+    .spec-panel .pmeta {
+      font-family: var(--mono);
+      font-size: 12px;
+      color: var(--text-3);
+      margin-bottom: 14px;
+    }
+
+    .bars {
+      display: grid;
+      grid-template-columns: 78px 1fr 56px;
+      gap: 9px 12px;
+      align-items: center;
+    }
+
+    .bars .blabel {
+      font-size: 13px;
+      color: var(--text-2);
+    }
+
+    .bars .btrack {
+      height: 8px;
+      background: #e9e7e3;
+      border-radius: 4px;
+      overflow: hidden;
+    }
+
+    .bars .bfill {
+      height: 100%;
+      border-radius: 4px;
+      background: var(--accent);
+      transition: width .4s ease;
+    }
+
+    .bars .bval {
+      font-family: var(--mono);
+      font-size: 11px;
+      color: var(--text-2);
+      text-align: right;
+    }
+
+    /* generic actor diagram */
+    .actors {
+      display: flex;
+      gap: 12px;
+      flex-wrap: wrap;
+    }
+
+    .actor {
+      flex: 1 1 0;
+      min-width: 96px;
+      border: 1.5px solid var(--border-strong);
+      border-radius: var(--radius-sm);
+      padding: 11px 10px;
+      text-align: center;
+      background: #fff;
+      transition: background .25s, border-color .25s;
+    }
+
+    .actor .aname {
+      font-weight: 700;
+      font-size: 13px;
+    }
+
+    .actor .arole {
+      font-family: var(--mono);
+      font-size: 10.5px;
+      color: var(--text-3);
+      margin-top: 2px;
+    }
+
+    .actor .astate {
+      font-size: 11.5px;
+      margin-top: 8px;
+      font-family: var(--mono);
+      color: var(--text-2);
+      min-height: 16px;
+    }
+
+    .coordinator {
+      border-style: dashed;
+    }
+
+    .flowsteps {
+      margin-top: 16px;
+    }
+
+    .stepitem {
+      display: flex;
+      gap: 11px;
+      font-size: 13.5px;
+      padding: 7px 0;
+      color: var(--text-3);
+      border-top: 1px solid var(--border);
+    }
+
+    .stepitem:first-child {
+      border-top: none;
+    }
+
+    .stepitem.done {
+      color: var(--text);
+    }
+
+    .stepitem.cur {
+      color: var(--text);
+      font-weight: 500;
+    }
+
+    .stepitem .sx {
+      font-family: var(--mono);
+      font-size: 11px;
+      flex: 0 0 26px;
+      color: var(--text-3);
+      padding-top: 2px;
+    }
+
+    .stepitem.cur .sx {
+      color: var(--accent);
+    }
+
+    /* timeline lab (TCC) */
+    .tl-scenarios {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      margin-bottom: 6px;
+    }
+
+    .tl-opt {
+      display: flex;
+      gap: 11px;
+      align-items: flex-start;
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      padding: 10px 13px;
+      cursor: pointer;
+      background: #fff;
+      transition: border-color .15s, background .15s;
+    }
+
+    .tl-opt:hover {
+      background: var(--bg-soft);
+    }
+
+    .tl-opt[aria-pressed="true"] {
+      border-color: var(--accent);
+      background: var(--accent-soft);
+    }
+
+    .tl-opt .tlname {
+      font-weight: 700;
+      font-size: 13.5px;
+    }
+
+    .tl-opt .tldesc {
+      font-size: 12.5px;
+      color: var(--text-2);
+      margin-top: 2px;
+    }
+
+    .tl-opt .tlbadge {
+      font-family: var(--mono);
+      font-size: 10px;
+      border: 1px solid var(--border-strong);
+      border-radius: 4px;
+      padding: 1px 5px;
+      color: var(--text-3);
+      flex: 0 0 auto;
+      margin-top: 1px;
+    }
+
+    .tl-result {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
+      margin-top: 16px;
+    }
+
+    @media (max-width: 560px) {
+      .tl-result {
+        grid-template-columns: 1fr;
+      }
+    }
+
+    .tl-card {
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      padding: 13px 14px;
+      font-size: 13px;
+    }
+
+    .tl-card .tch {
+      font-family: var(--mono);
+      font-size: 11px;
+      letter-spacing: .06em;
+      text-transform: uppercase;
+      margin-bottom: 8px;
+      color: var(--text-3);
+    }
+
+    .tl-card.naive {
+      border-left: 3px solid var(--bad);
+    }
+
+    .tl-card.fixed {
+      border-left: 3px solid var(--ok);
+    }
+
+    .tl-card .verdict {
+      font-weight: 700;
+      margin-top: 8px;
+      font-size: 13px;
+    }
+
+    .tl-card.naive .verdict {
+      color: var(--bad);
+    }
+
+    .tl-card.fixed .verdict {
+      color: var(--ok);
+    }
+
+    /* saga chain */
+    .saga-chain {
+      display: flex;
+      flex-direction: column;
+      gap: 0;
+      margin-top: 8px;
+    }
+
+    .saga-step {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .saga-box {
+      flex: 1 1 auto;
+      border: 1.5px solid var(--border-strong);
+      border-radius: var(--radius-sm);
+      padding: 10px 13px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      background: #fff;
+      transition: .25s;
+    }
+
+    .saga-box .sgn {
+      font-weight: 600;
+      font-size: 13.5px;
+    }
+
+    .saga-box .sgs {
+      font-family: var(--mono);
+      font-size: 11px;
+      color: var(--text-3);
+    }
+
+    .saga-arrow {
+      height: 18px;
+      width: 2px;
+      background: var(--border-strong);
+      margin-left: 18px;
+    }
+
+    .saga-pick {
+      font-size: 12.5px;
+      color: var(--text-2);
+      margin: 4px 0 10px;
+    }
+
+    .saga-pick select {
+      font-family: var(--sans);
+      font-size: 13px;
+      padding: 5px 8px;
+      border: 1px solid var(--border-strong);
+      border-radius: 6px;
+      background: #fff;
+      color: var(--text);
+    }
+
+    /* outbox toggle */
+    .ob-stage {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      margin-top: 8px;
+    }
+
+    .ob-row {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      font-size: 13px;
+    }
+
+    .ob-chip {
+      border: 1.5px solid var(--border-strong);
+      border-radius: var(--radius-sm);
+      padding: 9px 12px;
+      background: #fff;
+      font-size: 13px;
+      transition: .25s;
+      flex: 0 0 auto;
+    }
+
+    .ob-chip .obt {
+      font-weight: 600;
+    }
+
+    .ob-chip .obs {
+      font-family: var(--mono);
+      font-size: 10.5px;
+      color: var(--text-3);
+    }
+
+    .ob-flow {
+      font-family: var(--mono);
+      font-size: 11px;
+      color: var(--text-3);
+    }
+
+    /* wizard */
+    .wiz-q {
+      margin-bottom: 16px;
+    }
+
+    .wiz-q .wq {
+      font-size: 14px;
+      font-weight: 600;
+      margin-bottom: 8px;
+    }
+
+    .wiz-opts {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+
+    .wiz-opts button {
+      font-family: var(--sans);
+      font-size: 13px;
+      border: 1px solid var(--border-strong);
+      background: #fff;
+      color: var(--text-2);
+      padding: 7px 14px;
+      border-radius: 7px;
+      cursor: pointer;
+      transition: .15s;
+    }
+
+    .wiz-opts button:hover {
+      border-color: var(--text-3);
+      color: var(--text);
+    }
+
+    .wiz-opts button[aria-pressed="true"] {
+      background: var(--accent);
+      color: #fff;
+      border-color: var(--accent);
+    }
+
+    .wiz-result {
+      margin-top: 18px;
+      border: 1px solid var(--accent-line);
+      border-radius: var(--radius);
+      padding: 16px 18px;
+      background: var(--accent-soft);
+      font-size: 14px;
+      display: none;
+    }
+
+    .wiz-result.show {
+      display: block;
+    }
+
+    .wiz-result .wr-pick {
+      font-size: 17px;
+      font-weight: 700;
+      color: #2f4d6e;
+      margin-bottom: 6px;
+    }
+
+    .wiz-result .wr-why {
+      color: #3a5572;
+    }
+
+    /* FAQ */
+    details.faq {
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      margin-bottom: 10px;
+      background: #fff;
+      overflow: hidden;
+    }
+
+    details.faq summary {
+      cursor: pointer;
+      padding: 14px 16px;
+      font-weight: 600;
+      font-size: 14.5px;
+      list-style: none;
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      align-items: center;
+    }
+
+    details.faq summary::-webkit-details-marker {
+      display: none;
+    }
+
+    details.faq summary .q {
+      font-family: var(--mono);
+      font-size: 11px;
+      color: var(--accent);
+      flex: 0 0 auto;
+    }
+
+    details.faq summary .chev {
+      transition: transform .2s;
+      color: var(--text-3);
+      flex: 0 0 auto;
+      font-size: 13px;
+    }
+
+    details.faq[open] summary .chev {
+      transform: rotate(90deg);
+    }
+
+    details.faq .ans {
+      padding: 0 16px 16px;
+      font-size: 14px;
+      color: var(--text-2);
+    }
+
+    details.faq .ans p {
+      margin: 0 0 10px;
+    }
+
+    details.faq .ans p:last-child {
+      margin: 0;
+    }
+
+    .trap {
+      display: flex;
+      gap: 10px;
+      font-size: 14px;
+      margin: 9px 0;
+    }
+
+    .trap .tn {
+      font-family: var(--mono);
+      font-size: 11px;
+      color: var(--bad);
+      flex: 0 0 auto;
+      border: 1px solid var(--bad-soft);
+      background: var(--bad-soft);
+      border-radius: 4px;
+      padding: 1px 6px;
+      height: fit-content;
+      margin-top: 2px;
+    }
+
+    /* mobile responsive */
+    .toc-toggle {
+      display: none;
+    }
+
+    @media (max-width: 920px) {
+      .wrap {
+        flex-direction: column;
+      }
+      .toc {
+        position: static;
+        width: auto;
+        height: auto;
+        border-right: none;
+        border-bottom: 1px solid var(--border);
+        padding: 18px 22px;
+        transition: none;
+      }
+      .toc-title {
+        margin-bottom: 0;
+      }
+      .toc-kicker {
+        margin-bottom: 10px;
+      }
+      .toc-nav {
+        display: none;
+        margin-top: 16px;
+      }
+      .toc-nav.open {
+        display: block;
+      }
+      .toc-toggle {
+        display: inline-block;
+        margin-top: 10px;
+      }
+      .toc-collapse,
+      .toc-reopen {
+        display: none !important;
+      }
+      main {
+        padding: 0 22px;
+      }
+      .inner {
+        padding: 40px 0 100px;
+      }
+      .hero h1 {
+        font-size: 31px;
+      }
+    }
+
+    @media print {
+      .toc-reopen { display: none !important; }
+    }
+
+    @media (max-width: 480px) {
+      body {
+        font-size: 15px;
+      }
+      .hero h1 {
+        font-size: 27px;
+      }
+      h2 {
+        font-size: 23px;
+      }
+      .demo-body {
+        padding: 16px 13px;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <!-- ===================== TOC SIDEBAR ===================== -->
+    <nav class="toc" id="toc-panel" aria-label="目錄">
+      <div class="toc-kicker">
+        <a href="../index.html">← 返回目錄</a>
+        <button class="toc-collapse" type="button" aria-expanded="true" aria-controls="toc-panel"
+                aria-label="收合目錄" title="收合目錄">
+          <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor"
+               stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M15 18l-6-6 6-6"/>
+          </svg>
+        </button>
+      </div>
+      <div class="toc-title">MQTT 與 IoT Pub/Sub Messaging</div>
+      <button class="btn toc-toggle" type="button" aria-expanded="false" aria-controls="toc-nav">目錄 ▾</button>
+      <div class="toc-nav" id="toc-nav">
+        <a href="#s1"><span class="n">01</span>總覽與定位</a>
+        <a href="#s2"><span class="n">02</span>Broker 與 topic：一個中介，換三種解耦</a>
+        <a href="#s3"><span class="n">03</span>QoS 0 / 1 / 2：投遞保證怎麼被寫進協定</a>
+        <a href="#s4"><span class="n">04</span>Broker 替你記住的三件事</a>
+        <a href="#s5"><span class="n">05</span>連線層：Keep Alive、MQTTS 與裝置身分</a>
+        <a href="#s6"><span class="n">06</span>定位對照：WebSocket、Kafka、RabbitMQ 各自在解什麼</a>
+        <a href="#s7"><span class="n">07</span>互動 · MQTT Topic / QoS 模擬器</a>
+        <a href="#s8"><span class="n">08</span>面試折衷與實務選型</a>
+      </div>
+    </nav>
+    <button class="btn toc-reopen" type="button" aria-expanded="true" aria-controls="toc-panel"
+            aria-label="展開目錄" title="展開目錄">
+      <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor"
+           stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M9 18l6-6-6-6"/>
+      </svg>
+      <span>目錄</span>
+    </button>
+
+    <!-- ===================== MAIN CONTENT ===================== -->
+    <main>
+      <div class="inner">
+        <style>
+  /* 本篇專屬：mqtt-* 命名空間，不覆蓋全站 base 類別 */
+  #mqtt-root {
+    --mqtt-dev: #6b6f9a; --mqtt-dev-soft: #eef0f6;
+    --mqtt-brk: #3f6188; --mqtt-brk-soft: #eef2f7;
+    --mqtt-sub: #4d7d68; --mqtt-sub-soft: #eef4f1;
+    --mqtt-ctl: #a3743e; --mqtt-ctl-soft: #f6f0e7;
+    --mqtt-bad: #a8554f; --mqtt-bad-soft: #f6ecea;
+  }
+  .mqtt-h3 { font-weight: 700; font-size: 14px; margin: 20px 0 6px; padding-left: 10px; border-left: 3px solid var(--accent); color: var(--text); }
+
+  /* 定位卡片 */
+  .mqtt-cards { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin: 12px 0 6px; }
+  @media (max-width: 760px) { .mqtt-cards { grid-template-columns: 1fr; } }
+  .mqtt-card { border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 12px 14px; background: #fff; border-left-width: 4px; }
+  .mqtt-card.ch { border-left-color: var(--mqtt-dev); background: var(--mqtt-dev-soft); }
+  .mqtt-card.ms { border-left-color: var(--mqtt-brk); background: var(--mqtt-brk-soft); }
+  .mqtt-card.mx { border-left-color: var(--mqtt-sub); background: var(--mqtt-sub-soft); }
+  .mqtt-card .ct { font-weight: 700; font-size: 13.5px; margin-bottom: 3px; }
+  .mqtt-card .cl { font-family: var(--mono); font-size: 11px; color: var(--text-3); margin-bottom: 6px; letter-spacing: .04em; }
+  .mqtt-card .cs { font-size: 12.5px; color: var(--text-2); line-height: 1.55; }
+  .mqtt-flow { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin: 10px 0 4px; font-family: var(--mono); font-size: 12px; }
+  .mqtt-chip { border: 1px solid var(--border-strong); border-radius: 6px; padding: 6px 10px; background: #fff; font-weight: 600; color: var(--text); }
+  .mqtt-chip.d { background: var(--mqtt-dev-soft); border-color: var(--mqtt-dev); color: var(--mqtt-dev); }
+  .mqtt-chip.b { background: var(--mqtt-brk-soft); border-color: var(--mqtt-brk); color: var(--mqtt-brk); }
+  .mqtt-chip.s { background: var(--mqtt-sub-soft); border-color: var(--mqtt-sub); color: var(--mqtt-sub); }
+  .mqtt-chip.k { background: var(--mqtt-ctl-soft); border-color: var(--mqtt-ctl); color: var(--mqtt-ctl); }
+  .mqtt-chip.x { background: var(--mqtt-bad-soft); border-color: var(--mqtt-bad); color: var(--mqtt-bad); }
+  .mqtt-chip.op { background: var(--bg-soft); color: var(--text-3); border-style: dashed; font-weight: 500; }
+  .mqtt-lv { display: flex; flex-wrap: wrap; gap: 4px; align-items: stretch; margin: 8px 0 2px; }
+  .mqtt-lv .lf { font-family: var(--mono); font-size: 11.5px; padding: 8px 10px; text-align: center; border: 1px solid var(--border-strong); border-radius: 6px; background: #fff; color: var(--text-2); }
+  .mqtt-lv .lf b { display: block; font-size: 10px; color: var(--text-3); font-weight: 500; letter-spacing: .04em; margin-bottom: 2px; }
+  .mqtt-lv .lf.hi { background: var(--mqtt-brk-soft); border-color: var(--mqtt-brk); color: var(--mqtt-brk); }
+  .mqtt-lv .sep { align-self: center; color: var(--text-3); font-family: var(--mono); font-size: 13px; }
+
+  /* Demo */
+  .mqtt-ctrl { display: flex; flex-wrap: wrap; gap: 10px; margin: 10px 0 8px; align-items: center; }
+  .mqtt-lb { font-family: var(--mono); font-size: 11px; letter-spacing: .05em; text-transform: uppercase; color: var(--text-3); }
+  .mqtt-picker { display: flex; flex-wrap: wrap; gap: 6px; }
+  .mqtt-tchip { font-family: var(--mono); font-size: 11.5px; padding: 6px 9px; border-radius: 6px; border: 1px solid var(--border-strong); background: #fff; color: var(--text-2); cursor: pointer; }
+  .mqtt-tchip:hover { border-color: var(--accent); color: var(--accent); }
+  .mqtt-tchip[aria-pressed="true"] { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); font-weight: 700; }
+  .mqtt-topo { display: grid; grid-template-columns: 1fr 1fr 1.15fr; gap: 10px; margin: 10px 0 2px; align-items: start; }
+  @media (max-width: 840px) { .mqtt-topo { grid-template-columns: 1fr; } }
+  .mqtt-col { display: flex; flex-direction: column; gap: 8px; } .mqtt-col .colt { font-family: var(--mono); font-size: 10.5px; letter-spacing: .06em; text-transform: uppercase; color: var(--text-3); }
+  .mqtt-node { border: 1.5px solid var(--border-strong); border-radius: var(--radius-sm); padding: 9px 11px; background: #fff; transition: background .18s, border-color .18s, box-shadow .18s, opacity .18s; }
+  .mqtt-node .nn { font-weight: 700; font-size: 12.5px; } .mqtt-node .nb { font-family: var(--mono); font-size: 10.5px; color: var(--text-2); margin-top: 4px; }
+  .mqtt-node .nf { font-family: var(--mono); font-size: 10.5px; color: var(--text-3); margin-top: 2px; word-break: break-all; }
+  .mqtt-node.act { background: var(--accent-soft); border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+  .mqtt-node.hit { background: var(--ok-soft); border-color: var(--ok); } .mqtt-node.hit .nn { color: var(--ok); }
+  .mqtt-node.keep { background: var(--warn-soft); border-color: var(--warn); }
+  .mqtt-node.dead { background: var(--bad-soft); border-color: var(--bad); } .mqtt-node.dead .nn { color: var(--bad); }
+  .mqtt-node.miss { opacity: .4; } .mqtt-node.brk { border-top: 3px solid var(--mqtt-brk); }
+  .mqtt-wire { border: 1px solid var(--border); border-radius: var(--radius-sm); background: #fff; padding: 8px 10px; margin-top: 10px; max-height: 240px; overflow-y: auto; }
+  .mqtt-row { display: flex; align-items: baseline; gap: 8px; font-family: var(--mono); font-size: 11.5px; padding: 4px 0; border-bottom: 1px dashed var(--border); }
+  .mqtt-row:last-child { border-bottom: none; } .mqtt-row .tx { color: var(--text-2); line-height: 1.5; }
+  .mqtt-row .ar { width: 34px; flex: none; text-align: center; color: var(--text-3); font-weight: 700; }
+  .mqtt-row .tg { flex: none; border-radius: 4px; padding: 2px 6px; font-size: 10.5px; font-weight: 700; border: 1px solid var(--border-strong); background: var(--bg-soft); color: var(--text-3); }
+  .mqtt-row.p2b .ar { color: var(--mqtt-dev); } .mqtt-row.p2b .tg { background: var(--mqtt-dev-soft); border-color: var(--mqtt-dev); color: var(--mqtt-dev); }
+  .mqtt-row.b2s .ar { color: var(--mqtt-sub); } .mqtt-row.b2s .tg { background: var(--mqtt-sub-soft); border-color: var(--mqtt-sub); color: var(--mqtt-sub); }
+  .mqtt-row.ctl .tg { background: var(--mqtt-ctl-soft); border-color: var(--mqtt-ctl); color: var(--mqtt-ctl); }
+  .mqtt-row.bad .tg { background: var(--mqtt-bad-soft); border-color: var(--mqtt-bad); color: var(--mqtt-bad); } .mqtt-row.bad .tx { color: var(--bad); }
+  .mqtt-row.note { background: var(--bg-soft); border-radius: 4px; } .mqtt-row.note .tx { color: var(--text-3); }
+  .mqtt-panels { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 12px; }
+  @media (max-width: 640px) { .mqtt-panels { grid-template-columns: 1fr; } }
+  .mqtt-panel { border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 12px; background: #fff; }
+  .mqtt-panel .pt { font-size: 11px; color: var(--text-3); letter-spacing: .06em; text-transform: uppercase; font-family: var(--mono); margin-bottom: 8px; }
+  .mqtt-panel .prow { display: flex; justify-content: space-between; gap: 8px; font-family: var(--mono); font-size: 11.5px; padding: 4px 0; border-bottom: 1px dashed var(--border); }
+  .mqtt-panel .prow:last-child { border-bottom: none; } .mqtt-panel .pk { color: var(--text-3); white-space: nowrap; }
+  .mqtt-panel .pv { color: var(--text); font-weight: 600; text-align: right; word-break: break-all; }
+  .mqtt-panel .pv.good { color: var(--ok); } .mqtt-panel .pv.bad { color: var(--bad); } .mqtt-panel .pv.warn { color: var(--warn); }
+  .mqtt-panel .empty { font-family: var(--mono); font-size: 11.5px; color: var(--text-3); }
+</style>
+
+<div id="mqtt-root">
+
+<section id="s1">
+  <div class="sec-head"><span class="sec-num">01</span><h2>總覽與定位</h2></div>
+  <p class="sec-sub">上一篇把「通道」做到極致；本篇的協定從第一行規格開始，就沒打算只當一條通道。</p>
+
+  <p>篇 5 的最後留下一份帳單。WebSocket 這套設計<strong>預設你有完整的 TLS 與 HTTP 堆疊、一顆可以常時醒著跑心跳的 CPU，以及不計較每個位元組的頻寬</strong>；而且它從頭到尾只負責把位元組送到對面——<strong>訊息會不會重複、掉線那段時間的訊息去了哪裡、裝置突然斷電時誰替它說最後一句話，協定一概不管</strong>。</p>
+
+  <p>把這三個「不管」擺到一顆靠兩顆三號電池撐三年、掛在 NB-IoT 上、每天要被電梯與地下室吞掉十幾次連線的感測器面前，它們就不再是「應用層自己處理一下」的細節，而是<strong>會決定整個系統能不能成立的東西</strong>。<strong>MQTT（Message Queuing Telemetry Transport）</strong> 的選擇是把它們全部搬進協定：一則訊息的投遞保證、離線期間的訊息去向、以及裝置死亡時的公告，都由規格本身定義，而不是由你寫的第 3000 行 JavaScript 定義。</p>
+
+  <div class="mqtt-cards">
+    <div class="mqtt-card ch">
+      <div class="ct">WebSocket：想當通道</div>
+      <div class="cl">點對點 · 對稱 · 無中介</div>
+      <div class="cs">兩端直連，協定只保證訊息邊界。誰收得到、收幾次、沒收到怎麼辦，全部是應用的事。</div>
+    </div>
+    <div class="mqtt-card ms">
+      <div class="ct">MQTT：想當訊息系統</div>
+      <div class="cl">Broker 中介 · pub/sub · 帶 QoS</div>
+      <div class="cs">所有人都只跟 Broker 說話。發佈者不知道誰在聽、聽的人不必在線上，投遞保證由協定分級定義。</div>
+    </div>
+    <div class="mqtt-card mx">
+      <div class="ct">兩者不是對立</div>
+      <div class="cl">MQTT over WebSocket</div>
+      <div class="cs">瀏覽器裡要跑 MQTT，走的就是 WebSocket 當 transport（子協定 <code>mqtt</code>）。一個是通道、一個是通道上的語義。</div>
+    </div>
+  </div>
+
+  <div class="callout accent">
+    <div class="c-title"><span class="ic">座標</span>MQTT 在堆疊裡的位置：與 HTTP、WebSocket 平級的應用層協定</div>
+    <p>MQTT 是 <strong>OASIS 標準</strong>（目前主流是 <strong>3.1.1</strong> 與 <strong>5.0</strong>），跑在 TCP 之上，預設 port <code>1883</code>。名字裡的 “Message Queuing” 是歷史遺留——它<strong>不是 JMS 那種佇列協定</strong>，也跟任何 MQ 產品沒有繼承關係；它 1999 年被設計出來時要解的問題是「用衛星鏈路把油管上的 SCADA 資料送回來，而衛星頻寬按位元組計費」。這個出身決定了它後來的每一個設計取捨。<br>
+    加密版本沿用篇 2 的說法：<strong>MQTTS = MQTT over TLS，port <code>8883</code>，常搭配 mTLS 做裝置身分</strong>（ALPN 值 <code>mqtt</code>）。而在瀏覽器裡，MQTT 走的是 <strong>WebSocket 當 transport</strong>——這是本篇與篇 5 真正的接點，s6 會說清楚兩者的分工。</p>
+  </div>
+
+  <p class="mqtt-h3">1 · 篇 5 那張表的右欄，一半被搬進了協定</p>
+
+  <p>篇 5 的 s1 用一張生命週期表列出「協定提供什麼／你必須自己做什麼」，並在 caption 裡預告了本篇。現在把那張表的右欄拿出來，逐格對照 MQTT 的答案：</p>
+
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr><th>問題</th><th>WebSocket 的答案</th><th>MQTT 的答案</th><th>本篇章節</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>訊息要送給誰</td><td>你自己在 payload 裡塞 <code>channel</code> 欄位，伺服器自己維護訂閱表</td><td class="hl">Broker 按 <strong>topic</strong> 路由，訂閱用 wildcard 表達</td><td>s2</td></tr>
+        <tr><td>訊息會不會重複／掉</td><td>不管（TCP 只保證這條連線上不亂不掉）</td><td class="hl"><strong>QoS 0 / 1 / 2</strong> 三級投遞保證，寫在協定裡</td><td>s3</td></tr>
+        <tr><td>剛上線的人怎麼知道現況</td><td>自己另外拉一次快照 API</td><td class="hl"><strong>Retained message</strong>：訂閱當下立刻收到最後一則</td><td>s4</td></tr>
+        <tr><td>掉線那段時間的訊息</td><td>自己做序號補發或 resume token</td><td class="hl"><strong>Persistent session</strong>：Broker 替離線的你排隊</td><td>s4</td></tr>
+        <tr><td>裝置突然斷電</td><td>對面只會看到 <code>1006</code>，沒有人知道原因</td><td class="hl"><strong>Last Will</strong>：Broker 代發你事先寫好的遺囑</td><td>s4</td></tr>
+        <tr><td>連線還活著嗎</td><td>Ping/Pong control frame，週期與判定全自訂</td><td class="hl"><strong>Keep Alive</strong> 寫進 CONNECT，逾時門檻由規格定死</td><td>s5</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="cap">左欄不是在說 WebSocket 做錯了——它刻意只當通道，所以能被任何應用語義複用。右欄則是<strong>用「綁定一種語義」換「不必再寫一次」</strong>：一旦你的訊息模型不是 pub/sub，MQTT 的這些好處全部作廢。</p>
+
+  <p class="mqtt-h3">2 · 一個貫穿全篇的視角：device constraints</p>
+
+  <p>本篇每一節都會回到同一組限制上，它們解釋了 MQTT 幾乎所有「看起來很小氣」的設計：</p>
+
+  <div class="mqtt-flow">
+    <span class="mqtt-chip d">電池：每次喚醒都要付電</span>
+    <span class="mqtt-chip d">頻寬：按位元組計費</span>
+    <span class="mqtt-chip d">網路：時斷時續</span>
+    <span class="mqtt-chip d">規模：十萬～百萬條長連線</span>
+    <span class="mqtt-chip d">運算：MCU 等級，沒有 JSON 解析器</span>
+  </div>
+
+  <p>最直接的體現是<strong>固定標頭最小只有 2 bytes</strong>（1 byte 的封包型別＋旗標，加上 1–4 bytes 的變長 Remaining Length）。放進本系列的脈絡：篇 3 的一個 HTTP 請求光標頭就是好幾百 bytes（HPACK 之後仍有動態表成本）、HTTP/2 的 frame 標頭固定 9 bytes、篇 5 的 WebSocket 最小 2 bytes——<strong>MQTT 與 WebSocket 打平，但它用這 2 bytes 換到的是「一整套訊息語義」，而不只是「一個訊息邊界」。</strong></p>
+
+  <div class="callout warn">
+    <div class="c-title"><span class="ic">陷阱</span>「2 bytes 標頭」是行銷話術的一半</div>
+    <p>2 bytes 是<strong>固定標頭</strong>。一則 QoS 0 的 PUBLISH 實際上還要帶「2 bytes 的 topic 長度 + topic 字串本身」；QoS 1／2 再加 2 bytes 的 Packet Identifier。所以當你的 topic 長成 <code>factory/taipei/line-3/robot-07/telemetry/temperature</code>（50 bytes）而 payload 只有 4 bytes 的溫度值時，<strong>協定開銷佔了九成以上</strong>。這正是 MQTT 5.0 要引入 <strong>Topic Alias</strong> 的原因（s5）。談頻寬時請算完整封包，不要只念固定標頭那個數字。</p>
+  </div>
+
+  <div class="oneliner">
+    <b>一句話答法</b>MQTT 是跑在 TCP（1883）或 TLS（8883）上的 pub/sub 協定，用一個 Broker 做中介，把投遞保證（QoS）、離線訊息（persistent session）、現況快照（retained）與裝置死亡公告（Last Will）直接寫進協定；WebSocket 想當通道，MQTT 想當訊息系統，而在瀏覽器裡 MQTT 就是跑在 WebSocket 上。
+  </div>
+</section>
+
+<section id="s2">
+  <div class="sec-head"><span class="sec-num">02</span><h2>Broker 與 topic：一個中介，換三種解耦</h2></div>
+  <p class="sec-sub">MQTT 沒有「客戶端連客戶端」這回事。所有人都只認識 Broker——而這件事買到的東西比看起來多。</p>
+
+  <p>MQTT 的拓撲極其單純：<strong>每個客戶端只跟 Broker 建一條長連線</strong>，發佈者把訊息 <code>PUBLISH</code> 給 Broker，Broker 決定要複製給哪些訂閱者。發佈者永遠不知道有沒有人在聽、有幾個人在聽、聽的人是不是同一批。這種「刻意讓兩端互相不認識」正是 pub/sub 的核心價值，通常拆成三層：</p>
+
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr><th>解耦維度</th><th>意思</th><th>對 IoT 為什麼關鍵</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><strong>空間解耦</strong></td><td class="hl">雙方不需要知道對方的位址</td><td>裝置在 NAT／行動網路後面，位址每天換好幾次（篇 1 已定調「外往內預設不通，裝置一律主動建長連線」）</td></tr>
+        <tr><td><strong>時間解耦</strong></td><td class="hl">雙方不需要<strong>同時在線</strong></td><td>感測器一天只醒 4 次；後台服務要重啟部署。錯開在 IoT 是常態不是異常</td></tr>
+        <tr><td><strong>同步解耦</strong></td><td class="hl">發佈是非阻塞的，不等對方處理完</td><td>MCU 沒有餘裕維護「等 3 個下游回應」的狀態機</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="cap">代價寫在同一行字裡：<strong>Broker 變成所有語義的集中點，也變成整個系統唯一的單點。</strong>這句話會在 s8 與篇 7 各被提一次。</p>
+
+  <div class="mqtt-flow">
+    <span class="mqtt-chip op">連線</span>
+    <span class="mqtt-chip k">CONNECT</span>
+    <span class="mqtt-chip k">CONNACK</span>
+    <span class="mqtt-chip op">訂閱</span>
+    <span class="mqtt-chip s">SUBSCRIBE</span>
+    <span class="mqtt-chip s">SUBACK</span>
+    <span class="mqtt-chip op">傳送</span>
+    <span class="mqtt-chip b">PUBLISH</span>
+    <span class="mqtt-chip op">保活</span>
+    <span class="mqtt-chip k">PINGREQ</span>
+    <span class="mqtt-chip k">PINGRESP</span>
+    <span class="mqtt-chip op">收尾</span>
+    <span class="mqtt-chip x">DISCONNECT</span>
+  </div>
+  <p class="cap">MQTT 3.1.1 一共只有 14 種控制封包（5.0 多一個 <code>AUTH</code>），上面這幾種就覆蓋了九成流量。QoS 用到的四種 ack 封包留給 s3。</p>
+
+  <p class="mqtt-h3">1 · Topic：一個用 <code>/</code> 分層的 UTF-8 字串，如此而已</p>
+
+  <p>MQTT 的 topic 沒有型別、沒有 schema、<strong>不需要事先建立</strong>。它就是一個 UTF-8 字串，用 <code>/</code> 切成階層：</p>
+
+  <div class="mqtt-lv">
+    <div class="lf hi"><b>Level 1</b>factory</div>
+    <div class="sep">/</div>
+    <div class="lf hi"><b>Level 2</b>taipei</div>
+    <div class="sep">/</div>
+    <div class="lf hi"><b>Level 3</b>line-3</div>
+    <div class="sep">/</div>
+    <div class="lf hi"><b>Level 4</b>robot-07</div>
+    <div class="sep">/</div>
+    <div class="lf hi"><b>Level 5</b>telemetry</div>
+    <div class="sep">/</div>
+    <div class="lf hi"><b>Level 6</b>temperature</div>
+  </div>
+
+  <p>規格區分兩個很容易混用的名詞：<strong>Topic Name</strong> 是發佈時用的具體字串，<strong>不得含 wildcard</strong>；<strong>Topic Filter</strong> 是訂閱時用的樣板，<strong>才可以含 wildcard</strong>。兩個 wildcard 各管一件事：</p>
+
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr><th>Wildcard</th><th>匹配範圍</th><th>放置規則</th><th>例子</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><code>+</code></td><td class="hl">恰好<strong>一層</strong>，不跨 <code>/</code></td><td>可出現在任意層、可出現多次；該層必須整層都是 <code>+</code></td><td><code>factory/+/+/+/status</code> 命中所有廠區所有機台的狀態</td></tr>
+        <tr><td><code>#</code></td><td class="hl">剩下的<strong>所有層</strong>（含零層）</td><td class="hl"><strong>只能是最後一個字元</strong>，且前面必須是 <code>/</code> 或整個 filter 就是 <code>#</code></td><td><code>factory/taipei/line-3/#</code> 命中三線底下一切</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="cap">兩個容易被追問的細節：<strong>(1)</strong> <code>sport/#</code> 也會匹配 <code>sport</code> 本身（<code>#</code> 可以吃零層）。<strong>(2)</strong> 以 <code>$</code> 開頭的 topic（如 Broker 自身指標的 <code>$SYS/...</code>、5.0 共享訂閱的 <code>$share/...</code>）<strong>不會被第一層的 <code>+</code> 或 <code>#</code> 匹配到</strong>——所以訂 <code>#</code> 不會把 Broker 的內部指標一起吸進來。</p>
+
+  <div class="callout warn">
+    <div class="c-title"><span class="ic">陷阱</span>Topic 是<strong>路由鍵</strong>，不是<strong>佇列</strong>——本篇最重要的一句話</div>
+    <p>RabbitMQ 的 queue 是實體：要宣告、有容量、有堆積深度、可以在管理介面上看到 1,200 則待處理。Kafka 的 partition 是實體：磁碟上真的有那些 segment 檔。<strong>MQTT 的 topic 兩者都不是。</strong>它只是 Broker 在收到 PUBLISH 那一瞬間拿來比對訂閱樹的一個字串——比中了就複製轉發，沒比中就<strong>直接丟棄</strong>。<br>
+    推論有三個，而且都是實務上被反覆踩的：<strong>(1)</strong> 沒有任何訂閱者在線時發佈的訊息會消失（除非它是 retained，或某個離線客戶端有 persistent session）。<strong>(2)</strong> topic 數量可以是動態且巨量的（每台裝置一組），因為它不佔儲存空間——但<strong>訂閱樹的比對成本會隨層級與 wildcard 複雜度上升</strong>。<strong>(3)</strong> 「這個 topic 積壓了多少訊息」這個問題在 MQTT 裡沒有意義；積壓只會發生在<strong>每個客戶端各自的離線佇列</strong>裡。</p>
+  </div>
+
+  <p class="mqtt-h3">2 · Topic 設計準則：把「訂閱端想怎麼切」寫進層級順序</p>
+
+  <p>topic 一旦上線就幾乎改不動（韌體都燒進去了），所以它是 MQTT 系統裡最貴的一個設計決定。核心原則只有一條：<strong>層級順序要讓訂閱端能用 wildcard 切出它想要的視角</strong>。</p>
+
+<pre><code># 好的 topic：靜態層級（可過濾）→ 動態識別 → 語義方向
+factory/taipei/line-3/robot-07/telemetry/temperature   # 上報：裝置寫、後台讀
+factory/taipei/line-3/robot-07/cmd/set-speed           # 下發：後台寫、裝置讀
+factory/taipei/line-3/robot-07/status                  # presence：retained + LWT
+
+# 訂閱端用 wildcard 切視角
+factory/taipei/+/+/telemetry/temperature   # 全廠溫度（+ 不跨層，剛好卡在機台這層）
+factory/taipei/line-3/#                    # 三線的一切（# 只能放最後）
+factory/+/+/+/status                       # 全域 presence 看板
+
+# 反例
+sensor/data                          # 沒有層級，訂了就是全收，無法切
+device/550e8400-.../temperature      # 識別擺太前面，無法「跨裝置看同一種指標」
+factory/taipei/#/cmd                 # 非法：# 不是最後一個字元</code></pre>
+  <p class="cap">另外三條慣例值得寫進團隊規範：<strong>(1)</strong> 不要用前導 <code>/</code>（<code>/factory/...</code> 等於多一個空層級，合法但沒人想要）。<strong>(2)</strong> topic <strong>大小寫敏感</strong>，統一小寫加連字號。<strong>(3)</strong> <strong>上報與下發要分不同的 topic 子樹</strong>（<code>telemetry/</code> 對 <code>cmd/</code>）——否則裝置會收到自己剛發出去的訊息，這是新手第一個無限迴圈。（MQTT 5.0 的 <code>No Local</code> 訂閱選項可以擋，但分開設計更乾淨。）</p>
+
+  <div class="oneliner">
+    <b>一句話答法</b>Broker 讓發佈端與訂閱端在空間、時間、同步三個維度解耦，代價是它成為所有語義的集中點；topic 是用 <code>/</code> 分層的字串，<code>+</code> 匹配一層、<code>#</code> 匹配剩下所有層且只能放最後——而 topic 是<strong>路由鍵不是佇列</strong>，沒有訂閱者的訊息直接丟棄。
+  </div>
+</section>
+
+<section id="s3">
+  <div class="sec-head"><span class="sec-num">03</span><h2>QoS 0 / 1 / 2：投遞保證怎麼被寫進協定</h2></div>
+  <p class="sec-sub">TCP 已經保證不掉不亂了，為什麼還需要三級 QoS？因為 TCP 保證的是「這條連線上」，而連線本身會死。</p>
+
+  <p>先回答那個必問的追問。TCP 的可靠性（篇 1）作用範圍是<strong>一條活著的連線</strong>：序號與重傳讓位元組不掉不亂，但當連線在 <code>write()</code> 成功之後、對端應用處理完之前斷掉，<strong>發送端根本無法分辨這則訊息是「已被處理」還是「消失在半路」</strong>。TCP 的 ACK 只代表「對端核心收下了」，不代表「對端應用處理了」。QoS 補的就是這一段——它是<strong>應用層對應用層</strong>的確認，而且明確定義了重傳與去重的責任歸屬。</p>
+
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr><th>等級</th><th>語義</th><th>封包往返</th><th>失敗時會發生什麼</th><th>成本</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><strong>QoS 0</strong></td><td class="hl">At most once（至多一次）</td><td>1 個封包，沒有 ack</td><td class="hl">連線斷掉那一瞬間的訊息<strong>直接消失</strong>，沒有人會知道</td><td>最低：無狀態、無重傳、無 Packet Id</td></tr>
+        <tr><td><strong>QoS 1</strong></td><td class="hl">At least once（至少一次）</td><td>2 個：<code>PUBLISH</code> → <code>PUBACK</code></td><td class="hl">ack 遺失就<strong>重送</strong>，接收端可能拿到<strong>重複</strong></td><td>發送端要保留訊息直到收到 ack</td></tr>
+        <tr><td><strong>QoS 2</strong></td><td class="hl">Exactly once（恰好一次）</td><td>4 個：<code>PUBLISH</code> → <code>PUBREC</code> → <code>PUBREL</code> → <code>PUBCOMP</code></td><td class="hl">重送會被<strong>去重</strong>，接收端保證只處理一次</td><td>雙方都要存狀態；兩個來回，延遲最高</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="cap">實務分佈非常懸殊：<strong>絕大多數遙測資料用 QoS 0 或 1</strong>（下一筆溫度一分鐘後就來了，掉一筆不值得付重傳成本）；QoS 2 只留給「重複執行會出事」的下發指令——開閘門、扣款、韌體升級觸發。</p>
+
+  <p class="mqtt-h3">1 · QoS 1 為什麼會重複</p>
+
+  <div class="mqtt-flow">
+    <span class="mqtt-chip d">PUBLISH id=42</span>
+    <span class="mqtt-chip op">→</span>
+    <span class="mqtt-chip b">Broker 收下並轉發</span>
+    <span class="mqtt-chip op">→</span>
+    <span class="mqtt-chip x">PUBACK 在回程遺失</span>
+    <span class="mqtt-chip op">→</span>
+    <span class="mqtt-chip d">逾時，DUP=1 重送 id=42</span>
+    <span class="mqtt-chip op">→</span>
+    <span class="mqtt-chip x">Broker 再轉發一次</span>
+  </div>
+
+  <p>關鍵在最後一格：<strong>QoS 1 的接收端沒有去重義務</strong>。它看到同一個 Packet Identifier 再來一次，規格要求它就是再處理一次。<code>DUP=1</code> 這個旗標只是「這是一次重送」的提示，<strong>不能拿來當去重依據</strong>——因為在多跳（bridge、叢集）情境下，一則對你而言全新的訊息也可能帶著 DUP=1 抵達。</p>
+
+  <div class="callout accent">
+    <div class="c-title"><span class="ic">關鍵</span>QoS 1 是 IoT 的甜蜜點，前提是你把冪等性做在應用層</div>
+    <p>篇 3 已經完整定義過<strong>冪等性</strong>（約束的是伺服器狀態，不是回應內容）。在 MQTT 上這件事變得很具體：QoS 1 的成本只有一次 ack，卻能擋掉絕大多數的訊息遺失；重複的代價則可以用一個<strong>應用層的訊息 id</strong> 消掉——payload 裡帶 <code>msg_id</code> 或 <code>seq</code>，接收端存最近 <var>N</var> 筆做去重。<br>
+    這比 QoS 2 划算太多：QoS 2 每則要兩個來回、雙方都要落地狀態，在弱網上那兩個額外 RTT 是實打實的電量與延遲。<strong>「QoS 1 + 應用層去重」是實務上壓倒性的預設答案。</strong></p>
+  </div>
+
+  <p class="mqtt-h3">2 · QoS 2 為什麼要四步——兩對交換，各解一個問題</p>
+
+  <p>四步流程常被死記成「握手兩次」，但它其實是<strong>兩對語義完全不同的交換</strong>：</p>
+
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr><th>階段</th><th>封包</th><th>接收端做了什麼</th><th>沒有這一對會怎樣</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><strong>第一對</strong></td><td class="hl"><code>PUBLISH</code> → <code>PUBREC</code></td><td>把 <strong>Packet Id 記下來</strong>（標記為「已收到、待完成」），並回報「我收到了」</td><td>就退化成 QoS 1：發送端不知道對方是否具備去重能力</td></tr>
+        <tr><td><strong>第二對</strong></td><td class="hl"><code>PUBREL</code> → <code>PUBCOMP</code></td><td>看到 <code>PUBREL</code> 才<strong>真正交付給應用</strong>，然後<strong>忘掉這個 Packet Id</strong> 並回 <code>PUBCOMP</code></td><td class="hl">接收端永遠不知道何時可以忘記那個 id，去重表會無限成長；發送端也不敢重用 id</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="cap">用一句話收攏：<strong>第一對解決「不重複處理」，第二對解決「什麼時候可以安全地忘記」。</strong>Packet Identifier 只有 16 bits（1–65535，且 0 不合法），是一種必須被回收的稀缺資源——第二對交換就是那個回收協定。這個「先記下、再確認可以遺忘」的兩階段結構，和分散式交易的 2PC 是同一個形狀。</p>
+
+  <p>流程中的每一個封包都可能遺失，所以規格也定義了重送規則：發送端逾時未收到 <code>PUBREC</code> 就用 <code>DUP=1</code> 重送 <code>PUBLISH</code>（接收端因為已經記下 id，<strong>不會再交付一次</strong>，只補回一個 <code>PUBREC</code>）；未收到 <code>PUBCOMP</code> 就重送 <code>PUBREL</code>（注意 <code>PUBREL</code> 重送時 <strong>DUP 不設</strong>）。整條流程的狀態在 persistent session 裡是要<strong>跨連線存活</strong>的——這是 s4 的伏筆。</p>
+
+  <p class="mqtt-h3">3 · 最高頻的誤區：QoS 是<strong>分段</strong>的</p>
+
+  <div class="callout warn">
+    <div class="c-title"><span class="ic">陷阱</span>「我用 QoS 2 發佈，所以訂閱者一定恰好收到一次」——錯</div>
+    <p>一則訊息從發佈者到訂閱者<strong>經過兩段獨立的 MQTT 交易</strong>：publisher → Broker 是一段，Broker → subscriber 是另一段。<strong>兩段各自協商、各自跑自己的 ack 流程，互不相干。</strong>第一段的 QoS 由發佈者在 PUBLISH 裡指定，第二段的 QoS 則由下面這個公式決定。</p>
+  </div>
+
+  <div class="formula">訂閱者實際收到的 QoS = min ( 發佈時的 QoS , 訂閱時被授予的 QoS )</div>
+
+  <p>「被授予」也是一個常被略過的字。訂閱者在 <code>SUBSCRIBE</code> 裡<strong>要求</strong>一個 QoS，Broker 在 <code>SUBACK</code> 裡<strong>回覆實際授予</strong>的等級——它可以降級（甚至回失敗）。所以會出現這種情境：<strong>裝置辛辛苦苦用 QoS 2 發了訊息，某個以 QoS 0 訂閱的看板收到的仍然是 fire-and-forget，掉了也不會有人知道</strong>。</p>
+
+  <p>更根本的一點：<strong>MQTT 從來沒有承諾 end-to-end exactly-once。</strong>它承諾的是「每一段 hop 上的 exactly-once」。中間只要有 Broker 重啟、訊息在 Broker 記憶體裡還沒落地、或流量經過 bridge 到另一個 Broker，端到端的重複就仍然可能發生。<strong>要真正的一次語義，答案永遠是在應用層做冪等，而不是把 QoS 調到 2。</strong>這一點在 s6 對照 Kafka 的 exactly-once 時會再出現。</p>
+
+  <div class="callout accent">
+    <div class="c-title"><span class="ic">補充</span>Inflight window：QoS 大於 0 時真正的吞吐瓶頸</div>
+    <p>QoS 1／2 的訊息在收到最終 ack 之前叫 <strong>inflight</strong>，發送端必須保留它。客戶端函式庫與 Broker 都會限制「同時最多幾則 inflight」（常見預設 10–20；MQTT 5.0 把它正式化成 <strong>Receive Maximum</strong> 屬性，雙方在 CONNECT／CONNACK 互相宣告）。<br>
+    這個數字直接決定了弱網下的吞吐上限：如果 RTT 是 400 ms、inflight 上限是 10，那麼<strong>每秒最多 25 則</strong>，跟你的 CPU 和頻寬完全無關。裝置端遙測突然「卡住不上報」，第一個該看的就是 inflight 是不是被塞滿了——這是篇 1 backpressure 那條因果鏈在 MQTT 上的具體長相。</p>
+  </div>
+
+  <div class="oneliner">
+    <b>一句話答法</b>QoS 0 至多一次、1 至少一次（PUBACK，會重複）、2 恰好一次（PUBREC/PUBREL/PUBCOMP 四步：第一對讓接收端記下 Packet Id 去重，第二對確認何時可以安全遺忘並回收 id）；而 QoS 是<strong>分段</strong>的——publisher→Broker 與 Broker→subscriber 各自協商，訂閱端實得 QoS 取兩者最小值，所以 MQTT 從不保證 end-to-end exactly-once。
+  </div>
+</section>
+
+<section id="s4">
+  <div class="sec-head"><span class="sec-num">04</span><h2>Broker 替你記住的三件事</h2></div>
+  <p class="sec-sub">Retained message 管「我剛上線，現在是什麼狀況」；persistent session 管「我不在的時候」；Last Will 管「我回不來了」。</p>
+
+  <p>這三件事有一個共同結構：<strong>把「應該有人在線上」這個假設拆掉</strong>。它們也正是把 MQTT 從「pub/sub 語法」變成「訊息系統」的那部分。</p>
+
+  <p class="mqtt-h3">1 · Retained message：每個 topic 的最後一則快照</p>
+
+  <p>發佈時把 <code>RETAIN</code> 旗標設為 1，Broker 除了照常轉發給當下的訂閱者之外，還會<strong>把這則訊息存起來，覆蓋該 topic 上的前一則</strong>。之後<strong>任何新訂閱者一訂上，立刻就會收到它</strong>，不必等下一次上報。</p>
+
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr><th>性質</th><th>說明</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>每個 topic 幾則</td><td class="hl"><strong>恰好一則</strong>（最新的覆蓋舊的）。它是<strong>快照</strong>不是歷史，沒有任何回溯能力</td></tr>
+        <tr><td>存活多久</td><td>直到被覆蓋或被清除；不受 session 影響，客戶端斷線也還在</td></tr>
+        <tr><td>怎麼清除</td><td class="hl">對同一個 topic 發佈一則 <strong>payload 長度為 0</strong> 且 <code>RETAIN=1</code> 的訊息。這則空訊息不會被存下來，只會把既有的抹掉</td></tr>
+        <tr><td>收到時怎麼分辨</td><td>因新訂閱而投遞的 retained 訊息會帶 <code>RETAIN=1</code>；正常轉發給既有訂閱者的則是 0——客戶端可以據此分辨「這是歷史快照」還是「這是剛發生的事」</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="cap">典型用途：裝置的<strong>目前狀態</strong>（在線與否、目前設定值、韌體版本）。反例：不要拿它存感測器讀數的時序資料——它只留一則，而且沒有時間軸。MQTT 5.0 額外提供 <code>Retain Handling</code> 訂閱選項（0 = 照送、1 = 只在這是全新訂閱時送、2 = 完全不送），解掉「重連後重複收到一堆 retained」這個很煩的問題。</p>
+
+  <p class="mqtt-h3">2 · Persistent session：Broker 替離線的你排隊</p>
+
+  <p>客戶端在 <code>CONNECT</code> 裡宣告要不要保留 session。這是 3.1.1 與 5.0 差異最明顯的地方之一：</p>
+
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr><th></th><th>MQTT 3.1.1</th><th>MQTT 5.0</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>旗標</td><td class="hl"><code>Clean Session = 0</code> 表示要保留</td><td class="hl"><code>Clean Start = 0</code>（是否沿用既有 session）＋ <code>Session Expiry Interval</code>（斷線後留多久，秒）</td></tr>
+        <tr><td>存活期</td><td>沒有明確上限，由 Broker 實作決定——<strong>殭屍 session 會慢慢吃光記憶體</strong></td><td class="hl">明確可控：<code>0</code> = 斷線即銷毀、<code>0xFFFFFFFF</code> = 永不過期、其餘為秒數</td></tr>
+        <tr><td>兩件事是否分離</td><td>綁在一起：要保留 session 就永遠保留</td><td class="hl">分離：可以「這次開新的（Clean Start=1），但斷線後保留一小時」</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="cap">3.1.1 那個沒有 TTL 的設計是實務上真實的營運痛點：測試時用過的每一個 client id 都會在 Broker 上留下一份訂閱與佇列。<strong>「升 5.0 最有感的一項」通常就是 Session Expiry。</strong></p>
+
+  <p>Session 裡到底存了什麼，是面試最容易問細的地方：</p>
+
+  <div class="mqtt-flow">
+    <span class="mqtt-chip s">客戶端的所有訂閱</span>
+    <span class="mqtt-chip s">已送出但未收到 ack 的 QoS 1／2 訊息</span>
+    <span class="mqtt-chip s">已收到但未走完 QoS 2 流程的 Packet Id</span>
+    <span class="mqtt-chip s">離線期間累積的 QoS 1／2 訊息</span>
+    <span class="mqtt-chip x">QoS 0 訊息：不排隊</span>
+  </div>
+
+  <p>最後一格是關鍵：<strong>QoS 0 的訊息在你離線時直接被丟掉</strong>（規格允許 Broker 選擇保留，但實務上都不留）。所以「我明明開了 persistent session，重連後卻沒收到離線訊息」——九成是因為那些訊息是用 QoS 0 發的。這也讓 QoS 從一個「傳輸可靠性」的旋鈕，變成一個<strong>「離線期間值不值得替你存」的旋鈕</strong>。</p>
+
+  <p>另外兩件必須綁在一起講：<strong>(1)</strong> session 用 <strong>Client Identifier</strong> 當鍵——所以 client id 必須<strong>穩定且唯一</strong>；用隨機 UUID 每次重連都是新 session（persistent 形同虛設），而兩台裝置撞同一個 id 則會互相把對方踢下線，形成一個非常難查的無限重連迴圈。<strong>(2)</strong> Broker 在 <code>CONNACK</code> 裡回一個 <strong>Session Present</strong> 旗標，告訴你它究竟有沒有找到舊 session。<strong>客戶端必須看這個旗標</strong>：如果是 0，代表訂閱全部沒了，你得重新 SUBSCRIBE——很多「重連後就再也收不到訊息」的 bug 就出在沒檢查它。</p>
+
+  <p class="mqtt-h3">3 · Last Will and Testament：裝置斷電時，Broker 替它說最後一句話</p>
+
+  <p>篇 5 的 s4 花了一整節講 <strong>half-open</strong>：一端已經消失，另一端卻毫無察覺。MQTT 沒辦法讓 half-open 消失（那是 TCP 的事），但它做了一件更有用的事——<strong>讓「我死掉時要通知誰、說什麼」在還活著的時候就先講好</strong>。</p>
+
+  <p>客戶端在 <code>CONNECT</code> 封包裡就可以夾帶一份遺囑：Will Topic、Will Payload、Will QoS、Will Retain。Broker 收下後存著，只在特定條件下才發出去：</p>
+
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr><th>連線結束的方式</th><th>Broker 會不會發 LWT</th><th>為什麼</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>客戶端送了 <code>DISCONNECT</code> 才斷</td><td class="hl"><strong>不會</strong></td><td>這是「我要走了」，不是意外——Broker 收到 DISCONNECT 時會<strong>丟棄</strong>那份遺囑</td></tr>
+        <tr><td>Keep Alive 逾時</td><td class="hl"><strong>會</strong></td><td>最常見的觸發：裝置斷電、進隧道、電池耗盡（s5）</td></tr>
+        <tr><td>TCP 連線被 RST／FIN 意外中斷</td><td class="hl"><strong>會</strong></td><td>網路故障、行程被 kill、中間設備拆連線</td></tr>
+        <tr><td>協定錯誤／認證後違規（如訂了無權的 topic）</td><td><strong>會</strong></td><td>Broker 主動關閉且視為異常</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="cap">MQTT 5.0 補了兩個很實用的東西：<strong>Will Delay Interval</strong>（延遲 N 秒才發遺囑；若裝置在這段時間內帶著同一個 client id 回來，遺囑就取消）——這正好消掉「行動網路抖一下就發出離線告警」的誤報；以及<strong>帶 Reason Code 的 DISCONNECT</strong>，讓客戶端可以說「我是正常關機」還是「我要斷線但請幫我發遺囑」。</p>
+
+  <div class="callout accent">
+    <div class="c-title"><span class="ic">關鍵</span>Presence 模式：LWT + retained 是一組，單獨用哪一個都不完整</div>
+    <p>這是 MQTT 最漂亮的一個組合技，也幾乎是每個 IoT 系統都會實作的第一個功能：<br>
+    <strong>1.</strong> 裝置連上後，立刻對 <code>.../robot-07/status</code> 發佈 <code>online</code>，<strong>帶 RETAIN=1</strong>。<br>
+    <strong>2.</strong> 同一台裝置在 CONNECT 時就把 LWT 設成：同一個 topic、payload <code>offline</code>、<strong>Will Retain = 1</strong>。<br>
+    <strong>3.</strong> 裝置正常運作時，retained store 上是 <code>online</code>；裝置斷電後 Keep Alive 一逾時，Broker 代發 <code>offline</code> 並<strong>覆蓋</strong>掉 retained。<br>
+    效果是：<strong>任何時候上線的看板，只要訂閱 <code>factory/+/+/+/status</code>，一瞬間就能拿到全廠所有機台的當前在線狀態</strong>，完全不需要一個「裝置狀態」資料庫，也不需要輪詢。少了 retain，新看板要等到下一次狀態變化才知道；少了 LWT，斷電的裝置會永遠停在 <code>online</code>。</p>
+  </div>
+
+  <div class="oneliner">
+    <b>一句話答法</b>Retained 是每個 topic 一則的最新快照，讓新訂閱者立刻拿到現況（用零長度 payload 清除）；persistent session 以 client id 為鍵，替離線客戶端保留訂閱與 QoS 1／2 訊息（QoS 0 不排隊），5.0 用 Clean Start + Session Expiry 取代 3.1.1 沒有 TTL 的 Clean Session；Last Will 只在<strong>非正常</strong>斷線時由 Broker 代發，配上 retain 就是標準的 presence 方案。
+  </div>
+</section>
+
+<section id="s5">
+  <div class="sec-head"><span class="sec-num">05</span><h2>連線層：Keep Alive、MQTTS 與裝置身分</h2></div>
+  <p class="sec-sub">前面三節都建立在「Broker 知道你還在不在」之上。這一節處理那條連線本身，以及連上來的到底是誰。</p>
+
+  <p class="mqtt-h3">1 · Keep Alive：把保活的判定寫死在規格裡</p>
+
+  <p>篇 5 的 s4 建了一張三層保活分工表（TCP keepalive／協定層 Ping-Pong／應用層 heartbeat），並且結論是：<strong>週期與逾時判定全部由你自己決定</strong>。MQTT 走的是同一個機制、不同的哲學——它把這件事變成<strong>連線建立時的協商參數</strong>：</p>
+
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr><th></th><th>WebSocket Ping/Pong（篇 5）</th><th>MQTT Keep Alive</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>週期怎麼決定</td><td>應用自訂，兩端各自為政</td><td class="hl">客戶端在 <code>CONNECT</code> 裡宣告秒數（16-bit，最大 65535 秒；<code>0</code> = 停用）；5.0 的 Broker 還可以在 CONNACK 裡用 <strong>Server Keep Alive</strong> <strong>覆寫</strong>它</td></tr>
+        <tr><td>誰主動</td><td class="hl">伺服器發 Ping，瀏覽器自動回 Pong（JS 無法主動發）</td><td class="hl"><strong>客戶端主動</strong>發 <code>PINGREQ</code>，Broker 回 <code>PINGRESP</code></td></tr>
+        <tr><td>什麼時候要發</td><td>固定週期</td><td class="hl"><strong>只在沒有其他封包可送時才發</strong>——任何一個封包（PUBLISH、SUBSCRIBE…）都算數，等於免費保活</td></tr>
+        <tr><td>逾時判定</td><td>自訂：連續 N 次無 Pong</td><td class="hl">規格定死（見下）</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="formula">Broker 判定連線死亡的門檻 = Keep Alive × 1.5</div>
+
+  <p>也就是說：客戶端宣告 60 秒，Broker 就會在<strong>連續 90 秒沒有收到任何封包</strong>時斷開這條連線——並且觸發 s4 的 Last Will。這個 1.5 倍的寬容量是留給時脈飄移與網路抖動的。反過來，客戶端送出 <code>PINGREQ</code> 後若遲遲收不到 <code>PINGRESP</code>，也應該主動斷線重連（規格建議「合理時間內」，函式庫通常實作成一個 Keep Alive 週期）。</p>
+
+  <p>Keep Alive 的選值是<strong>純粹的 device constraints 題</strong>，而且和篇 1 的 NAT 結論直接掛鉤（那裡已經定調：心跳既是活性偵測，也是餵養 NAT 映射——這裡不重講）：</p>
+
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr><th>選值</th><th>換到什麼</th><th>付出什麼</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>短（30–60 s）</td><td class="hl">離線偵測快（presence 準）、NAT 與 LB 的 idle timeout 一定來不及先到</td><td>行動網路上每次 PINGREQ 都要喚醒無線模組，<strong>電池殺手</strong>；百萬連線時 Broker 的 CPU 帳單也很可觀</td></tr>
+        <tr><td>長（10–20 分鐘）</td><td class="hl">極省電，適合電池供電的感測器</td><td class="hl">裝置死掉後最久要 1.5 倍才被發現；而且<strong>必須確認路徑上每一段的 idle timeout 都比它長</strong>，否則連線會被中間設備靜默拆掉而你毫不知情</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="cap">實務起手式：<strong>市電供電的閘道器 60 秒；電池裝置盡量拉長，但先量測路徑上最短的 idle timeout（電信商 NAT 常見 5–30 分鐘），取它的一半</strong>。這條原則和篇 5 s8 的「心跳週期必須小於路徑上最短的 idle timeout」是同一條，只是這裡的成本單位從「流量」換成了「電池壽命」。</p>
+
+  <p class="mqtt-h3">2 · MQTTS 與裝置身分：mTLS 在這裡才真正變成主流做法</p>
+
+  <p>篇 2 已經把 mTLS 的機制講完（雙向憑證、CertificateVerify、私有 CA、短效憑證輪替），這裡只補「為什麼 IoT 是它最自然的戰場」。答案是<strong>裝置沒有人類</strong>：沒有人可以輸入密碼、沒有瀏覽器可以跳登入頁、也沒有辦法在外洩後叫使用者改密碼。<strong>一台裝置一張憑證</strong>，於是變成最乾淨的身分模型。</p>
+
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr><th>身分方案</th><th>怎麼做</th><th>適合</th><th>風險 / 限制</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><strong>X.509 + mTLS</strong></td><td class="hl">私有 CA 簽發 per-device 憑證，Broker 驗證後把 CN／SAN 當 client 身分</td><td>產線可燒錄、生命週期長的裝置</td><td>要建 PKI 與撤銷機制（CRL／OCSP 在裝置端常不可行，實務多靠短效憑證輪替＋Broker 端黑名單）；MCU 要有足夠 RAM 做非對稱運算</td></tr>
+        <tr><td><strong>Username / Password</strong></td><td class="hl">CONNECT 封包內建這兩個欄位，Broker 查後端驗證</td><td>改造成本最低、閘道器場景</td><td class="hl"><strong>必須跑在 TLS 之上</strong>（否則明文）；<strong>一定要 per-device 不同</strong>——共用一組帳密等於整批裝置一起淪陷，卻是最常見的做法</td></tr>
+        <tr><td><strong>Token（JWT 等）</strong></td><td class="hl">把短效 token 放進 password 欄位，Broker 驗簽</td><td>手機 App、能連後端換 token 的裝置</td><td>token 會過期，但 MQTT 連線可能活好幾天——需要「到期前重連」或 5.0 的 <code>AUTH</code> 封包做連線內重新認證</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="cap">兩個一定要成對記住的結論。<strong>(1)</strong> 沿用篇 2：<strong>mTLS 是 authentication 不是 authorization</strong>——證明了「你是 robot-07」，不代表 robot-07 有權訂閱 <code>factory/#</code>。Broker 端必須另外做 <strong>topic 級 ACL</strong>（把 client id 綁進 topic、限制它只能讀寫 <code>factory/+/+/robot-07/#</code>），否則任何一台被拆解的裝置都能監聽全廠。<strong>(2)</strong> 沿用篇 2 s8：<strong>「只開 TLS 1.3 還是保留 1.2」在 IoT 要先盤點</strong>——你不能像 Web 一樣宣布淘汰舊版，因為現場那批 2018 年出廠、跑著舊版 mbedTLS 的裝置，韌體可能根本升不上去。</p>
+
+<pre><code># 訂閱端：wildcard + QoS 1，保留 session（-c = disable clean session）
+$ mosquitto_sub -h broker.example.com -p 8883 --cafile ca.crt \
+    -i dash-01 -c -q 1 -t 'factory/taipei/+/+/status' -v
+factory/taipei/line-3/robot-07/status online     # 一訂上就收到 retained，不必等下次上報
+
+# 發佈端：mTLS 身分 + 上線公告(retained) + 事先寫好的遺囑
+$ mosquitto_pub -h broker.example.com -p 8883 --cafile ca.crt \
+    --cert robot-07.crt --key robot-07.key \
+    -i robot-07 --keepalive 60 \
+    -t 'factory/taipei/line-3/robot-07/status' -m 'online' -q 1 -r \
+    --will-topic 'factory/taipei/line-3/robot-07/status' \
+    --will-payload 'offline' --will-qos 1 --will-retain</code></pre>
+  <p class="cap">這兩條指令就是 s4 那個 presence 模式的完整實作：<code>-r</code> 讓 <code>online</code> 成為 retained，<code>--will-*</code> 讓 Broker 在 90 秒（<code>60 × 1.5</code>）沒收到封包時代發 <code>offline</code> 覆蓋它。把 <code>mosquitto_pub</code> 那個行程直接 <code>kill -9</code>，就能在訂閱端看到遺囑跳出來——這是驗證 LWT 設定最快的方法（用 Ctrl-C 反而不行，因為函式庫會送出乾淨的 DISCONNECT）。</p>
+
+  <p class="mqtt-h3">3 · MQTT 5.0 相對 3.1.1：值得知道的五項</p>
+
+  <p>3.1.1 仍然是裝置端相容性最好的版本，但雲端 Broker 幾乎都支援 5.0，新專案沒有理由不用。除了前面已經出現的 Session Expiry、Will Delay、Retain Handling、Receive Maximum、Server Keep Alive 之外，還有五項值得點名：</p>
+
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr><th>特性</th><th>解決什麼</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><strong>Reason Code + Reason String</strong></td><td class="hl">3.1.1 的 ack 幾乎沒有錯誤資訊，連線被拒只知道「失敗」。5.0 在所有 ack 上都帶原因碼——<strong>這是可觀測性上最大的一項改善</strong></td></tr>
+        <tr><td><strong>Shared Subscription</strong></td><td class="hl">訂閱 <code>$share/{group}/{filter}</code>，同組內的訂閱者<strong>輪流</strong>收訊息而不是每人一份——這才讓 MQTT 有了類似 consumer group 的競爭消費模型（s6 對照）</td></tr>
+        <tr><td><strong>Message Expiry Interval</strong></td><td class="hl">給訊息設 TTL。離線佇列裡放了三天的「開燈」指令，裝置回來時不應該還被執行</td></tr>
+        <tr><td><strong>Topic Alias</strong></td><td class="hl">把長 topic 字串在連線內映射成一個 2-byte 整數，之後只送整數——直接回應 s1 那筆「50 bytes topic 配 4 bytes payload」的帳單</td></tr>
+        <tr><td><strong>Request / Response</strong></td><td class="hl"><code>Response Topic</code> + <code>Correlation Data</code> 兩個屬性，把請求／回應關聯做進協定。這正是篇 5 s3 那張表裡「WebSocket 沒有、要自己加 <code>id</code> 欄位」的那一格</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="cap">另外 5.0 還有 <strong>User Properties</strong>（任意 key-value，等於 MQTT 版的 HTTP 標頭）與 <strong>Subscription Identifier</strong>（讓客戶端知道這則訊息是因為哪一條訂閱被送來的——多重 wildcard 訂閱時很有用）。</p>
+
+  <div class="oneliner">
+    <b>一句話答法</b>Keep Alive 由客戶端在 CONNECT 宣告、只在沒別的封包可送時才發 PINGREQ，Broker 在 <strong>1.5 倍</strong>週期無封包時斷線並觸發 LWT；MQTTS 是 MQTT over TLS（8883，ALPN <code>mqtt</code>），IoT 場景下 per-device X.509 + mTLS 是最乾淨的身分方案，但 mTLS 只做認證，topic 級 ACL 必須另外做。
+  </div>
+</section>
+
+<section id="s6">
+  <div class="sec-head"><span class="sec-num">06</span><h2>定位對照：WebSocket、Kafka、RabbitMQ 各自在解什麼</h2></div>
+  <p class="sec-sub">這一節只回答一個問題：什麼時候<strong>不</strong>該用 MQTT。而答案幾乎都是「因為你要的是另外三個東西之一」。</p>
+
+  <p class="mqtt-h3">1 · 與 WebSocket：一個是通道，一個是通道上的語義</p>
+
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr><th></th><th>WebSocket</th><th>MQTT</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>拓撲</td><td class="hl">點對點：客戶端 ↔ 伺服器</td><td class="hl">星狀：所有人 ↔ Broker，發佈者與訂閱者互不認識</td></tr>
+        <tr><td>訊息定址</td><td>沒有——你自己在 payload 裡設計</td><td>topic + wildcard 訂閱，由協定路由</td></tr>
+        <tr><td>投遞保證</td><td>沒有（TCP 之外什麼都沒有）</td><td>QoS 0／1／2</td></tr>
+        <tr><td>離線 / 死亡</td><td>沒有——重連後的狀態恢復全部自己寫</td><td>persistent session + retained + Last Will</td></tr>
+        <tr><td>典型客戶端</td><td class="hl">瀏覽器、行動 App</td><td class="hl">MCU、閘道器、車機、感測器</td></tr>
+        <tr><td>原生瀏覽器支援</td><td class="hl">有（<code>new WebSocket</code>）</td><td class="hl"><strong>沒有</strong>——瀏覽器不能開裸 TCP，必須走 MQTT over WebSocket</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="cap">最後一列是實務上最重要的一條綁定。<strong>MQTT over WebSocket</strong> 的作法是把 MQTT 的位元組流塞進 WebSocket 的 <strong>binary frame</strong>，子協定名固定為 <code>mqtt</code>（<code>Sec-WebSocket-Protocol: mqtt</code>），通常直接跑在 <code>wss://</code> 443 上——順帶解掉「企業防火牆只開 443」這個現實問題。注意分層：<strong>WebSocket 的 frame 邊界與 MQTT 的封包邊界不對齊</strong>，一個 WS frame 可以裝多個 MQTT 封包、一個 MQTT 封包也可以跨多個 frame，所以接收端仍然要照 MQTT 的 Remaining Length 自己切。這就是「一個是通道、一個是通道上的語義」最具體的樣子。</p>
+
+  <p class="mqtt-h3">2 · 與 Kafka、RabbitMQ：三個都叫「訊息系統」，但幾乎沒有一格是一樣的</p>
+
+  <p>這是本篇最需要記住的一張表。面試裡「MQTT 跟 Kafka 差在哪」如果只答「一個給 IoT 一個給大數據」，會被追問到底；真正的差異在<strong>投遞語義、消費模型、順序、保留與吞吐</strong>這五個維度上，而且每一格的差異都會反過來限制它能做什麼。</p>
+
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr><th>維度</th><th>MQTT</th><th>RabbitMQ（AMQP 0-9-1）</th><th>Kafka</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><strong>本質</strong></td><td class="hl">裝置<strong>接入協定</strong></td><td class="hl"><strong>訊息中介</strong>／任務佇列</td><td class="hl">分散式 <strong>commit log</strong></td></tr>
+        <tr><td><strong>Delivery semantics</strong></td><td>QoS 0／1／2，但<strong>分段</strong>（per-hop），無 end-to-end exactly-once</td><td>publisher confirm + consumer ack；至少一次，重複要自己防</td><td class="hl">預設至少一次；idempotent producer + transaction 可做<strong>Kafka 內部</strong>的 exactly-once</td></tr>
+        <tr><td><strong>Consumer model</strong></td><td class="hl"><strong>Push</strong>：Broker 主動推給所有匹配的訂閱者，客戶端無 offset 概念</td><td>Push（<code>basic.consume</code> + prefetch）為主；同一 queue 上多 consumer <strong>競爭</strong></td><td class="hl"><strong>Pull</strong>：consumer group 分配 partition，<strong>offset 由消費端自己管</strong></td></tr>
+        <tr><td><strong>扇出（fan-out）</strong></td><td class="hl"><strong>天然扇出</strong>：一則訊息複製給 N 個訂閱者。要競爭消費得用 5.0 的 shared subscription</td><td>用 fanout／topic exchange 綁到多個 queue，複製發生在 exchange</td><td>多個 consumer group 各自獨立讀同一份 log，互不影響</td></tr>
+        <tr><td><strong>Ordering</strong></td><td>同一發佈者、同一 topic、同一 QoS 內有序；跨 topic 或重傳後<strong>無保證</strong></td><td>單 queue 單 consumer 有序；一旦多 consumer 或 requeue 就破</td><td class="hl"><strong>partition 內嚴格有序</strong>（同 key → 同 partition），這是它最強的保證</td></tr>
+        <tr><td><strong>Retention</strong></td><td class="hl"><strong>幾乎不保留</strong>：只有每 topic 一則 retained ＋ 離線 session 佇列</td><td>投遞並 ack 後即刪除——queue 是<strong>暫存</strong>不是儲存</td><td class="hl">按時間／大小保留（天～永久），<strong>消費不刪除</strong></td></tr>
+        <tr><td><strong>重播 / 回溯</strong></td><td class="hl"><strong>不可能</strong>（沒有 log）</td><td>不可能（除非另建 replay 機制）</td><td class="hl">可以：seek 到任意 offset 或時間戳重讀</td></tr>
+        <tr><td><strong>連線規模</strong></td><td class="hl">十萬～百萬條長連線；2-byte 標頭、Keep Alive 可拉到十幾分鐘</td><td>千～萬（每連線多個 channel），協定較重</td><td>數千個 client；每個 client 要抓 metadata、跑 fetch 迴圈、參與 rebalance</td></tr>
+        <tr><td><strong>Throughput</strong></td><td>每則小、總量中等；瓶頸在<strong>連線數與扇出倍數</strong></td><td>中等；routing 能力豐富但單 queue 吞吐有限</td><td class="hl"><strong>極高</strong>：順序寫、批次、零拷貝，單 partition 就能吃下數十 MB/s</td></tr>
+        <tr><td><strong>典型場景</strong></td><td>感測器上報、遠端下發指令、車聯網、行動推播</td><td>任務佇列、RPC、工作流、需要複雜路由與死信</td><td>事件溯源、串流處理、入湖、指標管線</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="cap">把整張表壓成一句：<strong>MQTT 解決「怎麼把幾十萬台不穩定的裝置接進來」，RabbitMQ 解決「怎麼把工作可靠地分派給 worker」，Kafka 解決「怎麼把事件存成一份可以重讀的歷史」。</strong>三者不是同一個問題的三種答案，因此不可直接替換。</p>
+
+  <div class="callout warn">
+    <div class="c-title"><span class="ic">陷阱</span>兩個方向的誤用，都很常見</div>
+    <p><strong>「用 Kafka 直接接裝置」</strong>：Kafka client 是重量級的——要拉 metadata、維護 fetch 迴圈、參與 consumer group rebalance，MCU 上根本跑不動；而且它<strong>沒有 Last Will、沒有 retained、沒有為省電設計的 keep-alive</strong>，也扛不住幾十萬條時斷時續的連線（每次重連都可能觸發 rebalance）。<br>
+    <strong>「用 MQTT 當事件儲存」</strong>：MQTT <strong>沒有 log</strong>。新上線的分析服務無法回頭讀昨天的資料，訂閱之後才發生的事才看得到；retained 只有一則，也不是歷史。想「重跑一次上週的資料」在純 MQTT 架構下是不可能的——這通常是團隊決定引入 Kafka 的那一天。</p>
+  </div>
+
+  <p class="mqtt-h3">3 · 所以實務上的答案是接力，不是二選一</p>
+
+  <div class="mqtt-flow">
+    <span class="mqtt-chip d">裝置 × 500k</span>
+    <span class="mqtt-chip op">MQTT / QoS 1</span>
+    <span class="mqtt-chip b">MQTT Broker</span>
+    <span class="mqtt-chip op">bridge</span>
+    <span class="mqtt-chip s">Kafka topic</span>
+    <span class="mqtt-chip op">consumer group</span>
+    <span class="mqtt-chip s">流處理 · 入湖 · 告警</span>
+  </div>
+
+  <p>這是 IoT 後端幾乎標準化的長相，分工非常清楚：<strong>MQTT Broker 負責「接入」</strong>——扛連線數、處理弱網重連、跑 QoS 與 LWT、替離線裝置排隊、省裝置的電；<strong>Kafka 負責「留存與分發」</strong>——把事件寫成一份可重播的 log，讓分析、告警、入湖、機器學習各自用獨立的 consumer group 讀同一份資料，互不干擾，且新服務上線可以回頭補跑歷史。中間那個 bridge 通常是 Broker 內建的 connector（EMQX／HiveMQ／VerneMQ 都有）或雲端的規則引擎（AWS IoT Core Rule → Kinesis／MSK）。</p>
+
+  <p>反方向同樣重要：後台要下發指令時，是<strong>從 Kafka 或應用服務寫回 MQTT 的 <code>cmd/</code> 子樹</strong>，由 Broker 負責找到那台裝置、按 QoS 投遞、離線就排隊。Kafka 完全無法自己完成這件事——它不知道 <code>robot-07</code> 現在連在哪。而三者也常同時存在：MQTT 接裝置、Kafka 存事件、RabbitMQ 派工單給人類操作員或第三方系統。</p>
+
+  <div class="oneliner">
+    <b>一句話答法</b>MQTT 是裝置接入協定（push、天然扇出、幾乎零保留、百萬連線），RabbitMQ 是任務佇列（競爭消費、ack 後刪除、複雜路由），Kafka 是可重播的 commit log（pull、consumer group 自管 offset、partition 內嚴格有序、長期保留）；三者的投遞語義與消費模型根本不同，不可互換——標準架構是 MQTT 接裝置、bridge 到 Kafka 做留存與流處理，指令再從 MQTT 反向下發。
+  </div>
+</section>
+
+<section id="s7">
+  <div class="sec-head"><span class="sec-num">07</span><h2>互動 · MQTT Topic / QoS 模擬器</h2></div>
+  <p class="sec-sub">一個 Broker 居中，左邊發佈、右邊訂閱。三個情境分別演 topic 匹配、QoS 投遞流，以及 retained 與 Last Will。</p>
+
+  <div class="demo" id="mqtt-demo">
+    <div class="demo-bar">
+      <span class="label">互動 · MQTT Topic / QoS</span>
+      <span class="label" style="text-transform:none;font-family:var(--sans);font-size:12px;color:var(--text-2)">情境一點 topic 發佈；情境二、三按「下一步」</span>
+    </div>
+    <div class="demo-body">
+      <div class="seg" role="group" aria-label="情境切換" id="mqtt-seg-sc">
+        <button data-sc="topic" aria-pressed="true">Topic 與 Wildcard 匹配</button>
+        <button data-sc="qos" aria-pressed="false">QoS 0/1/2 投遞流</button>
+        <button data-sc="lwt" aria-pressed="false">Retained 與 Last Will</button>
+      </div>
+
+      <div class="mqtt-ctrl">
+        <button class="btn primary" id="mqtt-btn-next">下一步</button>
+        <button class="btn" id="mqtt-btn-reset">重置</button>
+        <div class="legend">
+          <span><i class="dot ns-wait"></i>本步作用中</span>
+          <span><i class="dot ns-ok"></i>匹配 / 收到訊息</span>
+          <span><i class="dot ns-lock"></i>保存的狀態 / 重複投遞</span>
+          <span><i class="dot ns-bad"></i>不匹配 / 丟棄 / 斷線</span>
+        </div>
+      </div>
+
+      <div class="mqtt-ctrl" id="mqtt-row-topic">
+        <span class="mqtt-lb">發佈到 topic</span>
+        <div class="mqtt-picker" id="mqtt-picker"></div>
+      </div>
+
+      <div class="mqtt-ctrl" id="mqtt-row-qos">
+        <span class="mqtt-lb">發佈端 QoS</span>
+        <div class="seg" role="group" aria-label="QoS 等級" id="mqtt-seg-qos">
+          <button data-q="0" aria-pressed="false">QoS 0</button>
+          <button data-q="1" aria-pressed="true">QoS 1</button>
+          <button data-q="2" aria-pressed="false">QoS 2</button>
+        </div>
+        <span class="mqtt-lb">鏈路</span>
+        <div class="seg" role="group" aria-label="鏈路品質" id="mqtt-seg-loss">
+          <button data-loss="0" aria-pressed="true">正常</button>
+          <button data-loss="1" aria-pressed="false">注入丟包</button>
+        </div>
+      </div>
+
+      <div class="status-line" id="mqtt-status">選一個情境開始。</div>
+
+      <div class="mqtt-topo">
+        <div class="mqtt-col">
+          <div class="colt">Publisher</div>
+          <div class="mqtt-col" id="mqtt-pubs"></div>
+        </div>
+        <div class="mqtt-col">
+          <div class="colt">Broker</div>
+          <div class="mqtt-node brk" id="mqtt-broker">
+            <div class="nn">broker.example.com</div>
+            <div class="nf">:8883 · MQTT 5.0</div>
+            <div class="nb" id="mqtt-broker-note">待命</div>
+          </div>
+        </div>
+        <div class="mqtt-col">
+          <div class="colt">Subscriber</div>
+          <div class="mqtt-col" id="mqtt-subs"></div>
+        </div>
+      </div>
+
+      <div class="mqtt-wire" id="mqtt-wire"></div>
+
+      <div class="mqtt-panels">
+        <div class="mqtt-panel">
+          <div class="pt">本次投遞</div>
+          <div id="mqtt-meta"></div>
+        </div>
+        <div class="mqtt-panel">
+          <div class="pt">Broker 保存的狀態</div>
+          <div id="mqtt-store"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <p class="cap">三個值得停下來比對的地方：<strong>(1)</strong> 情境一發佈 <code>.../line-3/robot-07/status</code> 時，<code>factory/+/+/+/status</code> 會亮但 <code>factory/taipei/+/+/telemetry/temperature</code> 不會——<strong><code>+</code> 恰好吃一層，層數不合就整條不匹配</strong>。<strong>(2)</strong> 情境二選 QoS 1 加「注入丟包」，會看到 Broker <strong>轉發了兩次</strong>（PUBACK 遺失導致重送，而 QoS 1 沒有去重義務）；同樣的操作換成 QoS 2，第二次 PUBLISH 只換來一個 PUBREC，<strong>訊息並沒有被再交付一次</strong>。<strong>(3)</strong> 情境三裡，裝置斷電後 Broker 有好幾步是「什麼都不知道」的——直到 Keep Alive 的 1.5 倍門檻到期，遺囑才發出去。這段延遲就是 presence 的精度上限。</p>
+
+  <div class="callout warn">
+    <div class="c-title"><span class="ic">說明</span>這個模型簡化了什麼，以及它跟前五個 demo 的分工</div>
+    <p>模型只保留「Broker 中介的投遞語義」這一條線：不畫 TCP／TLS 交握（篇 1、2 的主場）、不畫 WebSocket 狀態機（篇 5）、時間軸被壓縮（Keep Alive 的 90 秒在這裡是一步）。丟包只注入在 ack 的回程，因為那正是 QoS 1 與 QoS 2 行為分岔的地方。<br>
+    分工也刻意錯開：<strong>篇 4</strong> 是雙泳道矩陣，比的是<em>丟包時誰被卡住</em>；<strong>篇 5</strong> 是狀態機四格，主角是<em>一條連線的生命週期</em>；<strong>本篇</strong>是拓撲圖，主角是<em>一則訊息在 Broker 兩側各自發生了什麼</em>——所以這裡沒有狀態機，取而代之的是 Broker 手上那兩張表（retained store 與 session store）。</p>
+  </div>
+
+  <div class="oneliner">
+    <b>一句話答法</b>Wildcard 是逐層比對、<code>+</code> 不跨層而 <code>#</code> 吃掉剩下全部；QoS 1 在 ack 遺失時會造成<strong>重複投遞</strong>，QoS 2 靠 Broker 記住 Packet Id 擋掉第二份；retained 讓新訂閱者立刻看到現況，Last Will 則要等 Keep Alive 的 1.5 倍門檻到期才由 Broker 代發。
+  </div>
+</section>
+
+<section id="s8">
+  <div class="sec-head"><span class="sec-num">08</span><h2>面試折衷與實務選型</h2></div>
+  <p class="sec-sub">MQTT 的選型幾乎全部發生在兩個地方：QoS 要開幾級，以及狀態該放在 Broker 還是應用。</p>
+
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr><th>決策點</th><th>選項</th><th>Trade-off</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>QoS 等級</td><td class="hl">0 vs 1 vs 2</td><td>遙測用 0／1（掉一筆，下一筆一分鐘後就來）；<strong>會改變狀態的下發指令用 1 + 應用層冪等</strong>；QoS 2 只給「重複執行會出事且無法做冪等」的極少數操作，因為它要多一個來回、雙方都要落地狀態</td></tr>
+        <tr><td>Session</td><td class="hl">Clean vs Persistent</td><td>Persistent 讓裝置斷線期間的指令不遺失，代價是 Broker 要替每台裝置維護佇列（記憶體與磁碟成本 × 裝置數）。<strong>一定要設 Session Expiry</strong>，否則測試用過的 client id 會永久佔用資源</td></tr>
+        <tr><td>Keep Alive</td><td class="hl">短 vs 長</td><td>短：presence 準、NAT 不會先斷；長：省電。上限是路徑上最短的 idle timeout，取其一半是安全起手式</td></tr>
+        <tr><td>Topic 結構</td><td class="hl">粗（少層級） vs 細（多層級）</td><td>細：訂閱端能用 wildcard 精準切視角、ACL 好寫；粗：Broker 的訂閱樹比對便宜。<strong>但 topic 上線後幾乎改不動（韌體燒死），寧可一開始多切兩層</strong></td></tr>
+        <tr><td>Payload 格式</td><td class="hl">JSON vs 二進位（CBOR／protobuf）</td><td>JSON 好除錯、生態成熟；MCU 上 JSON 解析器可能比整支韌體還大，且每則多幾十 bytes——按位元組計費的 NB-IoT 上這是真金白銀</td></tr>
+        <tr><td>裝置身分</td><td class="hl">mTLS vs 帳密 vs token</td><td>mTLS 最乾淨但要建 PKI 與輪替機制；帳密最省事但<strong>絕對不能全機隊共用一組</strong>；token 要處理「連線活得比 token 久」</td></tr>
+        <tr><td>協定版本</td><td class="hl">3.1.1 vs 5.0</td><td>新專案直接上 5.0（Session Expiry、Reason Code、Shared Subscription、Topic Alias 都很有感）；但現場舊裝置的韌體可能只支援 3.1.1，Broker 要能同時服務兩種版本</td></tr>
+        <tr><td>要不要接 Kafka</td><td class="hl">純 MQTT vs MQTT + Kafka</td><td>只要出現「回頭重跑歷史資料」「多個下游各自消費同一份事件」「事件要留三個月」任一項，就是該 bridge 的訊號。純 MQTT 架構下這三件事都做不到</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="cap">共同結構：<strong>MQTT 把狀態集中到 Broker 換取裝置端的極簡</strong>——每多開一級 QoS、多留一份 session、多存一則 retained，省下的是裝置的電與程式碼，付出的是 Broker 的記憶體、磁碟與複雜度。這個天平的支點永遠在「你有幾台裝置」。</p>
+
+  <div class="callout accent">
+    <div class="c-title"><span class="ic">面試</span>高頻追問怎麼答</div>
+    <p><strong>Q：TCP 已經可靠了，為什麼還要 QoS？</strong>
+    答：TCP 只保證「一條活著的連線上」不掉不亂，而且 ACK 只代表對端核心收下。連線斷掉時發送端無法分辨訊息是被處理了還是消失了。QoS 是應用層對應用層的確認，並定義了重傳與去重的責任歸屬。<br>
+    <strong>Q：QoS 2 是不是就等於 end-to-end exactly-once？</strong>
+    答：不是。QoS 是<strong>分段</strong>的——publisher→Broker 與 Broker→subscriber 各自協商，訂閱端實得等於兩者取 min。QoS 2 保證的是每一段 hop 的 exactly-once；真正的一次語義要在應用層做冪等。<br>
+    <strong>Q：QoS 2 為什麼要四個封包？</strong>
+    答：兩對交換。第一對（PUBLISH／PUBREC）讓接收端記下 Packet Id 以便去重；第二對（PUBREL／PUBCOMP）確認何時可以安全忘記那個 id 並回收它——否則去重表會無限成長，發送端也不敢重用 16-bit 的 Packet Identifier。<br>
+    <strong>Q：我開了 persistent session，為什麼重連後沒收到離線訊息？</strong>
+    答：三個可能——訊息是用 QoS 0 發的（不排隊）、client id 每次重連都變（等於每次都是新 session）、或是 CONNACK 的 Session Present 是 0 而客戶端沒有重新 SUBSCRIBE。<br>
+    <strong>Q：怎麼做裝置在線狀態？</strong>
+    答：LWT + retained 一組。上線發 <code>online</code>（retain=1），CONNECT 時把遺囑設成同一個 topic 的 <code>offline</code>（will retain=1）。斷電後 Keep Alive 的 1.5 倍逾時，Broker 代發並覆蓋。新看板一訂上就拿到全機隊現況。<br>
+    <strong>Q：MQTT 跟 WebSocket 怎麼選？</strong>
+    答：不是二選一。WebSocket 是點對點通道，MQTT 是 Broker 中介的 pub/sub 語義；瀏覽器裡跑 MQTT 就是拿 WebSocket 當 transport（子協定 <code>mqtt</code>，走 wss 443）。要的是「自訂雙向訊息」選 WebSocket，要的是「投遞保證 + 離線 + presence」選 MQTT。<br>
+    <strong>Q：MQTT 跟 Kafka 差在哪？</strong>
+    答：五個維度——MQTT 是 push、無 offset、幾乎不保留、天然扇出、扛百萬連線；Kafka 是 pull、consumer group 自管 offset、按時間保留可重播、partition 內嚴格有序、吞吐極高但 client 很重。所以標準架構是 MQTT 接裝置、bridge 到 Kafka 做留存與流處理。</p>
+  </div>
+
+  <p>把本篇收攏成一句：<strong>MQTT 用一個 Broker 換掉了裝置端的複雜度</strong>。訊息該送給誰（topic 路由）、會不會重複（QoS）、離線時去哪（session 佇列）、剛上線怎麼知道現況（retained）、死掉了誰來說（Last Will）——這五件事在 WebSocket 上全部是你的程式碼，在 MQTT 上全部是 Broker 的職責。裝置端因此可以小到跑在一顆幾十 KB RAM 的 MCU 上。</p>
+
+  <p>而這正是問題所在。<strong>retained store、每個 client id 的 session 與離線佇列、每條連線的 inflight window、整棵訂閱樹——全部活在那一台 Broker 的記憶體裡。</strong>這句話你在篇 5 的 s6 已經看過一次，當時的主詞是 WebSocket gateway。兩條線在這裡合流了：無論你選的是 WebSocket 還是 MQTT，只要連線數超過一台機器扛得住的量，真正的題目就變成同一個——<strong>長連線要怎麼橫向擴充？</strong>訊息怎麼跨節點找到「持有那條連線的那一台」？Broker 組成叢集之後，session 與 retained 要不要複製、誰來判定 Keep Alive 逾時並代發 Last Will、發版時怎麼把幾十萬條連線優雅地趕去別台而不引爆重連風暴？還有，哪些工作應該下沉到 edge、哪些必須留在中心？<strong>本系列最後一篇處理它。</strong></p>
+
+  <div class="oneliner">
+    <b>一句話答法</b>MQTT 適合「大量受限裝置、不穩定網路、需要投遞保證與離線語義」的場景，選型的核心是 QoS 等級與 session 策略——它們決定了 Broker 要替你記住多少東西；而 MQTT 不是 Kafka 或 RabbitMQ 的替代品，它解的是接入問題，留存與重播要靠 bridge 出去。
+  </div>
+</section>
+
+</div>
+
+      </div>
+    </main>
+  </div>
+
+  <script>
+    "use strict";
+    document.addEventListener("DOMContentLoaded", function () {
+      /* ===== TOC scrollspy, mobile accordion & desktop collapse ===== */
+      (function () {
+        var links = Array.prototype.slice.call(document.querySelectorAll(".toc-nav a"));
+        var map = {};
+        links.forEach(function (a) {
+          var href = a.getAttribute("href");
+          if (href && href.startsWith("#")) {
+            map[href.slice(1)] = a;
+          }
+        });
+        var secs = links.map(function (a) {
+          var href = a.getAttribute("href");
+          return href && href.startsWith("#") ? document.getElementById(href.slice(1)) : null;
+        }).filter(Boolean);
+
+        if (secs.length > 0 && typeof IntersectionObserver !== "undefined") {
+          var obs = new IntersectionObserver(function (entries) {
+            entries.forEach(function (e) {
+              if (e.isIntersecting) {
+                links.forEach(function (l) { l.classList.remove("active"); });
+                var act = map[e.target.id];
+                if (act) act.classList.add("active");
+              }
+            });
+          }, { rootMargin: "-20% 0px -70% 0px", threshold: 0 });
+          secs.forEach(function (s) { obs.observe(s); });
+        }
+
+        /* mobile：目錄 accordion（≤920px） */
+        var toggle = document.querySelector(".toc-toggle");
+        var nav = document.querySelector(".toc-nav");
+        if (toggle && nav) {
+          toggle.addEventListener("click", function () {
+            var open = nav.classList.toggle("open");
+            toggle.setAttribute("aria-expanded", open ? "true" : "false");
+          });
+          nav.addEventListener("click", function (e) {
+            if (e.target.closest("a") && window.innerWidth <= 920) {
+              nav.classList.remove("open");
+              toggle.setAttribute("aria-expanded", "false");
+            }
+          });
+        }
+
+        /* desktop：收合側欄（預設展開；不持久化） */
+        var collapseBtn = document.querySelector(".toc-collapse");
+        var reopenBtn = document.querySelector(".toc-reopen");
+        function setTocCollapsed(collapsed) {
+          document.body.classList.toggle("toc-collapsed", collapsed);
+          if (collapseBtn) collapseBtn.setAttribute("aria-expanded", collapsed ? "false" : "true");
+          if (reopenBtn) reopenBtn.setAttribute("aria-expanded", collapsed ? "false" : "true");
+          if (collapsed && reopenBtn) reopenBtn.focus();
+          else if (!collapsed && collapseBtn) collapseBtn.focus();
+        }
+        if (collapseBtn) {
+          collapseBtn.addEventListener("click", function () { setTocCollapsed(true); });
+        }
+        if (reopenBtn) {
+          reopenBtn.addEventListener("click", function () { setTocCollapsed(false); });
+        }
+      })();
+    });
+  </script>
+
+  
+<script>
+(function () {
+  "use strict";
+
+  var scenario = "topic", pubQos = 1, lossy = false, stepIdx = 0, curTopic = null;
+
+  function $(id) { return document.getElementById(id); }
+  var statusEl = $("mqtt-status"), wireEl = $("mqtt-wire"), pubsEl = $("mqtt-pubs"),
+      subsEl = $("mqtt-subs"), metaEl = $("mqtt-meta"), storeEl = $("mqtt-store"),
+      bnoteEl = $("mqtt-broker-note"), btnNext = $("mqtt-btn-next"), btnReset = $("mqtt-btn-reset");
+
+  var T_TEMP = "factory/taipei/line-3/robot-07/telemetry/temperature";
+  var T_STAT = "factory/taipei/line-3/robot-07/status";
+
+  var SUBS = [
+    { n: "溫控後台", f: "factory/taipei/+/+/telemetry/temperature" },
+    { n: "三線看板", f: "factory/taipei/line-3/#" },
+    { n: "單機除錯", f: T_TEMP },
+    { n: "Presence 看板", f: "factory/+/+/+/status" },
+    { n: "稽核全訂", f: "#" }
+  ];
+  var TOPICS = [
+    { t: T_TEMP, h: "Presence 看板沒亮：它的 filter 是 5 層，這個 topic 有 6 層——<b>+ 恰好吃一層，層數不合就整條不匹配</b>。" },
+    { t: T_STAT, h: "溫控後台與單機除錯都沒亮：它們的尾巴是 telemetry/temperature。同一台機台、不同語義子樹自然分流——這就是 topic 層級順序的價值。" },
+    { t: "factory/taipei/line-5/robot-02/telemetry/temperature", h: "三線看板沒亮（這是 line-5），但溫控後台亮了——<b>+ 讓一條 filter 一次覆蓋全廠所有機台</b>。" },
+    { t: "factory/tainan/line-1/robot-01/status", h: "只剩 Presence 看板與稽核全訂。# 什麼都收，唯一收不到的是 $SYS/ 開頭的 Broker 內部指標。" }
+  ];
+
+  /* MQTT topic filter 比對：+ 恰好一層、# 吃掉剩下全部且只能在最後 */
+  function match(filter, topic) {
+    if (topic.charAt(0) === "$" && (filter.charAt(0) === "+" || filter.charAt(0) === "#")) return false;
+    var f = filter.split("/"), t = topic.split("/"), i;
+    for (i = 0; i < f.length; i++) {
+      if (f[i] === "#") return true;
+      if (i >= t.length) return false;
+      if (f[i] !== "+" && f[i] !== t[i]) return false;
+    }
+    return f.length === t.length;
+  }
+
+  function R(c, a, t, x) { return { c: c, a: a, t: t, x: x }; }
+  function nodeHTML(n) {
+    return '<div class="mqtt-node ' + (n.c || "") + '"><div class="nn">' + n.n + "</div>" +
+      (n.f ? '<div class="nf">' + n.f + "</div>" : "") + (n.b ? '<div class="nb">' + n.b + "</div>" : "") + "</div>";
+  }
+  function kvHTML(rows) {
+    if (!rows.length) return '<div class="empty">本情境不涉及 Broker 保存狀態。</div>';
+    return rows.map(function (r) {
+      return '<div class="prow"><span class="pk">' + r[0] + '</span><span class="pv ' + (r[2] || "") + '">' + r[1] + "</span></div>";
+    }).join("");
+  }
+  function paint(v) {
+    statusEl.innerHTML = v.s;
+    pubsEl.innerHTML = v.pubs.map(nodeHTML).join("");
+    subsEl.innerHTML = v.subs.map(nodeHTML).join("");
+    bnoteEl.textContent = v.bn;
+    metaEl.innerHTML = kvHTML(v.meta);
+    storeEl.innerHTML = kvHTML(v.store);
+    wireEl.innerHTML = v.rows.length
+      ? v.rows.map(function (r) {
+          return '<div class="mqtt-row ' + (r.c || "") + '"><span class="ar">' + (r.a || "") +
+            '</span><span class="tg">' + r.t + '</span><span class="tx">' + r.x + "</span></div>";
+        }).join("")
+      : '<div class="mqtt-row note"><span class="ar"></span><span class="tg">IDLE</span><span class="tx">尚無封包。</span></div>';
+    wireEl.scrollTop = wireEl.scrollHeight;
+  }
+
+  /* ---------- 情境一：topic 與 wildcard 匹配 ---------- */
+  function viewTopic() {
+    var rows = [], subs = [], hits = 0, i, ok, cur = curTopic;
+    for (i = 0; i < SUBS.length; i++) {
+      ok = cur ? match(SUBS[i].f, cur.t) : null;
+      if (ok) hits++;
+      subs.push({ n: SUBS[i].n, f: SUBS[i].f, b: cur ? (ok ? "MATCH · 收到 1 份" : "不匹配") : "等待發佈", c: cur ? (ok ? "hit" : "miss") : "" });
+      if (cur) rows.push(R(ok ? "b2s" : "bad", ok ? "→" : "✕", ok ? "PUBLISH" : "SKIP", SUBS[i].f + "　→　" + SUBS[i].n + (ok ? "" : "（不匹配，不複製）")));
+    }
+    if (cur) rows.unshift(R("p2b", "→", "PUBLISH", "topic=" + cur.t + "　qos=0"));
+    return {
+      s: cur ? "PUBLISH <b>" + cur.t + "</b>：Broker 拿這個 topic name 去比對整棵訂閱樹，" + hits + " / " + SUBS.length + " 條 filter 匹配。" + cur.h
+             : "點上面任一個 topic 發佈一則訊息，看 Broker 的訂閱樹比對結果。注意這裡沒有「下一步」——匹配是一瞬間的事。",
+      pubs: [{ n: "robot-07", f: "publisher", b: cur ? "PUBLISH" : "待命", c: cur ? "act" : "" }],
+      subs: subs, bn: cur ? (hits ? "比對訂閱樹 → 複製 " + hits + " 份" : "無匹配 → 直接丟棄") : "待命",
+      meta: [["發佈的 topic", cur ? cur.t : "—"], ["匹配 / 總訂閱", (cur ? hits : 0) + " / " + SUBS.length],
+             ["Broker 動作", cur ? (hits ? "複製 " + hits + " 份轉發" : "丟棄（topic 不是佇列）") : "—", cur && !hits ? "bad" : ""]],
+      store: [], rows: rows
+    };
+  }
+
+  /* ---------- 情境二：QoS 0/1/2 投遞流 ---------- */
+  function qosSteps() {
+    var q = pubQos, eA = Math.min(q, 2), S = [], a = 0, b = 0, d = 0, rows = [];
+    function P(s, add, o) {
+      o = o || {}; rows = rows.concat(add);
+      S.push({ s: s, rows: rows.slice(), a: a, b: b, d: d, pm: o.pm || "", am: o.am || "", bm: o.bm || "",
+               bn: o.bn || "待命", infl: o.infl || "—", dedup: o.dedup || "（空）" });
+    }
+    if (q === 0) {
+      P("QoS 0 = fire and forget：沒有 Packet Identifier、沒有 ack、沒有重傳。「注入丟包」在這條路徑上完全不會被任何人察覺。",
+        [R("p2b", "→", "PUBLISH", "qos=0　topic=" + T_TEMP + "　payload=26.4")], { pm: "act", infl: "不進 inflight" });
+      a = 1; b = 1; d = 1;
+      P("Broker 收下就立刻轉發給兩個匹配的訂閱者。看板 A 訂閱時要的是 QoS 2，實得卻是 0——<b>第二段有效 QoS = min(發佈 0, 授予 2) = 0</b>。",
+        [R("b2s", "→", "PUBLISH", "→ 看板 A　qos=0"), R("b2s", "→", "PUBLISH", "→ 稽核 B　qos=0")],
+        { am: "hit", bm: "hit", bn: "已轉發 · 不保存任何狀態" });
+      P("結論：<b>at most once</b>。整條流程 3 個封包、零往返、雙方零狀態——高頻遙測該用的等級，因為下一筆讀數馬上就來。",
+        [R("note", "", "結論", "訊息若在任何一段遺失，沒有任何一方會知道。")], { am: "hit", bm: "hit", bn: "閒置" });
+    } else if (q === 1) {
+      P("發佈端送出 QoS 1 的 PUBLISH，把它放進 inflight 等 PUBACK。Packet Identifier = 42。",
+        [R("p2b", "→", "PUBLISH", "qos=1　id=42　DUP=0　payload=26.4")], { pm: "act", infl: "id=42（等 PUBACK）" });
+      a = 1; b = 1; d = 1;
+      P("QoS 1 的接收端<b>一收到就交付</b>，所以 Broker 立刻轉發。兩段的 QoS 不同：給 A 是 min(1,2)=1，給 B 是 min(1,0)=0。",
+        [R("b2s", "→", "PUBLISH", "→ 看板 A　qos=1　id=7"), R("b2s", "→", "PUBLISH", "→ 稽核 B　qos=0")],
+        { am: "hit", bm: "hit", infl: "id=42（等 PUBACK）", bn: "已交付 · 待回 PUBACK" });
+      if (lossy) {
+        P("PUBACK 在回程遺失。Broker 早就處理並轉發了，但發佈端只知道「我沒收到 ack」——它無法分辨是訊息沒到、還是 ack 沒回。",
+          [R("bad", "✕", "PUBACK", "id=42　在回程遺失")], { am: "hit", bm: "hit", infl: "id=42（逾時計時中）", bn: "以為已完成" });
+        P("發佈端逾時，用 DUP=1 重送同一個 id=42。DUP 只是「這是一次重送」的提示，<b>規格明文說它不能拿來當去重依據</b>。",
+          [R("p2b", "→", "PUBLISH", "qos=1　id=42　DUP=1　← 重送")], { pm: "act", am: "hit", bm: "hit", infl: "id=42（重送中）" });
+        a = 2; b = 2; d = 2;
+        P("關鍵一步：<b>QoS 1 的接收端沒有去重義務</b>。Broker 看到 id=42 再來一次就再交付一次——看板 A 收到了第二份相同訊息。",
+          [R("b2s", "→", "PUBLISH", "→ 看板 A　qos=1　id=8　← 重複投遞"), R("b2s", "→", "PUBLISH", "→ 稽核 B　qos=0　← 重複投遞")],
+          { am: "keep", bm: "keep", infl: "id=42（仍在等）", bn: "再次交付（不去重）" });
+      }
+      P("PUBACK 抵達，發佈端釋放 inflight 並回收 Packet Identifier 42。",
+        [R("ctl", "←", "PUBACK", "id=42")], { am: a > 1 ? "keep" : "hit", bm: b > 1 ? "keep" : "hit", bn: "完成" });
+      P("結論：<b>at least once</b>。" + (lossy ? "本次看板 A 收到 <b>2 份</b>相同訊息。" : "本次沒有丟包，剛好一份——但協定並不保證這件事。") +
+        " 所以實務上的標準解是「QoS 1 + 應用層用 msg_id 去重」。",
+        [R("note", "", "結論", "重複的成本遠低於 QoS 2 的兩個額外來回，尤其在弱網與電池裝置上。")],
+        { am: a > 1 ? "keep" : "hit", bm: b > 1 ? "keep" : "hit", bn: "閒置" });
+    } else {
+      P("發佈端送出 QoS 2 的 PUBLISH。注意：Broker 此時「收下」了，但<b>還不會交付給任何人</b>。",
+        [R("p2b", "→", "PUBLISH", "qos=2　id=42　DUP=0")], { pm: "act", infl: "id=42（等 PUBREC）" });
+      P("第一對交換的後半：Broker 把 id=42 記進去重表，回 PUBREC 表示「我收到了、而且我記住了」。",
+        [R("ctl", "←", "PUBREC", "id=42")], { infl: "id=42（等 PUBCOMP）", dedup: "{ 42 }", bn: "已記錄 id=42 · 尚未交付" });
+      if (lossy) {
+        P("PUBREC 在回程遺失。發佈端一樣不知道對面發生了什麼。",
+          [R("bad", "✕", "PUBREC", "id=42　在回程遺失")], { infl: "id=42（逾時計時中）", dedup: "{ 42 }", bn: "已記錄 · 尚未交付" });
+        P("發佈端逾時，DUP=1 重送 PUBLISH id=42——<b>這裡就是 QoS 2 與 QoS 1 分岔的地方</b>。",
+          [R("p2b", "→", "PUBLISH", "qos=2　id=42　DUP=1　← 重送")], { pm: "act", infl: "id=42（重送中）", dedup: "{ 42 }" });
+        P("Broker 查去重表：42 已經在裡面 → <b>不交付、不轉發，只補回一個 PUBREC</b>。第二份訊息被擋在這裡，訂閱者永遠不會知道它存在過。",
+          [R("ctl", "←", "PUBREC", "id=42　← 命中去重表，未重複交付")], { dedup: "{ 42 }", bn: "命中去重表 · 丟棄重複" });
+      }
+      a = 1; b = 1; d = 1;
+      P("第二對交換：PUBREL 才是「可以交付了」的信號，Broker 到這一步<b>才真正把訊息轉發出去</b>。給 B 的仍然是 min(2,0)=0。",
+        [R("p2b", "→", "PUBREL", "id=42"), R("b2s", "→", "PUBLISH", "→ 看板 A　qos=2　id=9"), R("b2s", "→", "PUBLISH", "→ 稽核 B　qos=0")],
+        { pm: "act", am: "hit", bm: "hit", infl: "id=42（等 PUBCOMP）", dedup: "{ 42 }", bn: "收到 PUBREL · 交付一次" });
+      P("PUBCOMP：Broker 把 id=42 從去重表移除，發佈端回收這個 Packet Identifier。<b>第二對交換的真正作用就是確認「什麼時候可以安全地忘記」</b>。",
+        [R("ctl", "←", "PUBCOMP", "id=42")], { am: "hit", bm: "hit", bn: "完成 · 已釋放 id=42" });
+      P("結論：<b>每一段 hop 上是 exactly once</b>，但 end-to-end 不是——給稽核 B 的第二段是 QoS 0，而且只要中間有 Broker 重啟或 bridge 轉送，重複仍可能發生。",
+        [R("note", "", "結論", "要真正的一次語義，答案永遠是應用層冪等，不是把 QoS 調到 2。")], { am: "hit", bm: "hit", bn: "閒置" });
+    }
+    return S.map(function (st) {
+      var sem = q === 0 ? "at most once" : (q === 1 ? "at least once" : "exactly once（每段）");
+      return {
+        s: st.s, rows: st.rows, bn: st.bn,
+        pubs: [{ n: "robot-07", f: "publisher · " + T_TEMP.split("/").pop(), b: "發佈 QoS " + q, c: st.pm }],
+        subs: [{ n: "看板 A", f: "factory/taipei/+/+/telemetry/temperature", b: "授予 QoS 2 · 收到 " + st.a + " 份", c: st.am },
+               { n: "稽核 B", f: "#", b: "授予 QoS 0 · 收到 " + st.b + " 份", c: st.bm }],
+        meta: [["發佈端 QoS", "QoS " + q], ["第二段 · 看板 A", "QoS " + eA], ["第二段 · 稽核 B", "QoS 0"],
+               ["Broker 交付次數", String(st.d), st.d > 1 ? "bad" : ""],
+               ["看板 A 收到", st.a + " 份", st.a > 1 ? "bad" : (st.a ? "good" : "")], ["語義", sem]],
+        store: [["發佈端 inflight", st.infl], ["Broker QoS 2 去重表", st.dedup]]
+      };
+    });
+  }
+
+  /* ---------- 情境三：retained 與 Last Will ---------- */
+  function lwtSteps() {
+    var S = [], rows = [];
+    function P(s, add, o) {
+      rows = rows.concat(add);
+      S.push({
+        s: s, rows: rows.slice(), bn: o.bn,
+        pubs: [{ n: "robot-07", f: "keep-alive 60s · clean-start 0", b: o.pb, c: o.pm || "" }],
+        subs: o.sv ? [{ n: "看板 dash-01", f: "factory/+/+/+/status", b: o.sb, c: o.sm || "" }]
+                   : [{ n: "（尚無訂閱者）", f: "—", b: "", c: "miss" }],
+        meta: [["Keep Alive", "60 s"], ["Broker 逾時門檻", "90 s（× 1.5）"], ["Session Expiry", "3600 s"],
+               ["遺囑狀態", o.will, o.will.indexOf("已發") === 0 ? "bad" : ""], ["dash-01 收到", (o.got || 0) + " 則"]],
+        store: [["retained: …/robot-07/status", o.ret || "（空）", o.ret === "offline" ? "bad" : (o.ret ? "good" : "")],
+                ["session: robot-07", o.sess], ["will: robot-07", o.will]]
+      });
+    }
+    P("robot-07 建立連線。<b>遺囑是在 CONNECT 封包裡就先講好的</b>——趁還活著的時候，把「我死掉時要通知誰、說什麼」交給 Broker 保管。",
+      [R("p2b", "→", "CONNECT", "client-id=robot-07　clean-start=0　session-expiry=3600　keep-alive=60"),
+       R("p2b", "→", "WILL", "will-topic=…/robot-07/status　will-payload=offline　will-qos=1　will-retain=1"),
+       R("ctl", "←", "CONNACK", "reason=0　session-present=0　（沒有舊 session，訂閱要重建）")],
+      { pm: "act", pb: "已連線", bn: "已保管遺囑", will: "已登記（未觸發）", sess: "存在 · expiry 3600s" });
+    P("上線公告：發佈 online 到 status topic，<b>帶 RETAIN=1</b>。此刻沒有任何訂閱者匹配，但 Broker 仍然會把它存進 retained store。",
+      [R("p2b", "→", "PUBLISH", "topic=…/robot-07/status　payload=online　qos=1　retain=1"),
+       R("note", "", "RETAIN", "寫入 retained store（每個 topic 只留最新一則，覆蓋舊的）")],
+      { pm: "act", pb: "已上線公告", bn: "retained store 寫入", will: "已登記（未觸發）", sess: "存在 · expiry 3600s", ret: "online" });
+    P("遙測上報，這則<b>沒有 retain</b>。沒有任何訂閱者匹配 → Broker 直接丟棄。<b>topic 是路由鍵不是佇列</b>，這則訊息不會被存在任何地方。",
+      [R("p2b", "→", "PUBLISH", "topic=…/telemetry/temperature　payload=26.4　qos=0　retain=0"),
+       R("bad", "✕", "DROP", "無匹配訂閱者且非 retained → 丟棄，不進任何佇列")],
+      { pm: "act", pb: "上報中", bn: "無匹配 → 丟棄", will: "已登記（未觸發）", sess: "存在 · expiry 3600s", ret: "online" });
+    P("看板 dash-01 上線並訂閱 <code>factory/+/+/+/status</code>，Broker 在 SUBACK 裡回覆<b>實際授予</b>的 QoS 1。",
+      [R("b2s", "←", "SUBSCRIBE", "filter=factory/+/+/+/status　requested-qos=1"),
+       R("b2s", "→", "SUBACK", "granted-qos=1")],
+      { pb: "運行中", sv: 1, sm: "act", sb: "已訂閱", bn: "新增訂閱", will: "已登記（未觸發）", sess: "存在 · expiry 3600s", ret: "online" });
+    P("Broker 立刻投遞 retained：<b>dash-01 一訂上就拿到 robot-07 的當前狀態</b>，不必等下一次上報。這則帶 RETAIN=1，客戶端據此知道它是快照而不是剛發生的事。",
+      [R("b2s", "→", "PUBLISH", "→ dash-01　payload=online　retain=1　← 來自 retained store")],
+      { pb: "運行中", sv: 1, sm: "hit", sb: "收到 online（retained）", got: 1, bn: "投遞 retained", will: "已登記（未觸發）", sess: "存在 · expiry 3600s", ret: "online" });
+    P("robot-07 突然斷電：<b>沒有 DISCONNECT、沒有 FIN</b>。這就是篇 5 的 half-open——Broker 這一刻什麼都不知道，那條連線在它眼中還活著。",
+      [R("bad", "✕", "POWER", "robot-07 斷電，來不及送出 DISCONNECT")],
+      { pm: "dead", pb: "斷電（Broker 未察覺）", sv: 1, sb: "仍顯示 online", got: 1, bn: "尚未察覺 · 計時中", will: "已登記（未觸發）", sess: "存在 · expiry 3600s", ret: "online" });
+    P("Keep Alive 60 s × 1.5 = <b>90 s 內沒有收到任何封包</b> → Broker 判定連線死亡。<b>這 90 秒就是 presence 的精度上限</b>：拉長 Keep Alive 省電，代價就是這個數字一起變大。",
+      [R("ctl", "⏱", "KEEPALIVE", "90 s 無任何封包 → 判定連線異常中斷")],
+      { pm: "dead", pb: "已被判定離線", sv: 1, sb: "仍顯示 online", got: 1, bn: "逾時 · 準備代發遺囑", will: "觸發條件成立", sess: "存在 · expiry 3600s", ret: "online" });
+    P("Broker <b>代替裝置</b>發出遺囑：offline 送到同一個 topic 並帶 retain=1，<b>覆蓋掉 retained store 裡的 online</b>。dash-01 立刻收到。",
+      [R("ctl", "→", "LWT", "PUBLISH topic=…/robot-07/status　payload=offline　qos=1　retain=1"),
+       R("b2s", "→", "PUBLISH", "→ dash-01　payload=offline")],
+      { pm: "dead", pb: "離線", sv: 1, sm: "hit", sb: "收到 offline（LWT）", got: 2, bn: "已代發遺囑", will: "已發出", sess: "存在 · expiry 3600s", ret: "offline" });
+    P("收尾：<b>session 還在</b>（Session Expiry 3600 s），離線期間發給 robot-07 的 QoS 1 指令會排進它的佇列；上電重連（Clean Start=0）時 CONNACK 的 Session Present=1，訂閱與待送訊息一起回來。反過來，若剛才是<b>乾淨的 DISCONNECT</b>，Broker 會直接丟棄遺囑、一個字都不發。",
+      [R("note", "", "SESSION", "QoS 0 訊息不排隊；只有 QoS 1／2 會被保留在離線佇列裡"),
+       R("note", "", "對照", "正常 DISCONNECT → 不發 LWT；Keep Alive 逾時／連線異常 → 發 LWT")],
+      { pm: "dead", pb: "離線 · session 保留中", sv: 1, sb: "已知離線", got: 2, bn: "保留 session 待重連", will: "已發出（重連後可重新登記）", sess: "保留中 · 倒數 3600s", ret: "offline" });
+    return S;
+  }
+
+  /* ---------- 控制 ---------- */
+  var steps = [];
+  function build() {
+    steps = scenario === "qos" ? qosSteps() : (scenario === "lwt" ? lwtSteps() : []);
+  }
+  function render() {
+    $("mqtt-row-topic").style.display = scenario === "topic" ? "" : "none";
+    $("mqtt-row-qos").style.display = scenario === "qos" ? "" : "none";
+    if (scenario === "topic") { paint(viewTopic()); btnNext.disabled = true; return; }
+    paint(steps[stepIdx]);
+    btnNext.disabled = stepIdx >= steps.length - 1;
+  }
+  function reset() { stepIdx = 0; curTopic = null; syncPicker(); build(); render(); }
+
+  function pressGroup(el, btn) {
+    el.querySelectorAll("button").forEach(function (b) { b.setAttribute("aria-pressed", "false"); });
+    btn.setAttribute("aria-pressed", "true");
+  }
+
+  var picker = $("mqtt-picker");
+  picker.innerHTML = TOPICS.map(function (o, i) {
+    return '<button class="mqtt-tchip" type="button" data-i="' + i + '" aria-pressed="false">' + o.t + "</button>";
+  }).join("");
+  function syncPicker() {
+    picker.querySelectorAll("button").forEach(function (b) {
+      b.setAttribute("aria-pressed", curTopic && TOPICS[+b.getAttribute("data-i")] === curTopic ? "true" : "false");
+    });
+  }
+  picker.addEventListener("click", function (e) {
+    var b = e.target.closest ? e.target.closest("button") : null;
+    if (!b) return;
+    curTopic = TOPICS[+b.getAttribute("data-i")];
+    pressGroup(picker, b);
+    render();
+  });
+
+  $("mqtt-seg-sc").addEventListener("click", function (e) {
+    var b = e.target.closest ? e.target.closest("button") : null;
+    if (!b) return;
+    pressGroup($("mqtt-seg-sc"), b);
+    scenario = b.getAttribute("data-sc");
+    reset();
+  });
+  $("mqtt-seg-qos").addEventListener("click", function (e) {
+    var b = e.target.closest ? e.target.closest("button") : null;
+    if (!b) return;
+    pressGroup($("mqtt-seg-qos"), b);
+    pubQos = parseInt(b.getAttribute("data-q"), 10);
+    stepIdx = 0; build(); render();
+  });
+  $("mqtt-seg-loss").addEventListener("click", function (e) {
+    var b = e.target.closest ? e.target.closest("button") : null;
+    if (!b) return;
+    pressGroup($("mqtt-seg-loss"), b);
+    lossy = b.getAttribute("data-loss") === "1";
+    stepIdx = 0; build(); render();
+  });
+
+  btnNext.addEventListener("click", function () {
+    if (stepIdx < steps.length - 1) { stepIdx += 1; render(); }
+  });
+  btnReset.addEventListener("click", reset);
+
+  reset();
+})();
+</script>
+
+
+<!-- FULLSCREEN-FEATURE:START -->
+<style>
+  .fs-toggle {
+    position: fixed;
+    top: 18px;
+    right: 18px;
+    z-index: 1000;
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    font-family: var(--sans, system-ui, -apple-system, "Segoe UI", sans-serif);
+    font-size: 12.5px;
+    line-height: 1;
+    color: var(--text-2, #6b7078);
+    background: var(--bg, #ffffff);
+    border: 1px solid var(--border-strong, #dedcd8);
+    border-radius: 999px;
+    padding: 7px 13px 7px 11px;
+    cursor: pointer;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, .06), 0 4px 12px rgba(0, 0, 0, .04);
+    transition: background .15s, border-color .15s, color .15s;
+  }
+
+  .fs-toggle:hover {
+    background: var(--bg-soft, #fafaf9);
+    color: var(--text, #262a2f);
+    border-color: var(--text-3, #9aa0a8);
+  }
+
+  .fs-toggle:focus-visible {
+    outline: 2px solid var(--accent, #3f6188);
+    outline-offset: 2px;
+  }
+
+  .fs-toggle[aria-pressed="true"] {
+    background: var(--accent, #3f6188);
+    color: #fff;
+    border-color: var(--accent, #3f6188);
+  }
+
+  .fs-toggle .fs-ic {
+    flex: 0 0 auto;
+    display: block;
+  }
+
+  @media print {
+    .fs-toggle { display: none !important; }
+  }
+
+  @media (max-width: 480px) {
+    .fs-toggle { padding: 8px; }
+    .fs-toggle .fs-label { display: none; }
+  }
+</style>
+<button id="fs-toggle-btn" class="fs-toggle" type="button" aria-pressed="false"
+        aria-label="切換全螢幕檢視 (快捷鍵 F)" title="全螢幕檢視 (F)">
+  <svg class="fs-ic fs-ic-expand" viewBox="0 0 24 24" width="15" height="15" fill="none"
+       stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+    <path d="M8 3H5a2 2 0 0 0-2 2v3m18 0V5a2 2 0 0 0-2-2h-3m0 18h3a2 2 0 0 0 2-2v-3M3 16v3a2 2 0 0 0 2 2h3"/>
+  </svg>
+  <svg class="fs-ic fs-ic-compress" viewBox="0 0 24 24" width="15" height="15" fill="none"
+       stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="display:none">
+    <path d="M8 3v3a2 2 0 0 1-2 2H3m18 0h-3a2 2 0 0 1-2-2V3m0 18v-3a2 2 0 0 1 2-2h3M3 16h3a2 2 0 0 1 2 2v3"/>
+  </svg>
+  <span class="fs-label">全螢幕</span>
+</button>
+<script>
+  "use strict";
+  (function () {
+    var btn = document.getElementById("fs-toggle-btn");
+    if (!btn) return;
+    var docEl = document.documentElement;
+    var canFs = !!(docEl.requestFullscreen || docEl.webkitRequestFullscreen);
+    // 不支援 Fullscreen API (如 iPhone Safari) → 隱藏按鈕，避免壞掉的 UI
+    if (!canFs) { btn.style.display = "none"; return; }
+
+    var expandIc = btn.querySelector(".fs-ic-expand");
+    var compressIc = btn.querySelector(".fs-ic-compress");
+    var label = btn.querySelector(".fs-label");
+
+    function isFs() {
+      return !!(document.fullscreenElement || document.webkitFullscreenElement);
+    }
+    function enter() {
+      if (docEl.requestFullscreen) docEl.requestFullscreen();
+      else if (docEl.webkitRequestFullscreen) docEl.webkitRequestFullscreen();
+    }
+    function exit() {
+      if (document.exitFullscreen) document.exitFullscreen();
+      else if (document.webkitExitFullscreen) document.webkitExitFullscreen();
+    }
+    function toggle() { isFs() ? exit() : enter(); }
+    function sync() {
+      var on = isFs();
+      btn.setAttribute("aria-pressed", on ? "true" : "false");
+      if (label) label.textContent = on ? "離開全螢幕" : "全螢幕";
+      if (expandIc) expandIc.style.display = on ? "none" : "block";
+      if (compressIc) compressIc.style.display = on ? "block" : "none";
+    }
+
+    btn.addEventListener("click", toggle);
+    document.addEventListener("fullscreenchange", sync);
+    document.addEventListener("webkitfullscreenchange", sync);
+    document.addEventListener("keydown", function (e) {
+      if (e.key !== "f" && e.key !== "F") return;
+      if (e.metaKey || e.ctrlKey || e.altKey) return;
+      var t = e.target;
+      var tag = t && t.tagName ? t.tagName.toUpperCase() : "";
+      if (tag === "INPUT" || tag === "TEXTAREA" || (t && t.isContentEditable)) return;
+      e.preventDefault();
+      toggle();
+    });
+    sync();
+  })();
+</script>
+<!-- FULLSCREEN-FEATURE:END -->
+</body>
+</html>
