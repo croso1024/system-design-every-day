@@ -1,0 +1,248 @@
+<script>
+(function () {
+  "use strict";
+
+  /* ---------- 元素 ---------- */
+  var statusEl = document.getElementById("wsx-status");
+  var wireEl   = document.getElementById("wsx-wire");
+  var barEl    = document.getElementById("wsx-bar");
+  var btnNext  = document.getElementById("wsx-btn-next");
+  var btnReset = document.getElementById("wsx-btn-reset");
+  if (!statusEl || !wireEl || !btnNext) return;
+
+  var STATES = ["conn", "open", "closing", "closed"];
+  var ORDER  = { conn: 0, open: 1, closing: 2, closed: 3 };
+
+  var scenario = "clean";
+  var stepIdx = 0;
+  var JIT = [0.75, 0.75, 0.75];   /* reset 時重新抽樣，示範 jitter */
+
+  /* ---------- 步驟資料 ----------
+     每步：st 狀態、add 線上事件、p 面板增量（只寫變動的欄位）、dIdx 退避階數、msg 敘述
+     rows: [kind, tag, text]，kind ∈ c2s | s2c | c2sctl | s2cctl | note | bad          */
+
+  var SC = {
+    clean: [
+      { st: "conn", p: { rs: "0 CONNECTING" },
+        add: [["c2s", "HTTP", "GET /ws · Upgrade: websocket · Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ=="]],
+        msg: "交握就是一個普通的 HTTP GET。此刻還沒有 WebSocket——伺服器要是回 200 或 404，故事就在這裡結束。" },
+      { st: "conn", p: { proto: "chat.v2" },
+        add: [["s2c", "HTTP", "101 Switching Protocols · Sec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo="]],
+        msg: "伺服器把 Key 接上固定 GUID、做 SHA-1 再 base64，算出 Accept 並回 101。從這一刻起，這條 TCP 不再說 HTTP。" },
+      { st: "open", p: { rs: "1 OPEN", rsC: "good" },
+        add: [["note", "EVENT", "onopen 觸發 · readyState 0 → 1"]],
+        msg: "OPEN。兩端地位對稱，任一方都可以在任何時候送出一則訊息，不需要對方先問。" },
+      { st: "open", p: {},
+        add: [["c2s", "TEXT", "{\"op\":\"sub\",\"topic\":\"BTCUSD\"} · masked · 標頭 6 bytes"]],
+        msg: "客戶端送出訂閱。客戶端方向的每一個 frame 都必須 masked，所以標頭多了 4 bytes 的 masking key。" },
+      { st: "open", p: {},
+        add: [["s2c", "TEXT", "{\"px\":68120,\"seq\":41} · 未 masked · 標頭 2 bytes"]],
+        msg: "伺服器方向不 mask，標頭只有 2 bytes——這就是變長長度編碼替下行省下來的東西。" },
+      { st: "open", p: { ping: "1", pingC: "warn" },
+        add: [["s2cctl", "PING", "control frame · 伺服器每 25 秒探一次"]],
+        msg: "伺服器送 Ping。瀏覽器端不需要寫任何程式碼——規範要求它自動回 Pong。" },
+      { st: "open", p: { ping: "0", pingC: "" },
+        add: [["c2sctl", "PONG", "瀏覽器自動回應"]],
+        msg: "Pong 回來，未回應計數歸零。這一來一回同時餵飽了路徑上的 NAT 映射與 LB 的 idle timer。" },
+      { st: "closing", p: { rs: "2 CLOSING", rsC: "warn", code: "1001 Going Away", codeC: "warn" },
+        add: [["s2cctl", "CLOSE", "1001 \"server restarting\" · 2 bytes 狀態碼 + UTF-8 理由"]],
+        msg: "伺服器要下線，主動發起關閉交握並帶上明確的 1001。readyState 進入 CLOSING。" },
+      { st: "closed", p: { rs: "3 CLOSED", rsC: "", clean: "true", cleanC: "good" },
+        add: [["c2sctl", "CLOSE", "1001 · 回送 Close frame，之後由伺服器先關閉底層 TCP"]],
+        msg: "雙方都送過 CLOSE，這才叫 clean close。onclose 拿到 code=1001、wasClean=true——客戶端知道發生了什麼。" },
+      { st: "closed", p: { att: "即將第 1 次" }, dIdx: 0,
+        add: [["note", "DECIDE", "1001 = 伺服器只是重啟 → 應重連；若收到的是 1000 就該停手"]],
+        msg: "重連決策看的是 close code，不是「有沒有斷」。把 1000 也拿去重連，就會做出一個永遠關不掉的連線。" }
+    ],
+
+    silent: [
+      { st: "conn", p: { rs: "0 CONNECTING" },
+        add: [["c2s", "HTTP", "GET /ws · Upgrade: websocket"]],
+        msg: "同樣的交握起手式。" },
+      { st: "open", p: { rs: "1 OPEN", rsC: "good", proto: "chat.v2" },
+        add: [["s2c", "HTTP", "101 Switching Protocols"], ["note", "EVENT", "onopen · readyState 1"]],
+        msg: "連線建立，開始接收行情推送。" },
+      { st: "open", p: {},
+        add: [["s2c", "TEXT", "{\"px\":68120,\"seq\":41}"], ["s2c", "TEXT", "{\"px\":68135,\"seq\":42}"]],
+        msg: "資料正常往返，客戶端記下 lastSeq = 42。" },
+      { st: "open", p: { rsC: "warn" },
+        add: [["bad", "✕", "使用者進了電梯 · 路徑靜默中斷：沒有 FIN、沒有 RST、沒有任何事件"]],
+        msg: "關鍵的一格：連線實際上已經死了，但兩端都不知道。readyState 仍然是 OPEN，事件迴圈一片安靜。" },
+      { st: "open", p: { ping: "1", pingC: "warn" },
+        add: [["s2cctl", "PING", "第 1 次探測（送出後啟動計時器）"]],
+        msg: "伺服器照常送 Ping——只是它送進的是一條已經不通的路徑。" },
+      { st: "open", p: {},
+        add: [["note", "TIMEOUT", "25 秒內沒有 Pong · 未回應計數 = 1"]],
+        msg: "沒有錯誤、沒有 onclose。唯一的訊號是那個沒有回來的 Pong——這就是為什麼保活必須是「主動探測 + 計時」。" },
+      { st: "open", p: { ping: "2", pingC: "bad" },
+        add: [["s2cctl", "PING", "第 2 次探測"], ["note", "TIMEOUT", "再次逾時 · 未回應計數 = 2"]],
+        msg: "第二次逾時。從斷線到這裡，狀態機已經停在 OPEN 好幾格了——這就是 half-open。" },
+      { st: "closed", p: { rs: "3 CLOSED", rsC: "", code: "1006 Abnormal", codeC: "bad", clean: "false", cleanC: "bad", ping: "—", pingC: "" },
+        add: [["bad", "LOCAL", "判定連線已死 → 本地產生 close code 1006（從未收到 CLOSE frame）"]],
+        msg: "客戶端自行放棄。1006 是保留碼、不可能出現在線上——日誌裡的 1006 佔比，量的就是「關閉交握沒有發生」的次數。" },
+      { st: "closed", p: { att: "1" }, dIdx: 0,
+        add: [["note", "BACKOFF", "退避 #1 = min(30000, 500 × 2^0) × jitter"],
+              ["c2s", "HTTP", "GET /ws → 失敗，網路仍未恢復"]],
+        msg: "第一次退避。基底 500ms，乘上 0.5–1.0 的隨機係數。" },
+      { st: "closed", p: { att: "2" }, dIdx: 1,
+        add: [["note", "BACKOFF", "退避 #2 = min(30000, 500 × 2^1) × jitter"],
+              ["c2s", "HTTP", "GET /ws → 失敗"]],
+        msg: "等待時間加倍。注意每個客戶端抽到的 jitter 都不同——這正是打破相位鎖定、避免重連風暴的地方。" },
+      { st: "open", p: { rs: "1 OPEN", rsC: "good", att: "3", code: "—", codeC: "", clean: "—", cleanC: "", ping: "0" }, dIdx: 2,
+        add: [["note", "BACKOFF", "退避 #3 = min(30000, 500 × 2^2) × jitter"],
+              ["c2s", "HTTP", "GET /ws"], ["s2c", "HTTP", "101 Switching Protocols"]],
+        msg: "第三次成功。管道通了——但這只代表管道通了。" },
+      { st: "open", p: {},
+        add: [["c2s", "TEXT", "{\"type\":\"resume\",\"lastSeq\":42}"],
+              ["s2c", "TEXT", "{\"type\":\"replay\",\"from\":43,\"count\":6}"]],
+        msg: "重連 ≠ 恢復。客戶端宣告 lastSeq，伺服器補發 43 之後的六則；若保留視窗已經過期，回的就必須是「太舊了，請走全量重載」。" }
+    ],
+
+    buffer: [
+      { st: "open", p: { rs: "1 OPEN", rsC: "good", proto: "chat.v2" },
+        add: [["c2s", "HTTP", "GET /ws"], ["s2c", "HTTP", "101 Switching Protocols"], ["note", "EVENT", "onopen"]],
+        msg: "交握快轉，直接看發送側：應用要把每秒 200 筆行情推給這一個客戶端。" },
+      { st: "open", p: { buf: "48 KB", pct: 12 },
+        add: [["c2s", "TEXT", "send() × 40 · 應用層每 5ms 產一筆"]],
+        msg: "send() 立刻回傳：沒有回傳值、不會丟例外、不會回 EAGAIN。資料靜靜進了瀏覽器的內部緩衝。" },
+      { st: "open", p: { buf: "310 KB", pct: 32, bufC: "warn", barC: "warn" },
+        add: [["note", "SLOW", "對端在行動網路上 · 實際寫出速率遠低於產出速率"]],
+        msg: "bufferedAmount 開始持續上升——這是唯一的訊號。TCP 的 rwnd 早就在收縮了，但應用層完全看不到。" },
+      { st: "open", p: { buf: "780 KB", pct: 74 },
+        add: [["c2s", "TEXT", "send() 仍在繼續 · 沒有任何機制會阻止它"]],
+        msg: "程式碼裡若沒有主動檢查，這條曲線只會往上，終點是分頁 OOM——而且是被單一個慢客戶端拖垮。" },
+      { st: "open", p: { buf: "1.02 MB", pct: 100, bufC: "bad", barC: "bad" },
+        add: [["bad", "THRESHOLD", "bufferedAmount > 1 MB · 觸發有界佇列上限"]],
+        msg: "門檻到了。這一刻必須做選擇——而且是設計時就該決定好的選擇，不是當下臨時想。" },
+      { st: "open", p: { buf: "36 KB", pct: 8, bufC: "good", barC: "" },
+        add: [["note", "選項 A", "合併：同一支股票只保留最新一筆報價 → 佇列瞬間收斂"]],
+        msg: "策略一，對應篇 1 的「丟棄與合併」：行情、游標、線上狀態這類資料只有最新值有意義，覆蓋舊值即可。" },
+      { st: "closing", p: { rs: "2 CLOSING", rsC: "warn", code: "1013 Try Again Later", codeC: "warn", buf: "—", pct: 0, bufC: "", barC: "" },
+        add: [["note", "選項 B", "不可丟的資料 → 主動 close(1013)，讓客戶端退避後重連補發"]],
+        msg: "策略二，對應篇 1 的「有界佇列 + 斷線」：犧牲這一條連線，保全整個行程。遺漏的訊息靠 s5 的序號補發接回來。" },
+      { st: "closed", p: { rs: "3 CLOSED", rsC: "", clean: "true", cleanC: "good" },
+        add: [["note", "RESULT", "一個 slow consumer 的成本，會隨 fan-out 的廣播頻率被放大"]],
+        msg: "fan-out 場景下每一則廣播都要為他複製一份。單機的答案就是犧牲他一個；多節點版本的這個問題留給篇 7。" }
+    ]
+  };
+
+  var BASE = {
+    rs: "—", rsC: "", proto: "—", code: "—", codeC: "", clean: "—", cleanC: "",
+    ping: "0", pingC: "", buf: "0 B", bufC: "", att: "—", delay: "—", pct: 0, barC: ""
+  };
+
+  /* ---------- 工具 ---------- */
+  function esc(s) {
+    return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+  }
+  function fmtMs(ms) {
+    return ms < 1000 ? Math.round(ms) + " ms" : (ms / 1000).toFixed(2) + " s";
+  }
+  function backoff(i) {
+    return Math.min(30000, 500 * Math.pow(2, i)) * JIT[i];
+  }
+  function setP(id, val, cls) {
+    var el = document.getElementById(id);
+    if (!el) return;
+    el.textContent = val;
+    el.className = "pv" + (cls ? " " + cls : "");
+  }
+
+  var KIND = {
+    c2s:    { cls: "c2s", ar: "→" },
+    s2c:    { cls: "s2c", ar: "←" },
+    c2sctl: { cls: "c2s ctl", ar: "→" },
+    s2cctl: { cls: "s2c ctl", ar: "←" },
+    note:   { cls: "note", ar: "·" },
+    bad:    { cls: "bad", ar: "✕" }
+  };
+
+  /* ---------- 渲染 ---------- */
+  function render() {
+    var steps = SC[scenario];
+    var state = {};
+    var k;
+    for (k in BASE) { if (Object.prototype.hasOwnProperty.call(BASE, k)) state[k] = BASE[k]; }
+
+    var rows = [];
+    var cur = "conn";
+
+    for (var i = 0; i <= stepIdx && i < steps.length; i++) {
+      var s = steps[i];
+      cur = s.st;
+      if (s.add) { for (var j = 0; j < s.add.length; j++) rows.push(s.add[j]); }
+      if (s.p) { for (k in s.p) { if (Object.prototype.hasOwnProperty.call(s.p, k)) state[k] = s.p[k]; } }
+      if (typeof s.dIdx === "number") state.delay = fmtMs(backoff(s.dIdx));
+      if (i === stepIdx) statusEl.textContent = s.msg;
+    }
+
+    /* 狀態機 */
+    var reached = ORDER[cur];
+    for (var n = 0; n < STATES.length; n++) {
+      var box = document.querySelector('.wsx-st[data-st="' + STATES[n] + '"]');
+      if (!box) continue;
+      box.className = "wsx-st";
+      if (STATES[n] === cur) {
+        box.classList.add(cur === "closed" ? "dead" : "on");
+      } else if (ORDER[STATES[n]] < reached) {
+        box.classList.add("done");
+      }
+    }
+
+    /* 線上事件 */
+    var html = rows.map(function (r, idx) {
+      var kd = KIND[r[0]] || KIND.note;
+      var last = idx === rows.length - 1 ? " last" : "";
+      return '<div class="wsx-row ' + kd.cls + last + '">' +
+             '<span class="ar">' + kd.ar + '</span>' +
+             '<span class="tg">' + esc(r[1]) + '</span>' +
+             '<span class="tx">' + esc(r[2]) + '</span></div>';
+    }).join("");
+    wireEl.innerHTML = html || '<div class="wsx-row note"><span class="ar">·</span><span class="tx">尚無事件</span></div>';
+    wireEl.scrollTop = wireEl.scrollHeight;
+
+    /* 面板 */
+    setP("wsx-p-rs", state.rs, state.rsC);
+    setP("wsx-p-proto", state.proto, "");
+    setP("wsx-p-code", state.code, state.codeC);
+    setP("wsx-p-clean", state.clean, state.cleanC);
+    setP("wsx-p-ping", state.ping, state.pingC);
+    setP("wsx-p-buf", state.buf, state.bufC);
+    setP("wsx-p-att", state.att, "");
+    setP("wsx-p-delay", state.delay, state.delay === "—" ? "" : "warn");
+
+    if (barEl) {
+      barEl.style.width = (state.pct || 0) + "%";
+      barEl.className = state.barC || "";
+    }
+
+    btnNext.disabled = stepIdx >= steps.length - 1;
+  }
+
+  function reset() {
+    stepIdx = 0;
+    JIT = [0, 1, 2].map(function () { return 0.5 + Math.random() * 0.5; });
+    render();
+  }
+
+  function next() {
+    if (stepIdx < SC[scenario].length - 1) { stepIdx += 1; render(); }
+  }
+
+  /* ---------- 事件 ---------- */
+  var segBtns = document.querySelectorAll("#wsx-demo .seg button");
+  segBtns.forEach(function (btn) {
+    btn.addEventListener("click", function () {
+      segBtns.forEach(function (b) { b.setAttribute("aria-pressed", "false"); });
+      btn.setAttribute("aria-pressed", "true");
+      scenario = btn.getAttribute("data-sc");
+      reset();
+    });
+  });
+
+  btnNext.addEventListener("click", next);
+  if (btnReset) btnReset.addEventListener("click", reset);
+
+  reset();
+})();
+</script>

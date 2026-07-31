@@ -1,0 +1,2519 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>WebSocket 即時雙向通訊 | System Design Every Day</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@300;400;500;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+  <script>
+    mermaid.initialize({
+      startOnLoad: true,
+      theme: 'default',
+      securityLevel: 'loose'
+    });
+  </script>
+  <style>
+    :root {
+      --bg: #ffffff;
+      --bg-soft: #fafaf9;
+      --text: #262a2f;
+      --text-2: #6b7078;
+      --text-3: #9aa0a8;
+      --border: #ecebe8;
+      --border-strong: #dedcd8;
+      --code-bg: #f6f5f3;
+      --accent: #3f6188;
+      --accent-soft: #eef2f7;
+      --accent-line: #cdd9e6;
+      --ok: #4d7d68;
+      --ok-soft: #eef4f1;
+      --warn: #a3743e;
+      --warn-soft: #f6f0e7;
+      --bad: #a8554f;
+      --bad-soft: #f6ecea;
+      --radius: 10px;
+      --radius-sm: 7px;
+      --maxw: 760px;
+      --sans: "Noto Sans TC", system-ui, -apple-system, "Segoe UI", sans-serif;
+      --mono: "JetBrains Mono", "SFMono-Regular", Menlo, Consolas, monospace;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    html {
+      scroll-behavior: smooth;
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      html {
+        scroll-behavior: auto;
+      }
+      * {
+        animation-duration: .001ms !important;
+        transition-duration: .001ms !important;
+      }
+    }
+
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font-family: var(--sans);
+      font-weight: 400;
+      font-size: 16px;
+      line-height: 1.78;
+      -webkit-font-smoothing: antialiased;
+      letter-spacing: .005em;
+    }
+
+    ::selection {
+      background: var(--accent-soft);
+    }
+
+    /* ---------- layout ---------- */
+    .wrap {
+      display: flex;
+      max-width: 1180px;
+      margin: 0 auto;
+      gap: 0;
+    }
+
+    .toc {
+      width: 248px;
+      flex: 0 0 248px;
+      position: sticky;
+      top: 0;
+      height: 100vh;
+      padding: 54px 22px 40px 28px;
+      overflow-y: auto;
+      border-right: 1px solid var(--border);
+      transition: width .2s ease, flex-basis .2s ease, padding .2s ease, opacity .15s ease, border-color .15s ease;
+    }
+
+    .toc-kicker {
+      font-family: var(--mono);
+      font-size: 11px;
+      letter-spacing: .14em;
+      text-transform: uppercase;
+      color: var(--text-3);
+      margin-bottom: 20px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+    }
+
+    /* desktop：側欄內收合鈕；mobile 隱藏（沿用既有 .toc-toggle） */
+    .toc-collapse {
+      display: none;
+      flex: 0 0 auto;
+      align-items: center;
+      justify-content: center;
+      width: 28px;
+      height: 28px;
+      padding: 0;
+      border: none;
+      background: none;
+      border-radius: 6px;
+      color: var(--text-2);
+      line-height: 1;
+      cursor: pointer;
+    }
+
+    .toc-collapse:hover {
+      color: var(--text);
+      background: var(--bg-soft);
+    }
+
+    .toc-collapse:focus-visible {
+      outline: 2px solid var(--accent);
+      outline-offset: 2px;
+    }
+
+    .toc-collapse svg {
+      display: block;
+    }
+
+    /* desktop：側欄收合後的展開鈕（預設隱藏） */
+    .toc-reopen {
+      display: none;
+      position: fixed;
+      top: 18px;
+      left: 18px;
+      z-index: 900;
+      align-items: center;
+      gap: 7px;
+      font-size: 12.5px;
+      line-height: 1;
+      color: var(--text-2);
+      background: var(--bg);
+      border: 1px solid var(--border-strong);
+      border-radius: 999px;
+      padding: 7px 13px 7px 11px;
+      box-shadow: 0 1px 3px rgba(0, 0, 0, .06), 0 4px 12px rgba(0, 0, 0, .04);
+      cursor: pointer;
+      transition: background .15s, border-color .15s, color .15s;
+    }
+
+    .toc-reopen:hover {
+      background: var(--bg-soft);
+      color: var(--text);
+      border-color: var(--text-3);
+    }
+
+    .toc-reopen svg {
+      flex: 0 0 auto;
+      display: block;
+    }
+
+    @media (min-width: 921px) {
+      .toc-collapse {
+        display: inline-flex;
+      }
+
+      body.toc-collapsed .toc {
+        width: 0;
+        flex-basis: 0;
+        padding: 0;
+        opacity: 0;
+        overflow: hidden;
+        border-right-color: transparent;
+        pointer-events: none;
+      }
+
+      body.toc-collapsed .toc-reopen {
+        display: inline-flex;
+      }
+    }
+
+    .toc-kicker a {
+      color: var(--text-3);
+      text-decoration: none;
+      border-bottom: none;
+      transition: color .15s;
+    }
+
+    .toc-kicker a:hover {
+      color: var(--text);
+    }
+
+    .toc-title {
+      font-size: 15px;
+      font-weight: 700;
+      line-height: 1.4;
+      margin: 0 0 24px;
+    }
+
+    .toc a {
+      display: flex;
+      gap: 10px;
+      align-items: baseline;
+      text-decoration: none;
+      color: var(--text-2);
+      font-size: 13.5px;
+      padding: 6px 10px;
+      border-radius: 6px;
+      line-height: 1.45;
+      transition: background .15s, color .15s;
+      border-bottom: none;
+    }
+
+    .toc a:hover {
+      background: var(--bg-soft);
+      color: var(--text);
+      border-bottom: none;
+    }
+
+    .toc a.active {
+      color: var(--accent);
+      background: var(--accent-soft);
+      font-weight: 500;
+      border-bottom: none;
+    }
+
+    .toc a .n {
+      font-family: var(--mono);
+      font-size: 11px;
+      color: var(--text-3);
+      flex: 0 0 18px;
+    }
+
+    .toc a.active .n {
+      color: var(--accent);
+    }
+
+    main {
+      flex: 1 1 auto;
+      min-width: 0;
+      padding: 0 40px;
+    }
+
+    .inner {
+      max-width: var(--maxw);
+      margin: 0 auto;
+      padding: 72px 0 140px;
+    }
+
+    /* ---------- hero ---------- */
+    .hero {
+      margin-bottom: 64px;
+    }
+
+    .hero .eyebrow {
+      font-family: var(--mono);
+      font-size: 12px;
+      letter-spacing: .16em;
+      text-transform: uppercase;
+      color: var(--accent);
+      margin-bottom: 18px;
+    }
+
+    .hero h1 {
+      font-size: 40px;
+      line-height: 1.18;
+      font-weight: 700;
+      margin: 0 0 18px;
+      letter-spacing: -.01em;
+    }
+
+    .hero .lede {
+      font-size: 18px;
+      line-height: 1.7;
+      color: var(--text-2);
+      font-weight: 300;
+      margin: 0;
+      max-width: 620px;
+    }
+
+    .hero .meta {
+      margin-top: 28px;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+
+    .tag {
+      font-family: var(--mono);
+      font-size: 12px;
+      color: var(--text-2);
+      border: 1px solid var(--border-strong);
+      padding: 4px 11px;
+      border-radius: 999px;
+      background: var(--bg-soft);
+    }
+
+    /* ---------- sections ---------- */
+    section {
+      padding-top: 30px;
+      scroll-margin-top: 24px;
+    }
+
+    .sec-head {
+      display: flex;
+      align-items: baseline;
+      gap: 14px;
+      margin: 0 0 8px;
+    }
+
+    .sec-num {
+      font-family: var(--mono);
+      font-size: 13px;
+      color: var(--text-3);
+      font-weight: 500;
+      padding-top: 6px;
+      flex: 0 0 auto;
+    }
+
+    h2 {
+      font-size: 27px;
+      font-weight: 700;
+      line-height: 1.3;
+      margin: 0;
+      letter-spacing: -.01em;
+    }
+
+    .sec-sub {
+      color: var(--text-2);
+      font-size: 15px;
+      margin: 2px 0 28px 0;
+      font-weight: 300;
+    }
+
+    h3 {
+      font-size: 18.5px;
+      font-weight: 700;
+      margin: 38px 0 12px;
+      line-height: 1.45;
+    }
+
+    h4 {
+      font-size: 15.5px;
+      font-weight: 700;
+      margin: 26px 0 8px;
+      color: var(--text);
+    }
+
+    p {
+      margin: 0 0 16px;
+    }
+
+    a {
+      color: var(--accent);
+      text-decoration: none;
+      border-bottom: 1px solid var(--accent-line);
+      transition: border-color .15s;
+    }
+
+    a:hover {
+      border-color: var(--accent);
+    }
+
+    strong {
+      font-weight: 700;
+    }
+
+    em {
+      font-style: normal;
+      background: var(--accent-soft);
+      padding: 0 4px;
+      border-radius: 4px;
+      font-weight: 500;
+      color: #2f4d6e;
+    }
+
+    hr.div {
+      border: none;
+      border-top: 1px solid var(--border);
+      margin: 46px 0;
+    }
+
+    ul, ol {
+      margin: 0 0 18px;
+      padding-left: 22px;
+    }
+
+    li {
+      margin: 7px 0;
+      padding-left: 4px;
+    }
+
+    li::marker {
+      color: var(--text-3);
+    }
+
+    code {
+      font-family: var(--mono);
+      font-size: .86em;
+      background: var(--code-bg);
+      padding: 2px 6px;
+      border-radius: 5px;
+      color: #43494f;
+    }
+
+    pre {
+      background: var(--code-bg);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 16px 18px;
+      overflow-x: auto;
+      margin: 0 0 20px;
+      line-height: 1.6;
+    }
+
+    pre code {
+      background: none;
+      padding: 0;
+      font-size: 13px;
+    }
+
+    /* ---------- math notation ---------- */
+    /* 行內數學變數，如 W、R、N。本站不載入 MathJax/KaTeX，請勿使用 $...$ 或 \[...\] LaTeX 分隔符。 */
+    var {
+      font-family: var(--mono);
+      font-style: normal;
+      font-weight: 500;
+      color: var(--accent);
+    }
+
+    /* 區塊數學公式，置中等寬呈現，記得將 > < & 轉義為 &gt; &lt; &amp;。 */
+    .formula {
+      font-family: var(--mono);
+      font-size: 15px;
+      text-align: center;
+      background: var(--bg-soft);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      padding: 14px 18px;
+      margin: 0 0 20px;
+      color: var(--text);
+      letter-spacing: .03em;
+      overflow-x: auto;
+    }
+
+    /* ---------- callouts ---------- */
+    .callout {
+      border: 1px solid var(--border);
+      border-left: 3px solid var(--border-strong);
+      background: var(--bg-soft);
+      border-radius: var(--radius-sm);
+      padding: 15px 18px;
+      margin: 0 0 22px;
+      font-size: 14.5px;
+    }
+
+    .callout .c-title {
+      font-weight: 700;
+      font-size: 13px;
+      letter-spacing: .02em;
+      margin-bottom: 5px;
+      display: flex;
+      gap: 7px;
+      align-items: center;
+    }
+
+    .callout p:last-child {
+      margin-bottom: 0;
+    }
+
+    .callout.accent {
+      border-left-color: var(--accent);
+      background: var(--accent-soft);
+    }
+
+    .callout.accent .c-title {
+      color: #2f4d6e;
+    }
+
+    .callout.warn {
+      border-left-color: var(--warn);
+      background: var(--warn-soft);
+    }
+
+    .callout.warn .c-title {
+      color: var(--warn);
+    }
+
+    .callout .ic {
+      font-family: var(--mono);
+      font-size: 11px;
+      border: 1px solid currentColor;
+      border-radius: 4px;
+      padding: 0 4px;
+      line-height: 1.5;
+      opacity: .8;
+    }
+
+    .oneliner {
+      border: 1px dashed var(--accent-line);
+      border-radius: var(--radius-sm);
+      padding: 13px 16px;
+      margin: 0 0 22px;
+      font-size: 14.5px;
+      background: #fbfcfd;
+    }
+
+    .oneliner b {
+      font-family: var(--mono);
+      font-size: 11px;
+      letter-spacing: .08em;
+      color: var(--accent);
+      display: block;
+      margin-bottom: 4px;
+      text-transform: uppercase;
+    }
+
+    /* ---------- tables ---------- */
+    .tbl-wrap {
+      overflow-x: auto;
+      margin: 0 0 24px;
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+    }
+
+    table {
+      border-collapse: collapse;
+      width: 100%;
+      font-size: 14px;
+      min-width: 520px;
+    }
+
+    th, td {
+      text-align: left;
+      padding: 11px 14px;
+      border-bottom: 1px solid var(--border);
+      vertical-align: top;
+    }
+
+    th {
+      font-weight: 700;
+      background: var(--bg-soft);
+      font-size: 12.5px;
+      letter-spacing: .02em;
+      color: var(--text-2);
+      position: sticky;
+      top: 0;
+    }
+
+    tr:last-child td {
+      border-bottom: none;
+    }
+
+    td.hl {
+      background: var(--accent-soft);
+    }
+
+    .cap {
+      font-size: 12.5px;
+      color: var(--text-3);
+      margin: -12px 0 26px;
+      font-family: var(--mono);
+    }
+
+    /* ---------- interactive shell ---------- */
+    .demo {
+      border: 1px solid var(--border-strong);
+      border-radius: var(--radius);
+      background: var(--bg);
+      margin: 24px 0 26px;
+      overflow: hidden;
+    }
+
+    .demo-bar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      flex-wrap: wrap;
+      padding: 13px 16px;
+      border-bottom: 1px solid var(--border);
+      background: var(--bg-soft);
+    }
+
+    .demo-bar .label {
+      font-family: var(--mono);
+      font-size: 11px;
+      letter-spacing: .1em;
+      text-transform: uppercase;
+      color: var(--text-3);
+    }
+
+    .demo-body {
+      padding: 20px 18px;
+    }
+
+    .seg {
+      display: inline-flex;
+      border: 1px solid var(--border-strong);
+      border-radius: 999px;
+      overflow: hidden;
+      background: var(--bg);
+    }
+
+    .seg button {
+      border: none;
+      background: none;
+      font-family: var(--sans);
+      font-size: 12.5px;
+      color: var(--text-2);
+      padding: 6px 14px;
+      cursor: pointer;
+      transition: background .15s, color .15s;
+    }
+
+    .seg button:hover {
+      color: var(--text);
+    }
+
+    .seg button[aria-pressed="true"] {
+      background: var(--accent);
+      color: #fff;
+    }
+
+    .btn {
+      font-family: var(--sans);
+      font-size: 13px;
+      border: 1px solid var(--border-strong);
+      background: var(--bg);
+      color: var(--text);
+      padding: 7px 16px;
+      border-radius: 7px;
+      cursor: pointer;
+      transition: background .15s, border-color .15s;
+    }
+
+    .btn:hover {
+      background: var(--bg-soft);
+      border-color: var(--text-3);
+    }
+
+    .btn.primary {
+      background: var(--accent);
+      color: #fff;
+      border-color: var(--accent);
+    }
+
+    .btn.primary:hover {
+      background: #365578;
+    }
+
+    .btn:disabled {
+      opacity: .4;
+      cursor: not-allowed;
+    }
+
+    .btn:focus-visible, .seg button:focus-visible, .toc a:focus-visible, a:focus-visible,
+    summary:focus-visible {
+      outline: 2px solid var(--accent);
+      outline-offset: 2px;
+      border-radius: 4px;
+    }
+
+    .status-line {
+      font-size: 13.5px;
+      color: var(--text-2);
+      min-height: 42px;
+      margin-top: 14px;
+      background: var(--bg-soft);
+      border-radius: var(--radius-sm);
+      padding: 10px 13px;
+      border: 1px solid var(--border);
+    }
+
+    .status-line b {
+      color: var(--text);
+    }
+
+    .legend {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 14px;
+      font-size: 11.5px;
+      color: var(--text-2);
+      margin-top: 14px;
+      font-family: var(--mono);
+    }
+
+    .legend span {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .dot {
+      width: 9px;
+      height: 9px;
+      border-radius: 3px;
+      display: inline-block;
+      border: 1px solid rgba(0, 0, 0, .08);
+    }
+
+    /* node states used across diagrams */
+    .nstate-idle {
+      fill: #fff;
+      stroke: var(--border-strong);
+    }
+
+    .ns-idle {
+      background: #fff;
+      border-color: var(--border-strong);
+    }
+
+    .ns-lock {
+      background: var(--warn-soft);
+      border-color: var(--warn);
+    }
+
+    .ns-ok {
+      background: var(--ok-soft);
+      border-color: var(--ok);
+    }
+
+    .ns-bad {
+      background: var(--bad-soft);
+      border-color: var(--bad);
+    }
+
+    .ns-wait {
+      background: var(--accent-soft);
+      border-color: var(--accent);
+    }
+
+    /* spectrum */
+    .spectrum {
+      position: relative;
+      margin: 26px 6px 10px;
+    }
+
+    .spec-track {
+      height: 4px;
+      border-radius: 2px;
+      background: linear-gradient(90deg, #9fb6cf, #e7e5e1 50%, #c9d8c9);
+      position: relative;
+    }
+
+    .spec-ends {
+      display: flex;
+      justify-content: space-between;
+      font-family: var(--mono);
+      font-size: 11px;
+      color: var(--text-2);
+      margin-top: 10px;
+    }
+
+    .spec-mark {
+      position: absolute;
+      top: -12px;
+      transform: translateX(-50%);
+      cursor: pointer;
+      text-align: center;
+      background: none;
+      border: none;
+      padding: 0;
+    }
+
+    .spec-mark .pin {
+      width: 18px;
+      height: 18px;
+      border-radius: 50%;
+      background: #fff;
+      border: 2px solid var(--border-strong);
+      margin: 0 auto;
+      transition: border-color .15s, transform .15s, box-shadow .15s;
+      display: block;
+    }
+
+    .spec-mark .pn {
+      font-family: var(--mono);
+      font-size: 12px;
+      margin-top: 8px;
+      color: var(--text-2);
+      font-weight: 500;
+      white-space: nowrap;
+      display: block;
+    }
+
+    .spec-mark[aria-pressed="true"] .pin {
+      border-color: var(--accent);
+      transform: scale(1.18);
+      box-shadow: 0 0 0 4px var(--accent-soft);
+    }
+
+    .spec-mark[aria-pressed="true"] .pn {
+      color: var(--accent);
+    }
+
+    .spec-panel {
+      margin-top: 34px;
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 18px;
+      background: var(--bg-soft);
+    }
+
+    .spec-panel h4 {
+      margin: 0 0 4px;
+    }
+
+    .spec-panel .pmeta {
+      font-family: var(--mono);
+      font-size: 12px;
+      color: var(--text-3);
+      margin-bottom: 14px;
+    }
+
+    .bars {
+      display: grid;
+      grid-template-columns: 78px 1fr 56px;
+      gap: 9px 12px;
+      align-items: center;
+    }
+
+    .bars .blabel {
+      font-size: 13px;
+      color: var(--text-2);
+    }
+
+    .bars .btrack {
+      height: 8px;
+      background: #e9e7e3;
+      border-radius: 4px;
+      overflow: hidden;
+    }
+
+    .bars .bfill {
+      height: 100%;
+      border-radius: 4px;
+      background: var(--accent);
+      transition: width .4s ease;
+    }
+
+    .bars .bval {
+      font-family: var(--mono);
+      font-size: 11px;
+      color: var(--text-2);
+      text-align: right;
+    }
+
+    /* generic actor diagram */
+    .actors {
+      display: flex;
+      gap: 12px;
+      flex-wrap: wrap;
+    }
+
+    .actor {
+      flex: 1 1 0;
+      min-width: 96px;
+      border: 1.5px solid var(--border-strong);
+      border-radius: var(--radius-sm);
+      padding: 11px 10px;
+      text-align: center;
+      background: #fff;
+      transition: background .25s, border-color .25s;
+    }
+
+    .actor .aname {
+      font-weight: 700;
+      font-size: 13px;
+    }
+
+    .actor .arole {
+      font-family: var(--mono);
+      font-size: 10.5px;
+      color: var(--text-3);
+      margin-top: 2px;
+    }
+
+    .actor .astate {
+      font-size: 11.5px;
+      margin-top: 8px;
+      font-family: var(--mono);
+      color: var(--text-2);
+      min-height: 16px;
+    }
+
+    .coordinator {
+      border-style: dashed;
+    }
+
+    .flowsteps {
+      margin-top: 16px;
+    }
+
+    .stepitem {
+      display: flex;
+      gap: 11px;
+      font-size: 13.5px;
+      padding: 7px 0;
+      color: var(--text-3);
+      border-top: 1px solid var(--border);
+    }
+
+    .stepitem:first-child {
+      border-top: none;
+    }
+
+    .stepitem.done {
+      color: var(--text);
+    }
+
+    .stepitem.cur {
+      color: var(--text);
+      font-weight: 500;
+    }
+
+    .stepitem .sx {
+      font-family: var(--mono);
+      font-size: 11px;
+      flex: 0 0 26px;
+      color: var(--text-3);
+      padding-top: 2px;
+    }
+
+    .stepitem.cur .sx {
+      color: var(--accent);
+    }
+
+    /* timeline lab (TCC) */
+    .tl-scenarios {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      margin-bottom: 6px;
+    }
+
+    .tl-opt {
+      display: flex;
+      gap: 11px;
+      align-items: flex-start;
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      padding: 10px 13px;
+      cursor: pointer;
+      background: #fff;
+      transition: border-color .15s, background .15s;
+    }
+
+    .tl-opt:hover {
+      background: var(--bg-soft);
+    }
+
+    .tl-opt[aria-pressed="true"] {
+      border-color: var(--accent);
+      background: var(--accent-soft);
+    }
+
+    .tl-opt .tlname {
+      font-weight: 700;
+      font-size: 13.5px;
+    }
+
+    .tl-opt .tldesc {
+      font-size: 12.5px;
+      color: var(--text-2);
+      margin-top: 2px;
+    }
+
+    .tl-opt .tlbadge {
+      font-family: var(--mono);
+      font-size: 10px;
+      border: 1px solid var(--border-strong);
+      border-radius: 4px;
+      padding: 1px 5px;
+      color: var(--text-3);
+      flex: 0 0 auto;
+      margin-top: 1px;
+    }
+
+    .tl-result {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
+      margin-top: 16px;
+    }
+
+    @media (max-width: 560px) {
+      .tl-result {
+        grid-template-columns: 1fr;
+      }
+    }
+
+    .tl-card {
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      padding: 13px 14px;
+      font-size: 13px;
+    }
+
+    .tl-card .tch {
+      font-family: var(--mono);
+      font-size: 11px;
+      letter-spacing: .06em;
+      text-transform: uppercase;
+      margin-bottom: 8px;
+      color: var(--text-3);
+    }
+
+    .tl-card.naive {
+      border-left: 3px solid var(--bad);
+    }
+
+    .tl-card.fixed {
+      border-left: 3px solid var(--ok);
+    }
+
+    .tl-card .verdict {
+      font-weight: 700;
+      margin-top: 8px;
+      font-size: 13px;
+    }
+
+    .tl-card.naive .verdict {
+      color: var(--bad);
+    }
+
+    .tl-card.fixed .verdict {
+      color: var(--ok);
+    }
+
+    /* saga chain */
+    .saga-chain {
+      display: flex;
+      flex-direction: column;
+      gap: 0;
+      margin-top: 8px;
+    }
+
+    .saga-step {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .saga-box {
+      flex: 1 1 auto;
+      border: 1.5px solid var(--border-strong);
+      border-radius: var(--radius-sm);
+      padding: 10px 13px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      background: #fff;
+      transition: .25s;
+    }
+
+    .saga-box .sgn {
+      font-weight: 600;
+      font-size: 13.5px;
+    }
+
+    .saga-box .sgs {
+      font-family: var(--mono);
+      font-size: 11px;
+      color: var(--text-3);
+    }
+
+    .saga-arrow {
+      height: 18px;
+      width: 2px;
+      background: var(--border-strong);
+      margin-left: 18px;
+    }
+
+    .saga-pick {
+      font-size: 12.5px;
+      color: var(--text-2);
+      margin: 4px 0 10px;
+    }
+
+    .saga-pick select {
+      font-family: var(--sans);
+      font-size: 13px;
+      padding: 5px 8px;
+      border: 1px solid var(--border-strong);
+      border-radius: 6px;
+      background: #fff;
+      color: var(--text);
+    }
+
+    /* outbox toggle */
+    .ob-stage {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      margin-top: 8px;
+    }
+
+    .ob-row {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      font-size: 13px;
+    }
+
+    .ob-chip {
+      border: 1.5px solid var(--border-strong);
+      border-radius: var(--radius-sm);
+      padding: 9px 12px;
+      background: #fff;
+      font-size: 13px;
+      transition: .25s;
+      flex: 0 0 auto;
+    }
+
+    .ob-chip .obt {
+      font-weight: 600;
+    }
+
+    .ob-chip .obs {
+      font-family: var(--mono);
+      font-size: 10.5px;
+      color: var(--text-3);
+    }
+
+    .ob-flow {
+      font-family: var(--mono);
+      font-size: 11px;
+      color: var(--text-3);
+    }
+
+    /* wizard */
+    .wiz-q {
+      margin-bottom: 16px;
+    }
+
+    .wiz-q .wq {
+      font-size: 14px;
+      font-weight: 600;
+      margin-bottom: 8px;
+    }
+
+    .wiz-opts {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+
+    .wiz-opts button {
+      font-family: var(--sans);
+      font-size: 13px;
+      border: 1px solid var(--border-strong);
+      background: #fff;
+      color: var(--text-2);
+      padding: 7px 14px;
+      border-radius: 7px;
+      cursor: pointer;
+      transition: .15s;
+    }
+
+    .wiz-opts button:hover {
+      border-color: var(--text-3);
+      color: var(--text);
+    }
+
+    .wiz-opts button[aria-pressed="true"] {
+      background: var(--accent);
+      color: #fff;
+      border-color: var(--accent);
+    }
+
+    .wiz-result {
+      margin-top: 18px;
+      border: 1px solid var(--accent-line);
+      border-radius: var(--radius);
+      padding: 16px 18px;
+      background: var(--accent-soft);
+      font-size: 14px;
+      display: none;
+    }
+
+    .wiz-result.show {
+      display: block;
+    }
+
+    .wiz-result .wr-pick {
+      font-size: 17px;
+      font-weight: 700;
+      color: #2f4d6e;
+      margin-bottom: 6px;
+    }
+
+    .wiz-result .wr-why {
+      color: #3a5572;
+    }
+
+    /* FAQ */
+    details.faq {
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      margin-bottom: 10px;
+      background: #fff;
+      overflow: hidden;
+    }
+
+    details.faq summary {
+      cursor: pointer;
+      padding: 14px 16px;
+      font-weight: 600;
+      font-size: 14.5px;
+      list-style: none;
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      align-items: center;
+    }
+
+    details.faq summary::-webkit-details-marker {
+      display: none;
+    }
+
+    details.faq summary .q {
+      font-family: var(--mono);
+      font-size: 11px;
+      color: var(--accent);
+      flex: 0 0 auto;
+    }
+
+    details.faq summary .chev {
+      transition: transform .2s;
+      color: var(--text-3);
+      flex: 0 0 auto;
+      font-size: 13px;
+    }
+
+    details.faq[open] summary .chev {
+      transform: rotate(90deg);
+    }
+
+    details.faq .ans {
+      padding: 0 16px 16px;
+      font-size: 14px;
+      color: var(--text-2);
+    }
+
+    details.faq .ans p {
+      margin: 0 0 10px;
+    }
+
+    details.faq .ans p:last-child {
+      margin: 0;
+    }
+
+    .trap {
+      display: flex;
+      gap: 10px;
+      font-size: 14px;
+      margin: 9px 0;
+    }
+
+    .trap .tn {
+      font-family: var(--mono);
+      font-size: 11px;
+      color: var(--bad);
+      flex: 0 0 auto;
+      border: 1px solid var(--bad-soft);
+      background: var(--bad-soft);
+      border-radius: 4px;
+      padding: 1px 6px;
+      height: fit-content;
+      margin-top: 2px;
+    }
+
+    /* mobile responsive */
+    .toc-toggle {
+      display: none;
+    }
+
+    @media (max-width: 920px) {
+      .wrap {
+        flex-direction: column;
+      }
+      .toc {
+        position: static;
+        width: auto;
+        height: auto;
+        border-right: none;
+        border-bottom: 1px solid var(--border);
+        padding: 18px 22px;
+        transition: none;
+      }
+      .toc-title {
+        margin-bottom: 0;
+      }
+      .toc-kicker {
+        margin-bottom: 10px;
+      }
+      .toc-nav {
+        display: none;
+        margin-top: 16px;
+      }
+      .toc-nav.open {
+        display: block;
+      }
+      .toc-toggle {
+        display: inline-block;
+        margin-top: 10px;
+      }
+      .toc-collapse,
+      .toc-reopen {
+        display: none !important;
+      }
+      main {
+        padding: 0 22px;
+      }
+      .inner {
+        padding: 40px 0 100px;
+      }
+      .hero h1 {
+        font-size: 31px;
+      }
+    }
+
+    @media print {
+      .toc-reopen { display: none !important; }
+    }
+
+    @media (max-width: 480px) {
+      body {
+        font-size: 15px;
+      }
+      .hero h1 {
+        font-size: 27px;
+      }
+      h2 {
+        font-size: 23px;
+      }
+      .demo-body {
+        padding: 16px 13px;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <!-- ===================== TOC SIDEBAR ===================== -->
+    <nav class="toc" id="toc-panel" aria-label="目錄">
+      <div class="toc-kicker">
+        <a href="../index.html">← 返回目錄</a>
+        <button class="toc-collapse" type="button" aria-expanded="true" aria-controls="toc-panel"
+                aria-label="收合目錄" title="收合目錄">
+          <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor"
+               stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M15 18l-6-6 6-6"/>
+          </svg>
+        </button>
+      </div>
+      <div class="toc-title">WebSocket 即時雙向通訊</div>
+      <button class="btn toc-toggle" type="button" aria-expanded="false" aria-controls="toc-nav">目錄 ▾</button>
+      <div class="toc-nav" id="toc-nav">
+        <a href="#s1"><span class="n">01</span>總覽與定位</a>
+        <a href="#s2"><span class="n">02</span>交握：101 Switching Protocols 與它的兩個替身</a>
+        <a href="#s3"><span class="n">03</span>Framing：TCP 拿掉的訊息邊界，WebSocket 自己補回來</a>
+        <a href="#s4"><span class="n">04</span>保活、斷線偵測與 close code</a>
+        <a href="#s5"><span class="n">05</span>Backpressure 與重連：連線撐不住的兩種樣子</a>
+        <a href="#s6"><span class="n">06</span>認證與連線狀態：交握是唯一的那個 HTTP 請求</a>
+        <a href="#s7"><span class="n">07</span>互動 · WebSocket 生命週期模擬器</a>
+        <a href="#s8"><span class="n">08</span>面試折衷與實務選型</a>
+      </div>
+    </nav>
+    <button class="btn toc-reopen" type="button" aria-expanded="true" aria-controls="toc-panel"
+            aria-label="展開目錄" title="展開目錄">
+      <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor"
+           stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M9 18l6-6-6-6"/>
+      </svg>
+      <span>目錄</span>
+    </button>
+
+    <!-- ===================== MAIN CONTENT ===================== -->
+    <main>
+      <div class="inner">
+        <style>
+  /* 本篇專屬：wsx-* 命名空間，不覆蓋全站 base 類別 */
+  #wsx-root {
+    --wsx-c: #3f6188; --wsx-c-soft: #eef2f7;
+    --wsx-s: #4d7d68; --wsx-s-soft: #eef4f1;
+    --wsx-ctl: #a3743e; --wsx-ctl-soft: #f6f0e7;
+    --wsx-bad: #a8554f; --wsx-bad-soft: #f6ecea;
+    --wsx-alt: #7a5a8e; --wsx-alt-soft: #f3eef6;
+  }
+  .wsx-sub { font-weight: 700; font-size: 14px; margin: 20px 0 6px; padding-left: 10px; border-left: 3px solid var(--accent); color: var(--text); }
+
+  /* 角色 / 模式卡片 */
+  .wsx-cards { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin: 12px 0 6px; }
+  @media (max-width: 760px) { .wsx-cards { grid-template-columns: 1fr; } }
+  .wsx-card { border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 12px 14px; background: #fff; border-left-width: 4px; }
+  .wsx-card.req { border-left-color: var(--wsx-c); background: var(--wsx-c-soft); }
+  .wsx-card.push { border-left-color: var(--wsx-s); background: var(--wsx-s-soft); }
+  .wsx-card.duplex { border-left-color: var(--wsx-alt); background: var(--wsx-alt-soft); }
+  .wsx-card .ct { font-weight: 700; font-size: 13.5px; margin-bottom: 3px; }
+  .wsx-card .cl { font-family: var(--mono); font-size: 11px; color: var(--text-3); margin-bottom: 6px; letter-spacing: .04em; }
+  .wsx-card .cs { font-size: 12.5px; color: var(--text-2); line-height: 1.55; }
+
+  /* chips */
+  .wsx-flow { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin: 10px 0 4px; font-family: var(--mono); font-size: 12px; }
+  .wsx-chip { border: 1px solid var(--border-strong); border-radius: 6px; padding: 6px 10px; background: #fff; font-weight: 600; color: var(--text); }
+  .wsx-chip.d { background: var(--wsx-c-soft); border-color: var(--wsx-c); color: var(--wsx-c); }
+  .wsx-chip.k { background: var(--wsx-ctl-soft); border-color: var(--wsx-ctl); color: var(--wsx-ctl); }
+  .wsx-chip.x { background: var(--wsx-bad-soft); border-color: var(--wsx-bad); color: var(--wsx-bad); }
+  .wsx-chip.op { background: var(--bg-soft); color: var(--text-3); border-style: dashed; font-weight: 500; }
+
+  /* frame 欄位示意 */
+  .wsx-bits { display: flex; flex-wrap: wrap; gap: 4px; margin: 4px 0; }
+  .wsx-bits .bf { font-family: var(--mono); font-size: 11px; padding: 8px 4px; text-align: center; border: 1px solid var(--border-strong); border-radius: 6px; background: #fff; color: var(--text-2); }
+  .wsx-bits .bf b { display: block; font-size: 10px; color: var(--text-3); font-weight: 500; letter-spacing: .04em; }
+  .wsx-bits .bf.hi { background: var(--wsx-c-soft); border-color: var(--wsx-c); color: var(--wsx-c); }
+  .wsx-bits .bf.ctl { background: var(--wsx-ctl-soft); border-color: var(--wsx-ctl); color: var(--wsx-ctl); }
+  .wsx-bits .bf.opt { border-style: dashed; background: var(--bg-soft); color: var(--text-3); }
+  .wsx-bits .bf.pay { flex: 100%; background: var(--wsx-s-soft); border-color: var(--wsx-s); color: var(--wsx-s); border-style: dashed; }
+  .wsx-bits .f1 { flex: 1; } .wsx-bits .f2 { flex: 2; } .wsx-bits .f3 { flex: 3; } .wsx-bits .f4 { flex: 4; }
+
+  /* Demo */
+  .wsx-ctrl { display: flex; flex-wrap: wrap; gap: 10px; margin: 10px 0 8px; align-items: center; }
+  .wsx-states { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin: 10px 0 4px; }
+  @media (max-width: 620px) { .wsx-states { grid-template-columns: 1fr 1fr; } }
+  .wsx-st { border: 1.5px solid var(--border-strong); border-radius: var(--radius-sm); padding: 9px 8px; background: #fff; text-align: center; transition: background .18s, border-color .18s, box-shadow .18s; }
+  .wsx-st .sn { font-weight: 700; font-size: 12.5px; letter-spacing: .03em; }
+  .wsx-st .sv { font-family: var(--mono); font-size: 10.5px; color: var(--text-3); margin-top: 2px; }
+  .wsx-st.on { background: var(--accent-soft); border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+  .wsx-st.on .sn { color: var(--accent); }
+  .wsx-st.done { background: var(--ok-soft); border-color: var(--ok); }
+  .wsx-st.dead { background: var(--bad-soft); border-color: var(--bad); }
+  .wsx-st.dead .sn { color: var(--bad); }
+
+  .wsx-wire { border: 1px solid var(--border); border-radius: var(--radius-sm); background: #fff; padding: 8px 10px; margin-top: 10px; max-height: 268px; overflow-y: auto; }
+  .wsx-row { display: flex; align-items: baseline; gap: 8px; font-family: var(--mono); font-size: 11.5px; padding: 4px 0; border-bottom: 1px dashed var(--border); }
+  .wsx-row:last-child { border-bottom: none; }
+  .wsx-row .ar { width: 30px; flex: none; text-align: center; color: var(--text-3); font-weight: 700; }
+  .wsx-row .tg { flex: none; border-radius: 4px; padding: 2px 6px; font-size: 10.5px; font-weight: 700; border: 1px solid var(--border-strong); background: var(--bg-soft); color: var(--text-3); }
+  .wsx-row .tx { color: var(--text-2); line-height: 1.5; }
+  .wsx-row.c2s .ar { color: var(--wsx-c); }
+  .wsx-row.c2s .tg { background: var(--wsx-c-soft); border-color: var(--wsx-c); color: var(--wsx-c); }
+  .wsx-row.s2c .ar { color: var(--wsx-s); }
+  .wsx-row.s2c .tg { background: var(--wsx-s-soft); border-color: var(--wsx-s); color: var(--wsx-s); }
+  .wsx-row.ctl .tg { background: var(--wsx-ctl-soft); border-color: var(--wsx-ctl); color: var(--wsx-ctl); }
+  .wsx-row.bad .tg { background: var(--wsx-bad-soft); border-color: var(--wsx-bad); color: var(--wsx-bad); }
+  .wsx-row.bad .tx { color: var(--bad); }
+  .wsx-row.note { background: var(--bg-soft); border-radius: 4px; }
+  .wsx-row.note .tx { color: var(--text-3); font-style: normal; }
+  .wsx-row.last .tx { color: var(--text); font-weight: 600; }
+
+  .wsx-panels { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 12px; }
+  @media (max-width: 640px) { .wsx-panels { grid-template-columns: 1fr; } }
+  .wsx-panel { border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 12px; background: #fff; }
+  .wsx-panel .pt { font-size: 11px; color: var(--text-3); letter-spacing: .06em; text-transform: uppercase; font-family: var(--mono); margin-bottom: 8px; }
+  .wsx-panel .prow { display: flex; justify-content: space-between; gap: 8px; font-family: var(--mono); font-size: 12px; padding: 4px 0; border-bottom: 1px dashed var(--border); }
+  .wsx-panel .prow:last-child { border-bottom: none; }
+  .wsx-panel .pk { color: var(--text-3); white-space: nowrap; }
+  .wsx-panel .pv { color: var(--text); font-weight: 600; text-align: right; }
+  .wsx-panel .pv.good { color: var(--ok); }
+  .wsx-panel .pv.bad { color: var(--bad); }
+  .wsx-panel .pv.warn { color: var(--warn); }
+  .wsx-bar { height: 8px; border-radius: 4px; background: var(--bg-soft); border: 1px solid var(--border); margin-top: 8px; overflow: hidden; }
+  .wsx-bar i { display: block; height: 100%; width: 0; background: var(--accent); transition: width .25s, background .25s; }
+  .wsx-bar i.warn { background: var(--warn); }
+  .wsx-bar i.bad { background: var(--bad); }
+</style>
+
+<div id="wsx-root">
+
+<section id="s1">
+  <div class="sec-head"><span class="sec-num">01</span><h2>總覽與定位</h2></div>
+  <p class="sec-sub">前四篇一路把「請求／回應」做到極致；本篇處理的是它從頭到尾沒有碰的那一類需求——伺服器想在沒有人問的時候開口。</p>
+
+  <p>上一篇的最後一句是：把 transport 換掉，換到的仍然是<strong>同一種通訊模式的更好版本</strong>——客戶端問、伺服器答，只是問得更快、答得更不容易被卡住。而篇 3 在談完 Server Push 的失敗史時，也留下了同一個缺口：<strong>push 推的仍然是「客戶端接下來會請求的東西」，不是「伺服器現在想說的話」</strong>。</p>
+
+  <p>推播、行情跳動、聊天訊息、協作游標——這四個場景有一個共同特徵：<strong>訊息的時機由伺服器決定，客戶端沒有辦法事先問。</strong> 你可以用輪詢去猜（每秒問一次「有沒有新的？」），可以讓伺服器把回應 hold 住直到有東西可說（Long Polling），但這些都是在用請求／回應的語法模仿一件它不擅長的事。<strong>WebSocket（RFC 6455）</strong> 的作法乾脆得多：借 HTTP 開一次門，然後把這條 TCP 連線整個換掉，換成一個雙向、對稱、以訊息為單位的協定。</p>
+
+  <div class="wsx-cards">
+    <div class="wsx-card req">
+      <div class="ct">請求／回應</div>
+      <div class="cl">HTTP/1.1 · 2 · 3</div>
+      <div class="cs">客戶端問一次、伺服器答一次。伺服器沒有「主動說話」的位置——連 Server Push 都只能推「你等一下會要的東西」。</div>
+    </div>
+    <div class="wsx-card push">
+      <div class="ct">單向串流</div>
+      <div class="cl">SSE · Long Polling</div>
+      <div class="cs">仍然是一個 HTTP 回應，只是不結束。伺服器可以持續講，但客戶端要說話得另開一個請求。</div>
+    </div>
+    <div class="wsx-card duplex">
+      <div class="ct">全雙工訊息通道</div>
+      <div class="cl">WebSocket · WebTransport</div>
+      <div class="cs">交握完成後兩端地位對稱，任一方都可以在任何時候送出一則訊息，不需要對方先問。</div>
+    </div>
+  </div>
+
+  <div class="callout accent">
+    <div class="c-title"><span class="ic">座標</span>WebSocket 在堆疊裡的位置：一次性借用 HTTP，之後就自立門戶</div>
+    <p>WebSocket 是<strong>應用層協定</strong>，跑在 TCP 之上，與 HTTP 平級而非依附於 HTTP。它唯一用到 HTTP 的地方是<strong>開場那一個請求</strong>：借 HTTP/1.1 的 <code>101 Switching Protocols</code> 換協定（篇 3 的 s3 已經把這個機制與 <code>Connection: Upgrade</code> 的 hop-by-hop 性質定調，本篇把細節補完）。交握結束後，這條連線上跑的是 WebSocket 自己的二進位 framing，<strong>再也沒有 HTTP 標頭、狀態碼或方法</strong>。<br>
+    加密版本沿用篇 2 的說法：<strong>WSS = 先跑 HTTPS，再在同一條 TLS 通道上做 Upgrade（port 443）</strong>——不是另一套加密機制，只是把交握與後續 frame 都塞進既有的 TLS 通道。</p>
+  </div>
+
+  <p>把一條 WebSocket 連線的一生拆開，剛好就是本篇的章節地圖。值得先注意的是：<strong>右邊那一欄幾乎沒有一項是協定幫你做好的</strong>——WebSocket 給的是一條乾淨的雙向訊息管道，管道以外的事全部是你的責任。</p>
+
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr><th>生命週期階段</th><th>協定提供什麼</th><th>你必須自己做什麼</th><th>本篇章節</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>建立</td><td>Upgrade 交握 / Extended CONNECT</td><td class="hl">認證、Origin 驗證、子協定版本協商</td><td>s2、s6</td></tr>
+        <tr><td>傳輸</td><td>frame 與訊息邊界、text／binary</td><td class="hl">訊息格式、路由、多路復用（協定不提供）</td><td>s3</td></tr>
+        <tr><td>保活</td><td>Ping／Pong control frame</td><td class="hl">心跳週期、逾時判定、half-open 偵測</td><td>s4</td></tr>
+        <tr><td>擁塞</td><td><code>bufferedAmount</code>（就這個）</td><td class="hl">全部的 backpressure 策略</td><td>s5</td></tr>
+        <tr><td>斷線與重連</td><td>Close frame 與 close code</td><td class="hl">退避重連、狀態恢復、訊息補發</td><td>s4、s5</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="cap">這張表也是本篇與篇 6 的分界線：MQTT 會把右欄的一半搬到協定裡（QoS、離線訊息、Last Will）。WebSocket 刻意不做，因為它想當的是<strong>通道</strong>而不是<strong>訊息系統</strong>。</p>
+
+  <div class="oneliner">
+    <b>一句話答法</b>WebSocket 用一次 HTTP Upgrade 把 TCP 連線換成全雙工的訊息通道，讓伺服器不必等人問就能說話；代價是保活、backpressure、重連與狀態恢復全部變成應用層的責任。
+  </div>
+</section>
+
+<section id="s2">
+  <div class="sec-head"><span class="sec-num">02</span><h2>交握：101 Switching Protocols 與它的兩個替身</h2></div>
+  <p class="sec-sub">同一件事在 HTTP/1.1、HTTP/2、HTTP/3 上有三種寫法——而第三種之外還有一個「乾脆不要隧道」的選項。</p>
+
+  <p class="wsx-sub">1 · HTTP/1.1：借 <code>101</code> 換掉這條連線</p>
+
+  <p>WebSocket 交握是一個<strong>貨真價實的 HTTP GET 請求</strong>——這一點在 s6 談認證時會變成關鍵。它多帶了幾個標頭，告訴伺服器「我想把這條連線換成 WebSocket」：</p>
+
+<pre><code>GET /ws HTTP/1.1                              # 就是一個普通的 GET
+Host: chat.example.com
+Upgrade: websocket                            # 想換到哪個協定
+Connection: Upgrade                           # hop-by-hop：路徑上每個 proxy 都要看得懂
+Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==   # 16 bytes 隨機值的 base64
+Sec-WebSocket-Version: 13                     # RFC 6455 定案的版本號
+Sec-WebSocket-Protocol: chat.v2               # 可選：應用層子協定協商
+Origin: https://app.example.com               # 瀏覽器自動帶上，伺服器必須驗（見 s6）
+
+HTTP/1.1 101 Switching Protocols              # 不是 200；之後這條連線不再說 HTTP
+Upgrade: websocket
+Connection: Upgrade
+Sec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=   # SHA-1(key + 固定 GUID) 的 base64
+Sec-WebSocket-Protocol: chat.v2               # 必須是客戶端提議清單裡的其中一個</code></pre>
+  <p class="cap">注意回應是 <code>101</code> 而不是 <code>200</code>。收到 <code>101</code> 的那一刻，兩端都把這條 TCP 連線的「解析器」從 HTTP 換成 WebSocket——已經讀進來但還沒處理的位元組要一併轉交，這是自己實作 WebSocket 伺服器時最常見的 bug。</p>
+
+  <div class="callout accent">
+    <div class="c-title"><span class="ic">關鍵</span><code>Sec-WebSocket-Key</code> 不是安全機制，它是「你真的懂 WebSocket 嗎」的測驗</div>
+    <p>常見誤解：以為 Key／Accept 是某種身分驗證或防重放。<strong>完全不是。</strong> Key 是 16 bytes 隨機值的 base64，明文出現在請求裡；Accept 的算法（把 Key 字串接上一個寫死在 RFC 裡的 GUID <code>258EAFA5-…-C5AB0DC85B11</code>、做 SHA-1、再 base64）是公開的，任何人都能算出來。它防的是<strong>另一種東西：協定混淆</strong>。<br>
+    真正的攻擊情境是這樣：一個不懂 WebSocket 的中間設備（快取 proxy、老舊反向代理）如果看到一個像 GET 的請求就照舊處理，惡意腳本就能誘導它把後續的二進位 frame 誤讀成一個新的 HTTP 請求／回應，進而<strong>污染它的快取</strong>。要求伺服器回一個「只有真的實作了 RFC 6455 才算得出來」的值，就能確保<strong>對面不是一個被騙進二進位對話的一般 HTTP 伺服器或代理</strong>。同樣的思路在 s3 的 masking 會再出現一次。</p>
+  </div>
+
+  <p>因為 <code>Connection: Upgrade</code> 是<strong>逐跳（hop-by-hop）</strong>標頭（篇 3 s3 已列），路徑上每一個反向代理、負載均衡器都必須<strong>顯式支援</strong>才能把 Upgrade 轉發下去——這也是實務上「本機好好的、上了測試環境就 400／連上馬上斷」的頭號原因（Nginx 要設 <code>proxy_set_header Upgrade</code> 與 <code>Connection</code>，並把 <code>proxy_read_timeout</code> 拉長）。</p>
+
+  <p class="wsx-sub">2 · HTTP/2：<code>Connection</code> 系列標頭被禁掉之後怎麼辦——RFC 8441</p>
+
+  <p>篇 3 留了一個尾巴：<strong>HTTP/2 直接禁止整組 <code>Connection</code> 系列標頭</strong>，因為連線管理已經下沉到 frame 層，用 <code>SETTINGS</code>／<code>GOAWAY</code> 而不是用標頭表達。這代表上面那套交握在 HTTP/2 上<strong>一個字都不能用</strong>：沒有 <code>Upgrade</code>、沒有 <code>Connection</code>、也沒有 <code>101</code>（HTTP/2 的回應只有一組 <code>:status</code>，不走協定切換那條路）。</p>
+
+  <p><strong>RFC 8441（Extended CONNECT）</strong> 給的答案是換一個思路：不要「把整條連線換掉」，而是<strong>把單一條 stream 變成隧道</strong>。</p>
+
+  <div class="wsx-flow">
+    <span class="wsx-chip op">伺服器先宣告</span>
+    <span class="wsx-chip k">SETTINGS_ENABLE_CONNECT_PROTOCOL = 1</span>
+    <span class="wsx-chip op">客戶端才能送</span>
+    <span class="wsx-chip d">:method = CONNECT</span>
+    <span class="wsx-chip d">:protocol = websocket</span>
+    <span class="wsx-chip d">:scheme = https</span>
+    <span class="wsx-chip d">:path = /ws</span>
+    <span class="wsx-chip op">回應</span>
+    <span class="wsx-chip k">:status = 200</span>
+  </div>
+  <p class="cap">與一般 <code>CONNECT</code>（給 HTTP proxy 建 TCP 隧道用）的差別在 <code>:protocol</code> 這個新的 pseudo-header，以及<strong>必須保留 <code>:scheme</code> 與 <code>:path</code></strong>——因為隧道的另一端不是「某個主機的某個 port」，而是「這台伺服器上的某個 WebSocket 端點」。成功的回應是 <code>200</code> 而不是 <code>101</code>；之後這條 stream 的 <code>DATA</code> frame payload 就是 WebSocket frame。</p>
+
+  <p>這個設計有一個很好的副作用：WebSocket 從此<strong>共用同一條 HTTP/2 連線</strong>，不再各自佔一條 TCP。對瀏覽器來說，這解掉了篇 3 提過的 per-origin 6 連線上限——在 HTTP/1.1 上開六條 WebSocket 就把整個網域的 HTTP 請求餓死了。</p>
+
+  <p class="wsx-sub">3 · HTTP/3：同一套機制換一個載體——RFC 9220</p>
+
+  <p>篇 4 已經點名這條線的終點。<strong>RFC 9220</strong> 做的事幾乎是把 8441 原封不動搬到 HTTP/3 上：一樣用 <code>SETTINGS_ENABLE_CONNECT_PROTOCOL</code> 宣告能力、一樣用帶 <code>:protocol</code> 的 Extended CONNECT、一樣拿一條 stream 當隧道。差別在腳下換成了 QUIC，於是這條 WebSocket 隧道<strong>順便繼承了 QUIC 的 stream 獨立性與 connection migration</strong>——同一條連線上的其他 stream 丟包不會卡住它，手機從 Wi-Fi 切到 4G 也不必重連。</p>
+
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr><th></th><th>HTTP/1.1（RFC 6455）</th><th>HTTP/2（RFC 8441）</th><th>HTTP/3（RFC 9220）</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>交握方法</td><td class="hl">GET + <code>Upgrade</code></td><td class="hl">CONNECT + <code>:protocol</code></td><td class="hl">CONNECT + <code>:protocol</code></td></tr>
+        <tr><td>成功回應</td><td><code>101 Switching Protocols</code></td><td><code>200</code></td><td><code>200</code></td></tr>
+        <tr><td>換掉的粒度</td><td>整條 TCP 連線</td><td>一條 stream</td><td>一條 QUIC stream</td></tr>
+        <tr><td>能力協商</td><td>無（試了才知道）</td><td><code>SETTINGS_ENABLE_CONNECT_PROTOCOL</code></td><td>同左</td></tr>
+        <tr><td>與其他請求共用連線</td><td>不行，獨佔一條 TCP</td><td>可以</td><td>可以</td></tr>
+        <tr><td>部署現實</td><td class="hl">到處都通，事實標準</td><td class="hl">中間層支援參差，需逐一驗證</td><td class="hl">最新，生態仍在補</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="cap">最後一列才是選型重點：<strong>8441／9220 在協定上很漂亮，但只要路徑上任何一層（CDN、企業 proxy、舊版 LB）不支援，就會安靜地退回 HTTP/1.1 的老路。</strong>所以 2026 年絕大多數 production 的 WebSocket 仍然是「WSS over HTTP/1.1 Upgrade」。</p>
+
+  <p class="wsx-sub">4 · 或者根本不要隧道：WebTransport</p>
+
+  <p>把 WebSocket 塞進 HTTP/2 或 HTTP/3 的 stream 裡，解掉的是「連線數」問題，但沒有解掉 WebSocket 自己的一個結構性限制：<strong>一條 WebSocket 就是一條有序、可靠的訊息串流</strong>。你在上面同時傳一個 10 MB 的檔案和每秒 20 次的游標位置，兩者會互相排隊——這其實就是 HoL Blocking 在應用層又演一次。</p>
+
+  <p><strong>WebTransport</strong> 的作法是直接把 QUIC 的能力暴露給應用：一個 WebTransport session（也是用 Extended CONNECT 建立，<code>:protocol = webtransport</code>）之下可以開<strong>多條雙向／單向 stream</strong>，彼此獨立不互相阻塞；此外還提供<strong>不可靠的資料報（Datagram）</strong>——送出去不保證到、不重傳、不排序，正好對應遊戲狀態與音視訊那種「舊資料寧可丟掉」的需求。這兩件事都是 WebSocket 在設計上給不了的。</p>
+
+  <div class="callout warn">
+    <div class="c-title"><span class="ic">陷阱</span>「WebTransport 會取代 WebSocket」現在還不能這樣講</div>
+    <p>規格仍在標準化收尾階段，瀏覽器與伺服器端生態都還在補；企業網路對 UDP 的封鎖（篇 4 那筆帳）在這裡一樣要付。務實的定位是：<strong>WebSocket 是通用預設值，WebTransport 是「你確實需要多 stream 或不可靠投遞」時的升級選項，而且必須保留 WebSocket fallback。</strong></p>
+  </div>
+
+  <div class="oneliner">
+    <b>一句話答法</b>HTTP/1.1 用 <code>Upgrade</code>＋<code>101</code> 換掉整條 TCP；HTTP/2 因為禁用 <code>Connection</code> 系列標頭，改用 RFC 8441 的 Extended CONNECT（<code>:protocol=websocket</code>）把單一 stream 變隧道，回 <code>200</code>；RFC 9220 是同一套機制在 HTTP/3 上的版本。<code>Sec-WebSocket-Key/Accept</code> 不是安全機制，是防止中間設備被騙進二進位對話。
+  </div>
+</section>
+
+<section id="s3">
+  <div class="sec-head"><span class="sec-num">03</span><h2>Framing：TCP 拿掉的訊息邊界，WebSocket 自己補回來</h2></div>
+  <p class="sec-sub">篇 1 定調過「TCP 不保證訊息邊界，framing 是應用的事」。WebSocket 就是那句話的一個具體交卷。</p>
+
+  <p>篇 1 的 s2 已經論證過：TCP 給的是<strong>位元組串流</strong>，兩次 <code>send()</code> 可能被合併成一次 <code>recv()</code>、一次 <code>send()</code> 也可能被拆成三次收到——「黏包」不是 bug，是抽象本身如此。所以任何跑在 TCP 上的協定都得自己劃邊界：長度前綴、分隔符，或固定長度。<strong>WebSocket 選的是長度前綴</strong>，而且把長度欄位設計成變長的：</p>
+
+  <div class="wsx-bits">
+    <div class="bf hi f1"><b>1 bit</b>FIN</div>
+    <div class="bf opt f1"><b>3 bits</b>RSV1-3</div>
+    <div class="bf hi f2"><b>4 bits</b>opcode</div>
+    <div class="bf ctl f1"><b>1 bit</b>MASK</div>
+    <div class="bf hi f2"><b>7 bits</b>Payload len</div>
+  </div>
+  <div class="wsx-bits">
+    <div class="bf opt f2"><b>0 / 16 / 64 bits</b>擴充長度（len=126 → 16 bits；len=127 → 64 bits）</div>
+    <div class="bf ctl f2"><b>0 / 32 bits</b>Masking-key（客戶端→伺服器必填）</div>
+  </div>
+  <div class="wsx-bits">
+    <div class="bf pay">Payload Data（若 MASK=1，逐位元組與 Masking-key 做 XOR）</div>
+  </div>
+  <p class="cap">最小的一個 frame 只有 <strong>2 bytes 標頭</strong>（伺服器→客戶端、payload ≤ 125 bytes）；客戶端送出時加上 4 bytes 的 masking key，最小 6 bytes。對照篇 3 的 <strong>HTTP/2 固定 9-byte 標頭</strong>——兩者的設計目標不同：HTTP/2 的 frame 要攜帶 Stream ID 做多路復用，長度固定換解析簡單；WebSocket 沒有多路復用要做，於是把每個 byte 都省下來，因為它預期的負載是「每秒好幾十則的小訊息」。</p>
+
+  <p class="wsx-sub">1 · opcode：資料 frame 與 control frame</p>
+
+  <div class="wsx-flow">
+    <span class="wsx-chip d">0x1 TEXT</span>
+    <span class="wsx-chip d">0x2 BINARY</span>
+    <span class="wsx-chip d">0x0 CONTINUATION</span>
+    <span class="wsx-chip op">資料 frame</span>
+    <span class="wsx-chip k">0x8 CLOSE</span>
+    <span class="wsx-chip k">0x9 PING</span>
+    <span class="wsx-chip k">0xA PONG</span>
+    <span class="wsx-chip op">control frame</span>
+  </div>
+
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr><th>規則</th><th>資料 frame（0x0／0x1／0x2）</th><th>control frame（0x8／0x9／0xA）</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>可否分片</td><td class="hl">可以：首片 <code>FIN=0</code>＋真實 opcode，後續片 opcode <code>0x0</code>，末片 <code>FIN=1</code></td><td class="hl">不可分片，<code>FIN</code> 必為 1</td></tr>
+        <tr><td>payload 大小</td><td>最大 2<sup>63</sup>-1（實務由應用設上限）</td><td class="hl">≤ 125 bytes</td></tr>
+        <tr><td>能否插隊</td><td>同一方向的訊息必須依序完成</td><td class="hl"><strong>可以插在分片訊息中間送</strong></td></tr>
+        <tr><td>內容約束</td><td><code>TEXT</code> 必須是合法 UTF-8（違反 → close 1007）；<code>BINARY</code> 不限</td><td><code>CLOSE</code> 帶 2 bytes 狀態碼＋UTF-8 理由</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="cap">「control frame 可以插隊」這一列很容易被略過，但它是保活能成立的前提：正在傳一個 8 MB 的分片訊息時，<strong>Ping 仍然可以插進去、Pong 仍然可以回來</strong>，否則大訊息一送就會被誤判為連線已死。</p>
+
+  <p class="wsx-sub">2 · 為什麼客戶端<em>必須</em> mask，伺服器卻不必</p>
+
+  <p>RFC 6455 規定：<strong>客戶端送往伺服器的每一個 frame 都必須 masked</strong>（帶 4 bytes 隨機 key，payload 逐位元組 XOR），伺服器送往客戶端的則<strong>一律不 mask</strong>。這個不對稱的規定常被誤讀成「加密」——它跟機密性一點關係都沒有，<strong>key 就明文躺在同一個 frame 的標頭裡</strong>，任何人都能還原。</p>
+
+  <div class="callout accent">
+    <div class="c-title"><span class="ic">關鍵</span>masking 防的是 cache poisoning，而且只在「攻擊者能控制送出內容」時才有意義</div>
+    <p>威脅模型是這樣：瀏覽器裡的惡意 JavaScript 可以呼叫 <code>ws.send()</code> 送出<strong>任意位元組</strong>。如果不 mask，它就能精心構造一段看起來完全像 <code>GET /jquery.js HTTP/1.1\r\nHost: cdn.example.com\r\n\r\n</code> 的內容。路徑上某個沒有正確實作 WebSocket 的透明快取 proxy，若把這段位元組當成一個新的 HTTP 請求來解析，就會去抓、並<strong>把伺服器接下來送回的內容當成 <code>jquery.js</code> 存進快取</strong>——同一個網路下所有使用者從此拿到被污染的腳本。<br>
+    強制 masking 讓攻擊者<strong>無法預測實際流過線上的位元組</strong>（key 每個 frame 都不同、且必須來自密碼學亂數源），這條路就被封死了。伺服器不必 mask，是因為伺服器送出的內容不受攻擊者任意控制，而且省下的是<strong>下行</strong>頻寬與 CPU——fan-out 場景下下行流量遠大於上行。</p>
+  </div>
+
+  <p class="wsx-sub">3 · frame 之上：訊息，以及協定<em>沒有</em>給你的東西</p>
+
+  <p>應用看到的單位是<strong>訊息（message）</strong>而不是 frame：瀏覽器的 <code>onmessage</code> 只會在一則完整訊息（可能由多個分片組成）到齊後才觸發一次。這是 WebSocket 相對於裸 TCP 最大的便利——你不必自己算長度、不必處理黏包。</p>
+
+  <p>但也就到此為止了。有三件在 HTTP/2 上習以為常的事，WebSocket <strong>完全不提供</strong>：</p>
+
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr><th>沒有的東西</th><th>後果</th><th>實務怎麼補</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><strong>多路復用</strong></td><td class="hl">一條連線＝一條有序訊息流，大訊息會擋住小訊息</td><td>應用層自訂 <code>channel</code>／<code>topic</code> 欄位並限制單則大小；或改用 WebTransport</td></tr>
+        <tr><td><strong>請求／回應關聯</strong></td><td class="hl">送出去的訊息沒有「回應是哪一則」的概念</td><td>自己加 <code>id</code> 欄位做 correlation（MCP、GraphQL over WS 都是這樣做）</td></tr>
+        <tr><td><strong>壓縮</strong></td><td class="hl">預設不壓縮，JSON 全文上線</td><td><code>permessage-deflate</code> 擴充（RFC 7692）；注意它會吃記憶體，每條連線一份壓縮上下文</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="cap">結論很一致：<strong>WebSocket 提供的是「有邊界的雙向位元組管道」，不是「訊息系統」。</strong>上面這三格外加投遞保證，正是篇 6 的 MQTT 選擇放進協定裡的東西。</p>
+
+  <div class="oneliner">
+    <b>一句話答法</b>WebSocket 用長度前綴 framing 把 TCP 缺的訊息邊界補回來，標頭最小 2 bytes（變長長度）；control frame ≤125 bytes、不可分片但可插隊，所以大訊息傳輸中 Ping/Pong 仍然通；客戶端強制 masking 不是加密，是防止中間快取被構造出來的假 HTTP 請求污染。
+  </div>
+</section>
+
+<section id="s4">
+  <div class="sec-head"><span class="sec-num">04</span><h2>保活、斷線偵測與 close code</h2></div>
+  <p class="sec-sub">長連線最大的敵人不是斷線，而是「它明明已經斷了，兩端卻都以為還活著」。</p>
+
+  <p>篇 1 的 s5 已經把前提立好：因為「外往內」預設不通，即時系統一律採用<strong>客戶端主動建立並長期維持一條連線</strong>的模型；而那裡的 NAT callout 也定調了為什麼這條連線不能安靜——<strong>心跳既是活性偵測，也是「餵養」NAT 映射的手段</strong>。NAT 表項與有狀態防火牆的連線紀錄都有 idle timeout，一條完全沒有流量的長連線會在你毫無察覺的情況下被中間設備拆掉。</p>
+
+  <p class="wsx-sub">1 · 三層心跳，各測不同的東西</p>
+
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr><th>層級</th><th>機制</th><th>證明了什麼</th><th>限制</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>傳輸層</td><td><code>SO_KEEPALIVE</code>（TCP keepalive）</td><td class="hl">路徑通、對端核心還在</td><td>Linux 預設閒置 <strong>2 小時</strong>才開始探測，對即時系統形同不存在；且對端行程卡死時核心仍會回應</td></tr>
+        <tr><td>協定層</td><td>WebSocket <code>PING</code> / <code>PONG</code>（0x9／0xA）</td><td class="hl">對端的 WebSocket 實作還活著、路徑通</td><td><strong>瀏覽器 JS 無法主動送 Ping</strong>——規範沒有暴露這個 API，瀏覽器只會自動回 Pong</td></tr>
+        <tr><td>應用層</td><td>自訂 heartbeat 訊息（一則 TEXT）</td><td class="hl">對端的<strong>應用邏輯</strong>還活著（事件迴圈沒被卡死）</td><td>成本較高（要過完整訊息路徑）；但可以順便攜帶 <code>lastSeq</code>、伺服器版本等資訊</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="cap">典型分工：<strong>伺服器每 20–30 秒送 Ping</strong>（瀏覽器會自動回 Pong，不需要前端寫任何程式碼），用來清掉殭屍連線並餵 NAT；<strong>瀏覽器端則送應用層 heartbeat</strong>，因為它沒有別的選擇。兩個方向都要做——只有一方偵測，另一方的資源就會洩漏。</p>
+
+  <p class="wsx-sub">2 · half-open：最難查的那一種斷線</p>
+
+  <p><strong>Half-open</strong> 指的是一端已經消失（行程被 kill、機器斷電、路徑被中間設備靜默拆掉），但另一端<strong>沒有收到任何 FIN 或 RST</strong>。此時它的 socket 仍是 <code>ESTABLISHED</code>、<code>readyState</code> 仍是 <code>OPEN</code>、事件迴圈一片安靜——<strong>沒有任何錯誤事件會被觸發</strong>。它會一直維持這個狀態，直到你嘗試寫入並等到 TCP 重傳耗盡（可能是好幾分鐘），或是永遠。</p>
+
+  <div class="callout warn">
+    <div class="c-title"><span class="ic">陷阱</span>「沒有 <code>onclose</code> 就代表連線正常」是即時系統最貴的假設</div>
+    <p>唯一可靠的偵測方式是<strong>主動探測 + 計時</strong>：送出 Ping 後啟動計時器，連續 <var>N</var> 次（常見 2–3 次）在週期內沒收到 Pong，就<strong>主動判定連線已死</strong>、呼叫 <code>close()</code> 並進入重連流程。<br>
+    伺服器端更不能省：每條連線記一個 <code>lastPongAt</code>，掃描逾時的直接踢掉。否則行動端使用者進電梯、關螢幕、切飛航模式留下的殭屍連線會持續佔用 fd、記憶體與訂閱表——這是長連線服務記憶體慢性成長的頭號原因。</p>
+  </div>
+
+  <p class="wsx-sub">3 · 關閉交握與 close code 體系</p>
+
+  <p>乾淨的關閉是<strong>雙向</strong>的：一方送出 <code>CLOSE</code> frame（payload = 2 bytes 狀態碼 + UTF-8 理由，因為 control frame ≤125 bytes，理由最多 123 bytes），對方回一個 <code>CLOSE</code>，然後<strong>由伺服器先關閉底層 TCP</strong>。兩邊都收到 <code>CLOSE</code> 才算 clean close——瀏覽器的 <code>CloseEvent.wasClean</code> 就是在說這件事。</p>
+
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr><th>Code</th><th>意義</th><th>典型觸發</th><th>客戶端該不該重連</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><code>1000</code></td><td class="hl">Normal Closure</td><td>應用主動關閉、任務完成</td><td><strong>不要</strong>——這是「談完了」</td></tr>
+        <tr><td><code>1001</code></td><td class="hl">Going Away</td><td>使用者關分頁；<strong>伺服器重啟／下線</strong></td><td><strong>要</strong>，而且必須帶 jitter（見 s5）</td></tr>
+        <tr><td><code>1002</code> / <code>1007</code></td><td>Protocol Error／非法 UTF-8</td><td>對端實作有 bug 或版本不合</td><td>重連也會再撞——先告警</td></tr>
+        <tr><td><code>1006</code></td><td class="hl">Abnormal Closure（保留）</td><td><strong>沒有收到 CLOSE frame</strong>：網路斷、行程死、被中間設備拆</td><td>要，這是最常見的重連來源</td></tr>
+        <tr><td><code>1008</code></td><td>Policy Violation</td><td>認證失敗、越權訂閱</td><td>看原因——憑證問題重連無用</td></tr>
+        <tr><td><code>1009</code> / <code>1011</code></td><td>Message Too Big／Internal Error</td><td>超過伺服器單則上限；伺服器例外</td><td><code>1011</code> 要，<code>1009</code> 先修訊息</td></tr>
+        <tr><td><code>1012</code> / <code>1013</code></td><td>Service Restart／Try Again Later</td><td>優雅重啟、過載保護</td><td>要，且 <code>1013</code> 應退避更久</td></tr>
+        <tr><td><code>4000</code>–<code>4999</code></td><td class="hl">應用自訂區段</td><td>自己定義：<code>4001</code> token 過期、<code>4002</code> 被踢下線…</td><td>由你的語義決定</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="cap">重連策略應該<strong>按 close code 分流</strong>，而不是「一律重連」。把 <code>1000</code> 也拿去重連，就會做出一個永遠關不掉的連線。</p>
+
+  <div class="callout accent">
+    <div class="c-title"><span class="ic">關鍵</span><code>1005</code> 與 <code>1006</code> 從來不會出現在線上</div>
+    <p>這兩個是<strong>保留碼</strong>，規範明文禁止放進 <code>CLOSE</code> frame——它們是<strong>本地端自己產生的</strong>：<code>1005</code>＝收到了 <code>CLOSE</code> 但對方沒帶狀態碼；<code>1006</code>＝<strong>根本沒收到 <code>CLOSE</code></strong>，連線就沒了。<br>
+    所以在日誌裡看到 <code>1006</code>，意思永遠是「關閉交握沒有發生」——不要去伺服器程式碼裡找哪裡送了 1006，該查的是網路路徑（LB 的 idle timeout 是不是比你的心跳短？）、行程是不是 OOM 被殺、或中間有沒有設備靜默拆連線。<strong><code>1006</code> 佔比是長連線服務最值得監控的一個指標。</strong></p>
+  </div>
+
+  <div class="oneliner">
+    <b>一句話答法</b>TCP keepalive 預設 2 小時、對即時系統無用，所以保活要靠協定層 Ping/Pong（伺服器發、瀏覽器自動回）加應用層 heartbeat；half-open 只能靠「送 Ping 後計時、N 次無 Pong 就主動斷」偵測；close code 要分流處理，<code>1006</code> 代表根本沒發生關閉交握。
+  </div>
+</section>
+
+<section id="s5">
+  <div class="sec-head"><span class="sec-num">05</span><h2>Backpressure 與重連：連線撐不住的兩種樣子</h2></div>
+  <p class="sec-sub">一種是連線還在但送不出去，一種是連線沒了。兩種都不能靠「等一下應該就好了」處理。</p>
+
+  <p class="wsx-sub">1 · Backpressure：WebSocket 只給你一個數字</p>
+
+  <p>篇 1 的 s6 已經把因果鏈講完：接收端應用讀得慢 → 接收端核心 buffer 滿 → <var>rwnd</var> 縮到 0 → 發送端不能再送 → 發送端 send buffer 滿 → <code>write()</code> 回 <code>EAGAIN</code>。那裡也列了四種處理策略（暫停生產／丟棄與合併／有界佇列+斷線／降級取樣），並下了結論：<strong>把 backpressure 吃掉，等於把問題換成 OOM。</strong>這裡不重講機制，只補 WebSocket 這一層的三個特殊之處。</p>
+
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr><th>特殊之處</th><th>細節</th><th>後果</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><strong><code>send()</code> 永遠不會失敗</strong></td><td class="hl">瀏覽器的 <code>ws.send()</code> 立刻回傳，不會回 <code>EAGAIN</code>、不會丟例外</td><td>沒有任何訊號告訴你「慢一點」——資料靜靜堆進瀏覽器的內部緩衝，直到分頁 OOM</td></tr>
+        <tr><td><strong>唯一的儀表是 <code>bufferedAmount</code></strong></td><td class="hl">已經呼叫 <code>send()</code> 但還沒真正寫進 socket 的位元組數</td><td>必須<strong>每次送之前主動檢查</strong>；它持續上升就是對端或鏈路跟不上</td></tr>
+        <tr><td><strong>沒有 receive backpressure</strong></td><td class="hl">瀏覽器端沒有「暫停接收」的 API，<code>onmessage</code> 會一直被呼叫</td><td>收得比處理得快時，壓力只會累積在你的 JS heap 裡；只能在應用層丟棄或取樣</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="cap">伺服器端情況好一些：多數 runtime 允許暫停讀取 socket，讓壓力真的反壓到 TCP <var>rwnd</var>。但要小心副作用——<strong>停止讀取會把整條連線上的所有訊息一起卡住，包含對方的 Ping</strong>，於是你可能被對端判定為 half-open 而斷線。</p>
+
+<pre><code>let ws, attempt = 0;
+function connect() {
+  ws = new WebSocket("wss://chat.example.com/ws?ticket=" + ticket, ["chat.v2"]);
+  ws.onopen    = () =&gt; { attempt = 0; send({ type: "resume", lastSeq }); };
+  ws.onclose   = (e) =&gt; {                    // 1000/1001 有交握；1006 = 沒收到 CLOSE frame
+    if (e.code === 1000 || e.code === 4001) return;      // 正常關閉／憑證失效：不重連
+    const delay = Math.min(30000, 500 * 2 ** attempt++) * (0.5 + Math.random() * 0.5);
+    setTimeout(connect, delay);              // exponential backoff + full-ish jitter
+  };
+}
+function send(msg) {                         // send() 不會回 EAGAIN，只會無聲堆記憶體
+  if (ws.readyState !== WebSocket.OPEN) return queue(msg);
+  if (ws.bufferedAmount &gt; 1_000_000) return drop(msg);   // 有界：寧可丟也不要 OOM
+  ws.send(JSON.stringify(msg));
+}</code></pre>
+  <p class="cap">十五行裡塞了本節的全部重點：<strong>按 close code 決定要不要重連</strong>、<strong>退避要帶 jitter</strong>、<strong>重連後第一件事是宣告 <code>lastSeq</code></strong>、<strong>送出前檢查 <code>bufferedAmount</code></strong>。至於 <code>drop()</code> 要丟最舊的、還是把同一支股票的報價合併成最新一筆，就是篇 1 那張策略表的選擇題。</p>
+
+  <p class="wsx-sub">2 · 重連：退避、抖動，以及為什麼一定要抖</p>
+
+  <p>偵測到斷線之後立刻重連，是每個人第一版都會寫的錯誤。正確的作法是<strong>指數退避（exponential backoff）</strong>——每次失敗把等待時間加倍，並設一個上限：</p>
+
+  <div class="formula">delay = min(cap, base * 2 ^ attempt) * rand(0.5, 1.0)</div>
+
+  <p>前半段（<code>min(cap, base * 2 ^ attempt)</code>）讓失敗成本隨次數遞減；真正關鍵的是後面那個乘上隨機數的 <strong>jitter（抖動）</strong>。理由是：造成大量客戶端同時斷線的事件，通常是<strong>同一個</strong>事件——一次伺服器重啟、一次 LB 切換、一次網路抖動。這些客戶端的計時器因此完全同相，沒有 jitter 的話它們會在同一毫秒一起回來，把剛起來的伺服器再打掛一次，然後同步得更整齊地再來一輪。<strong>把重連時刻隨機攤平，是唯一能打破這個相位鎖定的手段。</strong>（這個現象叫<strong>重連風暴（Reconnect Storm）</strong>，它在單機視角只是一個係數，到了多節點叢集才會真正露出獠牙——篇 7 會完整處理。）</p>
+
+  <p class="wsx-sub">3 · 重連 ≠ 恢復：連線狀態要怎麼接回去</p>
+
+  <p>新的 TCP 連線建起來、<code>onopen</code> 觸發了，但這只代表<strong>管道通了</strong>。斷線那段時間伺服器推的訊息去哪了？客戶端的訂閱列表在伺服器那邊還在不在？這些都不是協定管的事。</p>
+
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr><th>恢復策略</th><th>作法</th><th>代價</th><th>適合</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><strong>全量重載</strong></td><td class="hl">重連後丟掉本地狀態，重新拉一次完整快照</td><td>伺服器要扛「重連即打 API」的尖峰</td><td>狀態小、可重算：儀表板、行情看板</td></tr>
+        <tr><td><strong>序號補發</strong></td><td class="hl">每則訊息帶遞增 <var>seq</var>；重連時客戶端送 <code>lastSeq</code>，伺服器補發之後的</td><td>伺服器必須為每條連線保留一段訊息視窗（有上限）</td><td>不可漏訊息：聊天、通知、訂單事件</td></tr>
+        <tr><td><strong>Resume token</strong></td><td class="hl">伺服器發一個不透明 token 代表「你上次讀到哪」，重連時原樣帶回</td><td>token 要有時效與撤銷機制；語義由伺服器完全掌握</td><td>需要跨節點恢復（token 裡可編碼分區資訊）</td></tr>
+        <tr><td><strong>最終一致快照</strong></td><td class="hl">不保證補齊中間過程，只保證重連後很快收到當前狀態</td><td>中間狀態永久遺失</td><td>只關心最新值：游標位置、線上狀態、行情</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="cap">共同前提：<strong>伺服器願意為斷線的客戶端保留多久的狀態，決定了你能給出多強的恢復保證。</strong>保留視窗一定有上限，所以每一種策略都要設計「太舊了，請走全量重載」這條退路。這也是為什麼 <code>resume</code> 訊息的回應必須明確告訴客戶端是<em>補發</em>還是<em>請重來</em>。</p>
+
+  <p>還有一件事在單機視角看不出殺傷力：<strong>slow consumer</strong>（篇 1 已定義）。一個手機在地鐵裡的使用者，會讓 gateway 上屬於他的那條連線的發送佇列持續堆積；在 fan-out 場景下，每一則廣播訊息都要為他複製一份，於是<strong>一個慢客戶端的成本會隨廣播頻率放大</strong>。單機上的答案就是那張策略表裡的「有界佇列 + 斷線」——犧牲他一個，保全其他人。至於當這件事發生在幾十台 gateway 上、而訊息還要跨節點分發時會變成什麼樣子，留給篇 7。</p>
+
+  <div class="oneliner">
+    <b>一句話答法</b>WebSocket 的 <code>send()</code> 不會失敗，唯一的 backpressure 訊號是 <code>bufferedAmount</code>，而且瀏覽器沒有暫停接收的 API；斷線後必須用「指數退避 + jitter」重連以打破相位鎖定，並且要另外設計序號補發或 resume token，因為重連只恢復管道、不恢復狀態。
+  </div>
+</section>
+
+<section id="s6">
+  <div class="sec-head"><span class="sec-num">06</span><h2>認證與連線狀態：交握是唯一的那個 HTTP 請求</h2></div>
+  <p class="sec-sub">整條連線的一生裡，只有第一個封包是 HTTP。你所有的認證機會都擠在那一瞬間——而瀏覽器還綁住了你的手。</p>
+
+  <p>好消息：交握是一個真正的 HTTP 請求，所以 <strong>Cookie 會自動帶上</strong>，既有的 session 機制可以直接沿用。壞消息有兩個，而且都很尖銳。</p>
+
+  <div class="callout warn">
+    <div class="c-title"><span class="ic">陷阱</span>WebSocket 交握<strong>不受同源政策保護</strong>——CSWSH</div>
+    <p>瀏覽器對 <code>fetch</code>／<code>XMLHttpRequest</code> 施加 CORS，但 <strong>WebSocket 沒有 CORS</strong>：任何網站的 JavaScript 都可以對你的 <code>wss://</code> 端點發起連線，而且瀏覽器<strong>會把使用者的 Cookie 一起帶上</strong>。這叫 <strong>Cross-Site WebSocket Hijacking（CSWSH）</strong>——攻擊者的頁面建立一條「以受害者身分登入」的連線，然後在上面收發訊息。<br>
+    唯一的防線是<strong>伺服器在交握時檢查 <code>Origin</code> 標頭</strong>，只放行白名單。這不是可選的加固項，而是<strong>只要你用 Cookie 認證 WebSocket 就必須做的事</strong>。（非瀏覽器客戶端可以偽造 <code>Origin</code>，所以它防的是「利用受害者瀏覽器」這個特定攻擊面，不是通用授權。）</p>
+  </div>
+
+  <p class="wsx-sub">1 · 瀏覽器不讓你設自訂標頭</p>
+
+  <p>第二個壞消息：瀏覽器的 WebSocket 建構子只有兩個參數——<code>new WebSocket(url, protocols)</code>。<strong>沒有地方放 <code>Authorization: Bearer …</code></strong>。（伺服器端與行動端 SDK 沒有這個限制，可以自由設標頭；這純粹是瀏覽器 API 的約束。）於是實務上出現四條路：</p>
+
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr><th>作法</th><th>怎麼做</th><th>風險 / 限制</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><strong>Cookie</strong></td><td class="hl">交握自動帶，伺服器照既有 session 驗</td><td>必須驗 <code>Origin</code>（見上）；受 <code>SameSite</code> 限制，跨網域部署（前端與 WS 端點不同站）會失效</td></tr>
+        <tr><td><strong>Token 放 query string</strong></td><td class="hl"><code>wss://…/ws?token=eyJ…</code></td><td class="hl"><strong>最常見也最糟</strong>：URL 會進 LB／proxy／伺服器的 access log、進 APM 追蹤、進瀏覽器歷史，長效 token 一旦落地就等於外洩</td></tr>
+        <tr><td><strong>Ticket 模式</strong></td><td class="hl">先用一般 HTTPS API（帶 <code>Authorization</code>）換一張<strong>一次性、數十秒有效、綁使用者</strong>的 ticket，再放進 query string</td><td>多一次往返；但 ticket 進了日誌也幾乎沒有價值——<strong>這是瀏覽器場景的推薦解</strong></td></tr>
+        <tr><td><strong><code>Sec-WebSocket-Protocol</code> 夾帶</strong></td><td class="hl">把 token 當成一個「子協定」送出：<code>["chat.v2", "bearer.eyJ…"]</code></td><td>算是把標頭欄位挪作他用；伺服器<strong>必須回選其中一個</strong>（回 token 那個會很怪，通常回 <code>chat.v2</code>）。避開了 URL 落日誌，但可讀性差、與 8441 路徑上的中間層互動要實測</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="cap">選擇順序通常是：<strong>同站部署用 Cookie + Origin 驗證；跨站或行動端用 Ticket 模式。</strong>把長效 JWT 直接掛在 query string 上是最省事、也最容易在資安檢查時被抓出來的做法。</p>
+
+  <p class="wsx-sub">2 · 連線活了八小時，token 三十分鐘就過期了</p>
+
+  <p>請求／回應模型裡，權杖過期是自然的：下一個請求帶新的就好。長連線把這個假設打破了——<strong>交握時驗過一次，不等於接下來八小時都該被允許</strong>。使用者可能已經登出、被停權、權限被收回，而那條連線還在推訊息給他。三種常見處理：</p>
+
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr><th>策略</th><th>作法</th><th>取捨</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><strong>到期即關</strong></td><td class="hl">伺服器記下 token 的 <code>exp</code>，時間到就主動送 <code>CLOSE</code>（自訂碼如 <code>4001</code>）</td><td>最簡單、語義清楚；客戶端收到 <code>4001</code> 應先去刷新 token 再重連，而不是盲目退避</td></tr>
+        <tr><td><strong>連線內續期</strong></td><td class="hl">定義一則 <code>auth.refresh</code> 訊息，客戶端在到期前送新 token 上來</td><td>不中斷連線，體驗最好；但你等於在應用層自己實作了一套認證協定，要處理續期失敗與競態</td></tr>
+        <tr><td><strong>每則訊息授權</strong></td><td class="hl">交握只認 <em>你是誰</em>，每則訊息的 <em>能不能做</em> 另外查（訂閱時查一次、寫入時再查）</td><td>最安全也最貴；通常只對高風險操作（下單、轉帳）這樣做</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="cap">共同原則：<strong>認證發生在交握，授權必須持續。</strong>把兩者混為一談，就會做出「踢不掉的已停權使用者」。</p>
+
+  <p class="wsx-sub">3 · 伺服器端的 connection state：本篇最後一個伏筆</p>
+
+  <p>每接受一條 WebSocket 連線，伺服器就得在記憶體裡掛一份狀態：</p>
+
+  <div class="wsx-flow">
+    <span class="wsx-chip d">user / device id</span>
+    <span class="wsx-chip d">訂閱的 topic 集合</span>
+    <span class="wsx-chip d">lastSeq / resume token</span>
+    <span class="wsx-chip k">lastPongAt</span>
+    <span class="wsx-chip k">心跳計時器</span>
+    <span class="wsx-chip x">發送佇列（有界）</span>
+    <span class="wsx-chip op">× 每一條連線</span>
+  </div>
+
+  <p>單機上這完全不是問題——十萬條連線各配幾 KB 也就是幾百 MB，篇 1 的 epoll 早就解決了「同時等很多連線」。真正的問題是這份狀態<strong>只存在於那一台機器的記憶體裡</strong>：它不能被別台機器讀到，也不會在行程重啟後留下來。一旦你要放兩台機器在負載均衡器後面，「這則訊息該送給誰」就變成「持有那條連線的是<em>哪一台</em>」——這是本篇刻意不處理的問題。</p>
+
+  <div class="oneliner">
+    <b>一句話答法</b>交握是整條連線唯一的 HTTP 請求，所以 Cookie 可用但必須驗 <code>Origin</code>（WebSocket 沒有 CORS，會被 CSWSH）；瀏覽器不能設自訂標頭，長效 token 別放 query string，改用一次性 ticket；而認證只發生在交握、授權必須持續，token 到期要主動關或在連線內續期。
+  </div>
+</section>
+
+<section id="s7">
+  <div class="sec-head"><span class="sec-num">07</span><h2>互動 · WebSocket 生命週期模擬器</h2></div>
+  <p class="sec-sub">一條連線從 <code>CONNECTING</code> 走到 <code>CLOSED</code> 的三種劇本：乾淨關閉、網路靜默中斷，以及送得比鏈路快。</p>
+
+  <div class="demo" id="wsx-demo">
+    <div class="demo-bar">
+      <span class="label">互動 · WebSocket 生命週期</span>
+      <span class="label" style="text-transform:none;font-family:var(--sans);font-size:12px;color:var(--text-2)">選一個劇本，按「下一步」逐格推進</span>
+    </div>
+    <div class="demo-body">
+      <div class="seg" role="group" aria-label="情境切換">
+        <button data-sc="clean" aria-pressed="true">伺服器正常關閉</button>
+        <button data-sc="silent" aria-pressed="false">網路靜默中斷 · 重連</button>
+        <button data-sc="buffer" aria-pressed="false">發送緩衝堆積</button>
+      </div>
+
+      <div class="wsx-ctrl">
+        <button class="btn primary" id="wsx-btn-next">下一步</button>
+        <button class="btn" id="wsx-btn-reset">重置</button>
+        <div class="legend">
+          <span><i class="dot ns-wait"></i>目前狀態</span>
+          <span><i class="dot ns-ok"></i>已走過</span>
+          <span><i class="dot ns-lock"></i>保活探測</span>
+          <span><i class="dot ns-bad"></i>異常 / 關閉</span>
+        </div>
+      </div>
+
+      <div class="status-line" id="wsx-status">選一個劇本後按「下一步」，觀察 readyState 與線上的 frame。</div>
+
+      <div class="wsx-states" id="wsx-states">
+        <div class="wsx-st" data-st="conn"><div class="sn">CONNECTING</div><div class="sv">readyState 0</div></div>
+        <div class="wsx-st" data-st="open"><div class="sn">OPEN</div><div class="sv">readyState 1</div></div>
+        <div class="wsx-st" data-st="closing"><div class="sn">CLOSING</div><div class="sv">readyState 2</div></div>
+        <div class="wsx-st" data-st="closed"><div class="sn">CLOSED</div><div class="sv">readyState 3</div></div>
+      </div>
+      <p class="cap" style="text-align:center">這四格就是 <code>WebSocket.readyState</code> 的全部取值。注意 <strong>half-open 情境下它會長時間停在 <code>OPEN</code></strong>——狀態機不會自己發現對面已經不在了。</p>
+
+      <div class="wsx-wire" id="wsx-wire"></div>
+
+      <div class="wsx-panels">
+        <div class="wsx-panel">
+          <div class="pt">連線狀態</div>
+          <div class="prow"><span class="pk">readyState</span><span class="pv" id="wsx-p-rs">—</span></div>
+          <div class="prow"><span class="pk">子協定</span><span class="pv" id="wsx-p-proto">—</span></div>
+          <div class="prow"><span class="pk">close code</span><span class="pv" id="wsx-p-code">—</span></div>
+          <div class="prow"><span class="pk">wasClean</span><span class="pv" id="wsx-p-clean">—</span></div>
+        </div>
+        <div class="wsx-panel">
+          <div class="pt">保活 / 緩衝 / 重連</div>
+          <div class="prow"><span class="pk">未回應 Ping</span><span class="pv" id="wsx-p-ping">0</span></div>
+          <div class="prow"><span class="pk">bufferedAmount</span><span class="pv" id="wsx-p-buf">0 B</span></div>
+          <div class="prow"><span class="pk">重連嘗試</span><span class="pv" id="wsx-p-att">—</span></div>
+          <div class="prow"><span class="pk">下次退避</span><span class="pv" id="wsx-p-delay">—</span></div>
+          <div class="wsx-bar"><i id="wsx-bar"></i></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <p class="cap">三個值得停下來比對的地方：<strong>(1)</strong> 「伺服器正常關閉」走完整的 <code>CLOSE</code> 往返，<code>wasClean = true</code>、code 是 <code>1001</code>——客戶端<em>知道</em>發生了什麼。<strong>(2)</strong> 「網路靜默中斷」裡，連線斷掉之後狀態機<strong>還停在 <code>OPEN</code> 好幾格</strong>，直到 Ping 連續逾時才被判死，close code 是本地產生的 <code>1006</code>、<code>wasClean = false</code>——這就是 s4 說的 half-open。<strong>(3)</strong> 重連的三次退避時間，每次按「重置」都會不一樣：那個亂數就是 jitter，把幾萬個同時斷線的客戶端攤開在時間軸上的唯一手段。</p>
+
+  <div class="callout warn">
+    <div class="c-title"><span class="ic">說明</span>這個模型簡化了什麼，以及它跟前四個 demo 的分工</div>
+    <p>模型只保留「狀態機與生命週期」這一條線：不畫 TCP 交握與 TLS 交握（篇 1、2 的主場）、不畫封包遺失與重傳、frame 一律視為一次送達。時間軸也被壓縮了——真實的 Ping 週期是數十秒，這裡一步就是一次。<br>
+    分工也刻意錯開：<strong>篇 2 的 demo</strong> 是訊息序列圖，主角是<em>交握時的密碼學時序</em>；<strong>本篇</strong>的主角是<em>交握之後那段很長的日子</em>——狀態怎麼變、什麼時候你其實已經斷了卻不知道。所以這裡的交握只用兩格帶過。</p>
+  </div>
+
+  <div class="oneliner">
+    <b>一句話答法</b><code>readyState</code> 只有四個值，而它最危險的行為是「網路已斷卻仍停在 <code>OPEN</code>」；乾淨關閉會走 <code>CLOSE</code> 往返並給出明確 code，靜默中斷只會得到本地產生的 <code>1006</code>，之後的重連必須帶 jitter。
+  </div>
+</section>
+
+<section id="s8">
+  <div class="sec-head"><span class="sec-num">08</span><h2>面試折衷與實務選型</h2></div>
+  <p class="sec-sub">最該記住的一句是：不是所有即時需求都需要 WebSocket，而且多數不需要。</p>
+
+  <p class="wsx-sub">1 · 四種「即時」的對照</p>
+
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr><th></th><th>Long Polling</th><th>SSE</th><th>WebSocket</th><th>WebTransport</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>方向性</td><td>雙向（但每則一次往返）</td><td class="hl">單向 server → client</td><td class="hl">全雙工</td><td class="hl">全雙工 · 多 stream</td></tr>
+        <tr><td>資料型別</td><td>任意</td><td class="hl">僅 UTF-8 文字（二進位要 base64）</td><td>text / binary</td><td>binary + 不可靠資料報</td></tr>
+        <tr><td>重連是否內建</td><td>天然（本來就一直重發）</td><td class="hl"><strong>內建</strong>：瀏覽器自動重連 + <code>Last-Event-ID</code> 續接</td><td class="hl"><strong>要自己寫</strong>（退避、jitter、狀態恢復）</td><td>要自己寫</td></tr>
+        <tr><td>經過 proxy 的友善度</td><td class="hl">最高，就是普通 HTTP</td><td class="hl">高，就是一個不結束的回應</td><td>需中間層支援 <code>Upgrade</code>；企業 proxy 常擋</td><td>需要 UDP 通行</td></tr>
+        <tr><td>連線數成本</td><td>高（不斷重建）</td><td>HTTP/1.1 上受 per-origin 6 連線限制</td><td>一條 TCP（8441 之後可共用）</td><td>共用一條 QUIC 連線</td></tr>
+        <tr><td>伺服器成本</td><td class="hl">最高：每則訊息一組完整標頭</td><td>低</td><td>低（2 bytes 標頭）</td><td>低</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="cap">第三列常被低估：<strong>SSE 的自動重連與 <code>Last-Event-ID</code> 是規範內建的</strong>——瀏覽器斷線後自己回來、並把「我上次收到哪一則」帶給伺服器。這正是 s5 花整整一節在 WebSocket 上手工重建的東西。而第四列的 HTTP/1.1 六連線限制，在 HTTP/2 的多路復用之後就消失了，這是近年 <strong>SSE 明顯復活</strong>的主因。</p>
+
+  <div class="callout accent">
+    <div class="c-title"><span class="ic">關鍵</span>選型只要問一個問題：客戶端需不需要<strong>低延遲地</strong>說話？</div>
+    <p>絕大多數所謂「即時」需求——通知、進度條、儀表板、LLM 逐字輸出、訂單狀態更新——都是<strong>純粹的伺服器單向推送</strong>；客戶端偶爾要說的話，用一個普通的 <code>POST</code> 就夠了。這種情況 <strong>SSE 幾乎總是更好的選擇</strong>：省掉整套重連與心跳程式碼、對中間層透明、除錯時 <code>curl</code> 就看得到。<br>
+    真正需要 WebSocket 的是<strong>客戶端也高頻發話</strong>的場景：協作編輯與游標、多人遊戲、互動白板、需要低延遲雙向的交易終端。判準是「客戶端每秒要說幾次話」，不是「這個功能聽起來即不即時」。</p>
+  </div>
+
+  <p class="wsx-sub">2 · 選型表</p>
+
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr><th>決策點</th><th>選項</th><th>Trade-off</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>協定選擇</td><td class="hl">SSE vs WebSocket</td><td>只有 server→client 就選 SSE（重連內建、proxy 友善）；客戶端高頻發話才需要 WebSocket。混用也很常見：SSE 推、REST 寫</td></tr>
+        <tr><td>要不要上 RFC 8441</td><td class="hl">WS over HTTP/1.1 vs over HTTP/2</td><td>8441 省連線數、與其他請求共用連線；但中間層支援參差，一層不支援就整條退回。多數團隊維持 HTTP/1.1 Upgrade</td></tr>
+        <tr><td>心跳週期</td><td class="hl">短（10–20s） vs 長（60s+）</td><td>短：斷線偵測快、確保 NAT 與 LB idle timeout 不會先到；代價是行動端耗電與流量。<strong>心跳週期必須小於路徑上最短的 idle timeout</strong></td></tr>
+        <tr><td>訊息格式</td><td class="hl">JSON（TEXT） vs 二進位（BINARY）</td><td>JSON 好除錯、生態成熟；二進位（protobuf／MessagePack）省頻寬與解析 CPU，高頻小訊息差距明顯。先量再換</td></tr>
+        <tr><td>壓縮</td><td class="hl">開 <code>permessage-deflate</code> vs 不開</td><td>重複性高的 JSON 壓縮率很好；代價是<strong>每條連線一份壓縮上下文</strong>，十萬連線時記憶體是實打實的帳單</td></tr>
+        <tr><td>送不出去時</td><td class="hl">緩衝 / 合併 / 斷線</td><td>沿用篇 1 那張表：可丟的資料合併成最新值，不可丟的用有界佇列 + 斷線。<strong>沒有明確答案的系統，預設答案是 OOM</strong></td></tr>
+        <tr><td>重連後的狀態</td><td class="hl">全量重載 vs 序號補發</td><td>全量簡單但重連尖峰會打 API；補發體驗好但伺服器要保留訊息視窗，而且一定要有「太舊請重來」的退路</td></tr>
+        <tr><td>認證</td><td class="hl">Cookie vs Ticket</td><td>同站用 Cookie（<strong>必須驗 <code>Origin</code></strong>）；跨站或行動端用一次性 ticket。長效 token 放 query string 是最常見的資安缺失</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="cap">共同結構：<strong>WebSocket 把「通道」做得很好，但把所有「訊息系統」的問題原封不動留給你</strong>——保活、退避、補發、限流，每一項都要自己決定犧牲什麼。</p>
+
+  <div class="callout accent">
+    <div class="c-title"><span class="ic">面試</span>高頻追問怎麼答</div>
+    <p><strong>Q：WebSocket 跟 HTTP 是什麼關係？</strong>
+    答：只有交握那一個請求是 HTTP（<code>Upgrade</code> + <code>101</code>）。之後這條 TCP 上跑的是 WebSocket 自己的二進位 framing，沒有標頭、沒有狀態碼。WSS 則是先跑 HTTPS，再在同一條 TLS 通道上做 Upgrade。<br>
+    <strong>Q：<code>Sec-WebSocket-Key</code> 是幹嘛的？</strong>
+    答：不是安全機制。算法公開、Key 明文可見，目的是確認對面真的實作了 WebSocket，避免把不懂這個協定的快取 proxy 騙進二進位對話。<br>
+    <strong>Q：為什麼客戶端一定要 mask？</strong>
+    答：防止惡意 JS 構造出「看起來像 HTTP 請求」的位元組去污染中間快取。它不是加密——key 就在同一個 frame 的標頭裡。<br>
+    <strong>Q：心跳應該放在哪一層？</strong>
+    答：TCP keepalive 預設兩小時太慢；協定層 Ping/Pong 適合伺服器主動探測（瀏覽器會自動回 Pong 但不能主動發 Ping）；應用層 heartbeat 才能證明對端的事件迴圈沒卡死，也才能順便帶 <code>lastSeq</code>。<br>
+    <strong>Q：日誌裡一堆 <code>1006</code> 代表什麼？</strong>
+    答：關閉交握根本沒發生。它是本地產生的保留碼，不可能出現在線上。該查的是 LB 的 idle timeout 是不是短於心跳、行程有沒有被 OOM kill、路徑上有沒有設備靜默拆連線。<br>
+    <strong>Q：瀏覽器怎麼在 WebSocket 上帶 token？</strong>
+    答：建構子不能設標頭。同站用 Cookie 加 <code>Origin</code> 驗證；否則先用 HTTPS API 換一張一次性短效 ticket 放 query string。長效 JWT 直接掛 URL 會進所有人的 access log。<br>
+    <strong>Q：WebSocket 在 HTTP/2 上怎麼跑？</strong>
+    答：HTTP/2 禁用了 <code>Connection</code> 系列標頭，所以改用 RFC 8441 的 Extended CONNECT：先靠 <code>SETTINGS_ENABLE_CONNECT_PROTOCOL</code> 宣告能力，再用 <code>:method=CONNECT</code> 加上 <code>:protocol=websocket</code> 把一條 stream 變成隧道，回 <code>200</code> 不是 <code>101</code>。HTTP/3 上是 RFC 9220，同一套機制。<br>
+    <strong>Q：什麼時候不該用 WebSocket？</strong>
+    答：只有伺服器單向推的時候。SSE 內建自動重連與 <code>Last-Event-ID</code>、對 proxy 透明、能省下你整套心跳與退避程式碼；HTTP/2 之後連六連線限制也沒了。</p>
+  </div>
+
+  <p>把本篇收攏成一句：<strong>WebSocket 用一次 HTTP Upgrade 買到了一條對稱的雙向訊息管道，而它把管道以外的一切都留給了你</strong>。framing 幫你補回 TCP 拿掉的訊息邊界，Ping/Pong 幫你戳一下對面還在不在，close code 幫你分辨「談完了」與「線斷了」——除此之外，保活週期、退避曲線、補發視窗、限流策略，全部是應用層的設計題。</p>
+
+  <p>這套設計在瀏覽器與伺服器之間非常合身。但把同一套東西搬到一顆靠電池活著的感測器上，帳單就翻過來了：<strong>WebSocket 預設你有完整的 TLS 與 HTTP 堆疊、一顆可以常時醒著跑心跳的 CPU，以及不計較每個位元組的頻寬。</strong>更關鍵的是，它從頭到尾只負責「把位元組送到對面」——訊息會不會重複、掉線那段時間的訊息去了哪裡、裝置突然斷電時誰替它說最後一句話，協定一概不管。當場景變成幾十萬顆在不穩定網路上時醒時睡的裝置，需要的是一個把投遞保證（QoS）與 pub/sub 語義直接做進協定裡的東西——<strong>下一篇進入 MQTT</strong>。</p>
+
+  <p>而即使場景就是瀏覽器與 WebSocket，本篇談的一切都建立在一個隱含前提上：<strong>連線的另一端只有一台伺服器。</strong>使用者是誰、訂了哪些 topic、最後收到第幾則——這些狀態全都活在那一台機器的記憶體裡（s6 的最後一小節）。一旦要放到多台機器後面，<strong>Sticky Session</strong> 要不要做、訊息怎麼跨節點 fan-out 到「持有那條連線的那一台」、發版時怎麼 <strong>Graceful Drain（優雅排空）</strong>而不引爆重連風暴，就是完全另一個層級的問題了——<strong>篇 7 處理它</strong>。</p>
+
+  <div class="oneliner">
+    <b>一句話答法</b>WebSocket 適合客戶端也需要低延遲發話的場景（協作、遊戲、交易終端），純推播用 SSE 幾乎總是更划算；選了它就要自己負責心跳週期、退避與 jitter、bufferedAmount 上限與重連後的狀態恢復——協定只給你一條管道，訊息系統的部分是你的。
+  </div>
+</section>
+
+</div>
+
+      </div>
+    </main>
+  </div>
+
+  <script>
+    "use strict";
+    document.addEventListener("DOMContentLoaded", function () {
+      /* ===== TOC scrollspy, mobile accordion & desktop collapse ===== */
+      (function () {
+        var links = Array.prototype.slice.call(document.querySelectorAll(".toc-nav a"));
+        var map = {};
+        links.forEach(function (a) {
+          var href = a.getAttribute("href");
+          if (href && href.startsWith("#")) {
+            map[href.slice(1)] = a;
+          }
+        });
+        var secs = links.map(function (a) {
+          var href = a.getAttribute("href");
+          return href && href.startsWith("#") ? document.getElementById(href.slice(1)) : null;
+        }).filter(Boolean);
+
+        if (secs.length > 0 && typeof IntersectionObserver !== "undefined") {
+          var obs = new IntersectionObserver(function (entries) {
+            entries.forEach(function (e) {
+              if (e.isIntersecting) {
+                links.forEach(function (l) { l.classList.remove("active"); });
+                var act = map[e.target.id];
+                if (act) act.classList.add("active");
+              }
+            });
+          }, { rootMargin: "-20% 0px -70% 0px", threshold: 0 });
+          secs.forEach(function (s) { obs.observe(s); });
+        }
+
+        /* mobile：目錄 accordion（≤920px） */
+        var toggle = document.querySelector(".toc-toggle");
+        var nav = document.querySelector(".toc-nav");
+        if (toggle && nav) {
+          toggle.addEventListener("click", function () {
+            var open = nav.classList.toggle("open");
+            toggle.setAttribute("aria-expanded", open ? "true" : "false");
+          });
+          nav.addEventListener("click", function (e) {
+            if (e.target.closest("a") && window.innerWidth <= 920) {
+              nav.classList.remove("open");
+              toggle.setAttribute("aria-expanded", "false");
+            }
+          });
+        }
+
+        /* desktop：收合側欄（預設展開；不持久化） */
+        var collapseBtn = document.querySelector(".toc-collapse");
+        var reopenBtn = document.querySelector(".toc-reopen");
+        function setTocCollapsed(collapsed) {
+          document.body.classList.toggle("toc-collapsed", collapsed);
+          if (collapseBtn) collapseBtn.setAttribute("aria-expanded", collapsed ? "false" : "true");
+          if (reopenBtn) reopenBtn.setAttribute("aria-expanded", collapsed ? "false" : "true");
+          if (collapsed && reopenBtn) reopenBtn.focus();
+          else if (!collapsed && collapseBtn) collapseBtn.focus();
+        }
+        if (collapseBtn) {
+          collapseBtn.addEventListener("click", function () { setTocCollapsed(true); });
+        }
+        if (reopenBtn) {
+          reopenBtn.addEventListener("click", function () { setTocCollapsed(false); });
+        }
+      })();
+    });
+  </script>
+
+  
+<script>
+(function () {
+  "use strict";
+
+  /* ---------- 元素 ---------- */
+  var statusEl = document.getElementById("wsx-status");
+  var wireEl   = document.getElementById("wsx-wire");
+  var barEl    = document.getElementById("wsx-bar");
+  var btnNext  = document.getElementById("wsx-btn-next");
+  var btnReset = document.getElementById("wsx-btn-reset");
+  if (!statusEl || !wireEl || !btnNext) return;
+
+  var STATES = ["conn", "open", "closing", "closed"];
+  var ORDER  = { conn: 0, open: 1, closing: 2, closed: 3 };
+
+  var scenario = "clean";
+  var stepIdx = 0;
+  var JIT = [0.75, 0.75, 0.75];   /* reset 時重新抽樣，示範 jitter */
+
+  /* ---------- 步驟資料 ----------
+     每步：st 狀態、add 線上事件、p 面板增量（只寫變動的欄位）、dIdx 退避階數、msg 敘述
+     rows: [kind, tag, text]，kind ∈ c2s | s2c | c2sctl | s2cctl | note | bad          */
+
+  var SC = {
+    clean: [
+      { st: "conn", p: { rs: "0 CONNECTING" },
+        add: [["c2s", "HTTP", "GET /ws · Upgrade: websocket · Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ=="]],
+        msg: "交握就是一個普通的 HTTP GET。此刻還沒有 WebSocket——伺服器要是回 200 或 404，故事就在這裡結束。" },
+      { st: "conn", p: { proto: "chat.v2" },
+        add: [["s2c", "HTTP", "101 Switching Protocols · Sec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo="]],
+        msg: "伺服器把 Key 接上固定 GUID、做 SHA-1 再 base64，算出 Accept 並回 101。從這一刻起，這條 TCP 不再說 HTTP。" },
+      { st: "open", p: { rs: "1 OPEN", rsC: "good" },
+        add: [["note", "EVENT", "onopen 觸發 · readyState 0 → 1"]],
+        msg: "OPEN。兩端地位對稱，任一方都可以在任何時候送出一則訊息，不需要對方先問。" },
+      { st: "open", p: {},
+        add: [["c2s", "TEXT", "{\"op\":\"sub\",\"topic\":\"BTCUSD\"} · masked · 標頭 6 bytes"]],
+        msg: "客戶端送出訂閱。客戶端方向的每一個 frame 都必須 masked，所以標頭多了 4 bytes 的 masking key。" },
+      { st: "open", p: {},
+        add: [["s2c", "TEXT", "{\"px\":68120,\"seq\":41} · 未 masked · 標頭 2 bytes"]],
+        msg: "伺服器方向不 mask，標頭只有 2 bytes——這就是變長長度編碼替下行省下來的東西。" },
+      { st: "open", p: { ping: "1", pingC: "warn" },
+        add: [["s2cctl", "PING", "control frame · 伺服器每 25 秒探一次"]],
+        msg: "伺服器送 Ping。瀏覽器端不需要寫任何程式碼——規範要求它自動回 Pong。" },
+      { st: "open", p: { ping: "0", pingC: "" },
+        add: [["c2sctl", "PONG", "瀏覽器自動回應"]],
+        msg: "Pong 回來，未回應計數歸零。這一來一回同時餵飽了路徑上的 NAT 映射與 LB 的 idle timer。" },
+      { st: "closing", p: { rs: "2 CLOSING", rsC: "warn", code: "1001 Going Away", codeC: "warn" },
+        add: [["s2cctl", "CLOSE", "1001 \"server restarting\" · 2 bytes 狀態碼 + UTF-8 理由"]],
+        msg: "伺服器要下線，主動發起關閉交握並帶上明確的 1001。readyState 進入 CLOSING。" },
+      { st: "closed", p: { rs: "3 CLOSED", rsC: "", clean: "true", cleanC: "good" },
+        add: [["c2sctl", "CLOSE", "1001 · 回送 Close frame，之後由伺服器先關閉底層 TCP"]],
+        msg: "雙方都送過 CLOSE，這才叫 clean close。onclose 拿到 code=1001、wasClean=true——客戶端知道發生了什麼。" },
+      { st: "closed", p: { att: "即將第 1 次" }, dIdx: 0,
+        add: [["note", "DECIDE", "1001 = 伺服器只是重啟 → 應重連；若收到的是 1000 就該停手"]],
+        msg: "重連決策看的是 close code，不是「有沒有斷」。把 1000 也拿去重連，就會做出一個永遠關不掉的連線。" }
+    ],
+
+    silent: [
+      { st: "conn", p: { rs: "0 CONNECTING" },
+        add: [["c2s", "HTTP", "GET /ws · Upgrade: websocket"]],
+        msg: "同樣的交握起手式。" },
+      { st: "open", p: { rs: "1 OPEN", rsC: "good", proto: "chat.v2" },
+        add: [["s2c", "HTTP", "101 Switching Protocols"], ["note", "EVENT", "onopen · readyState 1"]],
+        msg: "連線建立，開始接收行情推送。" },
+      { st: "open", p: {},
+        add: [["s2c", "TEXT", "{\"px\":68120,\"seq\":41}"], ["s2c", "TEXT", "{\"px\":68135,\"seq\":42}"]],
+        msg: "資料正常往返，客戶端記下 lastSeq = 42。" },
+      { st: "open", p: { rsC: "warn" },
+        add: [["bad", "✕", "使用者進了電梯 · 路徑靜默中斷：沒有 FIN、沒有 RST、沒有任何事件"]],
+        msg: "關鍵的一格：連線實際上已經死了，但兩端都不知道。readyState 仍然是 OPEN，事件迴圈一片安靜。" },
+      { st: "open", p: { ping: "1", pingC: "warn" },
+        add: [["s2cctl", "PING", "第 1 次探測（送出後啟動計時器）"]],
+        msg: "伺服器照常送 Ping——只是它送進的是一條已經不通的路徑。" },
+      { st: "open", p: {},
+        add: [["note", "TIMEOUT", "25 秒內沒有 Pong · 未回應計數 = 1"]],
+        msg: "沒有錯誤、沒有 onclose。唯一的訊號是那個沒有回來的 Pong——這就是為什麼保活必須是「主動探測 + 計時」。" },
+      { st: "open", p: { ping: "2", pingC: "bad" },
+        add: [["s2cctl", "PING", "第 2 次探測"], ["note", "TIMEOUT", "再次逾時 · 未回應計數 = 2"]],
+        msg: "第二次逾時。從斷線到這裡，狀態機已經停在 OPEN 好幾格了——這就是 half-open。" },
+      { st: "closed", p: { rs: "3 CLOSED", rsC: "", code: "1006 Abnormal", codeC: "bad", clean: "false", cleanC: "bad", ping: "—", pingC: "" },
+        add: [["bad", "LOCAL", "判定連線已死 → 本地產生 close code 1006（從未收到 CLOSE frame）"]],
+        msg: "客戶端自行放棄。1006 是保留碼、不可能出現在線上——日誌裡的 1006 佔比，量的就是「關閉交握沒有發生」的次數。" },
+      { st: "closed", p: { att: "1" }, dIdx: 0,
+        add: [["note", "BACKOFF", "退避 #1 = min(30000, 500 × 2^0) × jitter"],
+              ["c2s", "HTTP", "GET /ws → 失敗，網路仍未恢復"]],
+        msg: "第一次退避。基底 500ms，乘上 0.5–1.0 的隨機係數。" },
+      { st: "closed", p: { att: "2" }, dIdx: 1,
+        add: [["note", "BACKOFF", "退避 #2 = min(30000, 500 × 2^1) × jitter"],
+              ["c2s", "HTTP", "GET /ws → 失敗"]],
+        msg: "等待時間加倍。注意每個客戶端抽到的 jitter 都不同——這正是打破相位鎖定、避免重連風暴的地方。" },
+      { st: "open", p: { rs: "1 OPEN", rsC: "good", att: "3", code: "—", codeC: "", clean: "—", cleanC: "", ping: "0" }, dIdx: 2,
+        add: [["note", "BACKOFF", "退避 #3 = min(30000, 500 × 2^2) × jitter"],
+              ["c2s", "HTTP", "GET /ws"], ["s2c", "HTTP", "101 Switching Protocols"]],
+        msg: "第三次成功。管道通了——但這只代表管道通了。" },
+      { st: "open", p: {},
+        add: [["c2s", "TEXT", "{\"type\":\"resume\",\"lastSeq\":42}"],
+              ["s2c", "TEXT", "{\"type\":\"replay\",\"from\":43,\"count\":6}"]],
+        msg: "重連 ≠ 恢復。客戶端宣告 lastSeq，伺服器補發 43 之後的六則；若保留視窗已經過期，回的就必須是「太舊了，請走全量重載」。" }
+    ],
+
+    buffer: [
+      { st: "open", p: { rs: "1 OPEN", rsC: "good", proto: "chat.v2" },
+        add: [["c2s", "HTTP", "GET /ws"], ["s2c", "HTTP", "101 Switching Protocols"], ["note", "EVENT", "onopen"]],
+        msg: "交握快轉，直接看發送側：應用要把每秒 200 筆行情推給這一個客戶端。" },
+      { st: "open", p: { buf: "48 KB", pct: 12 },
+        add: [["c2s", "TEXT", "send() × 40 · 應用層每 5ms 產一筆"]],
+        msg: "send() 立刻回傳：沒有回傳值、不會丟例外、不會回 EAGAIN。資料靜靜進了瀏覽器的內部緩衝。" },
+      { st: "open", p: { buf: "310 KB", pct: 32, bufC: "warn", barC: "warn" },
+        add: [["note", "SLOW", "對端在行動網路上 · 實際寫出速率遠低於產出速率"]],
+        msg: "bufferedAmount 開始持續上升——這是唯一的訊號。TCP 的 rwnd 早就在收縮了，但應用層完全看不到。" },
+      { st: "open", p: { buf: "780 KB", pct: 74 },
+        add: [["c2s", "TEXT", "send() 仍在繼續 · 沒有任何機制會阻止它"]],
+        msg: "程式碼裡若沒有主動檢查，這條曲線只會往上，終點是分頁 OOM——而且是被單一個慢客戶端拖垮。" },
+      { st: "open", p: { buf: "1.02 MB", pct: 100, bufC: "bad", barC: "bad" },
+        add: [["bad", "THRESHOLD", "bufferedAmount > 1 MB · 觸發有界佇列上限"]],
+        msg: "門檻到了。這一刻必須做選擇——而且是設計時就該決定好的選擇，不是當下臨時想。" },
+      { st: "open", p: { buf: "36 KB", pct: 8, bufC: "good", barC: "" },
+        add: [["note", "選項 A", "合併：同一支股票只保留最新一筆報價 → 佇列瞬間收斂"]],
+        msg: "策略一，對應篇 1 的「丟棄與合併」：行情、游標、線上狀態這類資料只有最新值有意義，覆蓋舊值即可。" },
+      { st: "closing", p: { rs: "2 CLOSING", rsC: "warn", code: "1013 Try Again Later", codeC: "warn", buf: "—", pct: 0, bufC: "", barC: "" },
+        add: [["note", "選項 B", "不可丟的資料 → 主動 close(1013)，讓客戶端退避後重連補發"]],
+        msg: "策略二，對應篇 1 的「有界佇列 + 斷線」：犧牲這一條連線，保全整個行程。遺漏的訊息靠 s5 的序號補發接回來。" },
+      { st: "closed", p: { rs: "3 CLOSED", rsC: "", clean: "true", cleanC: "good" },
+        add: [["note", "RESULT", "一個 slow consumer 的成本，會隨 fan-out 的廣播頻率被放大"]],
+        msg: "fan-out 場景下每一則廣播都要為他複製一份。單機的答案就是犧牲他一個；多節點版本的這個問題留給篇 7。" }
+    ]
+  };
+
+  var BASE = {
+    rs: "—", rsC: "", proto: "—", code: "—", codeC: "", clean: "—", cleanC: "",
+    ping: "0", pingC: "", buf: "0 B", bufC: "", att: "—", delay: "—", pct: 0, barC: ""
+  };
+
+  /* ---------- 工具 ---------- */
+  function esc(s) {
+    return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+  }
+  function fmtMs(ms) {
+    return ms < 1000 ? Math.round(ms) + " ms" : (ms / 1000).toFixed(2) + " s";
+  }
+  function backoff(i) {
+    return Math.min(30000, 500 * Math.pow(2, i)) * JIT[i];
+  }
+  function setP(id, val, cls) {
+    var el = document.getElementById(id);
+    if (!el) return;
+    el.textContent = val;
+    el.className = "pv" + (cls ? " " + cls : "");
+  }
+
+  var KIND = {
+    c2s:    { cls: "c2s", ar: "→" },
+    s2c:    { cls: "s2c", ar: "←" },
+    c2sctl: { cls: "c2s ctl", ar: "→" },
+    s2cctl: { cls: "s2c ctl", ar: "←" },
+    note:   { cls: "note", ar: "·" },
+    bad:    { cls: "bad", ar: "✕" }
+  };
+
+  /* ---------- 渲染 ---------- */
+  function render() {
+    var steps = SC[scenario];
+    var state = {};
+    var k;
+    for (k in BASE) { if (Object.prototype.hasOwnProperty.call(BASE, k)) state[k] = BASE[k]; }
+
+    var rows = [];
+    var cur = "conn";
+
+    for (var i = 0; i <= stepIdx && i < steps.length; i++) {
+      var s = steps[i];
+      cur = s.st;
+      if (s.add) { for (var j = 0; j < s.add.length; j++) rows.push(s.add[j]); }
+      if (s.p) { for (k in s.p) { if (Object.prototype.hasOwnProperty.call(s.p, k)) state[k] = s.p[k]; } }
+      if (typeof s.dIdx === "number") state.delay = fmtMs(backoff(s.dIdx));
+      if (i === stepIdx) statusEl.textContent = s.msg;
+    }
+
+    /* 狀態機 */
+    var reached = ORDER[cur];
+    for (var n = 0; n < STATES.length; n++) {
+      var box = document.querySelector('.wsx-st[data-st="' + STATES[n] + '"]');
+      if (!box) continue;
+      box.className = "wsx-st";
+      if (STATES[n] === cur) {
+        box.classList.add(cur === "closed" ? "dead" : "on");
+      } else if (ORDER[STATES[n]] < reached) {
+        box.classList.add("done");
+      }
+    }
+
+    /* 線上事件 */
+    var html = rows.map(function (r, idx) {
+      var kd = KIND[r[0]] || KIND.note;
+      var last = idx === rows.length - 1 ? " last" : "";
+      return '<div class="wsx-row ' + kd.cls + last + '">' +
+             '<span class="ar">' + kd.ar + '</span>' +
+             '<span class="tg">' + esc(r[1]) + '</span>' +
+             '<span class="tx">' + esc(r[2]) + '</span></div>';
+    }).join("");
+    wireEl.innerHTML = html || '<div class="wsx-row note"><span class="ar">·</span><span class="tx">尚無事件</span></div>';
+    wireEl.scrollTop = wireEl.scrollHeight;
+
+    /* 面板 */
+    setP("wsx-p-rs", state.rs, state.rsC);
+    setP("wsx-p-proto", state.proto, "");
+    setP("wsx-p-code", state.code, state.codeC);
+    setP("wsx-p-clean", state.clean, state.cleanC);
+    setP("wsx-p-ping", state.ping, state.pingC);
+    setP("wsx-p-buf", state.buf, state.bufC);
+    setP("wsx-p-att", state.att, "");
+    setP("wsx-p-delay", state.delay, state.delay === "—" ? "" : "warn");
+
+    if (barEl) {
+      barEl.style.width = (state.pct || 0) + "%";
+      barEl.className = state.barC || "";
+    }
+
+    btnNext.disabled = stepIdx >= steps.length - 1;
+  }
+
+  function reset() {
+    stepIdx = 0;
+    JIT = [0, 1, 2].map(function () { return 0.5 + Math.random() * 0.5; });
+    render();
+  }
+
+  function next() {
+    if (stepIdx < SC[scenario].length - 1) { stepIdx += 1; render(); }
+  }
+
+  /* ---------- 事件 ---------- */
+  var segBtns = document.querySelectorAll("#wsx-demo .seg button");
+  segBtns.forEach(function (btn) {
+    btn.addEventListener("click", function () {
+      segBtns.forEach(function (b) { b.setAttribute("aria-pressed", "false"); });
+      btn.setAttribute("aria-pressed", "true");
+      scenario = btn.getAttribute("data-sc");
+      reset();
+    });
+  });
+
+  btnNext.addEventListener("click", next);
+  if (btnReset) btnReset.addEventListener("click", reset);
+
+  reset();
+})();
+</script>
+
+
+<!-- FULLSCREEN-FEATURE:START -->
+<style>
+  .fs-toggle {
+    position: fixed;
+    top: 18px;
+    right: 18px;
+    z-index: 1000;
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    font-family: var(--sans, system-ui, -apple-system, "Segoe UI", sans-serif);
+    font-size: 12.5px;
+    line-height: 1;
+    color: var(--text-2, #6b7078);
+    background: var(--bg, #ffffff);
+    border: 1px solid var(--border-strong, #dedcd8);
+    border-radius: 999px;
+    padding: 7px 13px 7px 11px;
+    cursor: pointer;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, .06), 0 4px 12px rgba(0, 0, 0, .04);
+    transition: background .15s, border-color .15s, color .15s;
+  }
+
+  .fs-toggle:hover {
+    background: var(--bg-soft, #fafaf9);
+    color: var(--text, #262a2f);
+    border-color: var(--text-3, #9aa0a8);
+  }
+
+  .fs-toggle:focus-visible {
+    outline: 2px solid var(--accent, #3f6188);
+    outline-offset: 2px;
+  }
+
+  .fs-toggle[aria-pressed="true"] {
+    background: var(--accent, #3f6188);
+    color: #fff;
+    border-color: var(--accent, #3f6188);
+  }
+
+  .fs-toggle .fs-ic {
+    flex: 0 0 auto;
+    display: block;
+  }
+
+  @media print {
+    .fs-toggle { display: none !important; }
+  }
+
+  @media (max-width: 480px) {
+    .fs-toggle { padding: 8px; }
+    .fs-toggle .fs-label { display: none; }
+  }
+</style>
+<button id="fs-toggle-btn" class="fs-toggle" type="button" aria-pressed="false"
+        aria-label="切換全螢幕檢視 (快捷鍵 F)" title="全螢幕檢視 (F)">
+  <svg class="fs-ic fs-ic-expand" viewBox="0 0 24 24" width="15" height="15" fill="none"
+       stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+    <path d="M8 3H5a2 2 0 0 0-2 2v3m18 0V5a2 2 0 0 0-2-2h-3m0 18h3a2 2 0 0 0 2-2v-3M3 16v3a2 2 0 0 0 2 2h3"/>
+  </svg>
+  <svg class="fs-ic fs-ic-compress" viewBox="0 0 24 24" width="15" height="15" fill="none"
+       stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="display:none">
+    <path d="M8 3v3a2 2 0 0 1-2 2H3m18 0h-3a2 2 0 0 1-2-2V3m0 18v-3a2 2 0 0 1 2-2h3M3 16h3a2 2 0 0 1 2 2v3"/>
+  </svg>
+  <span class="fs-label">全螢幕</span>
+</button>
+<script>
+  "use strict";
+  (function () {
+    var btn = document.getElementById("fs-toggle-btn");
+    if (!btn) return;
+    var docEl = document.documentElement;
+    var canFs = !!(docEl.requestFullscreen || docEl.webkitRequestFullscreen);
+    // 不支援 Fullscreen API (如 iPhone Safari) → 隱藏按鈕，避免壞掉的 UI
+    if (!canFs) { btn.style.display = "none"; return; }
+
+    var expandIc = btn.querySelector(".fs-ic-expand");
+    var compressIc = btn.querySelector(".fs-ic-compress");
+    var label = btn.querySelector(".fs-label");
+
+    function isFs() {
+      return !!(document.fullscreenElement || document.webkitFullscreenElement);
+    }
+    function enter() {
+      if (docEl.requestFullscreen) docEl.requestFullscreen();
+      else if (docEl.webkitRequestFullscreen) docEl.webkitRequestFullscreen();
+    }
+    function exit() {
+      if (document.exitFullscreen) document.exitFullscreen();
+      else if (document.webkitExitFullscreen) document.webkitExitFullscreen();
+    }
+    function toggle() { isFs() ? exit() : enter(); }
+    function sync() {
+      var on = isFs();
+      btn.setAttribute("aria-pressed", on ? "true" : "false");
+      if (label) label.textContent = on ? "離開全螢幕" : "全螢幕";
+      if (expandIc) expandIc.style.display = on ? "none" : "block";
+      if (compressIc) compressIc.style.display = on ? "block" : "none";
+    }
+
+    btn.addEventListener("click", toggle);
+    document.addEventListener("fullscreenchange", sync);
+    document.addEventListener("webkitfullscreenchange", sync);
+    document.addEventListener("keydown", function (e) {
+      if (e.key !== "f" && e.key !== "F") return;
+      if (e.metaKey || e.ctrlKey || e.altKey) return;
+      var t = e.target;
+      var tag = t && t.tagName ? t.tagName.toUpperCase() : "";
+      if (tag === "INPUT" || tag === "TEXTAREA" || (t && t.isContentEditable)) return;
+      e.preventDefault();
+      toggle();
+    });
+    sync();
+  })();
+</script>
+<!-- FULLSCREEN-FEATURE:END -->
+</body>
+</html>
