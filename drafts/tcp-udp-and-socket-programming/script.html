@@ -1,0 +1,310 @@
+<script>
+(function () {
+  "use strict";
+
+  var TOTAL = 8;          // 資料被切成 8 個片段 seq 1..8
+  var UDP_BATCH = 4;      // UDP 沒有 cwnd，發送節奏由應用自訂
+
+  var elSender = document.getElementById("tcpudp-sender");
+  var elWire = document.getElementById("tcpudp-wire");
+  var elRecv = document.getElementById("tcpudp-receiver");
+  var elStatus = document.getElementById("tcpudp-status");
+  var btnNext = document.getElementById("tcpudp-btn-next");
+  var btnReset = document.getElementById("tcpudp-btn-reset");
+  var cwndBar = document.getElementById("tcpudp-cwnd-bar");
+
+  var mode = "tcp";
+  var st = null;
+
+  function initState() {
+    return {
+      phase: "send",     // send → recv → send → ...
+      round: 0,
+      cwnd: 1,
+      ssthresh: 4,
+      base: 1,           // 最低尚未被累積確認的 seq
+      expect: 1,         // 接收端期待的下一個 seq
+      udpNext: 1,
+      inflight: [],      // [{ seq, lost, rtx }]
+      mark: {},          // 使用者注入的丟包
+      consumed: {},      // TCP：注入只生效一次，重傳會成功
+      sent: {},          // 曾經送出過（用來計算重傳次數）
+      sacked: {},        // 接收端亂序緩衝中（已被 SACK 告知）
+      delivered: {},     // 已交付應用
+      permLost: {},      // UDP：永久遺失
+      rtx: 0,
+      done: false
+    };
+  }
+
+  function inflightSeqs() {
+    return st.inflight.map(function (p) { return p.seq; });
+  }
+
+  function fmtRange(list) {
+    if (!list.length) return "無";
+    return "seq " + list.join("、");
+  }
+
+  /* ---------- TCP ---------- */
+
+  function tcpSend() {
+    st.round += 1;
+    var hi = Math.min(st.base + st.cwnd - 1, TOTAL);
+    var sending = [], skipped = [], losing = [], resent = [];
+
+    for (var s = st.base; s <= hi; s++) {
+      if (st.sacked[s]) { skipped.push(s); continue; }   // SACK 已告知收到，不必重傳
+      var willLose = !!st.mark[s] && !st.consumed[s];
+      if (willLose) { st.consumed[s] = true; losing.push(s); }
+      if (st.sent[s]) { st.rtx += 1; resent.push(s); }
+      st.sent[s] = true;
+      sending.push({ seq: s, lost: willLose, rtx: resent.indexOf(s) !== -1 });
+    }
+    st.inflight = sending;
+
+    var msg = "第 " + st.round + " 輪 · 發送：cwnd = " + st.cwnd +
+      "，送出 " + fmtRange(sending.map(function (p) { return p.seq; })) + "。";
+    if (resent.length) msg += " 其中 " + fmtRange(resent) + " 是重傳。";
+    if (skipped.length) msg += " " + fmtRange(skipped) + " 已被 SACK 確認收到，跳過不重送。";
+    if (losing.length) msg += " ⚠ " + fmtRange(losing) + " 會在路上遺失（發送端此刻還不知道）。";
+    elStatus.textContent = msg;
+  }
+
+  function tcpRecv() {
+    var lost = [], buffered = [], deliveredNow = [];
+
+    st.inflight.forEach(function (p) {
+      if (p.lost) { lost.push(p.seq); return; }
+      if (p.seq === st.expect) {
+        st.delivered[p.seq] = true;
+        deliveredNow.push(p.seq);
+        st.expect += 1;
+        while (st.sacked[st.expect]) {        // 破洞補上後，緩衝區一次排空
+          st.delivered[st.expect] = true;
+          deliveredNow.push(st.expect);
+          delete st.sacked[st.expect];
+          st.expect += 1;
+        }
+      } else if (p.seq > st.expect) {
+        st.sacked[p.seq] = true;              // 亂序，先扣在接收端緩衝區
+        buffered.push(p.seq);
+      }
+    });
+
+    st.base = st.expect;
+    st.inflight = [];
+
+    var msg = "第 " + st.round + " 輪 · 回應：" + (deliveredNow.length
+      ? "接收端依序交付 " + fmtRange(deliveredNow)
+      : "接收端這一輪沒有任何資料能交給應用") + "，累積 ACK = " + st.expect + "。";
+    if (buffered.length) {
+      msg += " " + fmtRange(buffered) + " 已抵達但序號不連續，只能扣在亂序緩衝區——這就是 HoL Blocking。";
+    }
+    if (lost.length) {
+      var oldCwnd = st.cwnd;
+      st.cwnd = Math.max(1, Math.floor(oldCwnd / 2));
+      st.ssthresh = st.cwnd;
+      msg += " 連續重複 ACK 觸發快速重傳：cwnd 由 " + oldCwnd + " 減半為 " + st.cwnd +
+        "，ssthresh 同步降到 " + st.ssthresh + "，下一輪補送 seq " + st.base + "。";
+    } else {
+      if (st.cwnd < st.ssthresh) {
+        st.cwnd = Math.min(st.cwnd * 2, TOTAL);
+        msg += " 無丟包，慢啟動翻倍：cwnd = " + st.cwnd + "。";
+      } else {
+        st.cwnd = Math.min(st.cwnd + 1, TOTAL);
+        msg += " 已越過 ssthresh，進入壅塞避免，線性加一：cwnd = " + st.cwnd + "。";
+      }
+    }
+
+    if (st.expect > TOTAL) {
+      st.done = true;
+      msg = "傳輸完成：8 個片段全部依序交付，累計重傳 " + st.rtx +
+        " 次。TCP 用重傳與等待換到了「不掉、不亂」。";
+    }
+    elStatus.textContent = msg;
+  }
+
+  /* ---------- UDP ---------- */
+
+  function udpSend() {
+    st.round += 1;
+    var hi = Math.min(st.udpNext + UDP_BATCH - 1, TOTAL);
+    var sending = [], losing = [];
+    for (var s = st.udpNext; s <= hi; s++) {
+      var willLose = !!st.mark[s];
+      if (willLose) losing.push(s);
+      st.sent[s] = true;
+      sending.push({ seq: s, lost: willLose, rtx: false });
+    }
+    st.inflight = sending;
+    st.udpNext = hi + 1;
+
+    var msg = "第 " + st.round + " 輪 · 發送：UDP 沒有壅塞視窗，發送節奏完全由應用決定，一口氣送出 " +
+      fmtRange(sending.map(function (p) { return p.seq; })) + "。";
+    if (losing.length) msg += " ⚠ " + fmtRange(losing) + " 會在路上遺失。";
+    elStatus.textContent = msg;
+  }
+
+  function udpRecv() {
+    var lost = [], got = [];
+    st.inflight.forEach(function (p) {
+      if (p.lost) { st.permLost[p.seq] = true; lost.push(p.seq); return; }
+      st.delivered[p.seq] = true;               // 到了就交付，不排序、不等待
+      got.push(p.seq);
+    });
+    st.inflight = [];
+
+    var msg = "第 " + st.round + " 輪 · 抵達：" + fmtRange(got) +
+      " 直接交付應用，沒有 ACK、沒有排序緩衝。";
+    if (lost.length) {
+      msg += " " + fmtRange(lost) + " 永久遺失——不會重傳，發送端也不會知道。";
+    }
+    if (st.udpNext > TOTAL) {
+      st.done = true;
+      var lostCount = Object.keys(st.permLost).length;
+      msg = "傳輸完成：共交付 " + (TOTAL - lostCount) + " / " + TOTAL +
+        " 個片段，永久遺失 " + lostCount + " 個。UDP 用「缺口」換到了延遲上限與零重傳等待。";
+    }
+    elStatus.textContent = msg;
+  }
+
+  /* ---------- 渲染 ---------- */
+
+  function box(seq, cls, label, opts) {
+    var o = opts || {};
+    var tag = o.button ? "button" : "div";
+    var attrs = ' class="tcpudp-seg-box ' + cls + (o.marked ? " marked" : "") + '"';
+    if (o.button) {
+      attrs += ' type="button" data-seq="' + seq + '" aria-pressed="' + (o.marked ? "true" : "false") + '"';
+      attrs += ' aria-label="片段 ' + seq + '：' + label + '"';
+      if (o.disabled) attrs += " disabled";
+    }
+    return "<" + tag + attrs + '><span class="sq">seq ' + seq + '</span><span class="ss">' +
+      label + "</span></" + tag + ">";
+  }
+
+  function renderSender() {
+    var inf = inflightSeqs();
+    var html = "";
+    for (var s = 1; s <= TOTAL; s++) {
+      var cls = "st-idle", label = "待送出", disabled = false;
+      if (mode === "tcp") {
+        if (st.delivered[s]) { cls = "st-ok"; label = "已確認"; disabled = true; }
+        else if (inf.indexOf(s) !== -1) { cls = "st-wait"; label = "在途"; disabled = true; }
+        else if (st.sacked[s]) { cls = "st-lock"; label = "已 SACK"; disabled = true; }
+        else if (st.sent[s]) { cls = "st-idle"; label = "待重傳"; }
+      } else {
+        if (st.permLost[s]) { cls = "st-bad"; label = "已遺失"; disabled = true; }
+        else if (st.delivered[s]) { cls = "st-ok"; label = "已送達"; disabled = true; }
+        else if (inf.indexOf(s) !== -1) { cls = "st-wait"; label = "在途"; disabled = true; }
+      }
+      var marked = !!st.mark[s];
+      if (marked && !disabled && !st.consumed[s]) label = "注入丟包";
+      html += box(s, cls, label, { button: true, marked: marked, disabled: disabled || st.done });
+    }
+    elSender.innerHTML = html;
+  }
+
+  function renderWire() {
+    if (!st.inflight.length) {
+      elWire.innerHTML = '<div class="tcpudp-empty">（線路上目前沒有在途封包）</div>';
+      return;
+    }
+    elWire.innerHTML = st.inflight.map(function (p) {
+      if (p.lost) return box(p.seq, "st-bad", "✕ 遺失", {});
+      return box(p.seq, "st-wait", p.rtx ? "重傳中" : "傳輸中", {});
+    }).join("");
+  }
+
+  function renderReceiver() {
+    var html = "";
+    for (var s = 1; s <= TOTAL; s++) {
+      if (st.delivered[s]) { html += box(s, "st-ok", "已交付", {}); continue; }
+      if (mode === "tcp") {
+        if (st.sacked[s]) { html += box(s, "st-lock", "亂序緩衝", {}); continue; }
+        if (s === st.expect) { html += box(s, "st-hole", "等待中", {}); continue; }
+      } else if (st.permLost[s]) {
+        html += box(s, "st-bad", "永久缺口", {});
+        continue;
+      }
+      html += box(s, "st-idle", "未抵達", {});
+    }
+    elRecv.innerHTML = html;
+  }
+
+  function setText(id, v) {
+    var el = document.getElementById(id);
+    if (el) el.textContent = v;
+  }
+
+  function renderMetrics() {
+    var delivered = Object.keys(st.delivered).length;
+    var isTcp = mode === "tcp";
+    setText("tcpudp-m-cwnd", isTcp ? String(st.cwnd) : "—");
+    setText("tcpudp-m-ssth", isTcp ? String(st.ssthresh) : "—");
+    setText("tcpudp-m-ack", isTcp ? String(st.expect) : "無");
+    setText("tcpudp-m-rtx", isTcp ? String(st.rtx) : "0");
+    setText("tcpudp-m-lost", String(Object.keys(st.permLost).length));
+    setText("tcpudp-m-del", delivered + " / " + TOTAL);
+    if (cwndBar) {
+      cwndBar.style.width = (isTcp ? (st.cwnd / TOTAL) * 100 : 100) + "%";
+      cwndBar.style.background = isTcp ? "var(--accent)" : "var(--tcpudp-udp)";
+    }
+  }
+
+  function render() {
+    renderSender();
+    renderWire();
+    renderReceiver();
+    renderMetrics();
+    btnNext.disabled = st.done;
+  }
+
+  /* ---------- 控制 ---------- */
+
+  function next() {
+    if (st.done) return;
+    if (st.phase === "send") {
+      if (mode === "tcp") tcpSend(); else udpSend();
+      st.phase = "recv";
+    } else {
+      if (mode === "tcp") tcpRecv(); else udpRecv();
+      st.phase = "send";
+    }
+    render();
+  }
+
+  function reset() {
+    st = initState();
+    elStatus.textContent = mode === "tcp"
+      ? "TCP 模式：點擊發送端任一片段注入丟包，再按「下一步」逐輪推進（發送 → 回應）。"
+      : "UDP 模式：沒有交握、沒有 ACK、沒有壅塞視窗。注入丟包後按「下一步」，看缺口如何永久留下。";
+    render();
+  }
+
+  elSender.addEventListener("click", function (ev) {
+    var btn = ev.target.closest ? ev.target.closest("button[data-seq]") : null;
+    if (!btn || btn.disabled) return;
+    var seq = parseInt(btn.getAttribute("data-seq"), 10);
+    if (st.mark[seq]) delete st.mark[seq]; else st.mark[seq] = true;
+    render();
+  });
+
+  document.querySelectorAll("#tcpudp-demo .seg button").forEach(function (b) {
+    b.addEventListener("click", function () {
+      document.querySelectorAll("#tcpudp-demo .seg button").forEach(function (x) {
+        x.setAttribute("aria-pressed", "false");
+      });
+      b.setAttribute("aria-pressed", "true");
+      mode = b.getAttribute("data-tp");
+      reset();
+    });
+  });
+
+  btnNext.addEventListener("click", next);
+  btnReset.addEventListener("click", reset);
+
+  reset();
+})();
+</script>
