@@ -1,0 +1,296 @@
+<script>
+(function () {
+  "use strict";
+
+  var NODES = ["gw1", "gw2", "gw3", "gw4"];
+  var MAXK = 60;          // bar 滿刻度（千條連線）
+  var scenario = "route";
+  var stepIdx = 0;
+
+  var statusEl = document.getElementById("rtsc-status");
+  var regEl = document.getElementById("rtsc-reg");
+  var logEl = document.getElementById("rtsc-log");
+  var btnNext = document.getElementById("rtsc-btn-next");
+  var btnReset = document.getElementById("rtsc-btn-reset");
+
+  // 每一步：s=狀態文字 n=[[連線k, 節點class, 註記] x4] r=registry 列 b=[吞吐, p99, 註記]
+  //         m=[重連速率, registry 寫入, 1006 佔比]（前綴 ! = 紅、~ = 黃） l=本步新增的日誌
+  var SC = {
+    route: [
+      {
+        s: "初始狀態：四個節點各 30k 連線。使用者 U-7731 的連線落在 gw-3，而一則站內通知剛好打到了 gw-1。",
+        n: [[30, "", "在線"], [30, "", "在線"], [30, "", "持有 U-7731 的連線"], [30, "", "在線"]],
+        r: [], b: ["throughput 12.4k msg/s", "fan-out p99 18ms", "穩定"], m: ["0 /s", "1.3k /s", "0.2%"],
+        l: [["note", "API", "POST /notify {user: U-7731} 落在 gw-1——它跟那條連線一點關係都沒有"]]
+      },
+      {
+        s: "gw-1 不持有那條連線，所以第一件事是查 connection registry：U-7731 現在在哪個節點上？",
+        n: [[30, "hot", "查 registry"], [30, "", "在線"], [30, "", "持有 U-7731 的連線"], [30, "", "在線"]],
+        r: [["conn:U-7731:web", "gw-3 · epoch 7", "TTL 74s", ""]],
+        b: ["throughput 12.4k msg/s", "fan-out p99 18ms", "穩定"], m: ["0 /s", "1.3k /s", "0.2%"],
+        l: [["reg", "REGISTRY", "LOOKUP conn:U-7731:* → gw-3（epoch 7，TTL 74s，隨心跳續期）"]]
+      },
+      {
+        s: "拿到 nodeId 之後，訊息投到 bus 上 gw-3 專屬的 channel。這不是廣播——只有 gw-3 收得到這一份。",
+        n: [[30, "", "已交棒給 bus"], [30, "", "在線"], [30, "hot", "收到 node.gw-3"], [30, "", "在線"]],
+        r: [["conn:U-7731:web", "gw-3 · epoch 7", "TTL 74s", "good"]],
+        b: ["throughput 12.4k msg/s", "fan-out p99 18ms", "PUBLISH node.gw-3"], m: ["0 /s", "1.3k /s", "0.2%"],
+        l: [["bus", "BUS", "PUBLISH node.gw-3 ← 1 則（每個節點固定訂 node.{id} / room.{id} / broadcast 三類）"]]
+      },
+      {
+        s: "gw-3 在本地表 connId → socket 找到那條連線，檢查出口佇列後寫出。整趟三跳：一次查找、一跳 bus、一次本地寫入。",
+        n: [[30, "", "在線"], [30, "", "在線"], [30, "hot", "投遞成功 · 出口佇列 3/256"], [30, "", "在線"]],
+        r: [["conn:U-7731:web", "gw-3 · epoch 7", "TTL 74s", "good"]],
+        b: ["throughput 12.4k msg/s", "fan-out p99 18ms", "投遞完成"], m: ["0 /s", "1.3k /s", "0.2%"],
+        l: [["gw", "gw-3", "本地表命中 c-91f2 → 出口佇列 3/256 → 寫入 socket ✓"],
+            ["note", "延遲", "publish → 客戶端收到 21ms，這正是「fan-out 端到端 p99」要量的東西"]]
+      },
+      {
+        s: "換一種結局：U-7731 剛換了網路、重連到 gw-2，但 registry 還沒更新。訊息一樣被投到 gw-3——而那裡已經沒有那條連線了。",
+        n: [[30, "", "在線"], [30.4, "hot", "實際持有 U-7731"], [29.6, "over", "本地表 MISS"], [30, "", "在線"]],
+        r: [["conn:U-7731:web", "gw-3 · epoch 7", "TTL 74s", "bad"], ["實際落點", "gw-2 · epoch 4", "尚未寫入", "warn"]],
+        b: ["throughput 12.4k msg/s", "fan-out p99 18ms", "投遞失敗 1"], m: ["~120 /s", "1.4k /s", "0.2%"],
+        l: [["bad", "gw-3", "找不到這條連線。如果就這樣默默丟掉，就是一次沒有任何錯誤日誌的訊息遺失"],
+            ["note", "修正", "投遞失敗必須回報：上游重查 registry 或走離線佇列；gw-2 則用較大的 epoch 覆寫條目"]]
+      }
+    ],
+
+    drain: [
+      {
+        s: "gw-4 要發版。第一步不是關行程，而是從 LB 摘除——健康檢查回不健康、停止進新連線，既有的 32k 條照常服務。",
+        n: [[30, "", "在線"], [30, "", "在線"], [30, "", "在線"], [32, "drain", "已從 LB 摘除"]],
+        r: [], b: ["throughput 12.4k msg/s", "fan-out p99 18ms", "穩定"], m: ["0 /s", "1.3k /s", "0.2%"],
+        l: [["ctl", "DRAIN", "deregister gw-4 → 等健康檢查確實摘除（LB 的 draining 只做得到這一步）"]]
+      },
+      {
+        s: "第二步：分批加抖動。預算 120 秒、批間隔 2 秒 → 每批約 534 條，每條的關閉時刻再各自抖動 0–2 秒。",
+        n: [[30, "", "在線"], [30, "", "在線"], [30, "", "在線"], [31.5, "drain", "批次 1/60 · 送出 1012"]],
+        r: [["批次 1 的 534 筆", "改指向 gw-1/2/3", "epoch+1", "warn"]],
+        b: ["throughput 12.4k msg/s", "fan-out p99 18ms", "穩定"], m: ["~530 /s", "1.6k /s", "0.2%"],
+        l: [["ctl", "gw-4", "CLOSE 1012 Service Restart × 534（MQTT 版本是 DISCONNECT 0x8B，或 0x9C + Server Reference）"]]
+      },
+      {
+        s: "客戶端重連，LB 把它們分給 gw-1～3，registry 條目跟著改指向。重連速率是一條可控的直線，不是尖峰。",
+        n: [[30.5, "hot", "+0.5k"], [30.5, "hot", "+0.5k"], [30.5, "hot", "+0.5k"], [30.4, "drain", "批次 3/60 · 剩 30.4k"]],
+        r: [["已改指向", "1.6k 筆", "epoch 遞增", "good"]],
+        b: ["throughput 12.4k msg/s", "fan-out p99 18ms", "穩定"], m: ["530 /s", "1.9k /s", "0.2%"],
+        l: [["reg", "REGISTRY", "1.6k 筆條目改指向；舊 epoch 的殘骸在比對時直接失效"],
+            ["note", "觀測", "每批之後檢查重連成功率，掉到 98% 以下就要 abort_drain()——排空必須可中止"]]
+      },
+      {
+        s: "排空過半。fan-out 延遲與 1006 佔比全程沒有變化——使用者端只會看到一次無感的重連。",
+        n: [[35, "", "+5.0k"], [35, "", "+5.0k"], [35, "", "+5.0k"], [16, "drain", "批次 30/60 · 剩 16k"]],
+        r: [["已改指向", "16k 筆", "epoch 遞增", "good"]],
+        b: ["throughput 12.4k msg/s", "fan-out p99 19ms", "穩定"], m: ["530 /s", "1.9k /s", "0.2%"],
+        l: [["gw", "gw-1..3", "各接手約 5.0k——連線傾斜就是從這裡開始累積的"]]
+      },
+      {
+        s: "最後一批送完，gw-4 上已經沒有連線。此時才 flush 未送出的訊息、把還有 session 的交棒出去。",
+        n: [[40.6, "", "+10.6k"], [40.6, "", "+10.6k"], [40.7, "", "+10.7k"], [0, "drain", "0 連線 · flush & handoff"]],
+        r: [["已改指向", "32k 筆", "全部完成", "good"]],
+        b: ["throughput 12.4k msg/s", "fan-out p99 18ms", "穩定"], m: ["~180 /s", "1.4k /s", "0.2%"],
+        l: [["ctl", "gw-4", "flush_pending_messages() → handoff_sessions() → 準備退出"]]
+      },
+      {
+        s: "行程退出。全程 1006 維持在 0.2% 的底噪、重連速率壓在 530/s、fan-out p99 沒有變化。這就是 graceful drain 該有的樣子。",
+        n: [[40.6, "", "在線"], [40.6, "", "在線"], [40.7, "", "在線"], [0, "down", "已下線（乾淨）"]],
+        r: [], b: ["throughput 12.4k msg/s", "fan-out p99 18ms", "穩定"], m: ["0 /s", "1.3k /s", "0.2%"],
+        l: [["note", "結果", "總耗時約 120s——terminationGracePeriodSeconds 必須大於它，否則 SIGKILL 把剩下的連線全變成 1006"],
+            ["note", "副作用", "三台從 30k 變成 40.6k：這就是 s2 的傾斜，第四個情境會把它放大"]]
+      }
+    ],
+
+    hard: [
+      {
+        s: "同一台 gw-4，這次是被 OOM kill。32k 條連線在同一毫秒全部消失，沒有任何關閉交握。",
+        n: [[30, "", "在線"], [30, "", "在線"], [30, "", "在線"], [32, "down", "行程消失 · 32k 條 RST"]],
+        r: [], b: ["throughput 12.4k msg/s", "fan-out p99 18ms", "穩定"], m: ["0 /s", "1.3k /s", "!68%"],
+        l: [["bad", "gw-4", "SIGKILL：沒有 1001/1012，客戶端全部拿到 1006——本地產生的保留碼，代表關閉交握根本沒發生"]]
+      },
+      {
+        s: "32k 個客戶端的計時器被同一個事件同時觸發——相位鎖定。一秒後，它們會一起回來。",
+        n: [[30, "", "在線"], [30, "", "在線"], [30, "", "在線"], [0, "down", "已下線（硬斷）"]],
+        r: [["conn:* → gw-4", "32k 筆 stale", "TTL 未到期", "bad"]],
+        b: ["throughput 12.4k msg/s", "fan-out p99 18ms", "穩定"], m: ["~0 /s", "1.3k /s", "!68%"],
+        l: [["reg", "REGISTRY", "32k 筆條目仍指向 gw-4：在 TTL 到期前，投到那裡的訊息全部是黑洞"],
+            ["note", "相位", "退避加 jitter 只在客戶端正確實作時有效——而你控制不了所有已經出貨的版本"]]
+      },
+      {
+        s: "第一波：32k 條連線同時建立。被打到的不只是 gateway——TLS 交握 CPU、認證服務、registry 寫入、快照 API 同時進入尖峰。",
+        n: [[40.7, "over", "+10.7k · TLS CPU 96%"], [40.7, "over", "+10.7k · TLS CPU 94%"], [40.6, "over", "+10.6k · TLS CPU 97%"], [0, "down", "已下線"]],
+        r: [["新寫入", "31.8k 筆／秒", "Redis p99 惡化", "bad"]],
+        b: ["throughput 12.4k msg/s", "!fan-out p99 340ms", "入口佇列堆積"], m: ["!31.8k /s", "!33k /s", "!68%"],
+        l: [["bad", "AUTH", "31.8k 次 token 驗證擠在一秒內 → auth API p99 從 8ms 變成 2.1s"],
+            ["bad", "SNAPSHOT", "每個回來的人都要一份初始狀態 → 快照 API 與它背後的 DB 一起飽和"]]
+      },
+      {
+        s: "第二波：三台 CPU 飽和、部分交握逾時 → 那些客戶端再斷一次、再回來一次，而且這次同步得更整齊。",
+        n: [[38.2, "over", "交握逾時 · 二次斷線"], [38, "over", "交握逾時 · 二次斷線"], [37.9, "over", "交握逾時 · 二次斷線"], [0, "down", "已下線"]],
+        r: [["新寫入", "14k 筆／秒", "仍在尖峰", "bad"]],
+        b: ["!throughput 9.1k msg/s", "!fan-out p99 1.8s", "分發落後"], m: ["!12.4k /s", "!14k /s", "!71%"],
+        l: [["bad", "CASCADE", "失敗的重連本身變成下一波的來源——重連風暴會自我續命"],
+            ["note", "對比", "graceful drain 搬動同樣的 32k 條，重連速率是 530/s；這裡是 31.8k/s，差 60 倍"]]
+      },
+      {
+        s: "打開四道防禦：連線層限流分批放行、reconnect token 免掉完整交握與認證、快照 API 快取降級、由伺服器下發帶抖動的退避參數。",
+        n: [[40.6, "", "已收斂"], [40.6, "", "已收斂"], [40.7, "", "已收斂"], [0, "down", "待重新上線"]],
+        r: [["新寫入", "2.4k 筆／秒", "已攤平", "good"]],
+        b: ["throughput 12.4k msg/s", "fan-out p99 24ms", "恢復"], m: ["~2.0k /s", "~2.4k /s", "~4%"],
+        l: [["ctl", "LIMIT", "accept rate 上限 2k/s，超出的直接拒絕並附退避提示（MQTT 5.0 的 0x9F Connection rate exceeded）"],
+            ["gw", "TOKEN", "reconnect token 命中 → 省下 TLS full handshake 的簽章與一次 auth 往返"],
+            ["note", "結果", "總恢復時間反而更短：限流不是在拖慢恢復，是在避免把恢復變成第二次故障"]]
+      }
+    ],
+
+    skew: [
+      {
+        s: "四台各 30k，完美平衡。現在做一次滾動重啟，一台一台來——而且每一步都完全正確。",
+        n: [[30, "", "在線"], [30, "", "在線"], [30, "", "在線"], [30, "", "在線"]],
+        r: [], b: ["throughput 12.4k msg/s", "fan-out p99 18ms", "穩定"], m: ["0 /s", "1.3k /s", "0.2%"],
+        l: [["note", "前提", "LB 對長連線只在建連時決策一次；重啟釋放的連線只能分給「當下還在線」的節點"]]
+      },
+      {
+        s: "重啟 gw-1：它的 30k 條排空後重連，被分給 gw-2/3/4，每台各 +10k。",
+        n: [[0, "drain", "重啟中"], [40, "hot", "+10k"], [40, "hot", "+10k"], [40, "hot", "+10k"]],
+        r: [], b: ["throughput 12.4k msg/s", "fan-out p99 19ms", "穩定"], m: ["~500 /s", "1.6k /s", "0.2%"],
+        l: [["ctl", "ROLLING", "gw-1 drain → 30k 條分給其餘三台"]]
+      },
+      {
+        s: "重啟 gw-2：它現在有 40k 條，排空後分給 gw-1/3/4——gw-1 剛回來、是空的，所以它也開始接。",
+        n: [[13.3, "hot", "+13.3k"], [0, "drain", "重啟中"], [53.3, "hot", "+13.3k"], [53.3, "hot", "+13.3k"]],
+        r: [], b: ["throughput 12.4k msg/s", "~fan-out p99 28ms", "gw-3/4 分發變慢"], m: ["~660 /s", "1.7k /s", "0.2%"],
+        l: [["ctl", "ROLLING", "gw-2 drain → 40k 條分給 gw-1/3/4；注意連線正在往「先重啟的節點」堆積"]]
+      },
+      {
+        s: "重啟 gw-3、再重啟 gw-4。每一輪都把更大的一坨往前面的節點推，最後一台則是空的。",
+        n: [[58, "over", "58.0k · 記憶體 78%"], [40, "", "40.0k"], [22, "", "22.0k"], [0, "drain", "最後重啟 · 空的"]],
+        r: [], b: ["throughput 12.4k msg/s", "~fan-out p99 46ms", "gw-1 分發變慢"], m: ["0 /s", "1.3k /s", "0.2%"],
+        l: [["bad", "SKEW", "max/min 從 1.0 變成無限大（gw-4 為 0）；gw-1 的爆炸半徑是 gw-3 的 2.6 倍"],
+            ["note", "代價", "傾斜不只是不好看：GC 停頓、fan-out 展開量、掛掉時的重連風暴規模，全部跟著連線數翻倍"]]
+      },
+      {
+        s: "Rebalance：對超過平均值一定比例的節點做小批量排空，用 1013 Try Again Later 讓那些客戶端退避久一點再回來。",
+        n: [[33, "drain", "小批量排空 -25k"], [33, "", "+ 接手"], [29, "", "+ 接手"], [25, "hot", "+25k"]],
+        r: [["改指向", "25k 筆", "分批寫入", "good"]],
+        b: ["throughput 12.4k msg/s", "fan-out p99 19ms", "恢復"], m: ["~1.2k /s", "~1.6k /s", "0.3%"],
+        l: [["ctl", "REBALANCE", "gw-1 分批帶抖動送出 1013 × 25k，LB 自然把它們分給連線最少的節點"],
+            ["note", "預防", "更省事的作法是每個節點設連線數上限，滿了就讓健康檢查回不健康——讓 LB 不要再送過來"]]
+      }
+    ]
+  };
+
+  function setText(id, text) {
+    var el = document.getElementById(id);
+    if (el) el.textContent = text;
+  }
+
+  function metric(id, raw) {
+    var el = document.getElementById(id);
+    if (!el) return;
+    var cls = "pv";
+    var v = raw;
+    if (v.charAt(0) === "!") { cls = "pv bad"; v = v.slice(1); }
+    else if (v.charAt(0) === "~") { cls = "pv warn"; v = v.slice(1); }
+    el.className = cls;
+    el.textContent = v;
+  }
+
+  function renderRegistry(rows) {
+    if (!regEl) return;
+    if (!rows || !rows.length) {
+      regEl.innerHTML = '<div class="empty">目前沒有進行中的查找／寫入</div>';
+      return;
+    }
+    regEl.innerHTML = rows.map(function (r) {
+      var cls = r[3] ? " " + r[3] : "";
+      return '<div class="prow"><span class="pk">' + r[0] + '</span>' +
+        '<span class="pv' + cls + '">' + r[1] + ' · ' + r[2] + '</span></div>';
+    }).join("");
+  }
+
+  function renderLog() {
+    if (!logEl) return;
+    var html = "";
+    for (var i = 0; i <= stepIdx; i++) {
+      var lines = SC[scenario][i].l || [];
+      for (var j = 0; j < lines.length; j++) {
+        html += '<div class="rtsc-row ' + lines[j][0] + '"><span class="tg">' +
+          lines[j][1] + '</span><span class="tx">' + lines[j][2] + "</span></div>";
+      }
+    }
+    logEl.innerHTML = html;
+    logEl.scrollTop = logEl.scrollHeight;
+  }
+
+  function renderStep() {
+    var steps = SC[scenario];
+    var st = steps[stepIdx];
+    if (!st) return;
+
+    if (statusEl) statusEl.textContent = st.s;
+
+    var total = 0;
+    NODES.forEach(function (id, i) {
+      var d = st.n[i];
+      total += d[0];
+      var card = document.querySelector('.rtsc-node[data-node="' + id + '"]');
+      if (card) card.className = "rtsc-node" + (d[1] ? " " + d[1] : "");
+      setText("rtsc-c-" + id, d[0].toFixed(1) + "k");
+      setText("rtsc-s-" + id, d[2] || "在線");
+      var bar = document.getElementById("rtsc-b-" + id);
+      if (bar) {
+        bar.style.width = Math.min(100, (d[0] / MAXK) * 100) + "%";
+        bar.className = d[0] >= 50 ? "bad" : (d[0] >= 42 ? "warn" : "");
+      }
+    });
+
+    setText("rtsc-m-total", total.toFixed(1) + "k");
+    metric("rtsc-m-rc", st.m[0]);
+    metric("rtsc-m-rw", st.m[1]);
+    metric("rtsc-m-1006", st.m[2]);
+
+    setText("rtsc-bus-rate", st.b[0].replace(/^[!~]/, ""));
+    setText("rtsc-bus-p99", st.b[1].replace(/^[!~]/, ""));
+    setText("rtsc-bus-note", st.b[2]);
+    var p99El = document.getElementById("rtsc-bus-p99");
+    if (p99El) p99El.style.color = st.b[1].charAt(0) === "!" ? "var(--bad)" : "var(--text-2)";
+
+    renderRegistry(st.r);
+    renderLog();
+
+    if (btnNext) {
+      btnNext.disabled = stepIdx >= steps.length - 1;
+      btnNext.textContent = btnNext.disabled ? "已到最後一步" : "下一步";
+    }
+  }
+
+  function reset() {
+    stepIdx = 0;
+    renderStep();
+  }
+
+  function next() {
+    if (stepIdx < SC[scenario].length - 1) {
+      stepIdx += 1;
+      renderStep();
+    }
+  }
+
+  var segButtons = document.querySelectorAll("#rtsc-demo .seg button");
+  Array.prototype.forEach.call(segButtons, function (btn) {
+    btn.addEventListener("click", function () {
+      Array.prototype.forEach.call(segButtons, function (b) {
+        b.setAttribute("aria-pressed", "false");
+      });
+      btn.setAttribute("aria-pressed", "true");
+      scenario = btn.getAttribute("data-sc");
+      reset();
+    });
+  });
+
+  if (btnNext) btnNext.addEventListener("click", next);
+  if (btnReset) btnReset.addEventListener("click", reset);
+
+  reset();
+})();
+</script>
