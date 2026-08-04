@@ -1,0 +1,177 @@
+<script>
+(function () {
+  "use strict";
+
+  var scenario = "vector";
+  var ran = false;
+
+  var statusEl = document.getElementById("hsr-status");
+  var hitsEl = document.getElementById("hsr-hits");
+  var verdictEl = document.getElementById("hsr-verdict");
+  var btnRun = document.getElementById("hsr-btn-run");
+  var btnReset = document.getElementById("hsr-btn-reset");
+  var mPipe = document.getElementById("hsr-m-pipe");
+  var mGold = document.getElementById("hsr-m-gold");
+  var mTop = document.getElementById("hsr-m-top");
+  var segRoot = document.querySelector("#demo-hsr-rank .seg");
+
+  var PIPELINES = {
+    vector: {
+      label: "純向量",
+      gold: "0/2",
+      topQuality: "弱／易誤導",
+      hits: [
+        {
+          meta: "rank#1 · dense 0.86 · promo-faq",
+          body: "本季滿額贈運費；會員延長鑑賞期僅限指定 SKU。與電子票券退貨無關。",
+          tone: "bad"
+        },
+        {
+          meta: "rank#2 · dense 0.79 · policy-v3§退貨",
+          body: "顧客可於到貨後 14 日內申請退貨，商品須保持原包裝。",
+          tone: "lock"
+        },
+        {
+          meta: "rank#3 · dense 0.71 · shipping",
+          body: "標準配送約 2–4 個工作天。到貨通知以簡訊為準。",
+          tone: "bad"
+        },
+        {
+          meta: "未進 Top · policy-v3§例外（含電子票券／E_TIMEOUT_42）",
+          body: "電子票券與客製化商品不適用本退貨條款。E_TIMEOUT_42 屬連線逾時，見運維手冊，與退貨無關。",
+          tone: "idle"
+        }
+      ],
+      status: "純向量：語意偏向「退貨／活動」敘述，把促銷 FAQ 抬到 Top-1；含精確例外與錯誤碼的金標段未進榜。",
+      verdictTone: "tone-bad",
+      verdict: "判定：召回失敗於字面錨點。Context 缺「票券不適用」與「E_TIMEOUT_42 無關退貨」，模型易瞎猜或混入促銷資訊。"
+    },
+    hybrid: {
+      label: "混合 · RRF",
+      gold: "2/2（排序未穩）",
+      topQuality: "可答但 Top-1 不穩",
+      hits: [
+        {
+          meta: "rank#1 · RRF · dense#2 + bm25#1 · policy-v3§例外",
+          body: "電子票券與客製化商品不適用本退貨條款。E_TIMEOUT_42 屬連線逾時，見運維手冊，與退貨無關。",
+          tone: "ok"
+        },
+        {
+          meta: "rank#2 · RRF · dense#1 + bm25#4 · promo-faq",
+          body: "本季滿額贈運費；與電子票券退貨無關，但仍佔用一個名次。",
+          tone: "lock"
+        },
+        {
+          meta: "rank#3 · RRF · dense#2 + bm25#3 · policy-v3§退貨",
+          body: "到貨後 14 日內可退，須原包裝（一般條款，未談例外）。",
+          tone: "lock"
+        }
+      ],
+      status: "RRF：BM25 把含 E_TIMEOUT_42／電子票券的例外段拉進榜，與向量路融合後金標進 Top-1；促銷仍靠向量分殘留在 Top-2。",
+      verdictTone: "tone-lock",
+      verdict: "判定：召回已救回。金標在榜，但精準度仍被弱相關佔位——若只取 k=1 尚可，取 k=3 仍有雜訊，適合再上 rerank。"
+    },
+    rerank: {
+      label: "混合 + Rerank",
+      gold: "2/2",
+      topQuality: "穩 · 可答",
+      hits: [
+        {
+          meta: "rank#1 · cross-encoder 0.93 · policy-v3§例外",
+          body: "電子票券與客製化商品不適用本退貨條款。E_TIMEOUT_42 屬連線逾時，與退貨無關。",
+          tone: "ok"
+        },
+        {
+          meta: "rank#2 · cross-encoder 0.88 · policy-v3§退貨",
+          body: "到貨後 14 日內可退，須原包裝——提供一般條款上下文。",
+          tone: "ok"
+        },
+        {
+          meta: "rank#3 · cross-encoder 0.41 · promo-faq",
+          body: "促銷 FAQ 被壓到邊緣；若最終 k=2 可直接丟棄。",
+          tone: "lock"
+        }
+      ],
+      status: "Rerank：在 RRF 候選池上精排，把兩段政策金標抬到 Top-2，促銷降至邊緣。延遲多一次模型，但 Context 乾淨。",
+      verdictTone: "tone-ok",
+      verdict: "判定：可穩定組 Context。先答「票券不適用」，再補充一般期限；明確否定錯誤碼與退貨的關聯。品質來自排序，不是換更大生成模型。"
+    }
+  };
+
+  function renderIdle() {
+    hitsEl.innerHTML = "";
+    verdictEl.textContent = "尚未執行。三種管線共用同一問題；差異只在「誰進榜、誰排第一」。";
+    verdictEl.className = "hsr-verdict";
+    mPipe.textContent = "—";
+    mGold.textContent = "—";
+    mTop.textContent = "—";
+    statusEl.textContent = "選擇管線後按「執行檢索」，比較純向量、RRF 混合與加 reranker 的排序差異。";
+    ran = false;
+  }
+
+  function renderHits(hits) {
+    hitsEl.innerHTML = "";
+    hits.forEach(function (h) {
+      var el = document.createElement("div");
+      el.className = "hsr-hit tone-" + h.tone;
+      el.innerHTML =
+        '<div class="hm">' + h.meta + "</div>" +
+        '<div class="hb">' + h.body + "</div>";
+      hitsEl.appendChild(el);
+    });
+  }
+
+  function run() {
+    var p = PIPELINES[scenario];
+    if (!p) return;
+    statusEl.textContent = "檢索中…";
+    hitsEl.innerHTML =
+      '<div class="hsr-hit tone-wait"><div class="hm">pipeline</div><div class="hb">正在跑 ' +
+      p.label +
+      "…</div></div>";
+    verdictEl.className = "hsr-verdict";
+    verdictEl.textContent = "計算各路分數／融合／精排中。";
+
+    window.setTimeout(function () {
+      mPipe.textContent = p.label;
+      mGold.textContent = p.gold;
+      mTop.textContent = p.topQuality;
+      renderHits(p.hits);
+      statusEl.textContent = p.status;
+      verdictEl.textContent = p.verdict;
+      verdictEl.className = "hsr-verdict " + p.verdictTone;
+      ran = true;
+    }, 280);
+  }
+
+  if (segRoot) {
+    segRoot.addEventListener("click", function (e) {
+      var btn = e.target.closest("button[data-sc]");
+      if (!btn) return;
+      scenario = btn.getAttribute("data-sc");
+      Array.prototype.forEach.call(segRoot.querySelectorAll("button[data-sc]"), function (b) {
+        b.setAttribute("aria-pressed", b === btn ? "true" : "false");
+      });
+      if (ran) run();
+      else {
+        statusEl.textContent = "已選「" + (PIPELINES[scenario] && PIPELINES[scenario].label) + "」。按「執行檢索」查看排序。";
+      }
+    });
+  }
+
+  if (btnRun) btnRun.addEventListener("click", run);
+  if (btnReset) {
+    btnReset.addEventListener("click", function () {
+      scenario = "vector";
+      if (segRoot) {
+        Array.prototype.forEach.call(segRoot.querySelectorAll("button[data-sc]"), function (b) {
+          b.setAttribute("aria-pressed", b.getAttribute("data-sc") === "vector" ? "true" : "false");
+        });
+      }
+      renderIdle();
+    });
+  }
+
+  renderIdle();
+})();
+</script>
