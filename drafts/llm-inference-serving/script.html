@@ -1,0 +1,413 @@
+<script>
+(function () {
+  "use strict";
+
+  var strategy = "static";
+  var step = 0;
+  var maxSteps = 6;
+
+  var statusEl = document.getElementById("lis-status");
+  var verdictEl = document.getElementById("lis-verdict");
+  var slotsEl = document.getElementById("lis-slots");
+  var kvGridEl = document.getElementById("lis-kv-grid");
+  var timelineEl = document.getElementById("lis-timeline");
+  var btnStep = document.getElementById("lis-btn-step");
+  var btnReset = document.getElementById("lis-btn-reset");
+  var mStep = document.getElementById("lis-m-step");
+  var mBatch = document.getElementById("lis-m-batch");
+  var mTtft = document.getElementById("lis-m-ttft");
+  var mTps = document.getElementById("lis-m-tps");
+  var mKv = document.getElementById("lis-m-kv");
+  var segRoot = document.querySelector("#demo-lis-serve .seg");
+
+  var REQ = [
+    { id: "A", label: "A·短問", kind: "short" },
+    { id: "B", label: "B·短問", kind: "short" },
+    { id: "C", label: "C·長RAG", kind: "rag" },
+    { id: "D", label: "D·長答案", kind: "long" }
+  ];
+
+  /* Each strategy: frames[0..n] describe GPU slots + kv blocks used + metrics + log */
+  var FRAMES = {
+    static: [
+      {
+        slots: [
+          { t: "A·等齊", c: "wait" },
+          { t: "B·等齊", c: "wait" },
+          { t: "C·Prefill", c: "prefill" },
+          { t: "D·等齊", c: "wait" }
+        ],
+        kv: 6,
+        batch: "1／等齊中",
+        ttft: "—（短請求被擋）",
+        tps: "0",
+        status: "靜態 Batch：必須湊滿同一批才開始 decode。C 的長 Prefill 先佔住，A/B/D 乾等。",
+        log: "t0  靜態批：等待四筆對齊；C 開始 prefill（長 context）"
+      },
+      {
+        slots: [
+          { t: "A·等齊", c: "wait" },
+          { t: "B·等齊", c: "wait" },
+          { t: "C·Prefill", c: "prefill" },
+          { t: "D·Prefill", c: "prefill" }
+        ],
+        kv: 14,
+        batch: "2／仍未齊",
+        ttft: "A/B 仍 0 token",
+        tps: "~40（僅 prefill）",
+        status: "C、D 陸續 prefill，KV 快速膨脹；短請求仍未拿到首 token。",
+        log: "t1  C/D prefill 寫入 KV；A/B 繼續排隊"
+      },
+      {
+        slots: [
+          { t: "A·Decode", c: "decode" },
+          { t: "B·Decode", c: "decode" },
+          { t: "C·Decode", c: "decode" },
+          { t: "D·Decode", c: "decode" }
+        ],
+        kv: 22,
+        batch: "4（齊步 decode）",
+        ttft: "A≈420ms（被拖）",
+        tps: "~180",
+        status: "四筆終於一起 decode。吞吐看起來「一次很多」，但 A/B 的 TTFT 已被長請求拖壞。",
+        log: "t2  批對齊完成 → 同步 decode；短請求 TTFT 惡化"
+      },
+      {
+        slots: [
+          { t: "A·完成", c: "idle" },
+          { t: "B·完成", c: "idle" },
+          { t: "C·Decode", c: "decode" },
+          { t: "D·Decode", c: "decode" }
+        ],
+        kv: 24,
+        batch: "2（尾部長請求）",
+        ttft: "A≈420ms",
+        tps: "~110（槽位閒置）",
+        status: "A/B 早已 EOS，但靜態批常要等整批結束或留下空洞——槽位與 KV 被長尾佔用。",
+        log: "t3  A/B 結束；C/D 長尾仍佔 batch／KV"
+      },
+      {
+        slots: [
+          { t: "—", c: "idle" },
+          { t: "—", c: "idle" },
+          { t: "C·Decode", c: "decode" },
+          { t: "D·Decode", c: "decode" }
+        ],
+        kv: 26,
+        batch: "2",
+        ttft: "A≈420ms · B≈420ms",
+        tps: "~95",
+        status: "長尾拖住資源。靜態策略的典型病徵：平均利用率看起來還行，互動 SLA 已碎。",
+        log: "t4  長尾 decode；短請求體驗已鎖定為差"
+      },
+      {
+        slots: [
+          { t: "—", c: "idle" },
+          { t: "—", c: "idle" },
+          { t: "C·完成", c: "idle" },
+          { t: "D·完成", c: "idle" }
+        ],
+        kv: 8,
+        batch: "0",
+        ttft: "A/B≈420ms（差）",
+        tps: "峰值高、均值不穩",
+        status: "結束。靜態 Batch：峰值吞吐可觀，但 TTFT 被齊步走懲罰。",
+        log: "t5  批結束，KV 釋放",
+        verdictTone: "tone-bad",
+        verdict: "判定：靜態 Batch 不適合互動 LLM。長 Prefill／長答案會綁架短請求的首 token；GPU 看似忙碌，SLA 卻掛了。"
+      }
+    ],
+    continuous: [
+      {
+        slots: [
+          { t: "A·Prefill", c: "prefill" },
+          { t: "B·Prefill", c: "prefill" },
+          { t: "—", c: "idle" },
+          { t: "—", c: "idle" }
+        ],
+        kv: 4,
+        batch: "2（動態）",
+        ttft: "A/B 即將出首 token",
+        tps: "~60",
+        status: "Continuous：短請求立刻進場 prefill，不必等 C/D 到齊。",
+        log: "t0  A/B 立即 prefill；C/D 在佇列"
+      },
+      {
+        slots: [
+          { t: "A·Decode", c: "decode" },
+          { t: "B·Decode", c: "decode" },
+          { t: "C·Prefill", c: "prefill" },
+          { t: "—", c: "idle" }
+        ],
+        kv: 12,
+        batch: "3",
+        ttft: "A≈90ms · B≈95ms",
+        tps: "~210",
+        status: "A/B 已在 decode 串流；C 的長 Prefill 併入同一步 iteration，不阻擋已開始的短請求。",
+        log: "t1  A/B decode；C 加入 prefill（iteration-level）"
+      },
+      {
+        slots: [
+          { t: "A·完成", c: "idle" },
+          { t: "B·Decode", c: "decode" },
+          { t: "C·Decode", c: "decode" },
+          { t: "D·Prefill", c: "prefill" }
+        ],
+        kv: 18,
+        batch: "3",
+        ttft: "A≈90ms（佳）",
+        tps: "~260",
+        status: "完成的請求立刻讓出 slot；D 動態加入。吞吐上升，TTFT 仍受控。",
+        log: "t2  A EOS 離場；D 加入；batch 重組"
+      },
+      {
+        slots: [
+          { t: "—", c: "idle" },
+          { t: "B·完成", c: "idle" },
+          { t: "C·Decode", c: "decode" },
+          { t: "D·Decode", c: "decode" }
+        ],
+        kv: 20,
+        batch: "2",
+        ttft: "A/B≈90–95ms",
+        tps: "~240",
+        status: "活躍集合只剩長請求。空出來的容量可接新互動流量（本 demo 未再注入）。",
+        log: "t3  短請求清空；C/D 續跑"
+      },
+      {
+        slots: [
+          { t: "—", c: "idle" },
+          { t: "—", c: "idle" },
+          { t: "C·Decode", c: "decode" },
+          { t: "D·Decode", c: "decode" }
+        ],
+        kv: 22,
+        batch: "2",
+        ttft: "維持前值",
+        tps: "~220",
+        status: "KV 隨 decode 緩步成長，但仍在預算內；scheduler 健康。",
+        log: "t4  KV 穩定成長；無拒單"
+      },
+      {
+        slots: [
+          { t: "—", c: "idle" },
+          { t: "—", c: "idle" },
+          { t: "C·完成", c: "idle" },
+          { t: "D·完成", c: "idle" }
+        ],
+        kv: 6,
+        batch: "0",
+        ttft: "A/B≈90ms（佳）",
+        tps: "高且平穩",
+        status: "結束。Continuous batching：短請求 TTFT 明顯改善，整體 tokens/s 也更高更穩。",
+        log: "t5  全部完成，KV 釋放",
+        verdictTone: "tone-ok",
+        verdict: "判定：Continuous batching 同時改善互動 TTFT 與平均吞吐。這是現代 LLM serving 的預設答案——再往上才是分頁 KV、prefix cache、分池。"
+      }
+    ],
+    "kv-tight": [
+      {
+        slots: [
+          { t: "A·Prefill", c: "prefill" },
+          { t: "B·Prefill", c: "prefill" },
+          { t: "—", c: "idle" },
+          { t: "—", c: "idle" }
+        ],
+        kv: 4,
+        batch: "2",
+        ttft: "A/B 進行中",
+        tps: "~60",
+        status: "策略仍是 Continuous，但 HBM 預算被刻意收緊（示意上限 ≈18 blocks）。",
+        log: "t0  KV 預算緊縮模式；A/B prefill"
+      },
+      {
+        slots: [
+          { t: "A·Decode", c: "decode" },
+          { t: "B·Decode", c: "decode" },
+          { t: "C·Prefill", c: "prefill" },
+          { t: "—", c: "idle" }
+        ],
+        kv: 14,
+        batch: "3",
+        ttft: "A≈90ms",
+        tps: "~200",
+        status: "C 的長 context 開始寫 KV，佔用逼近天花板。",
+        log: "t1  C 長 prefill → KV 急升"
+      },
+      {
+        slots: [
+          { t: "A·完成", c: "idle" },
+          { t: "B·Decode", c: "decode" },
+          { t: "C·Decode", c: "decode" },
+          { t: "D·拒單", c: "wait" }
+        ],
+        kv: 18,
+        batch: "2（D 被擋）",
+        ttft: "A≈90ms · D=REJECT",
+        tps: "~190",
+        status: "KV 觸頂：scheduler 拒絕或延後 D（admission control）。再聰明的 batching 也無法憑空變出 HBM。",
+        log: "t2  KV=18/18 → D admission rejected／queued"
+      },
+      {
+        slots: [
+          { t: "—", c: "idle" },
+          { t: "B·完成", c: "idle" },
+          { t: "C·Decode", c: "decode" },
+          { t: "D·拒單", c: "wait" }
+        ],
+        kv: 17,
+        batch: "1",
+        ttft: "D 仍在等 KV",
+        tps: "~120",
+        status: "B 結束釋出一點空間，但仍不夠 D 的預估 KV → 繼續擋。",
+        log: "t3  釋放不足；D 仍無法入場"
+      },
+      {
+        slots: [
+          { t: "—", c: "idle" },
+          { t: "—", c: "idle" },
+          { t: "C·Decode", c: "decode" },
+          { t: "D·等KV", c: "wait" }
+        ],
+        kv: 16,
+        batch: "1",
+        ttft: "互動 OK；D 飢餓",
+        tps: "~100",
+        status: "吞吐下降不是算力沒了，是記憶體 admission 在限流。監控上要分開看「算力飽和」vs「KV 飽和」。",
+        log: "t4  記憶體瓶頸主導；非 compute 瓶頸"
+      },
+      {
+        slots: [
+          { t: "—", c: "idle" },
+          { t: "—", c: "idle" },
+          { t: "C·完成", c: "idle" },
+          { t: "D·Prefill", c: "prefill" }
+        ],
+        kv: 10,
+        batch: "1（D 遲進）",
+        ttft: "D 嚴重惡化",
+        tps: "前半高、後半塌",
+        status: "C 結束後 D 才進場——成功率靠排隊換來，TTFT 已不可接受。治本是加容量、縮 context、或分池。",
+        log: "t5  C 釋放後 D 才 prefill",
+        verdictTone: "tone-lock",
+        verdict: "判定：Continuous 救得了調度，救不了顯存數學。KV 緊縮時必須搭配 admission control、max_concurrency、或更短有效 prompt；否則長請求會讓後到者飢餓。"
+      }
+    ]
+  };
+
+  function setMetrics(frame) {
+    mStep.textContent = String(step);
+    mBatch.textContent = frame.batch;
+    mTtft.textContent = frame.ttft;
+    mTps.textContent = frame.tps;
+    mKv.textContent = frame.kv + " / 32 blocks";
+  }
+
+  function renderSlots(slots) {
+    slotsEl.innerHTML = "";
+    slots.forEach(function (s) {
+      var el = document.createElement("div");
+      el.className = "lis-slot " + s.c;
+      el.textContent = s.t;
+      slotsEl.appendChild(el);
+    });
+  }
+
+  function renderKv(used) {
+    kvGridEl.innerHTML = "";
+    var i;
+    for (i = 0; i < 32; i++) {
+      var cell = document.createElement("div");
+      cell.className = "lis-kv-cell";
+      if (i < used) {
+        cell.className += i >= 16 && strategy === "kv-tight" ? " hot" : " on";
+      }
+      kvGridEl.appendChild(cell);
+    }
+  }
+
+  function appendLog(line) {
+    var div = document.createElement("div");
+    div.innerHTML = '<span class="ev">' + line + "</span>";
+    timelineEl.appendChild(div);
+    timelineEl.scrollTop = timelineEl.scrollHeight;
+  }
+
+  function showFrame(frame, withLog) {
+    renderSlots(frame.slots);
+    renderKv(frame.kv);
+    setMetrics(frame);
+    statusEl.textContent = frame.status;
+    if (withLog) appendLog(frame.log);
+    if (frame.verdict) {
+      verdictEl.className = "lis-verdict " + (frame.verdictTone || "");
+      verdictEl.textContent = frame.verdict;
+    }
+  }
+
+  function currentFrames() {
+    return FRAMES[strategy];
+  }
+
+  function resetView() {
+    step = 0;
+    timelineEl.innerHTML = "";
+    verdictEl.className = "lis-verdict";
+    verdictEl.textContent = "判定尚未產生——跑完數步後會摘要 TTFT／吞吐／KV 壓力。";
+    mStep.textContent = "0";
+    mBatch.textContent = "—";
+    mTtft.textContent = "—";
+    mTps.textContent = "—";
+    mKv.textContent = "—";
+    renderSlots([
+      { t: "A·待命", c: "idle" },
+      { t: "B·待命", c: "idle" },
+      { t: "C·待命", c: "idle" },
+      { t: "D·待命", c: "idle" }
+    ]);
+    renderKv(0);
+    var hint = {
+      static: "靜態 Batch：按「模擬一步」開始等齊四筆。",
+      continuous: "Continuous：短請求可立即進場，逐步重組 batch。",
+      "kv-tight": "Continuous + KV 緊縮：觀察 admission control 何時擋下 D。"
+    };
+    statusEl.textContent = hint[strategy] || "按「模擬一步」開始。";
+  }
+
+  if (segRoot) {
+    segRoot.addEventListener("click", function (e) {
+      var btn = e.target.closest("button[data-sc]");
+      if (!btn) return;
+      strategy = btn.getAttribute("data-sc");
+      Array.prototype.forEach.call(segRoot.querySelectorAll("button[data-sc]"), function (b) {
+        b.setAttribute("aria-pressed", b === btn ? "true" : "false");
+      });
+      resetView();
+    });
+  }
+
+  if (btnStep) {
+    btnStep.addEventListener("click", function () {
+      var frames = currentFrames();
+      if (step >= frames.length) {
+        statusEl.textContent = "本策略已模擬完畢。可重置或切換其他策略。";
+        return;
+      }
+      var frame = frames[step];
+      step += 1;
+      showFrame(frame, true);
+      if (step >= frames.length && !frame.verdict) {
+        /* last frame should always have verdict; fallback */
+      }
+    });
+  }
+
+  if (btnReset) {
+    btnReset.addEventListener("click", function () {
+      resetView();
+    });
+  }
+
+  resetView();
+})();
+</script>
