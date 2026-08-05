@@ -1,0 +1,2538 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>LLM 推論服務化 (LLM Inference Serving) | System Design Every Day</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@300;400;500;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+  <script>
+    mermaid.initialize({
+      startOnLoad: true,
+      theme: 'default',
+      securityLevel: 'loose'
+    });
+  </script>
+  <style>
+    :root {
+      --bg: #ffffff;
+      --bg-soft: #fafaf9;
+      --text: #262a2f;
+      --text-2: #6b7078;
+      --text-3: #9aa0a8;
+      --border: #ecebe8;
+      --border-strong: #dedcd8;
+      --code-bg: #f6f5f3;
+      --accent: #3f6188;
+      --accent-soft: #eef2f7;
+      --accent-line: #cdd9e6;
+      --ok: #4d7d68;
+      --ok-soft: #eef4f1;
+      --warn: #a3743e;
+      --warn-soft: #f6f0e7;
+      --bad: #a8554f;
+      --bad-soft: #f6ecea;
+      --radius: 10px;
+      --radius-sm: 7px;
+      --maxw: 760px;
+      --sans: "Noto Sans TC", system-ui, -apple-system, "Segoe UI", sans-serif;
+      --mono: "JetBrains Mono", "SFMono-Regular", Menlo, Consolas, monospace;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    html {
+      scroll-behavior: smooth;
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      html {
+        scroll-behavior: auto;
+      }
+      * {
+        animation-duration: .001ms !important;
+        transition-duration: .001ms !important;
+      }
+    }
+
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font-family: var(--sans);
+      font-weight: 400;
+      font-size: 16px;
+      line-height: 1.78;
+      -webkit-font-smoothing: antialiased;
+      letter-spacing: .005em;
+    }
+
+    ::selection {
+      background: var(--accent-soft);
+    }
+
+    /* ---------- layout ---------- */
+    .wrap {
+      display: flex;
+      max-width: 1180px;
+      margin: 0 auto;
+      gap: 0;
+    }
+
+    .toc {
+      width: 248px;
+      flex: 0 0 248px;
+      position: sticky;
+      top: 0;
+      height: 100vh;
+      padding: 54px 22px 40px 28px;
+      overflow-y: auto;
+      border-right: 1px solid var(--border);
+      transition: width .2s ease, flex-basis .2s ease, padding .2s ease, opacity .15s ease, border-color .15s ease;
+    }
+
+    .toc-kicker {
+      font-family: var(--mono);
+      font-size: 11px;
+      letter-spacing: .14em;
+      text-transform: uppercase;
+      color: var(--text-3);
+      margin-bottom: 20px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+    }
+
+    /* desktop：側欄內收合鈕；mobile 隱藏（沿用既有 .toc-toggle） */
+    .toc-collapse {
+      display: none;
+      flex: 0 0 auto;
+      align-items: center;
+      justify-content: center;
+      width: 28px;
+      height: 28px;
+      padding: 0;
+      border: none;
+      background: none;
+      border-radius: 6px;
+      color: var(--text-2);
+      line-height: 1;
+      cursor: pointer;
+    }
+
+    .toc-collapse:hover {
+      color: var(--text);
+      background: var(--bg-soft);
+    }
+
+    .toc-collapse:focus-visible {
+      outline: 2px solid var(--accent);
+      outline-offset: 2px;
+    }
+
+    .toc-collapse svg {
+      display: block;
+    }
+
+    /* desktop：側欄收合後的展開鈕（預設隱藏） */
+    .toc-reopen {
+      display: none;
+      position: fixed;
+      top: 18px;
+      left: 18px;
+      z-index: 900;
+      align-items: center;
+      gap: 7px;
+      font-size: 12.5px;
+      line-height: 1;
+      color: var(--text-2);
+      background: var(--bg);
+      border: 1px solid var(--border-strong);
+      border-radius: 999px;
+      padding: 7px 13px 7px 11px;
+      box-shadow: 0 1px 3px rgba(0, 0, 0, .06), 0 4px 12px rgba(0, 0, 0, .04);
+      cursor: pointer;
+      transition: background .15s, border-color .15s, color .15s;
+    }
+
+    .toc-reopen:hover {
+      background: var(--bg-soft);
+      color: var(--text);
+      border-color: var(--text-3);
+    }
+
+    .toc-reopen svg {
+      flex: 0 0 auto;
+      display: block;
+    }
+
+    @media (min-width: 921px) {
+      .toc-collapse {
+        display: inline-flex;
+      }
+
+      body.toc-collapsed .toc {
+        width: 0;
+        flex-basis: 0;
+        padding: 0;
+        opacity: 0;
+        overflow: hidden;
+        border-right-color: transparent;
+        pointer-events: none;
+      }
+
+      body.toc-collapsed .toc-reopen {
+        display: inline-flex;
+      }
+    }
+
+    .toc-kicker a {
+      color: var(--text-3);
+      text-decoration: none;
+      border-bottom: none;
+      transition: color .15s;
+    }
+
+    .toc-kicker a:hover {
+      color: var(--text);
+    }
+
+    .toc-title {
+      font-size: 15px;
+      font-weight: 700;
+      line-height: 1.4;
+      margin: 0 0 24px;
+    }
+
+    .toc a {
+      display: flex;
+      gap: 10px;
+      align-items: baseline;
+      text-decoration: none;
+      color: var(--text-2);
+      font-size: 13.5px;
+      padding: 6px 10px;
+      border-radius: 6px;
+      line-height: 1.45;
+      transition: background .15s, color .15s;
+      border-bottom: none;
+    }
+
+    .toc a:hover {
+      background: var(--bg-soft);
+      color: var(--text);
+      border-bottom: none;
+    }
+
+    .toc a.active {
+      color: var(--accent);
+      background: var(--accent-soft);
+      font-weight: 500;
+      border-bottom: none;
+    }
+
+    .toc a .n {
+      font-family: var(--mono);
+      font-size: 11px;
+      color: var(--text-3);
+      flex: 0 0 18px;
+    }
+
+    .toc a.active .n {
+      color: var(--accent);
+    }
+
+    main {
+      flex: 1 1 auto;
+      min-width: 0;
+      padding: 0 40px;
+    }
+
+    .inner {
+      max-width: var(--maxw);
+      margin: 0 auto;
+      padding: 72px 0 140px;
+    }
+
+    /* ---------- hero ---------- */
+    .hero {
+      margin-bottom: 64px;
+    }
+
+    .hero .eyebrow {
+      font-family: var(--mono);
+      font-size: 12px;
+      letter-spacing: .16em;
+      text-transform: uppercase;
+      color: var(--accent);
+      margin-bottom: 18px;
+    }
+
+    .hero h1 {
+      font-size: 40px;
+      line-height: 1.18;
+      font-weight: 700;
+      margin: 0 0 18px;
+      letter-spacing: -.01em;
+    }
+
+    .hero .lede {
+      font-size: 18px;
+      line-height: 1.7;
+      color: var(--text-2);
+      font-weight: 300;
+      margin: 0;
+      max-width: 620px;
+    }
+
+    .hero .meta {
+      margin-top: 28px;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+
+    .tag {
+      font-family: var(--mono);
+      font-size: 12px;
+      color: var(--text-2);
+      border: 1px solid var(--border-strong);
+      padding: 4px 11px;
+      border-radius: 999px;
+      background: var(--bg-soft);
+    }
+
+    /* ---------- sections ---------- */
+    section {
+      padding-top: 30px;
+      scroll-margin-top: 24px;
+    }
+
+    .sec-head {
+      display: flex;
+      align-items: baseline;
+      gap: 14px;
+      margin: 0 0 8px;
+    }
+
+    .sec-num {
+      font-family: var(--mono);
+      font-size: 13px;
+      color: var(--text-3);
+      font-weight: 500;
+      padding-top: 6px;
+      flex: 0 0 auto;
+    }
+
+    h2 {
+      font-size: 27px;
+      font-weight: 700;
+      line-height: 1.3;
+      margin: 0;
+      letter-spacing: -.01em;
+    }
+
+    .sec-sub {
+      color: var(--text-2);
+      font-size: 15px;
+      margin: 2px 0 28px 0;
+      font-weight: 300;
+    }
+
+    h3 {
+      font-size: 18.5px;
+      font-weight: 700;
+      margin: 38px 0 12px;
+      line-height: 1.45;
+    }
+
+    h4 {
+      font-size: 15.5px;
+      font-weight: 700;
+      margin: 26px 0 8px;
+      color: var(--text);
+    }
+
+    p {
+      margin: 0 0 16px;
+    }
+
+    a {
+      color: var(--accent);
+      text-decoration: none;
+      border-bottom: 1px solid var(--accent-line);
+      transition: border-color .15s;
+    }
+
+    a:hover {
+      border-color: var(--accent);
+    }
+
+    strong {
+      font-weight: 700;
+    }
+
+    em {
+      font-style: normal;
+      background: var(--accent-soft);
+      padding: 0 4px;
+      border-radius: 4px;
+      font-weight: 500;
+      color: #2f4d6e;
+    }
+
+    hr.div {
+      border: none;
+      border-top: 1px solid var(--border);
+      margin: 46px 0;
+    }
+
+    ul, ol {
+      margin: 0 0 18px;
+      padding-left: 22px;
+    }
+
+    li {
+      margin: 7px 0;
+      padding-left: 4px;
+    }
+
+    li::marker {
+      color: var(--text-3);
+    }
+
+    code {
+      font-family: var(--mono);
+      font-size: .86em;
+      background: var(--code-bg);
+      padding: 2px 6px;
+      border-radius: 5px;
+      color: #43494f;
+    }
+
+    pre {
+      background: var(--code-bg);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 16px 18px;
+      overflow-x: auto;
+      margin: 0 0 20px;
+      line-height: 1.6;
+    }
+
+    pre code {
+      background: none;
+      padding: 0;
+      font-size: 13px;
+    }
+
+    /* ---------- math notation ---------- */
+    /* 行內數學變數，如 W、R、N。本站不載入 MathJax/KaTeX，請勿使用 $...$ 或 \[...\] LaTeX 分隔符。 */
+    var {
+      font-family: var(--mono);
+      font-style: normal;
+      font-weight: 500;
+      color: var(--accent);
+    }
+
+    /* 區塊數學公式，置中等寬呈現，記得將 > < & 轉義為 &gt; &lt; &amp;。 */
+    .formula {
+      font-family: var(--mono);
+      font-size: 15px;
+      text-align: center;
+      background: var(--bg-soft);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      padding: 14px 18px;
+      margin: 0 0 20px;
+      color: var(--text);
+      letter-spacing: .03em;
+      overflow-x: auto;
+    }
+
+    /* ---------- callouts ---------- */
+    .callout {
+      border: 1px solid var(--border);
+      border-left: 3px solid var(--border-strong);
+      background: var(--bg-soft);
+      border-radius: var(--radius-sm);
+      padding: 15px 18px;
+      margin: 0 0 22px;
+      font-size: 14.5px;
+    }
+
+    .callout .c-title {
+      font-weight: 700;
+      font-size: 13px;
+      letter-spacing: .02em;
+      margin-bottom: 5px;
+      display: flex;
+      gap: 7px;
+      align-items: center;
+    }
+
+    .callout p:last-child {
+      margin-bottom: 0;
+    }
+
+    .callout.accent {
+      border-left-color: var(--accent);
+      background: var(--accent-soft);
+    }
+
+    .callout.accent .c-title {
+      color: #2f4d6e;
+    }
+
+    .callout.warn {
+      border-left-color: var(--warn);
+      background: var(--warn-soft);
+    }
+
+    .callout.warn .c-title {
+      color: var(--warn);
+    }
+
+    .callout .ic {
+      font-family: var(--mono);
+      font-size: 11px;
+      border: 1px solid currentColor;
+      border-radius: 4px;
+      padding: 0 4px;
+      line-height: 1.5;
+      opacity: .8;
+    }
+
+    .oneliner {
+      border: 1px dashed var(--accent-line);
+      border-radius: var(--radius-sm);
+      padding: 13px 16px;
+      margin: 0 0 22px;
+      font-size: 14.5px;
+      background: #fbfcfd;
+    }
+
+    .oneliner b {
+      font-family: var(--mono);
+      font-size: 11px;
+      letter-spacing: .08em;
+      color: var(--accent);
+      display: block;
+      margin-bottom: 4px;
+      text-transform: uppercase;
+    }
+
+    /* ---------- tables ---------- */
+    .tbl-wrap {
+      overflow-x: auto;
+      margin: 0 0 24px;
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+    }
+
+    table {
+      border-collapse: collapse;
+      width: 100%;
+      font-size: 14px;
+      min-width: 520px;
+    }
+
+    th, td {
+      text-align: left;
+      padding: 11px 14px;
+      border-bottom: 1px solid var(--border);
+      vertical-align: top;
+    }
+
+    th {
+      font-weight: 700;
+      background: var(--bg-soft);
+      font-size: 12.5px;
+      letter-spacing: .02em;
+      color: var(--text-2);
+      position: sticky;
+      top: 0;
+    }
+
+    tr:last-child td {
+      border-bottom: none;
+    }
+
+    td.hl {
+      background: var(--accent-soft);
+    }
+
+    .cap {
+      font-size: 12.5px;
+      color: var(--text-3);
+      margin: -12px 0 26px;
+      font-family: var(--mono);
+    }
+
+    /* ---------- interactive shell ---------- */
+    .demo {
+      border: 1px solid var(--border-strong);
+      border-radius: var(--radius);
+      background: var(--bg);
+      margin: 24px 0 26px;
+      overflow: hidden;
+    }
+
+    .demo-bar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      flex-wrap: wrap;
+      padding: 13px 16px;
+      border-bottom: 1px solid var(--border);
+      background: var(--bg-soft);
+    }
+
+    .demo-bar .label {
+      font-family: var(--mono);
+      font-size: 11px;
+      letter-spacing: .1em;
+      text-transform: uppercase;
+      color: var(--text-3);
+    }
+
+    .demo-body {
+      padding: 20px 18px;
+    }
+
+    .seg {
+      display: inline-flex;
+      border: 1px solid var(--border-strong);
+      border-radius: 999px;
+      overflow: hidden;
+      background: var(--bg);
+    }
+
+    .seg button {
+      border: none;
+      background: none;
+      font-family: var(--sans);
+      font-size: 12.5px;
+      color: var(--text-2);
+      padding: 6px 14px;
+      cursor: pointer;
+      transition: background .15s, color .15s;
+    }
+
+    .seg button:hover {
+      color: var(--text);
+    }
+
+    .seg button[aria-pressed="true"] {
+      background: var(--accent);
+      color: #fff;
+    }
+
+    .btn {
+      font-family: var(--sans);
+      font-size: 13px;
+      border: 1px solid var(--border-strong);
+      background: var(--bg);
+      color: var(--text);
+      padding: 7px 16px;
+      border-radius: 7px;
+      cursor: pointer;
+      transition: background .15s, border-color .15s;
+    }
+
+    .btn:hover {
+      background: var(--bg-soft);
+      border-color: var(--text-3);
+    }
+
+    .btn.primary {
+      background: var(--accent);
+      color: #fff;
+      border-color: var(--accent);
+    }
+
+    .btn.primary:hover {
+      background: #365578;
+    }
+
+    .btn:disabled {
+      opacity: .4;
+      cursor: not-allowed;
+    }
+
+    .btn:focus-visible, .seg button:focus-visible, .toc a:focus-visible, a:focus-visible,
+    summary:focus-visible {
+      outline: 2px solid var(--accent);
+      outline-offset: 2px;
+      border-radius: 4px;
+    }
+
+    .status-line {
+      font-size: 13.5px;
+      color: var(--text-2);
+      min-height: 42px;
+      margin-top: 14px;
+      background: var(--bg-soft);
+      border-radius: var(--radius-sm);
+      padding: 10px 13px;
+      border: 1px solid var(--border);
+    }
+
+    .status-line b {
+      color: var(--text);
+    }
+
+    .legend {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 14px;
+      font-size: 11.5px;
+      color: var(--text-2);
+      margin-top: 14px;
+      font-family: var(--mono);
+    }
+
+    .legend span {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .dot {
+      width: 9px;
+      height: 9px;
+      border-radius: 3px;
+      display: inline-block;
+      border: 1px solid rgba(0, 0, 0, .08);
+    }
+
+    /* node states used across diagrams */
+    .nstate-idle {
+      fill: #fff;
+      stroke: var(--border-strong);
+    }
+
+    .ns-idle {
+      background: #fff;
+      border-color: var(--border-strong);
+    }
+
+    .ns-lock {
+      background: var(--warn-soft);
+      border-color: var(--warn);
+    }
+
+    .ns-ok {
+      background: var(--ok-soft);
+      border-color: var(--ok);
+    }
+
+    .ns-bad {
+      background: var(--bad-soft);
+      border-color: var(--bad);
+    }
+
+    .ns-wait {
+      background: var(--accent-soft);
+      border-color: var(--accent);
+    }
+
+    /* spectrum */
+    .spectrum {
+      position: relative;
+      margin: 26px 6px 10px;
+    }
+
+    .spec-track {
+      height: 4px;
+      border-radius: 2px;
+      background: linear-gradient(90deg, #9fb6cf, #e7e5e1 50%, #c9d8c9);
+      position: relative;
+    }
+
+    .spec-ends {
+      display: flex;
+      justify-content: space-between;
+      font-family: var(--mono);
+      font-size: 11px;
+      color: var(--text-2);
+      margin-top: 10px;
+    }
+
+    .spec-mark {
+      position: absolute;
+      top: -12px;
+      transform: translateX(-50%);
+      cursor: pointer;
+      text-align: center;
+      background: none;
+      border: none;
+      padding: 0;
+    }
+
+    .spec-mark .pin {
+      width: 18px;
+      height: 18px;
+      border-radius: 50%;
+      background: #fff;
+      border: 2px solid var(--border-strong);
+      margin: 0 auto;
+      transition: border-color .15s, transform .15s, box-shadow .15s;
+      display: block;
+    }
+
+    .spec-mark .pn {
+      font-family: var(--mono);
+      font-size: 12px;
+      margin-top: 8px;
+      color: var(--text-2);
+      font-weight: 500;
+      white-space: nowrap;
+      display: block;
+    }
+
+    .spec-mark[aria-pressed="true"] .pin {
+      border-color: var(--accent);
+      transform: scale(1.18);
+      box-shadow: 0 0 0 4px var(--accent-soft);
+    }
+
+    .spec-mark[aria-pressed="true"] .pn {
+      color: var(--accent);
+    }
+
+    .spec-panel {
+      margin-top: 34px;
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 18px;
+      background: var(--bg-soft);
+    }
+
+    .spec-panel h4 {
+      margin: 0 0 4px;
+    }
+
+    .spec-panel .pmeta {
+      font-family: var(--mono);
+      font-size: 12px;
+      color: var(--text-3);
+      margin-bottom: 14px;
+    }
+
+    .bars {
+      display: grid;
+      grid-template-columns: 78px 1fr 56px;
+      gap: 9px 12px;
+      align-items: center;
+    }
+
+    .bars .blabel {
+      font-size: 13px;
+      color: var(--text-2);
+    }
+
+    .bars .btrack {
+      height: 8px;
+      background: #e9e7e3;
+      border-radius: 4px;
+      overflow: hidden;
+    }
+
+    .bars .bfill {
+      height: 100%;
+      border-radius: 4px;
+      background: var(--accent);
+      transition: width .4s ease;
+    }
+
+    .bars .bval {
+      font-family: var(--mono);
+      font-size: 11px;
+      color: var(--text-2);
+      text-align: right;
+    }
+
+    /* generic actor diagram */
+    .actors {
+      display: flex;
+      gap: 12px;
+      flex-wrap: wrap;
+    }
+
+    .actor {
+      flex: 1 1 0;
+      min-width: 96px;
+      border: 1.5px solid var(--border-strong);
+      border-radius: var(--radius-sm);
+      padding: 11px 10px;
+      text-align: center;
+      background: #fff;
+      transition: background .25s, border-color .25s;
+    }
+
+    .actor .aname {
+      font-weight: 700;
+      font-size: 13px;
+    }
+
+    .actor .arole {
+      font-family: var(--mono);
+      font-size: 10.5px;
+      color: var(--text-3);
+      margin-top: 2px;
+    }
+
+    .actor .astate {
+      font-size: 11.5px;
+      margin-top: 8px;
+      font-family: var(--mono);
+      color: var(--text-2);
+      min-height: 16px;
+    }
+
+    .coordinator {
+      border-style: dashed;
+    }
+
+    .flowsteps {
+      margin-top: 16px;
+    }
+
+    .stepitem {
+      display: flex;
+      gap: 11px;
+      font-size: 13.5px;
+      padding: 7px 0;
+      color: var(--text-3);
+      border-top: 1px solid var(--border);
+    }
+
+    .stepitem:first-child {
+      border-top: none;
+    }
+
+    .stepitem.done {
+      color: var(--text);
+    }
+
+    .stepitem.cur {
+      color: var(--text);
+      font-weight: 500;
+    }
+
+    .stepitem .sx {
+      font-family: var(--mono);
+      font-size: 11px;
+      flex: 0 0 26px;
+      color: var(--text-3);
+      padding-top: 2px;
+    }
+
+    .stepitem.cur .sx {
+      color: var(--accent);
+    }
+
+    /* timeline lab (TCC) */
+    .tl-scenarios {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      margin-bottom: 6px;
+    }
+
+    .tl-opt {
+      display: flex;
+      gap: 11px;
+      align-items: flex-start;
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      padding: 10px 13px;
+      cursor: pointer;
+      background: #fff;
+      transition: border-color .15s, background .15s;
+    }
+
+    .tl-opt:hover {
+      background: var(--bg-soft);
+    }
+
+    .tl-opt[aria-pressed="true"] {
+      border-color: var(--accent);
+      background: var(--accent-soft);
+    }
+
+    .tl-opt .tlname {
+      font-weight: 700;
+      font-size: 13.5px;
+    }
+
+    .tl-opt .tldesc {
+      font-size: 12.5px;
+      color: var(--text-2);
+      margin-top: 2px;
+    }
+
+    .tl-opt .tlbadge {
+      font-family: var(--mono);
+      font-size: 10px;
+      border: 1px solid var(--border-strong);
+      border-radius: 4px;
+      padding: 1px 5px;
+      color: var(--text-3);
+      flex: 0 0 auto;
+      margin-top: 1px;
+    }
+
+    .tl-result {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
+      margin-top: 16px;
+    }
+
+    @media (max-width: 560px) {
+      .tl-result {
+        grid-template-columns: 1fr;
+      }
+    }
+
+    .tl-card {
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      padding: 13px 14px;
+      font-size: 13px;
+    }
+
+    .tl-card .tch {
+      font-family: var(--mono);
+      font-size: 11px;
+      letter-spacing: .06em;
+      text-transform: uppercase;
+      margin-bottom: 8px;
+      color: var(--text-3);
+    }
+
+    .tl-card.naive {
+      border-left: 3px solid var(--bad);
+    }
+
+    .tl-card.fixed {
+      border-left: 3px solid var(--ok);
+    }
+
+    .tl-card .verdict {
+      font-weight: 700;
+      margin-top: 8px;
+      font-size: 13px;
+    }
+
+    .tl-card.naive .verdict {
+      color: var(--bad);
+    }
+
+    .tl-card.fixed .verdict {
+      color: var(--ok);
+    }
+
+    /* saga chain */
+    .saga-chain {
+      display: flex;
+      flex-direction: column;
+      gap: 0;
+      margin-top: 8px;
+    }
+
+    .saga-step {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .saga-box {
+      flex: 1 1 auto;
+      border: 1.5px solid var(--border-strong);
+      border-radius: var(--radius-sm);
+      padding: 10px 13px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      background: #fff;
+      transition: .25s;
+    }
+
+    .saga-box .sgn {
+      font-weight: 600;
+      font-size: 13.5px;
+    }
+
+    .saga-box .sgs {
+      font-family: var(--mono);
+      font-size: 11px;
+      color: var(--text-3);
+    }
+
+    .saga-arrow {
+      height: 18px;
+      width: 2px;
+      background: var(--border-strong);
+      margin-left: 18px;
+    }
+
+    .saga-pick {
+      font-size: 12.5px;
+      color: var(--text-2);
+      margin: 4px 0 10px;
+    }
+
+    .saga-pick select {
+      font-family: var(--sans);
+      font-size: 13px;
+      padding: 5px 8px;
+      border: 1px solid var(--border-strong);
+      border-radius: 6px;
+      background: #fff;
+      color: var(--text);
+    }
+
+    /* outbox toggle */
+    .ob-stage {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      margin-top: 8px;
+    }
+
+    .ob-row {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      font-size: 13px;
+    }
+
+    .ob-chip {
+      border: 1.5px solid var(--border-strong);
+      border-radius: var(--radius-sm);
+      padding: 9px 12px;
+      background: #fff;
+      font-size: 13px;
+      transition: .25s;
+      flex: 0 0 auto;
+    }
+
+    .ob-chip .obt {
+      font-weight: 600;
+    }
+
+    .ob-chip .obs {
+      font-family: var(--mono);
+      font-size: 10.5px;
+      color: var(--text-3);
+    }
+
+    .ob-flow {
+      font-family: var(--mono);
+      font-size: 11px;
+      color: var(--text-3);
+    }
+
+    /* wizard */
+    .wiz-q {
+      margin-bottom: 16px;
+    }
+
+    .wiz-q .wq {
+      font-size: 14px;
+      font-weight: 600;
+      margin-bottom: 8px;
+    }
+
+    .wiz-opts {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+
+    .wiz-opts button {
+      font-family: var(--sans);
+      font-size: 13px;
+      border: 1px solid var(--border-strong);
+      background: #fff;
+      color: var(--text-2);
+      padding: 7px 14px;
+      border-radius: 7px;
+      cursor: pointer;
+      transition: .15s;
+    }
+
+    .wiz-opts button:hover {
+      border-color: var(--text-3);
+      color: var(--text);
+    }
+
+    .wiz-opts button[aria-pressed="true"] {
+      background: var(--accent);
+      color: #fff;
+      border-color: var(--accent);
+    }
+
+    .wiz-result {
+      margin-top: 18px;
+      border: 1px solid var(--accent-line);
+      border-radius: var(--radius);
+      padding: 16px 18px;
+      background: var(--accent-soft);
+      font-size: 14px;
+      display: none;
+    }
+
+    .wiz-result.show {
+      display: block;
+    }
+
+    .wiz-result .wr-pick {
+      font-size: 17px;
+      font-weight: 700;
+      color: #2f4d6e;
+      margin-bottom: 6px;
+    }
+
+    .wiz-result .wr-why {
+      color: #3a5572;
+    }
+
+    /* FAQ */
+    details.faq {
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      margin-bottom: 10px;
+      background: #fff;
+      overflow: hidden;
+    }
+
+    details.faq summary {
+      cursor: pointer;
+      padding: 14px 16px;
+      font-weight: 600;
+      font-size: 14.5px;
+      list-style: none;
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      align-items: center;
+    }
+
+    details.faq summary::-webkit-details-marker {
+      display: none;
+    }
+
+    details.faq summary .q {
+      font-family: var(--mono);
+      font-size: 11px;
+      color: var(--accent);
+      flex: 0 0 auto;
+    }
+
+    details.faq summary .chev {
+      transition: transform .2s;
+      color: var(--text-3);
+      flex: 0 0 auto;
+      font-size: 13px;
+    }
+
+    details.faq[open] summary .chev {
+      transform: rotate(90deg);
+    }
+
+    details.faq .ans {
+      padding: 0 16px 16px;
+      font-size: 14px;
+      color: var(--text-2);
+    }
+
+    details.faq .ans p {
+      margin: 0 0 10px;
+    }
+
+    details.faq .ans p:last-child {
+      margin: 0;
+    }
+
+    .trap {
+      display: flex;
+      gap: 10px;
+      font-size: 14px;
+      margin: 9px 0;
+    }
+
+    .trap .tn {
+      font-family: var(--mono);
+      font-size: 11px;
+      color: var(--bad);
+      flex: 0 0 auto;
+      border: 1px solid var(--bad-soft);
+      background: var(--bad-soft);
+      border-radius: 4px;
+      padding: 1px 6px;
+      height: fit-content;
+      margin-top: 2px;
+    }
+
+    /* mobile responsive */
+    .toc-toggle {
+      display: none;
+    }
+
+    @media (max-width: 920px) {
+      .wrap {
+        flex-direction: column;
+      }
+      .toc {
+        position: static;
+        width: auto;
+        height: auto;
+        border-right: none;
+        border-bottom: 1px solid var(--border);
+        padding: 18px 22px;
+        transition: none;
+      }
+      .toc-title {
+        margin-bottom: 0;
+      }
+      .toc-kicker {
+        margin-bottom: 10px;
+      }
+      .toc-nav {
+        display: none;
+        margin-top: 16px;
+      }
+      .toc-nav.open {
+        display: block;
+      }
+      .toc-toggle {
+        display: inline-block;
+        margin-top: 10px;
+      }
+      .toc-collapse,
+      .toc-reopen {
+        display: none !important;
+      }
+      main {
+        padding: 0 22px;
+      }
+      .inner {
+        padding: 40px 0 100px;
+      }
+      .hero h1 {
+        font-size: 31px;
+      }
+    }
+
+    @media print {
+      .toc-reopen { display: none !important; }
+    }
+
+    @media (max-width: 480px) {
+      body {
+        font-size: 15px;
+      }
+      .hero h1 {
+        font-size: 27px;
+      }
+      h2 {
+        font-size: 23px;
+      }
+      .demo-body {
+        padding: 16px 13px;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <!-- ===================== TOC SIDEBAR ===================== -->
+    <nav class="toc" id="toc-panel" aria-label="目錄">
+      <div class="toc-kicker">
+        <a href="../index.html">← 返回目錄</a>
+        <button class="toc-collapse" type="button" aria-expanded="true" aria-controls="toc-panel"
+                aria-label="收合目錄" title="收合目錄">
+          <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor"
+               stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M15 18l-6-6 6-6"/>
+          </svg>
+        </button>
+      </div>
+      <div class="toc-title">LLM 推論服務化 (LLM Inference Serving)</div>
+      <button class="btn toc-toggle" type="button" aria-expanded="false" aria-controls="toc-nav">目錄 ▾</button>
+      <div class="toc-nav" id="toc-nav">
+        <a href="#s1"><span class="n">01</span>總覽與定位</a>
+        <a href="#s2"><span class="n">02</span>Prefill、Decode 與 Token Streaming</a>
+        <a href="#s3"><span class="n">03</span>Continuous Batching：把 GPU 從「等人」變成「一直算」</a>
+        <a href="#s4"><span class="n">04</span>KV Cache 與 GPU 記憶體瓶頸</a>
+        <a href="#s5"><span class="n">05</span>TTFT vs Throughput：怎麼取捨</a>
+        <a href="#s6"><span class="n">06</span>互動 Demo：Batching 與 KV 如何改寫延遲／吞吐</a>
+        <a href="#s7"><span class="n">07</span>面試折衷與實務選型</a>
+      </div>
+    </nav>
+    <button class="btn toc-reopen" type="button" aria-expanded="true" aria-controls="toc-panel"
+            aria-label="展開目錄" title="展開目錄">
+      <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor"
+           stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M9 18l6-6-6-6"/>
+      </svg>
+      <span>目錄</span>
+    </button>
+
+    <!-- ===================== MAIN CONTENT ===================== -->
+    <main>
+      <div class="inner">
+        <style>
+  /* 本篇專屬：lis-* 命名空間（llm-inference-serving），不覆蓋全站 base 類別 */
+  #lis-root {
+    --lis-prefill: #3f6188; --lis-prefill-soft: #eef2f7;
+    --lis-decode: #4d7d68; --lis-decode-soft: #eef4f1;
+    --lis-kv: #6b6f9a; --lis-kv-soft: #eef0f6;
+    --lis-batch: #a3743e; --lis-batch-soft: #f6f0e7;
+  }
+
+  .lis-pain {
+    display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px;
+    margin: 14px 0 6px;
+  }
+  @media (max-width: 720px) { .lis-pain { grid-template-columns: 1fr; } }
+  .lis-pain-card {
+    border: 1px solid var(--border); border-radius: var(--radius-sm);
+    background: #fff; padding: 12px 13px; border-top: 3px solid var(--border-strong);
+  }
+  .lis-pain-card.p1 { border-top-color: var(--bad); }
+  .lis-pain-card.p2 { border-top-color: var(--warn); }
+  .lis-pain-card.p3 { border-top-color: var(--lis-prefill); }
+  .lis-pain-card .pt { font-weight: 700; font-size: 13.5px; margin-bottom: 4px; }
+  .lis-pain-card .ps { font-size: 12.5px; color: var(--text-2); line-height: 1.55; }
+
+  .lis-phases {
+    display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin: 12px 0;
+  }
+  @media (max-width: 640px) { .lis-phases { grid-template-columns: 1fr; } }
+  .lis-phase {
+    border: 1px solid var(--border); border-radius: var(--radius-sm);
+    background: #fff; padding: 14px;
+  }
+  .lis-phase.prefill { border-top: 3px solid var(--lis-prefill); }
+  .lis-phase.decode { border-top: 3px solid var(--lis-decode); }
+  .lis-phase .st { font-weight: 700; font-size: 14px; margin-bottom: 2px; }
+  .lis-phase .ss {
+    font-family: var(--mono); font-size: 11px; color: var(--text-3);
+    margin-bottom: 8px; letter-spacing: .04em;
+  }
+  .lis-phase ul { margin: 0; padding-left: 1.15em; font-size: 13px; color: var(--text-2); line-height: 1.65; }
+
+  .lis-flow {
+    display: flex; flex-wrap: wrap; gap: 6px; align-items: center;
+    margin: 12px 0; font-family: var(--mono); font-size: 11.5px;
+  }
+  .lis-chip {
+    border: 1px solid var(--border-strong); border-radius: 6px;
+    padding: 6px 10px; background: #fff; color: var(--text); font-weight: 600;
+  }
+  .lis-chip.prefill { background: var(--lis-prefill-soft); border-color: var(--lis-prefill); color: var(--lis-prefill); }
+  .lis-chip.decode { background: var(--lis-decode-soft); border-color: var(--lis-decode); color: var(--lis-decode); }
+  .lis-chip.kv { background: var(--lis-kv-soft); border-color: var(--lis-kv); color: var(--lis-kv); }
+  .lis-chip.batch { background: var(--lis-batch-soft); border-color: var(--lis-batch); color: var(--lis-batch); }
+  .lis-chip.op { background: var(--bg-soft); color: var(--text-3); border-style: dashed; font-weight: 500; }
+
+  .lis-pipeline {
+    border: 1px solid var(--border); border-radius: var(--radius-sm);
+    background: var(--bg-soft); padding: 14px; margin: 12px 0;
+  }
+  .lis-pipe-row {
+    display: flex; flex-wrap: wrap; gap: 8px; align-items: stretch; justify-content: center;
+    margin: 6px 0;
+  }
+  .lis-box {
+    border: 1px solid var(--border-strong); border-radius: 8px;
+    background: #fff; padding: 10px 12px; min-width: 100px; text-align: center;
+  }
+  .lis-box .bn { font-family: var(--mono); font-size: 12px; font-weight: 700; color: var(--text); }
+  .lis-box .bs { font-size: 11px; color: var(--text-2); margin-top: 3px; line-height: 1.4; }
+  .lis-box.b-prefill { border-top: 3px solid var(--lis-prefill); }
+  .lis-box.b-decode { border-top: 3px solid var(--lis-decode); }
+  .lis-box.b-kv { border-top: 3px solid var(--lis-kv); }
+  .lis-box.b-batch { border-top: 3px solid var(--lis-batch); }
+  .lis-arr {
+    font-family: var(--mono); font-size: 14px; color: var(--text-3);
+    display: flex; align-items: center;
+  }
+
+  .lis-mem {
+    border: 1px solid var(--border); border-radius: var(--radius-sm);
+    background: #fff; padding: 12px; margin: 10px 0;
+  }
+  .lis-mem-bar {
+    height: 18px; border-radius: 6px; background: var(--bg-soft);
+    border: 1px solid var(--border); overflow: hidden; display: flex; margin: 8px 0 4px;
+  }
+  .lis-mem-bar span { display: block; height: 100%; }
+  .lis-mem-bar .w { background: var(--lis-kv); }
+  .lis-mem-bar .m { background: var(--lis-prefill); opacity: .55; }
+  .lis-mem-bar .f { background: var(--ok-soft); }
+  .lis-mem-legend {
+    display: flex; flex-wrap: wrap; gap: 12px; font-size: 12px; color: var(--text-2); margin-top: 6px;
+  }
+  .lis-mem-legend i {
+    display: inline-block; width: 10px; height: 10px; border-radius: 2px;
+    margin-right: 4px; vertical-align: -1px;
+  }
+
+  /* Demo */
+  .lis-demo-controls {
+    display: flex; flex-wrap: wrap; gap: 8px; margin: 10px 0 8px; align-items: center;
+  }
+  .lis-metric {
+    display: flex; flex-wrap: wrap; gap: 14px; margin: 8px 0 12px;
+    font-size: 13px; color: var(--text-2);
+  }
+  .lis-metric strong { color: var(--text); font-family: var(--mono); font-size: 12.5px; }
+  .lis-panels {
+    display: grid; grid-template-columns: 1.1fr 1fr; gap: 12px; margin: 10px 0;
+  }
+  @media (max-width: 720px) { .lis-panels { grid-template-columns: 1fr; } }
+  .lis-panel {
+    border: 1px solid var(--border); border-radius: var(--radius-sm);
+    background: #fff; padding: 12px;
+  }
+  .lis-panel .pt {
+    font-family: var(--mono); font-size: 11px; color: var(--text-3);
+    letter-spacing: .04em; margin-bottom: 8px; font-weight: 600;
+  }
+  .lis-slot-row {
+    display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; min-height: 36px;
+  }
+  .lis-slot {
+    border: 1px solid var(--border-strong); border-radius: 6px;
+    padding: 6px 8px; font-family: var(--mono); font-size: 11px;
+    background: var(--bg-soft); color: var(--text-2); min-width: 72px; text-align: center;
+  }
+  .lis-slot.prefill { background: var(--lis-prefill-soft); border-color: var(--lis-prefill); color: var(--lis-prefill); font-weight: 600; }
+  .lis-slot.decode { background: var(--lis-decode-soft); border-color: var(--lis-decode); color: var(--lis-decode); font-weight: 600; }
+  .lis-slot.wait { background: var(--warn-soft); border-color: var(--warn); color: var(--warn); }
+  .lis-slot.idle { opacity: .55; border-style: dashed; }
+  .lis-kv-grid {
+    display: grid; grid-template-columns: repeat(8, 1fr); gap: 3px; margin-top: 4px;
+  }
+  .lis-kv-cell {
+    aspect-ratio: 1; border-radius: 3px; border: 1px solid var(--border);
+    background: var(--bg-soft);
+  }
+  .lis-kv-cell.on { background: var(--lis-kv); border-color: var(--lis-kv); }
+  .lis-kv-cell.hot { background: var(--lis-batch); border-color: var(--lis-batch); }
+  .lis-timeline {
+    border: 1px solid var(--border); border-radius: var(--radius-sm);
+    background: var(--bg-soft); padding: 10px 12px; margin-top: 8px;
+    font-family: var(--mono); font-size: 11.5px; line-height: 1.7; color: var(--text-2);
+    max-height: 160px; overflow-y: auto;
+  }
+  .lis-timeline .ev { color: var(--text); }
+  .lis-verdict {
+    border: 1px solid var(--border); border-radius: var(--radius-sm);
+    padding: 12px; margin: 8px 0; background: #fff; font-size: 13.5px; line-height: 1.6;
+  }
+  .lis-verdict.tone-ok { border-left: 3px solid var(--ok); background: var(--ok-soft); }
+  .lis-verdict.tone-lock { border-left: 3px solid var(--warn); background: var(--warn-soft); }
+  .lis-verdict.tone-bad { border-left: 3px solid var(--bad); background: var(--bad-soft); }
+</style>
+
+<div id="lis-root">
+
+<section id="s1">
+  <div class="sec-head">
+    <span class="sec-num">01</span>
+    <h2>總覽與定位</h2>
+  </div>
+  <p class="sec-sub">為什麼 LLM 特別難 serve：自回歸、串流、GPU 記憶體與延遲／吞吐的交錯約束。</p>
+
+  <p>RAG 與 Agent 討論的是「怎麼組上下文、怎麼呼叫模型」；本篇切到<strong>純後端 infra</strong>：模型權重已就緒，你要把它變成可水平擴充、可觀測、可對 SLA 負責的 <strong>Inference Serving</strong>。不談訓練、微調或資料集——只談請求進來之後，GPU 上發生什麼、哪裡會爆。</p>
+
+  <div class="lis-pain">
+    <div class="lis-pain-card p1">
+      <div class="pt">自回歸不可並行到「一個答案」</div>
+      <div class="ps">下一個 token 依賴前面所有 token。使用者看到的是串流（streaming），系統看到的是逐步 decode 的長尾工作。</div>
+    </div>
+    <div class="lis-pain-card p2">
+      <div class="pt">狀態比權重更吃顯存</div>
+      <div class="ps">Attention 的 <strong>KV Cache</strong> 隨序列長度與並發線性成長；顯存耗盡前，吞吐早已被排程策略綁死。</div>
+    </div>
+    <div class="lis-pain-card p3">
+      <div class="pt">兩個互相打架的 SLA</div>
+      <div class="ps"><strong>TTFT</strong>（Time to First Token）要短、互動感才好；<strong>throughput</strong>（tokens/s 或 req/s）要高，單位 GPU 成本才划算。</div>
+    </div>
+  </div>
+
+  <div class="lis-pipeline">
+    <div class="lis-pipe-row">
+      <div class="lis-box b-prefill"><div class="bn">Prefill</div><div class="bs">吃完整 prompt<br>建 KV · 定 TTFT</div></div>
+      <span class="lis-arr">→</span>
+      <div class="lis-box b-decode"><div class="bn">Decode</div><div class="bs">逐 token 產出<br>串流回客戶端</div></div>
+      <span class="lis-arr">→</span>
+      <div class="lis-box b-kv"><div class="bn">KV Cache</div><div class="bs">每層 K/V<br>佔 GPU HBM</div></div>
+      <span class="lis-arr">→</span>
+      <div class="lis-box b-batch"><div class="bn">Batching</div><div class="bs">連續批處理<br>抬吞吐、管排隊</div></div>
+    </div>
+  </div>
+
+  <div class="callout accent">
+    <div class="c-title"><span class="ic">座標</span>與鄰近主題的切分</div>
+    <p>建議先讀過 <em>RAG 架構</em> 再進來（軟依賴：理解「長 prompt 從哪來」）。本篇不重複檢索／chunking；也不談 Agent loop 或 tool calling——那些是編排層。這裡只回答：<strong>同一個模型權重，如何在 GPU 上穩定地服務多用戶推論</strong>。</p>
+  </div>
+
+  <div class="oneliner">
+    <b>一句話答法</b>LLM serving 難在自回歸 + KV Cache 吃顯存 + TTFT／吞吐互相拉扯；工程核心是 Prefill/Decode 分離、連續批處理與記憶體感知排程。
+  </div>
+</section>
+
+<section id="s2">
+  <div class="sec-head">
+    <span class="sec-num">02</span>
+    <h2>Prefill、Decode 與 Token Streaming</h2>
+  </div>
+  <p class="sec-sub">一次請求在時間軸上拆成兩段計算型態，串流只是 Decode 階段對外的呈現。</p>
+
+  <div class="lis-phases">
+    <div class="lis-phase prefill">
+      <div class="st">Prefill（提示消化）</div>
+      <div class="ss">COMPUTE-BOUND · 定 TTFT</div>
+      <ul>
+        <li>一次處理完整 prompt（含 system／RAG context）</li>
+        <li>為每個 transformer 層寫入初始 KV Cache</li>
+        <li>通常可用高度並行的矩陣運算吃滿 GPU</li>
+        <li>長度一拉長（長 context），TTFT 幾乎線性惡化</li>
+      </ul>
+    </div>
+    <div class="lis-phase decode">
+      <div class="st">Decode（自回歸產出）</div>
+      <div class="ss">MEMORY-BOUND · 定體感速度</div>
+      <ul>
+        <li>每步只產出約 1 個 token，再 append 進 KV</li>
+        <li>算力密度低：瓶頸常是讀取巨大 KV／權重頻寬</li>
+        <li>透過 SSE／WebSocket／gRPC stream 推給客戶端</li>
+        <li>結束條件：EOS、max_tokens、或客戶端取消</li>
+      </ul>
+    </div>
+  </div>
+
+  <p>產品面的「打字機效果」來自 Decode 串流；Infra 面則必須分開優化兩段：Prefill 要降 <var>TTFT</var>，Decode 要抬 <var>TPOT</var>（Time Per Output Token）與整體 tokens/s。把兩者綁在同一個同步 batch 裡，往往會讓長 prompt 請求拖死短請求的首 token。</p>
+
+  <div class="lis-flow">
+    <span class="lis-chip prefill">prompt tokens</span>
+    <span class="lis-chip op">→ prefill →</span>
+    <span class="lis-chip kv">KV written</span>
+    <span class="lis-chip op">→ loop →</span>
+    <span class="lis-chip decode">token<sub>t</sub></span>
+    <span class="lis-chip op">stream</span>
+    <span class="lis-chip decode">token<sub>t+1</sub></span>
+    <span class="lis-chip op">…</span>
+  </div>
+
+  <div class="callout warn">
+    <div class="c-title"><span class="ic">陷阱</span>把「模型延遲」當單一數字</div>
+    <p>面試或監控若只報一個 p99 latency，會掩蓋真相：使用者真正在意的是 TTFT 與後續 token 節奏。長答案請求的 wall-clock 幾乎必然高，不代表服務壞了。</p>
+  </div>
+
+  <div class="oneliner">
+    <b>一句話答法</b>Prefill 吃完整 prompt、決定 TTFT；Decode 逐步產 token 並串流；兩者計算特性不同，必須分開量測與排程。
+  </div>
+</section>
+
+<section id="s3">
+  <div class="sec-head">
+    <span class="sec-num">03</span>
+    <h2>Continuous Batching：把 GPU 從「等人」變成「一直算」</h2>
+  </div>
+  <p class="sec-sub">靜態 batch 等齊才跑；連續批處理讓請求動態進出 iteration，抬高吞吐。</p>
+
+  <p>傳統離線推論習慣「湊滿 <var>B</var> 筆再跑」：對 LLM 幾乎不可用——有人要 8 個 token、有人要 800 個，齊步走會讓短請求乾等、長請求佔滿 slot。現代 serving runtime（vLLM、TGI、TensorRT-LLM 等）的核心是 <strong>Continuous Batching</strong>（又稱 iteration-level scheduling）：</p>
+
+  <ul>
+    <li>每個 decode step 組成一個「當前活躍集合」</li>
+    <li>請求可在 step 邊界 <strong>加入</strong>（新 prefill 完成）或 <strong>離開</strong>（EOS／取消）</li>
+    <li>GPU 幾乎每一步都在算，而不是等最慢那筆結束</li>
+  </ul>
+
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>策略</th>
+          <th>排程粒度</th>
+          <th>短請求 TTFT</th>
+          <th>GPU 利用率</th>
+          <th>實作複雜度</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>靜態 Batch</td>
+          <td>整批起迄對齊</td>
+          <td class="hl">差（等人）</td>
+          <td>低～中</td>
+          <td>低</td>
+        </tr>
+        <tr>
+          <td>Continuous Batching</td>
+          <td>每個 decode step</td>
+          <td class="hl">較穩</td>
+          <td>高</td>
+          <td>中～高</td>
+        </tr>
+        <tr>
+          <td>Prefill/Decode 分離佇列</td>
+          <td>兩類 worker／優先權</td>
+          <td class="hl">可調優</td>
+          <td>高（需配額）</td>
+          <td>高</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="cap">Batching 不是越大越好：batch 越大吞吐通常越高，但單請求的 TTFT／TPOT 會被同批鄰居拖累。</p>
+
+  <div class="callout accent">
+    <div class="c-title"><span class="ic">關鍵</span>批處理換的是「攤提」</div>
+    <p>權重載入與 kernel launch 成本被多請求攤提；Decode 又偏 memory-bound，多序列一起算能更有效吃滿記憶體頻寬。代價是排程、分頁 KV、與公平性（長請求饿死短請求）都變難。</p>
+  </div>
+
+  <div class="oneliner">
+    <b>一句話答法</b>Continuous batching 在每個 decode step 動態重組活躍請求，避免靜態 batch 齊步走，是現代 LLM serving 抬吞吐的基本盤。
+  </div>
+</section>
+
+<section id="s4">
+  <div class="sec-head">
+    <span class="sec-num">04</span>
+    <h2>KV Cache 與 GPU 記憶體瓶頸</h2>
+  </div>
+  <p class="sec-sub">顯存同時要扛權重、啟動配置與隨序列成長的 K/V；爆了就只能拒單或換頁。</p>
+
+  <p>對 decoder-only Transformer，每個 token、每一層都要快取 Key／Value，後續 decode 才不必重算整段歷史。粗估：</p>
+
+  <div class="formula">KV_bytes ≈ 2 × layers × kv_heads × head_dim × seq_len × dtype_bytes × batch</div>
+
+  <p>因此並發 <var>N</var> 個長對話時，KV 往往比「再塞一個 replica」更先撞牆。工程上常見手段：</p>
+
+  <ul>
+    <li><strong>PagedAttention / 分頁 KV</strong>：像 OS 分頁一樣按 block 配置，減少碎片、支援動態長度</li>
+    <li><strong>Prefix caching</strong>：共用 system prompt／RAG 前綴的 KV，降重複 Prefill</li>
+    <li><strong>量化 KV</strong>（FP8／INT8）：用精度換容量，需評估品質回歸</li>
+    <li><strong>限制 max_concurrency × max_context</strong>：最樸素也最有效的容量規劃</li>
+  </ul>
+
+  <div class="lis-mem">
+    <div style="font-family:var(--mono);font-size:11px;color:var(--text-3);letter-spacing:.04em;font-weight:600;">示意 · 單卡 HBM 切分（非精確比例）</div>
+    <div class="lis-mem-bar" aria-hidden="true">
+      <span class="w" style="width:42%"></span>
+      <span class="m" style="width:18%"></span>
+      <span class="f" style="width:40%"></span>
+    </div>
+    <div class="lis-mem-legend">
+      <span><i style="background:var(--lis-kv)"></i>Weights</span>
+      <span><i style="background:var(--lis-prefill);opacity:.55"></i>Activations / workspace</span>
+      <span><i style="background:var(--ok-soft);border:1px solid var(--border)"></i>KV Cache 可成長空間</span>
+    </div>
+  </div>
+
+  <div class="callout warn">
+    <div class="c-title"><span class="ic">陷阱</span>只看「模型放不放得進卡」</div>
+    <p>7B 權重量化後可能輕鬆進 24GB，但 32k context × 高並發會把剩餘 HBM 吃光。容量規劃要以 <strong>權重 + 目標並發 × 目標上下文的 KV</strong> 一起算，而不是只看 checkpoint 大小。</p>
+  </div>
+
+  <div class="oneliner">
+    <b>一句話答法</b>KV Cache 隨 seq_len 與並發成長，常比權重更早成為顯存瓶頸；分頁 KV、prefix cache 與並發上限是標準對策。
+  </div>
+</section>
+
+<section id="s5">
+  <div class="sec-head">
+    <span class="sec-num">05</span>
+    <h2>TTFT vs Throughput：怎麼取捨</h2>
+  </div>
+  <p class="sec-sub">互動產品護 TTFT；批次摘要／離線評測護吞吐；同一集群常用隔離與優先權拆開。</p>
+
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>優化方向</th>
+          <th>常見手法</th>
+          <th>TTFT</th>
+          <th>Throughput</th>
+          <th>風險</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>加大 continuous batch</td>
+          <td>提高 max_num_seqs / 佇列深度</td>
+          <td>變差</td>
+          <td class="hl">變好</td>
+          <td>長尾延遲、不公平</td>
+        </tr>
+        <tr>
+          <td>Prefill 優先／分離</td>
+          <td>獨立 prefill worker、chunked prefill</td>
+          <td class="hl">變好</td>
+          <td>可能略降</td>
+          <td>調度複雜、資源切分</td>
+        </tr>
+        <tr>
+          <td>縮短有效 prompt</td>
+          <td>RAG top-k、摘要、prompt cache</td>
+          <td class="hl">變好</td>
+          <td class="hl">變好</td>
+          <td>品質／召回取捨（屬應用層）</td>
+        </tr>
+        <tr>
+          <td>投機解碼 / 小模型草稿</td>
+          <td>speculative decoding</td>
+          <td>視情況</td>
+          <td class="hl">常變好</td>
+          <td>接受率低時白算</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="cap">沒有免費午餐：多數 serving 旋鈕是在「體感延遲」與「單位 GPU 產出」之間滑動。</p>
+
+  <p>實務上建議用產品 SLA 反推：聊天／客服把 TTFT p95 當硬約束，再在約束內最大化 tokens/s；離線評測或大量摘要任務則可接受較高 TTFT，換取更高 batch。必要時<strong>分池</strong>（interactive pool vs batch pool），比在單一佇列上調一個神奇參數更穩。</p>
+
+  <div class="oneliner">
+    <b>一句話答法</b>TTFT 與 throughput 常反向：加大 batch 抬吞吐但傷首 token；互動流量護 TTFT、批次流量護吞吐，必要時分池。
+  </div>
+</section>
+
+<section id="s6">
+  <div class="sec-head">
+    <span class="sec-num">06</span>
+    <h2>互動 Demo：Batching 與 KV 如何改寫延遲／吞吐</h2>
+  </div>
+  <p class="sec-sub">同一組請求，切換排程策略，觀察 GPU slot、KV 佔用與 TTFT／吞吐指標。</p>
+
+  <div class="demo" id="demo-lis-serve">
+    <div class="demo-bar">
+      <span class="label">互動 · Inference Scheduler</span>
+      <span class="label" style="text-transform:none;font-family:var(--sans);font-size:12px;color:var(--text-2)">切換策略後按「模擬一步」，看 batch 與 KV 的取捨</span>
+    </div>
+    <div class="demo-body">
+      <p style="margin:0 0 8px;font-size:13px;color:var(--text-2);line-height:1.55;">場景：4 個並發請求（短問答 ×2、長 RAG 上下文 ×1、長答案摘要 ×1）。策略改變的是<strong>誰能進 GPU、KV 怎麼長</strong>——數字為教學示意，非真實 kernel 量測。</p>
+
+      <div class="seg" role="group" aria-label="排程策略">
+        <button data-sc="static" aria-pressed="true">靜態 Batch</button>
+        <button data-sc="continuous" aria-pressed="false">Continuous</button>
+        <button data-sc="kv-tight" aria-pressed="false">Continuous + KV 緊縮</button>
+      </div>
+
+      <div class="lis-demo-controls">
+        <button class="btn primary" id="lis-btn-step">模擬一步</button>
+        <button class="btn" id="lis-btn-reset">重置</button>
+      </div>
+
+      <div class="lis-metric">
+        <span>步驟 <strong id="lis-m-step">0</strong></span>
+        <span>活躍 batch <strong id="lis-m-batch">—</strong></span>
+        <span>TTFT（示意） <strong id="lis-m-ttft">—</strong></span>
+        <span>吞吐 tokens/s <strong id="lis-m-tps">—</strong></span>
+        <span>KV 佔用 <strong id="lis-m-kv">—</strong></span>
+      </div>
+
+      <div class="lis-panels">
+        <div class="lis-panel">
+          <div class="pt">GPU ACTIVE SLOTS</div>
+          <div class="lis-slot-row" id="lis-slots"></div>
+          <div class="legend">
+            <span><i class="dot ns-wait"></i>Prefill</span>
+            <span><i class="dot ns-ok"></i>Decode</span>
+            <span><i class="dot ns-lock"></i>排隊</span>
+            <span><i class="dot ns-idle"></i>空閒</span>
+          </div>
+        </div>
+        <div class="lis-panel">
+          <div class="pt">KV CACHE BLOCKS（32 blocks）</div>
+          <div class="lis-kv-grid" id="lis-kv-grid" aria-hidden="true"></div>
+        </div>
+      </div>
+
+      <div class="status-line" id="lis-status">選擇策略後按「模擬一步」。靜態 Batch 會等齊四筆；Continuous 允許動態進出。</div>
+      <div class="lis-verdict" id="lis-verdict">判定尚未產生——跑完數步後會摘要 TTFT／吞吐／KV 壓力。</div>
+      <div class="lis-timeline" id="lis-timeline" aria-live="polite"></div>
+    </div>
+  </div>
+
+  <div class="oneliner">
+    <b>一句話答法</b>Demo 要傳達的不是絕對數字，而是機制：靜態齊步走傷 TTFT；連續批處理抬吞吐；KV 空間不夠時再聰明的 scheduler 也只能拒單或換頁。
+  </div>
+</section>
+
+<section id="s7">
+  <div class="sec-head">
+    <span class="sec-num">07</span>
+    <h2>面試折衷與實務選型</h2>
+  </div>
+  <p class="sec-sub">把 serving 講成可落地的容量、SLA 與觀測問題，而不是背一串框架名稱。</p>
+
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>面試常問</th>
+          <th>建議答法骨架</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>為什麼 LLM API 比一般 REST 難擴？</td>
+          <td>自回歸、狀態（KV）隨長度成長、串流長連線、延遲指標要拆 TTFT／TPOT。</td>
+        </tr>
+        <tr>
+          <td>如何提高 GPU 利用率？</td>
+          <td>Continuous batching、paged KV、prefix cache；必要時 speculative decoding。</td>
+        </tr>
+        <tr>
+          <td>如何保證互動體驗？</td>
+          <td>TTFT SLO、prefill 優先或分池、限制超長 context、背壓與排隊可見性。</td>
+        </tr>
+        <tr>
+          <td>顯存爆了怎麼辦？</td>
+          <td>降並發、縮 max_len、KV 量化、分頁換出、拒絕過長請求並回報可重試。</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="callout accent">
+    <div class="c-title"><span class="ic">選型</span>runtime 怎麼挑（高層）</div>
+    <p>先定義 SLA 與上下文分佈，再選 runtime／並行策略。開源棧常見路徑是「連續批處理 + 分頁 KV」；自建需補齊：佇列背壓、每請求取消、token 級計費、以及 Prefill/Decode 指標儀表板。框架名會變，這幾塊不會。</p>
+  </div>
+
+  <div class="callout warn">
+    <div class="c-title"><span class="ic">邊界</span>本篇刻意不覆蓋</div>
+    <p>模型訓練、LoRA 熱更新、多模型路由、以及 Agent／Tool 編排都不在範圍。那些會改變「請求長什麼樣」，但不改變「GPU 上 Prefill → Decode → KV」這條物理約束。</p>
+  </div>
+
+  <div class="oneliner">
+    <b>一句話答法</b>面試先講 Prefill/Decode、KV、continuous batching 與 TTFT／吞吐取捨；再補容量公式與分池，比堆砌產品名更有說服力。
+  </div>
+</section>
+
+</div>
+
+      </div>
+    </main>
+  </div>
+
+  <script>
+    "use strict";
+    document.addEventListener("DOMContentLoaded", function () {
+      /* ===== TOC scrollspy, mobile accordion & desktop collapse ===== */
+      (function () {
+        var links = Array.prototype.slice.call(document.querySelectorAll(".toc-nav a"));
+        var map = {};
+        links.forEach(function (a) {
+          var href = a.getAttribute("href");
+          if (href && href.startsWith("#")) {
+            map[href.slice(1)] = a;
+          }
+        });
+        var secs = links.map(function (a) {
+          var href = a.getAttribute("href");
+          return href && href.startsWith("#") ? document.getElementById(href.slice(1)) : null;
+        }).filter(Boolean);
+
+        if (secs.length > 0 && typeof IntersectionObserver !== "undefined") {
+          var obs = new IntersectionObserver(function (entries) {
+            entries.forEach(function (e) {
+              if (e.isIntersecting) {
+                links.forEach(function (l) { l.classList.remove("active"); });
+                var act = map[e.target.id];
+                if (act) act.classList.add("active");
+              }
+            });
+          }, { rootMargin: "-20% 0px -70% 0px", threshold: 0 });
+          secs.forEach(function (s) { obs.observe(s); });
+        }
+
+        /* mobile：目錄 accordion（≤920px） */
+        var toggle = document.querySelector(".toc-toggle");
+        var nav = document.querySelector(".toc-nav");
+        if (toggle && nav) {
+          toggle.addEventListener("click", function () {
+            var open = nav.classList.toggle("open");
+            toggle.setAttribute("aria-expanded", open ? "true" : "false");
+          });
+          nav.addEventListener("click", function (e) {
+            if (e.target.closest("a") && window.innerWidth <= 920) {
+              nav.classList.remove("open");
+              toggle.setAttribute("aria-expanded", "false");
+            }
+          });
+        }
+
+        /* desktop：收合側欄（預設展開；不持久化） */
+        var collapseBtn = document.querySelector(".toc-collapse");
+        var reopenBtn = document.querySelector(".toc-reopen");
+        function setTocCollapsed(collapsed) {
+          document.body.classList.toggle("toc-collapsed", collapsed);
+          if (collapseBtn) collapseBtn.setAttribute("aria-expanded", collapsed ? "false" : "true");
+          if (reopenBtn) reopenBtn.setAttribute("aria-expanded", collapsed ? "false" : "true");
+          if (collapsed && reopenBtn) reopenBtn.focus();
+          else if (!collapsed && collapseBtn) collapseBtn.focus();
+        }
+        if (collapseBtn) {
+          collapseBtn.addEventListener("click", function () { setTocCollapsed(true); });
+        }
+        if (reopenBtn) {
+          reopenBtn.addEventListener("click", function () { setTocCollapsed(false); });
+        }
+      })();
+    });
+  </script>
+
+  
+<script>
+(function () {
+  "use strict";
+
+  var strategy = "static";
+  var step = 0;
+  var maxSteps = 6;
+
+  var statusEl = document.getElementById("lis-status");
+  var verdictEl = document.getElementById("lis-verdict");
+  var slotsEl = document.getElementById("lis-slots");
+  var kvGridEl = document.getElementById("lis-kv-grid");
+  var timelineEl = document.getElementById("lis-timeline");
+  var btnStep = document.getElementById("lis-btn-step");
+  var btnReset = document.getElementById("lis-btn-reset");
+  var mStep = document.getElementById("lis-m-step");
+  var mBatch = document.getElementById("lis-m-batch");
+  var mTtft = document.getElementById("lis-m-ttft");
+  var mTps = document.getElementById("lis-m-tps");
+  var mKv = document.getElementById("lis-m-kv");
+  var segRoot = document.querySelector("#demo-lis-serve .seg");
+
+  var REQ = [
+    { id: "A", label: "A·短問", kind: "short" },
+    { id: "B", label: "B·短問", kind: "short" },
+    { id: "C", label: "C·長RAG", kind: "rag" },
+    { id: "D", label: "D·長答案", kind: "long" }
+  ];
+
+  /* Each strategy: frames[0..n] describe GPU slots + kv blocks used + metrics + log */
+  var FRAMES = {
+    static: [
+      {
+        slots: [
+          { t: "A·等齊", c: "wait" },
+          { t: "B·等齊", c: "wait" },
+          { t: "C·Prefill", c: "prefill" },
+          { t: "D·等齊", c: "wait" }
+        ],
+        kv: 6,
+        batch: "1／等齊中",
+        ttft: "—（短請求被擋）",
+        tps: "0",
+        status: "靜態 Batch：必須湊滿同一批才開始 decode。C 的長 Prefill 先佔住，A/B/D 乾等。",
+        log: "t0  靜態批：等待四筆對齊；C 開始 prefill（長 context）"
+      },
+      {
+        slots: [
+          { t: "A·等齊", c: "wait" },
+          { t: "B·等齊", c: "wait" },
+          { t: "C·Prefill", c: "prefill" },
+          { t: "D·Prefill", c: "prefill" }
+        ],
+        kv: 14,
+        batch: "2／仍未齊",
+        ttft: "A/B 仍 0 token",
+        tps: "~40（僅 prefill）",
+        status: "C、D 陸續 prefill，KV 快速膨脹；短請求仍未拿到首 token。",
+        log: "t1  C/D prefill 寫入 KV；A/B 繼續排隊"
+      },
+      {
+        slots: [
+          { t: "A·Decode", c: "decode" },
+          { t: "B·Decode", c: "decode" },
+          { t: "C·Decode", c: "decode" },
+          { t: "D·Decode", c: "decode" }
+        ],
+        kv: 22,
+        batch: "4（齊步 decode）",
+        ttft: "A≈420ms（被拖）",
+        tps: "~180",
+        status: "四筆終於一起 decode。吞吐看起來「一次很多」，但 A/B 的 TTFT 已被長請求拖壞。",
+        log: "t2  批對齊完成 → 同步 decode；短請求 TTFT 惡化"
+      },
+      {
+        slots: [
+          { t: "A·完成", c: "idle" },
+          { t: "B·完成", c: "idle" },
+          { t: "C·Decode", c: "decode" },
+          { t: "D·Decode", c: "decode" }
+        ],
+        kv: 24,
+        batch: "2（尾部長請求）",
+        ttft: "A≈420ms",
+        tps: "~110（槽位閒置）",
+        status: "A/B 早已 EOS，但靜態批常要等整批結束或留下空洞——槽位與 KV 被長尾佔用。",
+        log: "t3  A/B 結束；C/D 長尾仍佔 batch／KV"
+      },
+      {
+        slots: [
+          { t: "—", c: "idle" },
+          { t: "—", c: "idle" },
+          { t: "C·Decode", c: "decode" },
+          { t: "D·Decode", c: "decode" }
+        ],
+        kv: 26,
+        batch: "2",
+        ttft: "A≈420ms · B≈420ms",
+        tps: "~95",
+        status: "長尾拖住資源。靜態策略的典型病徵：平均利用率看起來還行，互動 SLA 已碎。",
+        log: "t4  長尾 decode；短請求體驗已鎖定為差"
+      },
+      {
+        slots: [
+          { t: "—", c: "idle" },
+          { t: "—", c: "idle" },
+          { t: "C·完成", c: "idle" },
+          { t: "D·完成", c: "idle" }
+        ],
+        kv: 8,
+        batch: "0",
+        ttft: "A/B≈420ms（差）",
+        tps: "峰值高、均值不穩",
+        status: "結束。靜態 Batch：峰值吞吐可觀，但 TTFT 被齊步走懲罰。",
+        log: "t5  批結束，KV 釋放",
+        verdictTone: "tone-bad",
+        verdict: "判定：靜態 Batch 不適合互動 LLM。長 Prefill／長答案會綁架短請求的首 token；GPU 看似忙碌，SLA 卻掛了。"
+      }
+    ],
+    continuous: [
+      {
+        slots: [
+          { t: "A·Prefill", c: "prefill" },
+          { t: "B·Prefill", c: "prefill" },
+          { t: "—", c: "idle" },
+          { t: "—", c: "idle" }
+        ],
+        kv: 4,
+        batch: "2（動態）",
+        ttft: "A/B 即將出首 token",
+        tps: "~60",
+        status: "Continuous：短請求立刻進場 prefill，不必等 C/D 到齊。",
+        log: "t0  A/B 立即 prefill；C/D 在佇列"
+      },
+      {
+        slots: [
+          { t: "A·Decode", c: "decode" },
+          { t: "B·Decode", c: "decode" },
+          { t: "C·Prefill", c: "prefill" },
+          { t: "—", c: "idle" }
+        ],
+        kv: 12,
+        batch: "3",
+        ttft: "A≈90ms · B≈95ms",
+        tps: "~210",
+        status: "A/B 已在 decode 串流；C 的長 Prefill 併入同一步 iteration，不阻擋已開始的短請求。",
+        log: "t1  A/B decode；C 加入 prefill（iteration-level）"
+      },
+      {
+        slots: [
+          { t: "A·完成", c: "idle" },
+          { t: "B·Decode", c: "decode" },
+          { t: "C·Decode", c: "decode" },
+          { t: "D·Prefill", c: "prefill" }
+        ],
+        kv: 18,
+        batch: "3",
+        ttft: "A≈90ms（佳）",
+        tps: "~260",
+        status: "完成的請求立刻讓出 slot；D 動態加入。吞吐上升，TTFT 仍受控。",
+        log: "t2  A EOS 離場；D 加入；batch 重組"
+      },
+      {
+        slots: [
+          { t: "—", c: "idle" },
+          { t: "B·完成", c: "idle" },
+          { t: "C·Decode", c: "decode" },
+          { t: "D·Decode", c: "decode" }
+        ],
+        kv: 20,
+        batch: "2",
+        ttft: "A/B≈90–95ms",
+        tps: "~240",
+        status: "活躍集合只剩長請求。空出來的容量可接新互動流量（本 demo 未再注入）。",
+        log: "t3  短請求清空；C/D 續跑"
+      },
+      {
+        slots: [
+          { t: "—", c: "idle" },
+          { t: "—", c: "idle" },
+          { t: "C·Decode", c: "decode" },
+          { t: "D·Decode", c: "decode" }
+        ],
+        kv: 22,
+        batch: "2",
+        ttft: "維持前值",
+        tps: "~220",
+        status: "KV 隨 decode 緩步成長，但仍在預算內；scheduler 健康。",
+        log: "t4  KV 穩定成長；無拒單"
+      },
+      {
+        slots: [
+          { t: "—", c: "idle" },
+          { t: "—", c: "idle" },
+          { t: "C·完成", c: "idle" },
+          { t: "D·完成", c: "idle" }
+        ],
+        kv: 6,
+        batch: "0",
+        ttft: "A/B≈90ms（佳）",
+        tps: "高且平穩",
+        status: "結束。Continuous batching：短請求 TTFT 明顯改善，整體 tokens/s 也更高更穩。",
+        log: "t5  全部完成，KV 釋放",
+        verdictTone: "tone-ok",
+        verdict: "判定：Continuous batching 同時改善互動 TTFT 與平均吞吐。這是現代 LLM serving 的預設答案——再往上才是分頁 KV、prefix cache、分池。"
+      }
+    ],
+    "kv-tight": [
+      {
+        slots: [
+          { t: "A·Prefill", c: "prefill" },
+          { t: "B·Prefill", c: "prefill" },
+          { t: "—", c: "idle" },
+          { t: "—", c: "idle" }
+        ],
+        kv: 4,
+        batch: "2",
+        ttft: "A/B 進行中",
+        tps: "~60",
+        status: "策略仍是 Continuous，但 HBM 預算被刻意收緊（示意上限 ≈18 blocks）。",
+        log: "t0  KV 預算緊縮模式；A/B prefill"
+      },
+      {
+        slots: [
+          { t: "A·Decode", c: "decode" },
+          { t: "B·Decode", c: "decode" },
+          { t: "C·Prefill", c: "prefill" },
+          { t: "—", c: "idle" }
+        ],
+        kv: 14,
+        batch: "3",
+        ttft: "A≈90ms",
+        tps: "~200",
+        status: "C 的長 context 開始寫 KV，佔用逼近天花板。",
+        log: "t1  C 長 prefill → KV 急升"
+      },
+      {
+        slots: [
+          { t: "A·完成", c: "idle" },
+          { t: "B·Decode", c: "decode" },
+          { t: "C·Decode", c: "decode" },
+          { t: "D·拒單", c: "wait" }
+        ],
+        kv: 18,
+        batch: "2（D 被擋）",
+        ttft: "A≈90ms · D=REJECT",
+        tps: "~190",
+        status: "KV 觸頂：scheduler 拒絕或延後 D（admission control）。再聰明的 batching 也無法憑空變出 HBM。",
+        log: "t2  KV=18/18 → D admission rejected／queued"
+      },
+      {
+        slots: [
+          { t: "—", c: "idle" },
+          { t: "B·完成", c: "idle" },
+          { t: "C·Decode", c: "decode" },
+          { t: "D·拒單", c: "wait" }
+        ],
+        kv: 17,
+        batch: "1",
+        ttft: "D 仍在等 KV",
+        tps: "~120",
+        status: "B 結束釋出一點空間，但仍不夠 D 的預估 KV → 繼續擋。",
+        log: "t3  釋放不足；D 仍無法入場"
+      },
+      {
+        slots: [
+          { t: "—", c: "idle" },
+          { t: "—", c: "idle" },
+          { t: "C·Decode", c: "decode" },
+          { t: "D·等KV", c: "wait" }
+        ],
+        kv: 16,
+        batch: "1",
+        ttft: "互動 OK；D 飢餓",
+        tps: "~100",
+        status: "吞吐下降不是算力沒了，是記憶體 admission 在限流。監控上要分開看「算力飽和」vs「KV 飽和」。",
+        log: "t4  記憶體瓶頸主導；非 compute 瓶頸"
+      },
+      {
+        slots: [
+          { t: "—", c: "idle" },
+          { t: "—", c: "idle" },
+          { t: "C·完成", c: "idle" },
+          { t: "D·Prefill", c: "prefill" }
+        ],
+        kv: 10,
+        batch: "1（D 遲進）",
+        ttft: "D 嚴重惡化",
+        tps: "前半高、後半塌",
+        status: "C 結束後 D 才進場——成功率靠排隊換來，TTFT 已不可接受。治本是加容量、縮 context、或分池。",
+        log: "t5  C 釋放後 D 才 prefill",
+        verdictTone: "tone-lock",
+        verdict: "判定：Continuous 救得了調度，救不了顯存數學。KV 緊縮時必須搭配 admission control、max_concurrency、或更短有效 prompt；否則長請求會讓後到者飢餓。"
+      }
+    ]
+  };
+
+  function setMetrics(frame) {
+    mStep.textContent = String(step);
+    mBatch.textContent = frame.batch;
+    mTtft.textContent = frame.ttft;
+    mTps.textContent = frame.tps;
+    mKv.textContent = frame.kv + " / 32 blocks";
+  }
+
+  function renderSlots(slots) {
+    slotsEl.innerHTML = "";
+    slots.forEach(function (s) {
+      var el = document.createElement("div");
+      el.className = "lis-slot " + s.c;
+      el.textContent = s.t;
+      slotsEl.appendChild(el);
+    });
+  }
+
+  function renderKv(used) {
+    kvGridEl.innerHTML = "";
+    var i;
+    for (i = 0; i < 32; i++) {
+      var cell = document.createElement("div");
+      cell.className = "lis-kv-cell";
+      if (i < used) {
+        cell.className += i >= 16 && strategy === "kv-tight" ? " hot" : " on";
+      }
+      kvGridEl.appendChild(cell);
+    }
+  }
+
+  function appendLog(line) {
+    var div = document.createElement("div");
+    div.innerHTML = '<span class="ev">' + line + "</span>";
+    timelineEl.appendChild(div);
+    timelineEl.scrollTop = timelineEl.scrollHeight;
+  }
+
+  function showFrame(frame, withLog) {
+    renderSlots(frame.slots);
+    renderKv(frame.kv);
+    setMetrics(frame);
+    statusEl.textContent = frame.status;
+    if (withLog) appendLog(frame.log);
+    if (frame.verdict) {
+      verdictEl.className = "lis-verdict " + (frame.verdictTone || "");
+      verdictEl.textContent = frame.verdict;
+    }
+  }
+
+  function currentFrames() {
+    return FRAMES[strategy];
+  }
+
+  function resetView() {
+    step = 0;
+    timelineEl.innerHTML = "";
+    verdictEl.className = "lis-verdict";
+    verdictEl.textContent = "判定尚未產生——跑完數步後會摘要 TTFT／吞吐／KV 壓力。";
+    mStep.textContent = "0";
+    mBatch.textContent = "—";
+    mTtft.textContent = "—";
+    mTps.textContent = "—";
+    mKv.textContent = "—";
+    renderSlots([
+      { t: "A·待命", c: "idle" },
+      { t: "B·待命", c: "idle" },
+      { t: "C·待命", c: "idle" },
+      { t: "D·待命", c: "idle" }
+    ]);
+    renderKv(0);
+    var hint = {
+      static: "靜態 Batch：按「模擬一步」開始等齊四筆。",
+      continuous: "Continuous：短請求可立即進場，逐步重組 batch。",
+      "kv-tight": "Continuous + KV 緊縮：觀察 admission control 何時擋下 D。"
+    };
+    statusEl.textContent = hint[strategy] || "按「模擬一步」開始。";
+  }
+
+  if (segRoot) {
+    segRoot.addEventListener("click", function (e) {
+      var btn = e.target.closest("button[data-sc]");
+      if (!btn) return;
+      strategy = btn.getAttribute("data-sc");
+      Array.prototype.forEach.call(segRoot.querySelectorAll("button[data-sc]"), function (b) {
+        b.setAttribute("aria-pressed", b === btn ? "true" : "false");
+      });
+      resetView();
+    });
+  }
+
+  if (btnStep) {
+    btnStep.addEventListener("click", function () {
+      var frames = currentFrames();
+      if (step >= frames.length) {
+        statusEl.textContent = "本策略已模擬完畢。可重置或切換其他策略。";
+        return;
+      }
+      var frame = frames[step];
+      step += 1;
+      showFrame(frame, true);
+      if (step >= frames.length && !frame.verdict) {
+        /* last frame should always have verdict; fallback */
+      }
+    });
+  }
+
+  if (btnReset) {
+    btnReset.addEventListener("click", function () {
+      resetView();
+    });
+  }
+
+  resetView();
+})();
+</script>
+
+
+<!-- FULLSCREEN-FEATURE:START -->
+<style>
+  .fs-toggle {
+    position: fixed;
+    top: 18px;
+    right: 18px;
+    z-index: 1000;
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    font-family: var(--sans, system-ui, -apple-system, "Segoe UI", sans-serif);
+    font-size: 12.5px;
+    line-height: 1;
+    color: var(--text-2, #6b7078);
+    background: var(--bg, #ffffff);
+    border: 1px solid var(--border-strong, #dedcd8);
+    border-radius: 999px;
+    padding: 7px 13px 7px 11px;
+    cursor: pointer;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, .06), 0 4px 12px rgba(0, 0, 0, .04);
+    transition: background .15s, border-color .15s, color .15s;
+  }
+
+  .fs-toggle:hover {
+    background: var(--bg-soft, #fafaf9);
+    color: var(--text, #262a2f);
+    border-color: var(--text-3, #9aa0a8);
+  }
+
+  .fs-toggle:focus-visible {
+    outline: 2px solid var(--accent, #3f6188);
+    outline-offset: 2px;
+  }
+
+  .fs-toggle[aria-pressed="true"] {
+    background: var(--accent, #3f6188);
+    color: #fff;
+    border-color: var(--accent, #3f6188);
+  }
+
+  .fs-toggle .fs-ic {
+    flex: 0 0 auto;
+    display: block;
+  }
+
+  @media print {
+    .fs-toggle { display: none !important; }
+  }
+
+  @media (max-width: 480px) {
+    .fs-toggle { padding: 8px; }
+    .fs-toggle .fs-label { display: none; }
+  }
+</style>
+<button id="fs-toggle-btn" class="fs-toggle" type="button" aria-pressed="false"
+        aria-label="切換全螢幕檢視 (快捷鍵 F)" title="全螢幕檢視 (F)">
+  <svg class="fs-ic fs-ic-expand" viewBox="0 0 24 24" width="15" height="15" fill="none"
+       stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+    <path d="M8 3H5a2 2 0 0 0-2 2v3m18 0V5a2 2 0 0 0-2-2h-3m0 18h3a2 2 0 0 0 2-2v-3M3 16v3a2 2 0 0 0 2 2h3"/>
+  </svg>
+  <svg class="fs-ic fs-ic-compress" viewBox="0 0 24 24" width="15" height="15" fill="none"
+       stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="display:none">
+    <path d="M8 3v3a2 2 0 0 1-2 2H3m18 0h-3a2 2 0 0 1-2-2V3m0 18v-3a2 2 0 0 1 2-2h3M3 16h3a2 2 0 0 1 2 2v3"/>
+  </svg>
+  <span class="fs-label">全螢幕</span>
+</button>
+<script>
+  "use strict";
+  (function () {
+    var btn = document.getElementById("fs-toggle-btn");
+    if (!btn) return;
+    var docEl = document.documentElement;
+    var canFs = !!(docEl.requestFullscreen || docEl.webkitRequestFullscreen);
+    // 不支援 Fullscreen API (如 iPhone Safari) → 隱藏按鈕，避免壞掉的 UI
+    if (!canFs) { btn.style.display = "none"; return; }
+
+    var expandIc = btn.querySelector(".fs-ic-expand");
+    var compressIc = btn.querySelector(".fs-ic-compress");
+    var label = btn.querySelector(".fs-label");
+
+    function isFs() {
+      return !!(document.fullscreenElement || document.webkitFullscreenElement);
+    }
+    function enter() {
+      if (docEl.requestFullscreen) docEl.requestFullscreen();
+      else if (docEl.webkitRequestFullscreen) docEl.webkitRequestFullscreen();
+    }
+    function exit() {
+      if (document.exitFullscreen) document.exitFullscreen();
+      else if (document.webkitExitFullscreen) document.webkitExitFullscreen();
+    }
+    function toggle() { isFs() ? exit() : enter(); }
+    function sync() {
+      var on = isFs();
+      btn.setAttribute("aria-pressed", on ? "true" : "false");
+      if (label) label.textContent = on ? "離開全螢幕" : "全螢幕";
+      if (expandIc) expandIc.style.display = on ? "none" : "block";
+      if (compressIc) compressIc.style.display = on ? "block" : "none";
+    }
+
+    btn.addEventListener("click", toggle);
+    document.addEventListener("fullscreenchange", sync);
+    document.addEventListener("webkitfullscreenchange", sync);
+    document.addEventListener("keydown", function (e) {
+      if (e.key !== "f" && e.key !== "F") return;
+      if (e.metaKey || e.ctrlKey || e.altKey) return;
+      var t = e.target;
+      var tag = t && t.tagName ? t.tagName.toUpperCase() : "";
+      if (tag === "INPUT" || tag === "TEXTAREA" || (t && t.isContentEditable)) return;
+      e.preventDefault();
+      toggle();
+    });
+    sync();
+  })();
+</script>
+<!-- FULLSCREEN-FEATURE:END -->
+</body>
+</html>
