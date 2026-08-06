@@ -1,0 +1,414 @@
+<script>
+(function () {
+  "use strict";
+
+  var strategy = "direct";
+  var step = 0;
+
+  var statusEl = document.getElementById("lgw-status");
+  var verdictEl = document.getElementById("lgw-verdict");
+  var reqsEl = document.getElementById("lgw-reqs");
+  var providersEl = document.getElementById("lgw-providers");
+  var cacheBarEl = document.getElementById("lgw-cache-bar");
+  var timelineEl = document.getElementById("lgw-timeline");
+  var btnStep = document.getElementById("lgw-btn-step");
+  var btnReset = document.getElementById("lgw-btn-reset");
+  var mStep = document.getElementById("lgw-m-step");
+  var mCost = document.getElementById("lgw-m-cost");
+  var mHits = document.getElementById("lgw-m-hits");
+  var mFalls = document.getElementById("lgw-m-falls");
+  var mSaved = document.getElementById("lgw-m-saved");
+  var segRoot = document.querySelector("#demo-lgw-gateway .seg");
+
+  var REQS = [
+    { id: "R1", label: "FAQ：重設密碼步驟", kind: "faq", tokens: 420 },
+    { id: "R2", label: "FAQ：forgot password how-to", kind: "faq-sim", tokens: 400 },
+    { id: "R3", label: "產生 Python 單元測試", kind: "codegen", tokens: 900 },
+    { id: "R4", label: "長推理：容量規劃推導", kind: "reason", tokens: 2200 },
+    { id: "R5", label: "尖峰：免費層第 N+1 次", kind: "burst", tokens: 500 }
+  ];
+
+  /* Per strategy: one frame per request processed (and a final summary frame via last) */
+  var FRAMES = {
+    direct: [
+      {
+        idx: 0,
+        state: "active",
+        providers: { cheap: "", balanced: "", premium: "selected" },
+        cost: 0.042,
+        hits: 0,
+        falls: 0,
+        saved: 0,
+        hitRatio: [0, 1],
+        status: "R1 直打 Premium。答案正確，但短 FAQ 也燒旗艦價。",
+        log: "t0  R1 → premium · miss · $0.042"
+      },
+      {
+        idx: 1,
+        state: "active",
+        providers: { cheap: "", balanced: "", premium: "selected" },
+        cost: 0.082,
+        hits: 0,
+        falls: 0,
+        saved: 0,
+        hitRatio: [0, 2],
+        status: "R2 與 R1 語意極近，但仍再次打 Premium——沒有語意快取。",
+        log: "t1  R2 → premium · miss（本可命中）· +$0.040"
+      },
+      {
+        idx: 2,
+        state: "active",
+        providers: { cheap: "", balanced: "", premium: "selected" },
+        cost: 0.172,
+        hits: 0,
+        falls: 0,
+        saved: 0,
+        hitRatio: [0, 3],
+        status: "R3 程式碼生成也走 Premium。品質高，單位成本同樣高。",
+        log: "t2  R3 → premium · miss · +$0.090"
+      },
+      {
+        idx: 3,
+        state: "fall",
+        providers: { cheap: "", balanced: "fallback", premium: "down" },
+        cost: 0.262,
+        hits: 0,
+        falls: 1,
+        saved: 0,
+        hitRatio: [0, 4],
+        status: "R4 需要長推理，Premium 逾時；臨時 fallback 到 Balanced（仍偏貴）。",
+        log: "t3  R4 → premium timeout → balanced fallback · +$0.090"
+      },
+      {
+        idx: 4,
+        state: "active",
+        providers: { cheap: "", balanced: "", premium: "selected" },
+        cost: 0.312,
+        hits: 0,
+        falls: 1,
+        saved: 0,
+        hitRatio: [0, 5],
+        status: "R5 免費層尖峰仍打 Premium——沒有租戶配額閘門。",
+        log: "t4  R5 → premium · 無 quota 擋下 · +$0.050"
+      },
+      {
+        idx: -1,
+        state: "done",
+        providers: { cheap: "", balanced: "", premium: "" },
+        cost: 0.312,
+        hits: 0,
+        falls: 1,
+        saved: 0,
+        hitRatio: [0, 5],
+        status: "回合結束：直打貴模型路徑簡單，但 FAQ 重複與免費層尖峰都會把帳單拉高。",
+        log: "done  cost=$0.312 · hits=0 · fallback=1 · saved_tokens=0",
+        verdict: "直打 Premium：實作最省事，成本最差。重複 FAQ 零命中，尖峰也無配額保護。",
+        tone: "tone-bad"
+      }
+    ],
+    routed: [
+      {
+        idx: 0,
+        state: "active",
+        providers: { cheap: "selected", balanced: "", premium: "" },
+        cost: 0.006,
+        hits: 0,
+        falls: 0,
+        saved: 0,
+        hitRatio: [0, 1],
+        status: "R1 FAQ → 路由到 Cheap 池。任務分級開始生效。",
+        log: "t0  R1 → cheap（faq 策略）· miss · $0.006"
+      },
+      {
+        idx: 1,
+        state: "active",
+        providers: { cheap: "selected", balanced: "", premium: "" },
+        cost: 0.012,
+        hits: 0,
+        falls: 0,
+        saved: 0,
+        hitRatio: [0, 2],
+        status: "R2 仍判為 FAQ，再打 Cheap。有路由但尚未語意快取，仍付第二次推論。",
+        log: "t1  R2 → cheap · miss（語意近但未快取）· +$0.006"
+      },
+      {
+        idx: 2,
+        state: "active",
+        providers: { cheap: "", balanced: "selected", premium: "" },
+        cost: 0.042,
+        hits: 0,
+        falls: 0,
+        saved: 0,
+        hitRatio: [0, 3],
+        status: "R3 codegen → Balanced。比 Premium 便宜，能力足夠。",
+        log: "t2  R3 → balanced（codegen）· miss · +$0.030"
+      },
+      {
+        idx: 3,
+        state: "fall",
+        providers: { cheap: "", balanced: "fallback", premium: "down" },
+        cost: 0.092,
+        hits: 0,
+        falls: 1,
+        saved: 0,
+        hitRatio: [0, 4],
+        status: "R4 先選 Premium 長推理；供應商故障 → fallback Balanced，並標記降級。",
+        log: "t3  R4 → premium down → balanced fallback · +$0.050"
+      },
+      {
+        idx: 4,
+        state: "deny",
+        providers: { cheap: "down", balanced: "", premium: "" },
+        cost: 0.092,
+        hits: 0,
+        falls: 1,
+        saved: 0,
+        hitRatio: [0, 4],
+        status: "R5 觸發免費層 token quota → 429。成本被硬閘門保住。",
+        log: "t4  R5 → DENY 429 quota exceeded · +$0"
+      },
+      {
+        idx: -1,
+        state: "done",
+        providers: { cheap: "", balanced: "", premium: "" },
+        cost: 0.092,
+        hits: 0,
+        falls: 1,
+        saved: 0,
+        hitRatio: [0, 4],
+        status: "回合結束：智慧路由把多數流量離開 Premium，quota 擋住尖峰；但相近 FAQ 仍付兩次。",
+        log: "done  cost=$0.092 · hits=0 · fallback=1 · saved_tokens=0",
+        verdict: "智慧路由：成本約降為直打的 1/3，並有配額保護。下一步用語意快取消掉重複 FAQ。",
+        tone: "tone-lock"
+      }
+    ],
+    cached: [
+      {
+        idx: 0,
+        state: "active",
+        providers: { cheap: "selected", balanced: "", premium: "" },
+        cost: 0.006,
+        hits: 0,
+        falls: 0,
+        saved: 0,
+        hitRatio: [0, 1],
+        status: "R1 FAQ miss → Cheap 生成並寫入 semantic cache。",
+        log: "t0  R1 → cheap · miss · write cache · $0.006"
+      },
+      {
+        idx: 1,
+        state: "hit",
+        providers: { cheap: "", balanced: "", premium: "" },
+        cost: 0.006,
+        hits: 1,
+        falls: 0,
+        saved: 400,
+        hitRatio: [1, 1],
+        status: "R2 與 R1 相似度 ≥ τ → 快取命中，跳過模型，延遲與 token 雙降。",
+        log: "t1  R2 → SEMANTIC HIT（≈R1）· +$0 · saved≈400 tokens"
+      },
+      {
+        idx: 2,
+        state: "active",
+        providers: { cheap: "", balanced: "selected", premium: "" },
+        cost: 0.036,
+        hits: 1,
+        falls: 0,
+        saved: 400,
+        hitRatio: [1, 2],
+        status: "R3 codegen → Balanced（不快取：輸出個人化／易過期策略可關）。",
+        log: "t2  R3 → balanced · miss（政策：codegen 不入 cache）· +$0.030"
+      },
+      {
+        idx: 3,
+        state: "fall",
+        providers: { cheap: "", balanced: "fallback", premium: "down" },
+        cost: 0.086,
+        hits: 1,
+        falls: 1,
+        saved: 400,
+        hitRatio: [1, 3],
+        status: "R4 Premium 故障 → Balanced fallback；長推理結果可選短 TTL 入庫。",
+        log: "t3  R4 → premium down → balanced fallback · +$0.050"
+      },
+      {
+        idx: 4,
+        state: "deny",
+        providers: { cheap: "down", balanced: "", premium: "" },
+        cost: 0.086,
+        hits: 1,
+        falls: 1,
+        saved: 400,
+        hitRatio: [1, 3],
+        status: "R5 仍被 quota 擋住。快取不能繞過租戶硬上限（除非政策允許「只讀快取」模式）。",
+        log: "t4  R5 → DENY 429 · cache 不放行超額租戶"
+      },
+      {
+        idx: -1,
+        state: "done",
+        providers: { cheap: "", balanced: "", premium: "" },
+        cost: 0.086,
+        hits: 1,
+        falls: 1,
+        saved: 400,
+        hitRatio: [1, 3],
+        status: "回合結束：路由 + 語意快取在重複 FAQ 上省下一次完整推論，總成本最低且仍保有 fallback／quota。",
+        log: "done  cost=$0.086 · hits=1 · fallback=1 · saved_tokens≈400",
+        verdict: "路由 + Semantic Cache：重複問題零模型成本；配額與 fallback 仍生效。這是 Gateway 最常見的成本槓桿組合。",
+        tone: "tone-ok"
+      }
+    ]
+  };
+
+  function money(n) {
+    return "$" + n.toFixed(3);
+  }
+
+  function renderProviders(map) {
+    var names = [
+      { k: "cheap", label: "Cheap" },
+      { k: "balanced", label: "Balanced" },
+      { k: "premium", label: "Premium" }
+    ];
+    providersEl.innerHTML = names.map(function (n) {
+      var cls = "lgw-prov" + (map[n.k] ? " " + map[n.k] : "");
+      return '<div class="' + cls + '">' + n.label + "</div>";
+    }).join("");
+  }
+
+  function renderReqs(frame) {
+    var html = REQS.map(function (r, i) {
+      var cls = "lgw-req";
+      var meta = r.kind;
+      if (frame.idx === -1) {
+        cls += " done";
+        meta = "done";
+      } else if (i < frame.idx) {
+        cls += " done";
+        meta = "done";
+      } else if (i === frame.idx) {
+        if (frame.state === "hit") cls += " hit";
+        else if (frame.state === "fall") cls += " fall";
+        else if (frame.state === "deny") cls += " deny";
+        else cls += " active";
+        meta = frame.state;
+      }
+      return (
+        '<div class="' + cls + '">' +
+          '<span class="rid">' + r.id + " · " + r.label + "</span>" +
+          '<span class="meta">' + meta + " · ~" + r.tokens + " tok</span>" +
+        "</div>"
+      );
+    }).join("");
+    reqsEl.innerHTML = html;
+  }
+
+  function renderCacheBar(pair) {
+    var hits = pair[0];
+    var misses = pair[1];
+    var total = hits + misses;
+    var hPct = total ? (hits / total) * 100 : 0;
+    var mPct = total ? (misses / total) * 100 : 0;
+    cacheBarEl.innerHTML =
+      '<span class="hit" style="width:' + hPct + '%"></span>' +
+      '<span class="miss" style="width:' + mPct + '%"></span>';
+  }
+
+  function appendLog(line) {
+    var div = document.createElement("div");
+    div.innerHTML = '<span class="ev">' + line + "</span>";
+    timelineEl.appendChild(div);
+    timelineEl.scrollTop = timelineEl.scrollHeight;
+  }
+
+  function applyFrame(frame, withLog) {
+    mStep.textContent = String(step);
+    mCost.textContent = money(frame.cost);
+    mHits.textContent = String(frame.hits);
+    mFalls.textContent = String(frame.falls);
+    mSaved.textContent = String(frame.saved);
+    statusEl.textContent = frame.status;
+    renderProviders(frame.providers);
+    renderReqs(frame);
+    renderCacheBar(frame.hitRatio);
+
+    if (frame.verdict) {
+      verdictEl.textContent = frame.verdict;
+      verdictEl.className = "lgw-verdict " + (frame.tone || "");
+    } else {
+      verdictEl.textContent = "判定尚未產生——處理完佇列後會摘要成本／命中／fallback。";
+      verdictEl.className = "lgw-verdict";
+    }
+
+    if (withLog && frame.log) appendLog(frame.log);
+
+    var frames = FRAMES[strategy];
+    btnStep.disabled = step >= frames.length;
+  }
+
+  function reset(keepStrategy) {
+    step = 0;
+    timelineEl.innerHTML = "";
+    if (!keepStrategy) strategy = "direct";
+    if (segRoot) {
+      var buttons = segRoot.querySelectorAll("button[data-sc]");
+      buttons.forEach(function (b) {
+        b.setAttribute("aria-pressed", b.getAttribute("data-sc") === strategy ? "true" : "false");
+      });
+    }
+    var idle = {
+      idx: -2,
+      state: "idle",
+      providers: { cheap: "", balanced: "", premium: "" },
+      cost: 0,
+      hits: 0,
+      falls: 0,
+      saved: 0,
+      hitRatio: [0, 0],
+      status: "選擇策略後按「處理下一筆」。對照三種策略的成本與命中差異。"
+    };
+    /* show empty queue state */
+    mStep.textContent = "0";
+    mCost.textContent = "$0.000";
+    mHits.textContent = "0";
+    mFalls.textContent = "0";
+    mSaved.textContent = "0";
+    statusEl.textContent = idle.status;
+    verdictEl.textContent = "判定尚未產生——處理完佇列後會摘要成本／命中／fallback。";
+    verdictEl.className = "lgw-verdict";
+    renderProviders(idle.providers);
+    renderCacheBar([0, 0]);
+    reqsEl.innerHTML = REQS.map(function (r) {
+      return (
+        '<div class="lgw-req">' +
+          '<span class="rid">' + r.id + " · " + r.label + "</span>" +
+          '<span class="meta">' + r.kind + " · ~" + r.tokens + " tok</span>" +
+        "</div>"
+      );
+    }).join("");
+    btnStep.disabled = false;
+  }
+
+  function onStep() {
+    var frames = FRAMES[strategy];
+    if (step >= frames.length) return;
+    var frame = frames[step];
+    step += 1;
+    applyFrame(frame, true);
+  }
+
+  if (segRoot) {
+    segRoot.addEventListener("click", function (e) {
+      var btn = e.target.closest("button[data-sc]");
+      if (!btn) return;
+      strategy = btn.getAttribute("data-sc");
+      reset(true);
+    });
+  }
+
+  if (btnStep) btnStep.addEventListener("click", onStep);
+  if (btnReset) btnReset.addEventListener("click", function () { reset(true); });
+
+  reset(false);
+})();
+</script>
