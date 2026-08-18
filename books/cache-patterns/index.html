@@ -1,0 +1,2992 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>快取策略 (Cache Patterns) | System Design Every Day</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@300;400;500;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+  <script>
+    mermaid.initialize({
+      startOnLoad: true,
+      theme: 'default',
+      securityLevel: 'loose'
+    });
+  </script>
+  <style>
+    :root {
+      --bg: #ffffff;
+      --bg-soft: #fafaf9;
+      --text: #262a2f;
+      --text-2: #6b7078;
+      --text-3: #9aa0a8;
+      --border: #ecebe8;
+      --border-strong: #dedcd8;
+      --code-bg: #f6f5f3;
+      --accent: #3f6188;
+      --accent-soft: #eef2f7;
+      --accent-line: #cdd9e6;
+      --ok: #4d7d68;
+      --ok-soft: #eef4f1;
+      --warn: #a3743e;
+      --warn-soft: #f6f0e7;
+      --bad: #a8554f;
+      --bad-soft: #f6ecea;
+      --radius: 10px;
+      --radius-sm: 7px;
+      --maxw: 760px;
+      --sans: "Noto Sans TC", system-ui, -apple-system, "Segoe UI", sans-serif;
+      --mono: "JetBrains Mono", "SFMono-Regular", Menlo, Consolas, monospace;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    html {
+      scroll-behavior: smooth;
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      html {
+        scroll-behavior: auto;
+      }
+      * {
+        animation-duration: .001ms !important;
+        transition-duration: .001ms !important;
+      }
+    }
+
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font-family: var(--sans);
+      font-weight: 400;
+      font-size: 16px;
+      line-height: 1.78;
+      -webkit-font-smoothing: antialiased;
+      letter-spacing: .005em;
+    }
+
+    ::selection {
+      background: var(--accent-soft);
+    }
+
+    /* ---------- layout ---------- */
+    .wrap {
+      display: flex;
+      max-width: 1180px;
+      margin: 0 auto;
+      gap: 0;
+    }
+
+    .toc {
+      width: 248px;
+      flex: 0 0 248px;
+      position: sticky;
+      top: 0;
+      height: 100vh;
+      padding: 54px 22px 40px 28px;
+      overflow-y: auto;
+      border-right: 1px solid var(--border);
+      transition: width .2s ease, flex-basis .2s ease, padding .2s ease, opacity .15s ease, border-color .15s ease;
+    }
+
+    .toc-kicker {
+      font-family: var(--mono);
+      font-size: 11px;
+      letter-spacing: .14em;
+      text-transform: uppercase;
+      color: var(--text-3);
+      margin-bottom: 20px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+    }
+
+    /* desktop：側欄內收合鈕；mobile 隱藏（沿用既有 .toc-toggle） */
+    .toc-collapse {
+      display: none;
+      flex: 0 0 auto;
+      align-items: center;
+      justify-content: center;
+      width: 28px;
+      height: 28px;
+      padding: 0;
+      border: none;
+      background: none;
+      border-radius: 6px;
+      color: var(--text-2);
+      line-height: 1;
+      cursor: pointer;
+    }
+
+    .toc-collapse:hover {
+      color: var(--text);
+      background: var(--bg-soft);
+    }
+
+    .toc-collapse:focus-visible {
+      outline: 2px solid var(--accent);
+      outline-offset: 2px;
+    }
+
+    .toc-collapse svg {
+      display: block;
+    }
+
+    /* desktop：側欄收合後的展開鈕（預設隱藏） */
+    .toc-reopen {
+      display: none;
+      position: fixed;
+      top: 18px;
+      left: 18px;
+      z-index: 900;
+      align-items: center;
+      gap: 7px;
+      font-size: 12.5px;
+      line-height: 1;
+      color: var(--text-2);
+      background: var(--bg);
+      border: 1px solid var(--border-strong);
+      border-radius: 999px;
+      padding: 7px 13px 7px 11px;
+      box-shadow: 0 1px 3px rgba(0, 0, 0, .06), 0 4px 12px rgba(0, 0, 0, .04);
+      cursor: pointer;
+      transition: background .15s, border-color .15s, color .15s;
+    }
+
+    .toc-reopen:hover {
+      background: var(--bg-soft);
+      color: var(--text);
+      border-color: var(--text-3);
+    }
+
+    .toc-reopen svg {
+      flex: 0 0 auto;
+      display: block;
+    }
+
+    @media (min-width: 921px) {
+      .toc-collapse {
+        display: inline-flex;
+      }
+
+      body.toc-collapsed .toc {
+        width: 0;
+        flex-basis: 0;
+        padding: 0;
+        opacity: 0;
+        overflow: hidden;
+        border-right-color: transparent;
+        pointer-events: none;
+      }
+
+      body.toc-collapsed .toc-reopen {
+        display: inline-flex;
+      }
+    }
+
+    .toc-kicker a {
+      color: var(--text-3);
+      text-decoration: none;
+      border-bottom: none;
+      transition: color .15s;
+    }
+
+    .toc-kicker a:hover {
+      color: var(--text);
+    }
+
+    .toc-title {
+      font-size: 15px;
+      font-weight: 700;
+      line-height: 1.4;
+      margin: 0 0 24px;
+    }
+
+    .toc a {
+      display: flex;
+      gap: 10px;
+      align-items: baseline;
+      text-decoration: none;
+      color: var(--text-2);
+      font-size: 13.5px;
+      padding: 6px 10px;
+      border-radius: 6px;
+      line-height: 1.45;
+      transition: background .15s, color .15s;
+      border-bottom: none;
+    }
+
+    .toc a:hover {
+      background: var(--bg-soft);
+      color: var(--text);
+      border-bottom: none;
+    }
+
+    .toc a.active {
+      color: var(--accent);
+      background: var(--accent-soft);
+      font-weight: 500;
+      border-bottom: none;
+    }
+
+    .toc a .n {
+      font-family: var(--mono);
+      font-size: 11px;
+      color: var(--text-3);
+      flex: 0 0 18px;
+    }
+
+    .toc a.active .n {
+      color: var(--accent);
+    }
+
+    main {
+      flex: 1 1 auto;
+      min-width: 0;
+      padding: 0 40px;
+    }
+
+    .inner {
+      max-width: var(--maxw);
+      margin: 0 auto;
+      padding: 72px 0 140px;
+    }
+
+    /* ---------- hero ---------- */
+    .hero {
+      margin-bottom: 64px;
+    }
+
+    .hero .eyebrow {
+      font-family: var(--mono);
+      font-size: 12px;
+      letter-spacing: .16em;
+      text-transform: uppercase;
+      color: var(--accent);
+      margin-bottom: 18px;
+    }
+
+    .hero h1 {
+      font-size: 40px;
+      line-height: 1.18;
+      font-weight: 700;
+      margin: 0 0 18px;
+      letter-spacing: -.01em;
+    }
+
+    .hero .lede {
+      font-size: 18px;
+      line-height: 1.7;
+      color: var(--text-2);
+      font-weight: 300;
+      margin: 0;
+      max-width: 620px;
+    }
+
+    .hero .meta {
+      margin-top: 28px;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+
+    .tag {
+      font-family: var(--mono);
+      font-size: 12px;
+      color: var(--text-2);
+      border: 1px solid var(--border-strong);
+      padding: 4px 11px;
+      border-radius: 999px;
+      background: var(--bg-soft);
+    }
+
+    /* ---------- sections ---------- */
+    section {
+      padding-top: 30px;
+      scroll-margin-top: 24px;
+    }
+
+    .sec-head {
+      display: flex;
+      align-items: baseline;
+      gap: 14px;
+      margin: 0 0 8px;
+    }
+
+    .sec-num {
+      font-family: var(--mono);
+      font-size: 13px;
+      color: var(--text-3);
+      font-weight: 500;
+      padding-top: 6px;
+      flex: 0 0 auto;
+    }
+
+    h2 {
+      font-size: 27px;
+      font-weight: 700;
+      line-height: 1.3;
+      margin: 0;
+      letter-spacing: -.01em;
+    }
+
+    .sec-sub {
+      color: var(--text-2);
+      font-size: 15px;
+      margin: 2px 0 28px 0;
+      font-weight: 300;
+    }
+
+    h3 {
+      font-size: 18.5px;
+      font-weight: 700;
+      margin: 38px 0 12px;
+      line-height: 1.45;
+    }
+
+    h4 {
+      font-size: 15.5px;
+      font-weight: 700;
+      margin: 26px 0 8px;
+      color: var(--text);
+    }
+
+    p {
+      margin: 0 0 16px;
+    }
+
+    a {
+      color: var(--accent);
+      text-decoration: none;
+      border-bottom: 1px solid var(--accent-line);
+      transition: border-color .15s;
+    }
+
+    a:hover {
+      border-color: var(--accent);
+    }
+
+    strong {
+      font-weight: 700;
+    }
+
+    em {
+      font-style: normal;
+      background: var(--accent-soft);
+      padding: 0 4px;
+      border-radius: 4px;
+      font-weight: 500;
+      color: #2f4d6e;
+    }
+
+    hr.div {
+      border: none;
+      border-top: 1px solid var(--border);
+      margin: 46px 0;
+    }
+
+    ul, ol {
+      margin: 0 0 18px;
+      padding-left: 22px;
+    }
+
+    li {
+      margin: 7px 0;
+      padding-left: 4px;
+    }
+
+    li::marker {
+      color: var(--text-3);
+    }
+
+    code {
+      font-family: var(--mono);
+      font-size: .86em;
+      background: var(--code-bg);
+      padding: 2px 6px;
+      border-radius: 5px;
+      color: #43494f;
+    }
+
+    pre {
+      background: var(--code-bg);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 16px 18px;
+      overflow-x: auto;
+      margin: 0 0 20px;
+      line-height: 1.6;
+    }
+
+    pre code {
+      background: none;
+      padding: 0;
+      font-size: 13px;
+    }
+
+    /* ---------- math notation ---------- */
+    /* 行內數學變數，如 W、R、N。本站不載入 MathJax/KaTeX，請勿使用 $...$ 或 \[...\] LaTeX 分隔符。 */
+    var {
+      font-family: var(--mono);
+      font-style: normal;
+      font-weight: 500;
+      color: var(--accent);
+    }
+
+    /* 區塊數學公式，置中等寬呈現，記得將 > < & 轉義為 &gt; &lt; &amp;。 */
+    .formula {
+      font-family: var(--mono);
+      font-size: 15px;
+      text-align: center;
+      background: var(--bg-soft);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      padding: 14px 18px;
+      margin: 0 0 20px;
+      color: var(--text);
+      letter-spacing: .03em;
+      overflow-x: auto;
+    }
+
+    /* ---------- callouts ---------- */
+    .callout {
+      border: 1px solid var(--border);
+      border-left: 3px solid var(--border-strong);
+      background: var(--bg-soft);
+      border-radius: var(--radius-sm);
+      padding: 15px 18px;
+      margin: 0 0 22px;
+      font-size: 14.5px;
+    }
+
+    .callout .c-title {
+      font-weight: 700;
+      font-size: 13px;
+      letter-spacing: .02em;
+      margin-bottom: 5px;
+      display: flex;
+      gap: 7px;
+      align-items: center;
+    }
+
+    .callout p:last-child {
+      margin-bottom: 0;
+    }
+
+    .callout.accent {
+      border-left-color: var(--accent);
+      background: var(--accent-soft);
+    }
+
+    .callout.accent .c-title {
+      color: #2f4d6e;
+    }
+
+    .callout.warn {
+      border-left-color: var(--warn);
+      background: var(--warn-soft);
+    }
+
+    .callout.warn .c-title {
+      color: var(--warn);
+    }
+
+    .callout .ic {
+      font-family: var(--mono);
+      font-size: 11px;
+      border: 1px solid currentColor;
+      border-radius: 4px;
+      padding: 0 4px;
+      line-height: 1.5;
+      opacity: .8;
+    }
+
+    .oneliner {
+      border: 1px dashed var(--accent-line);
+      border-radius: var(--radius-sm);
+      padding: 13px 16px;
+      margin: 0 0 22px;
+      font-size: 14.5px;
+      background: #fbfcfd;
+    }
+
+    .oneliner b {
+      font-family: var(--mono);
+      font-size: 11px;
+      letter-spacing: .08em;
+      color: var(--accent);
+      display: block;
+      margin-bottom: 4px;
+      text-transform: uppercase;
+    }
+
+    /* ---------- tables ---------- */
+    .tbl-wrap {
+      overflow-x: auto;
+      margin: 0 0 24px;
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+    }
+
+    table {
+      border-collapse: collapse;
+      width: 100%;
+      font-size: 14px;
+      min-width: 520px;
+    }
+
+    th, td {
+      text-align: left;
+      padding: 11px 14px;
+      border-bottom: 1px solid var(--border);
+      vertical-align: top;
+    }
+
+    th {
+      font-weight: 700;
+      background: var(--bg-soft);
+      font-size: 12.5px;
+      letter-spacing: .02em;
+      color: var(--text-2);
+      position: sticky;
+      top: 0;
+    }
+
+    tr:last-child td {
+      border-bottom: none;
+    }
+
+    td.hl {
+      background: var(--accent-soft);
+    }
+
+    .cap {
+      font-size: 12.5px;
+      color: var(--text-3);
+      margin: -12px 0 26px;
+      font-family: var(--mono);
+    }
+
+    /* ---------- interactive shell ---------- */
+    .demo {
+      border: 1px solid var(--border-strong);
+      border-radius: var(--radius);
+      background: var(--bg);
+      margin: 24px 0 26px;
+      overflow: hidden;
+    }
+
+    .demo-bar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      flex-wrap: wrap;
+      padding: 13px 16px;
+      border-bottom: 1px solid var(--border);
+      background: var(--bg-soft);
+    }
+
+    .demo-bar .label {
+      font-family: var(--mono);
+      font-size: 11px;
+      letter-spacing: .1em;
+      text-transform: uppercase;
+      color: var(--text-3);
+    }
+
+    .demo-body {
+      padding: 20px 18px;
+    }
+
+    .seg {
+      display: inline-flex;
+      border: 1px solid var(--border-strong);
+      border-radius: 999px;
+      overflow: hidden;
+      background: var(--bg);
+    }
+
+    .seg button {
+      border: none;
+      background: none;
+      font-family: var(--sans);
+      font-size: 12.5px;
+      color: var(--text-2);
+      padding: 6px 14px;
+      cursor: pointer;
+      transition: background .15s, color .15s;
+    }
+
+    .seg button:hover {
+      color: var(--text);
+    }
+
+    .seg button[aria-pressed="true"] {
+      background: var(--accent);
+      color: #fff;
+    }
+
+    .btn {
+      font-family: var(--sans);
+      font-size: 13px;
+      border: 1px solid var(--border-strong);
+      background: var(--bg);
+      color: var(--text);
+      padding: 7px 16px;
+      border-radius: 7px;
+      cursor: pointer;
+      transition: background .15s, border-color .15s;
+    }
+
+    .btn:hover {
+      background: var(--bg-soft);
+      border-color: var(--text-3);
+    }
+
+    .btn.primary {
+      background: var(--accent);
+      color: #fff;
+      border-color: var(--accent);
+    }
+
+    .btn.primary:hover {
+      background: #365578;
+    }
+
+    .btn:disabled {
+      opacity: .4;
+      cursor: not-allowed;
+    }
+
+    .btn:focus-visible, .seg button:focus-visible, .toc a:focus-visible, a:focus-visible,
+    summary:focus-visible {
+      outline: 2px solid var(--accent);
+      outline-offset: 2px;
+      border-radius: 4px;
+    }
+
+    .status-line {
+      font-size: 13.5px;
+      color: var(--text-2);
+      min-height: 42px;
+      margin-top: 14px;
+      background: var(--bg-soft);
+      border-radius: var(--radius-sm);
+      padding: 10px 13px;
+      border: 1px solid var(--border);
+    }
+
+    .status-line b {
+      color: var(--text);
+    }
+
+    .legend {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 14px;
+      font-size: 11.5px;
+      color: var(--text-2);
+      margin-top: 14px;
+      font-family: var(--mono);
+    }
+
+    .legend span {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .dot {
+      width: 9px;
+      height: 9px;
+      border-radius: 3px;
+      display: inline-block;
+      border: 1px solid rgba(0, 0, 0, .08);
+    }
+
+    /* node states used across diagrams */
+    .nstate-idle {
+      fill: #fff;
+      stroke: var(--border-strong);
+    }
+
+    .ns-idle {
+      background: #fff;
+      border-color: var(--border-strong);
+    }
+
+    .ns-lock {
+      background: var(--warn-soft);
+      border-color: var(--warn);
+    }
+
+    .ns-ok {
+      background: var(--ok-soft);
+      border-color: var(--ok);
+    }
+
+    .ns-bad {
+      background: var(--bad-soft);
+      border-color: var(--bad);
+    }
+
+    .ns-wait {
+      background: var(--accent-soft);
+      border-color: var(--accent);
+    }
+
+    /* spectrum */
+    .spectrum {
+      position: relative;
+      margin: 26px 6px 10px;
+    }
+
+    .spec-track {
+      height: 4px;
+      border-radius: 2px;
+      background: linear-gradient(90deg, #9fb6cf, #e7e5e1 50%, #c9d8c9);
+      position: relative;
+    }
+
+    .spec-ends {
+      display: flex;
+      justify-content: space-between;
+      font-family: var(--mono);
+      font-size: 11px;
+      color: var(--text-2);
+      margin-top: 10px;
+    }
+
+    .spec-mark {
+      position: absolute;
+      top: -12px;
+      transform: translateX(-50%);
+      cursor: pointer;
+      text-align: center;
+      background: none;
+      border: none;
+      padding: 0;
+    }
+
+    .spec-mark .pin {
+      width: 18px;
+      height: 18px;
+      border-radius: 50%;
+      background: #fff;
+      border: 2px solid var(--border-strong);
+      margin: 0 auto;
+      transition: border-color .15s, transform .15s, box-shadow .15s;
+      display: block;
+    }
+
+    .spec-mark .pn {
+      font-family: var(--mono);
+      font-size: 12px;
+      margin-top: 8px;
+      color: var(--text-2);
+      font-weight: 500;
+      white-space: nowrap;
+      display: block;
+    }
+
+    .spec-mark[aria-pressed="true"] .pin {
+      border-color: var(--accent);
+      transform: scale(1.18);
+      box-shadow: 0 0 0 4px var(--accent-soft);
+    }
+
+    .spec-mark[aria-pressed="true"] .pn {
+      color: var(--accent);
+    }
+
+    .spec-panel {
+      margin-top: 34px;
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 18px;
+      background: var(--bg-soft);
+    }
+
+    .spec-panel h4 {
+      margin: 0 0 4px;
+    }
+
+    .spec-panel .pmeta {
+      font-family: var(--mono);
+      font-size: 12px;
+      color: var(--text-3);
+      margin-bottom: 14px;
+    }
+
+    .bars {
+      display: grid;
+      grid-template-columns: 78px 1fr 56px;
+      gap: 9px 12px;
+      align-items: center;
+    }
+
+    .bars .blabel {
+      font-size: 13px;
+      color: var(--text-2);
+    }
+
+    .bars .btrack {
+      height: 8px;
+      background: #e9e7e3;
+      border-radius: 4px;
+      overflow: hidden;
+    }
+
+    .bars .bfill {
+      height: 100%;
+      border-radius: 4px;
+      background: var(--accent);
+      transition: width .4s ease;
+    }
+
+    .bars .bval {
+      font-family: var(--mono);
+      font-size: 11px;
+      color: var(--text-2);
+      text-align: right;
+    }
+
+    /* generic actor diagram */
+    .actors {
+      display: flex;
+      gap: 12px;
+      flex-wrap: wrap;
+    }
+
+    .actor {
+      flex: 1 1 0;
+      min-width: 96px;
+      border: 1.5px solid var(--border-strong);
+      border-radius: var(--radius-sm);
+      padding: 11px 10px;
+      text-align: center;
+      background: #fff;
+      transition: background .25s, border-color .25s;
+    }
+
+    .actor .aname {
+      font-weight: 700;
+      font-size: 13px;
+    }
+
+    .actor .arole {
+      font-family: var(--mono);
+      font-size: 10.5px;
+      color: var(--text-3);
+      margin-top: 2px;
+    }
+
+    .actor .astate {
+      font-size: 11.5px;
+      margin-top: 8px;
+      font-family: var(--mono);
+      color: var(--text-2);
+      min-height: 16px;
+    }
+
+    .coordinator {
+      border-style: dashed;
+    }
+
+    .flowsteps {
+      margin-top: 16px;
+    }
+
+    .stepitem {
+      display: flex;
+      gap: 11px;
+      font-size: 13.5px;
+      padding: 7px 0;
+      color: var(--text-3);
+      border-top: 1px solid var(--border);
+    }
+
+    .stepitem:first-child {
+      border-top: none;
+    }
+
+    .stepitem.done {
+      color: var(--text);
+    }
+
+    .stepitem.cur {
+      color: var(--text);
+      font-weight: 500;
+    }
+
+    .stepitem .sx {
+      font-family: var(--mono);
+      font-size: 11px;
+      flex: 0 0 26px;
+      color: var(--text-3);
+      padding-top: 2px;
+    }
+
+    .stepitem.cur .sx {
+      color: var(--accent);
+    }
+
+    /* timeline lab (TCC) */
+    .tl-scenarios {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      margin-bottom: 6px;
+    }
+
+    .tl-opt {
+      display: flex;
+      gap: 11px;
+      align-items: flex-start;
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      padding: 10px 13px;
+      cursor: pointer;
+      background: #fff;
+      transition: border-color .15s, background .15s;
+    }
+
+    .tl-opt:hover {
+      background: var(--bg-soft);
+    }
+
+    .tl-opt[aria-pressed="true"] {
+      border-color: var(--accent);
+      background: var(--accent-soft);
+    }
+
+    .tl-opt .tlname {
+      font-weight: 700;
+      font-size: 13.5px;
+    }
+
+    .tl-opt .tldesc {
+      font-size: 12.5px;
+      color: var(--text-2);
+      margin-top: 2px;
+    }
+
+    .tl-opt .tlbadge {
+      font-family: var(--mono);
+      font-size: 10px;
+      border: 1px solid var(--border-strong);
+      border-radius: 4px;
+      padding: 1px 5px;
+      color: var(--text-3);
+      flex: 0 0 auto;
+      margin-top: 1px;
+    }
+
+    .tl-result {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
+      margin-top: 16px;
+    }
+
+    @media (max-width: 560px) {
+      .tl-result {
+        grid-template-columns: 1fr;
+      }
+    }
+
+    .tl-card {
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      padding: 13px 14px;
+      font-size: 13px;
+    }
+
+    .tl-card .tch {
+      font-family: var(--mono);
+      font-size: 11px;
+      letter-spacing: .06em;
+      text-transform: uppercase;
+      margin-bottom: 8px;
+      color: var(--text-3);
+    }
+
+    .tl-card.naive {
+      border-left: 3px solid var(--bad);
+    }
+
+    .tl-card.fixed {
+      border-left: 3px solid var(--ok);
+    }
+
+    .tl-card .verdict {
+      font-weight: 700;
+      margin-top: 8px;
+      font-size: 13px;
+    }
+
+    .tl-card.naive .verdict {
+      color: var(--bad);
+    }
+
+    .tl-card.fixed .verdict {
+      color: var(--ok);
+    }
+
+    /* saga chain */
+    .saga-chain {
+      display: flex;
+      flex-direction: column;
+      gap: 0;
+      margin-top: 8px;
+    }
+
+    .saga-step {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .saga-box {
+      flex: 1 1 auto;
+      border: 1.5px solid var(--border-strong);
+      border-radius: var(--radius-sm);
+      padding: 10px 13px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      background: #fff;
+      transition: .25s;
+    }
+
+    .saga-box .sgn {
+      font-weight: 600;
+      font-size: 13.5px;
+    }
+
+    .saga-box .sgs {
+      font-family: var(--mono);
+      font-size: 11px;
+      color: var(--text-3);
+    }
+
+    .saga-arrow {
+      height: 18px;
+      width: 2px;
+      background: var(--border-strong);
+      margin-left: 18px;
+    }
+
+    .saga-pick {
+      font-size: 12.5px;
+      color: var(--text-2);
+      margin: 4px 0 10px;
+    }
+
+    .saga-pick select {
+      font-family: var(--sans);
+      font-size: 13px;
+      padding: 5px 8px;
+      border: 1px solid var(--border-strong);
+      border-radius: 6px;
+      background: #fff;
+      color: var(--text);
+    }
+
+    /* outbox toggle */
+    .ob-stage {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      margin-top: 8px;
+    }
+
+    .ob-row {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      font-size: 13px;
+    }
+
+    .ob-chip {
+      border: 1.5px solid var(--border-strong);
+      border-radius: var(--radius-sm);
+      padding: 9px 12px;
+      background: #fff;
+      font-size: 13px;
+      transition: .25s;
+      flex: 0 0 auto;
+    }
+
+    .ob-chip .obt {
+      font-weight: 600;
+    }
+
+    .ob-chip .obs {
+      font-family: var(--mono);
+      font-size: 10.5px;
+      color: var(--text-3);
+    }
+
+    .ob-flow {
+      font-family: var(--mono);
+      font-size: 11px;
+      color: var(--text-3);
+    }
+
+    /* wizard */
+    .wiz-q {
+      margin-bottom: 16px;
+    }
+
+    .wiz-q .wq {
+      font-size: 14px;
+      font-weight: 600;
+      margin-bottom: 8px;
+    }
+
+    .wiz-opts {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+
+    .wiz-opts button {
+      font-family: var(--sans);
+      font-size: 13px;
+      border: 1px solid var(--border-strong);
+      background: #fff;
+      color: var(--text-2);
+      padding: 7px 14px;
+      border-radius: 7px;
+      cursor: pointer;
+      transition: .15s;
+    }
+
+    .wiz-opts button:hover {
+      border-color: var(--text-3);
+      color: var(--text);
+    }
+
+    .wiz-opts button[aria-pressed="true"] {
+      background: var(--accent);
+      color: #fff;
+      border-color: var(--accent);
+    }
+
+    .wiz-result {
+      margin-top: 18px;
+      border: 1px solid var(--accent-line);
+      border-radius: var(--radius);
+      padding: 16px 18px;
+      background: var(--accent-soft);
+      font-size: 14px;
+      display: none;
+    }
+
+    .wiz-result.show {
+      display: block;
+    }
+
+    .wiz-result .wr-pick {
+      font-size: 17px;
+      font-weight: 700;
+      color: #2f4d6e;
+      margin-bottom: 6px;
+    }
+
+    .wiz-result .wr-why {
+      color: #3a5572;
+    }
+
+    /* FAQ */
+    details.faq {
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      margin-bottom: 10px;
+      background: #fff;
+      overflow: hidden;
+    }
+
+    details.faq summary {
+      cursor: pointer;
+      padding: 14px 16px;
+      font-weight: 600;
+      font-size: 14.5px;
+      list-style: none;
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      align-items: center;
+    }
+
+    details.faq summary::-webkit-details-marker {
+      display: none;
+    }
+
+    details.faq summary .q {
+      font-family: var(--mono);
+      font-size: 11px;
+      color: var(--accent);
+      flex: 0 0 auto;
+    }
+
+    details.faq summary .chev {
+      transition: transform .2s;
+      color: var(--text-3);
+      flex: 0 0 auto;
+      font-size: 13px;
+    }
+
+    details.faq[open] summary .chev {
+      transform: rotate(90deg);
+    }
+
+    details.faq .ans {
+      padding: 0 16px 16px;
+      font-size: 14px;
+      color: var(--text-2);
+    }
+
+    details.faq .ans p {
+      margin: 0 0 10px;
+    }
+
+    details.faq .ans p:last-child {
+      margin: 0;
+    }
+
+    .trap {
+      display: flex;
+      gap: 10px;
+      font-size: 14px;
+      margin: 9px 0;
+    }
+
+    .trap .tn {
+      font-family: var(--mono);
+      font-size: 11px;
+      color: var(--bad);
+      flex: 0 0 auto;
+      border: 1px solid var(--bad-soft);
+      background: var(--bad-soft);
+      border-radius: 4px;
+      padding: 1px 6px;
+      height: fit-content;
+      margin-top: 2px;
+    }
+
+    /* mobile responsive */
+    .toc-toggle {
+      display: none;
+    }
+
+    @media (max-width: 920px) {
+      .wrap {
+        flex-direction: column;
+      }
+      .toc {
+        position: static;
+        width: auto;
+        height: auto;
+        border-right: none;
+        border-bottom: 1px solid var(--border);
+        padding: 18px 22px;
+        transition: none;
+      }
+      .toc-title {
+        margin-bottom: 0;
+      }
+      .toc-kicker {
+        margin-bottom: 10px;
+      }
+      .toc-nav {
+        display: none;
+        margin-top: 16px;
+      }
+      .toc-nav.open {
+        display: block;
+      }
+      .toc-toggle {
+        display: inline-block;
+        margin-top: 10px;
+      }
+      .toc-collapse,
+      .toc-reopen {
+        display: none !important;
+      }
+      main {
+        padding: 0 22px;
+      }
+      .inner {
+        padding: 40px 0 100px;
+      }
+      .hero h1 {
+        font-size: 31px;
+      }
+    }
+
+    @media print {
+      .toc-reopen { display: none !important; }
+    }
+
+    @media (max-width: 480px) {
+      body {
+        font-size: 15px;
+      }
+      .hero h1 {
+        font-size: 27px;
+      }
+      h2 {
+        font-size: 23px;
+      }
+      .demo-body {
+        padding: 16px 13px;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <!-- ===================== TOC SIDEBAR ===================== -->
+    <nav class="toc" id="toc-panel" aria-label="目錄">
+      <div class="toc-kicker">
+        <a href="../index.html">← 返回目錄</a>
+        <button class="toc-collapse" type="button" aria-expanded="true" aria-controls="toc-panel"
+                aria-label="收合目錄" title="收合目錄">
+          <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor"
+               stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M15 18l-6-6 6-6"/>
+          </svg>
+        </button>
+      </div>
+      <div class="toc-title">快取策略 (Cache Patterns)</div>
+      <button class="btn toc-toggle" type="button" aria-expanded="false" aria-controls="toc-nav">目錄 ▾</button>
+      <div class="toc-nav" id="toc-nav">
+        <a href="#s1"><span class="n">01</span>總覽與定位</a>
+        <a href="#s2"><span class="n">02</span>讀路徑：Cache-Aside 與 Read-Through</a>
+        <a href="#s3"><span class="n">03</span>寫路徑：Aside 失效、Write-Through、Write-Back、Write-Around</a>
+        <a href="#s4"><span class="n">04</span>TTL 與 Eviction：命中率是容量的函數</a>
+        <a href="#s5"><span class="n">05</span>這份資料該不該快取</a>
+        <a href="#s6"><span class="n">06</span>互動 Demo：讀寫時序與淘汰對照</a>
+        <a href="#s7"><span class="n">07</span>面試折衷與邊界</a>
+      </div>
+    </nav>
+    <button class="btn toc-reopen" type="button" aria-expanded="true" aria-controls="toc-panel"
+            aria-label="展開目錄" title="展開目錄">
+      <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor"
+           stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M9 18l6-6-6-6"/>
+      </svg>
+      <span>目錄</span>
+    </button>
+
+    <!-- ===================== MAIN CONTENT ===================== -->
+    <main>
+      <div class="inner">
+        <style>
+  /* 本篇專屬：cp-* 命名空間，不覆蓋全站 base 類別 */
+  #cp-root {
+    --cp-c: #3f6188; --cp-c-soft: #eef2f7;
+    --cp-s: #4d7d68; --cp-s-soft: #eef4f1;
+    --cp-w: #a3743e; --cp-w-soft: #f6f0e7;
+    --cp-bad: #a8554f; --cp-bad-soft: #f6ecea;
+    --cp-alt: #6b6f9a; --cp-alt-soft: #eef0f6;
+  }
+  .cp-sub { font-weight: 700; font-size: 14px; margin: 20px 0 6px; padding-left: 10px; border-left: 3px solid var(--accent); color: var(--text); }
+
+  .cp-cards { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin: 12px 0 6px; }
+  @media (max-width: 760px) { .cp-cards { grid-template-columns: 1fr; } }
+  .cp-card { border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 12px 14px; background: #fff; border-left-width: 4px; }
+  .cp-card.read { border-left-color: var(--cp-c); background: var(--cp-c-soft); }
+  .cp-card.write { border-left-color: var(--cp-w); background: var(--cp-w-soft); }
+  .cp-card.evict { border-left-color: var(--cp-s); background: var(--cp-s-soft); }
+  .cp-card .ct { font-weight: 700; font-size: 13.5px; margin-bottom: 3px; }
+  .cp-card .cl { font-family: var(--mono); font-size: 11px; color: var(--text-3); margin-bottom: 6px; letter-spacing: .04em; }
+  .cp-card .cs { font-size: 12.5px; color: var(--text-2); line-height: 1.55; }
+
+  .cp-flow { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin: 10px 0 4px; font-family: var(--mono); font-size: 12px; }
+  .cp-chip { border: 1px solid var(--border-strong); border-radius: 6px; padding: 6px 10px; background: #fff; font-weight: 600; color: var(--text); }
+  .cp-chip.cli { background: var(--cp-c-soft); border-color: var(--cp-c); color: var(--cp-c); }
+  .cp-chip.cache { background: var(--cp-alt-soft); border-color: var(--cp-alt); color: var(--cp-alt); }
+  .cp-chip.db { background: var(--cp-s-soft); border-color: var(--cp-s); color: var(--cp-s); }
+  .cp-chip.op { background: var(--bg-soft); color: var(--text-3); border-style: dashed; font-weight: 500; }
+  .cp-chip.bad { background: var(--cp-bad-soft); border-color: var(--cp-bad); color: var(--cp-bad); }
+  .cp-chip.warn { background: var(--cp-w-soft); border-color: var(--cp-w); color: var(--cp-w); }
+
+  .cp-split { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin: 12px 0; }
+  @media (max-width: 640px) { .cp-split { grid-template-columns: 1fr; } }
+  .cp-pane {
+    border: 1px solid var(--border); border-radius: var(--radius-sm);
+    background: #fff; padding: 14px; border-top: 3px solid var(--border-strong);
+  }
+  .cp-pane.read { border-top-color: var(--cp-c); }
+  .cp-pane.write { border-top-color: var(--cp-w); }
+  .cp-pane.ok { border-top-color: var(--cp-s); }
+  .cp-pane.bad { border-top-color: var(--cp-bad); }
+  .cp-pane .st { font-weight: 700; font-size: 14px; margin-bottom: 2px; }
+  .cp-pane .ss { font-family: var(--mono); font-size: 11px; color: var(--text-3); margin-bottom: 8px; letter-spacing: .04em; }
+  .cp-pane ul { margin: 0; padding-left: 1.15em; font-size: 13px; color: var(--text-2); line-height: 1.65; }
+
+  .cp-check { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin: 12px 0 6px; }
+  @media (max-width: 640px) { .cp-check { grid-template-columns: 1fr; } }
+  .cp-q {
+    border: 1px solid var(--border); border-radius: var(--radius-sm);
+    padding: 12px 14px; background: #fff; border-top: 3px solid var(--border-strong);
+  }
+  .cp-q.y { border-top-color: var(--cp-s); }
+  .cp-q.n { border-top-color: var(--cp-bad); }
+  .cp-q.m { border-top-color: var(--cp-w); }
+  .cp-q .ft { font-weight: 700; font-size: 13.5px; margin-bottom: 2px; }
+  .cp-q .fk { font-family: var(--mono); font-size: 11px; color: var(--text-3); margin-bottom: 6px; letter-spacing: .04em; }
+  .cp-q .fs { font-size: 12.5px; color: var(--text-2); line-height: 1.55; }
+
+  .cp-ctrl { display: flex; flex-wrap: wrap; gap: 10px; margin: 10px 0 8px; align-items: center; }
+  .cp-metric { display: flex; flex-wrap: wrap; gap: 14px; margin: 8px 0 4px; font-size: 13px; color: var(--text-2); }
+  .cp-metric strong { color: var(--text); font-family: var(--mono); font-size: 12.5px; }
+
+  .cp-actors { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin: 12px 0 6px; }
+  .cp-actors[hidden], #cp-evict-view[hidden] { display: none; }
+  @media (max-width: 640px) { .cp-actors { grid-template-columns: 1fr; } }
+  .cp-actor {
+    border: 1.5px solid var(--border-strong); border-radius: var(--radius-sm);
+    padding: 12px 12px 10px; background: #fff; text-align: center;
+    transition: background .18s, border-color .18s, box-shadow .18s;
+  }
+  .cp-actor .an { font-weight: 700; font-size: 13px; letter-spacing: .03em; }
+  .cp-actor .al { font-family: var(--mono); font-size: 10.5px; color: var(--text-3); margin-top: 2px; }
+  .cp-actor .av { font-family: var(--mono); font-size: 16px; font-weight: 700; margin-top: 8px; color: var(--text); }
+  .cp-actor .ah { font-size: 11.5px; color: var(--text-2); margin-top: 4px; min-height: 1.4em; }
+  .cp-actor.on { background: var(--accent-soft); border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+  .cp-actor.on .an { color: var(--accent); }
+  .cp-actor.ok { background: var(--ok-soft); border-color: var(--ok); }
+  .cp-actor.ok .an { color: var(--ok); }
+  .cp-actor.dirty { background: var(--warn-soft); border-color: var(--warn); }
+  .cp-actor.dirty .an { color: var(--warn); }
+  .cp-actor.bad { background: var(--bad-soft); border-color: var(--bad); }
+  .cp-actor.bad .an { color: var(--bad); }
+
+  .cp-slots { display: flex; flex-wrap: wrap; gap: 8px; margin: 10px 0 4px; }
+  .cp-slot {
+    min-width: 88px; flex: 1;
+    border: 1.5px solid var(--border-strong); border-radius: var(--radius-sm);
+    padding: 10px 8px; background: #fff; text-align: center;
+  }
+  .cp-slot .sk { font-family: var(--mono); font-size: 13px; font-weight: 700; color: var(--text); }
+  .cp-slot .sm { font-family: var(--mono); font-size: 10.5px; color: var(--text-3); margin-top: 4px; }
+  .cp-slot.empty { background: var(--bg-soft); }
+  .cp-slot.empty .sk { color: var(--text-3); font-weight: 500; }
+  .cp-slot.hit { background: var(--ok-soft); border-color: var(--ok); }
+  .cp-slot.evict { background: var(--bad-soft); border-color: var(--bad); }
+  .cp-slot.fresh { background: var(--accent-soft); border-color: var(--accent); }
+
+  .cp-panels { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 12px; }
+  @media (max-width: 640px) { .cp-panels { grid-template-columns: 1fr; } }
+  .cp-panel { border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 12px; background: #fff; }
+  .cp-panel .pt {
+    font-size: 11px; color: var(--text-3); letter-spacing: .06em; text-transform: uppercase;
+    font-family: var(--mono); margin-bottom: 8px;
+  }
+  .cp-panel .prow {
+    display: flex; justify-content: space-between; gap: 8px;
+    font-family: var(--mono); font-size: 12px; padding: 4px 0;
+    border-bottom: 1px dashed var(--border);
+  }
+  .cp-panel .prow:last-child { border-bottom: none; }
+  .cp-panel .pk { color: var(--text-3); white-space: nowrap; }
+  .cp-panel .pv { color: var(--text); font-weight: 600; text-align: right; }
+  .cp-panel .pv.good { color: var(--ok); }
+  .cp-panel .pv.bad { color: var(--bad); }
+  .cp-panel .pv.warn { color: var(--warn); }
+
+  .cp-wire {
+    border: 1px solid var(--border); border-radius: var(--radius-sm);
+    background: #fff; padding: 8px 10px; margin-top: 10px; max-height: 260px; overflow-y: auto;
+  }
+  .cp-row {
+    display: flex; align-items: baseline; gap: 8px;
+    font-family: var(--mono); font-size: 11.5px; padding: 4px 0;
+    border-bottom: 1px dashed var(--border);
+  }
+  .cp-row:last-child { border-bottom: none; }
+  .cp-row .ar { width: 42px; flex: none; text-align: center; color: var(--text-3); font-weight: 700; }
+  .cp-row .tg {
+    flex: none; border-radius: 4px; padding: 2px 6px; font-size: 10.5px; font-weight: 700;
+    border: 1px solid var(--border-strong); background: var(--bg-soft); color: var(--text-3);
+  }
+  .cp-row .tx { color: var(--text-2); line-height: 1.5; }
+  .cp-row.read .tg { background: var(--cp-c-soft); border-color: var(--cp-c); color: var(--cp-c); }
+  .cp-row.write .tg { background: var(--cp-w-soft); border-color: var(--cp-w); color: var(--cp-w); }
+  .cp-row.ok .tg { background: var(--cp-s-soft); border-color: var(--cp-s); color: var(--cp-s); }
+  .cp-row.bad .tg { background: var(--cp-bad-soft); border-color: var(--cp-bad); color: var(--cp-bad); }
+  .cp-row.bad .tx { color: var(--bad); }
+  .cp-row.note { background: var(--bg-soft); border-radius: 4px; }
+  .cp-row.note .tx { color: var(--text-3); }
+
+  .cp-verdict {
+    margin-top: 10px; padding: 10px 12px; border-radius: var(--radius-sm);
+    border: 1px solid var(--border); background: var(--bg-soft);
+    font-size: 13px; color: var(--text-2); line-height: 1.55;
+  }
+  .cp-verdict.tone-ok { border-left: 3px solid var(--ok); background: var(--ok-soft); color: var(--text); }
+  .cp-verdict.tone-lock { border-left: 3px solid var(--warn); background: var(--warn-soft); color: var(--text); }
+  .cp-verdict.tone-bad { border-left: 3px solid var(--bad); background: var(--bad-soft); color: var(--text); }
+
+  .cp-mode-hint { font-size: 12.5px; color: var(--text-2); margin: 8px 0 4px; line-height: 1.55; }
+</style>
+
+<div id="cp-root">
+
+<section id="s1">
+  <div class="sec-head">
+    <span class="sec-num">01</span>
+    <h2>總覽與定位</h2>
+  </div>
+  <p class="sec-sub">快取是一份<strong>非權威、可隨時丟棄的副本</strong>。本篇只談讀寫路徑怎麼走、一致性縫隙從哪來、以及滿了之後踢誰——不談複寫協定，也不談雪崩怎麼防。</p>
+
+  <p>資料庫是權威來源（Source of Truth）：它必須能回答「現在正確的值是什麼」，也必須在程序重啟後還在。快取不是。它存在的理由只有三個字能概括：<strong>少打來源</strong>——少一次跨機房往返、少一次磁碟讀、少一次計費的 origin 請求。一旦這筆帳算不過來，就不該快取。</p>
+
+  <div class="cp-cards">
+    <div class="cp-card read">
+      <div class="ct">讀路徑</div>
+      <div class="cl">誰在 miss 時回源、誰把值填進去</div>
+      <div class="cs">Cache-Aside 由應用自己打 DB 再回填；Read-Through 把回源藏進快取層。決定的是「應用要不要認得 DB」。</div>
+    </div>
+    <div class="cp-card write">
+      <div class="ct">寫路徑</div>
+      <div class="cl">ACK 發生在哪一步、誰可能丟資料</div>
+      <div class="cs">Write-Through 等 DB 成功才回；Write-Back 先寫快取再異步刷盤；Write-Around 寫入繞過快取。Stale window 幾乎都從這裡長出來。</div>
+    </div>
+    <div class="cp-card evict">
+      <div class="ct">容量與壽命</div>
+      <div class="cl">TTL · LRU · LFU</div>
+      <div class="cs">記憶體有限，每筆資料都要有被丟掉的理由。TTL 是時間預算；LRU／LFU 是「留下誰」的賭局。命中率是結果，不是目標本身。</div>
+    </div>
+  </div>
+
+  <div class="callout accent">
+    <div class="c-title"><span class="ic">座標</span>快取不是複寫，也不是 CDN</div>
+    <p><em>資料複寫基礎概念</em> 那篇講的是權威副本之間如何同步、誰能接受寫入。<strong>快取是另一種副本：過期、被踢、程序重啟都可以整份丟掉</strong>，應用必須能從 DB 重建。本篇借用這個視角，不講 Leader／Follower、也不講 Quorum。<br>
+    本群後續才展開防護與產品化：穿透／擊穿／雪崩與 Thundering Herd 交給 <em>快取失效模式與雪崩防護</em>；Redis 的資料結構、持久化與 Cluster 交給 <em>Redis 架構與運維</em>；HTTP 快取標頭與邊緣節點交給 <em>CDN 與邊緣快取</em>。如何把 key 攤到多台 cache node，則已在 <em>一致性雜湊</em> 處理。</p>
+  </div>
+
+  <div class="oneliner">
+    <b>一句話答法</b>快取 = 可丟棄的熱副本。選模式先畫讀路徑與寫路徑兩張圖，再問「stale 能忍多久」與「cache 掛了會丟什麼」。
+  </div>
+</section>
+
+<section id="s2">
+  <div class="sec-head">
+    <span class="sec-num">02</span>
+    <h2>讀路徑：Cache-Aside 與 Read-Through</h2>
+  </div>
+  <p class="sec-sub">Miss 時誰去打 DB、誰負責把結果放進快取——這一步決定應用與快取的耦合，也決定快取掛掉時讀請求還能不能走。</p>
+
+  <p class="cp-sub">1 · Cache-Aside（Lazy Loading）</p>
+  <p>應用擁有完整讀路徑。這是面試預設答案，也是 Redis 最常見的用法。</p>
+  <div class="cp-flow">
+    <span class="cp-chip cli">Client GET</span>
+    <span class="cp-chip op">→</span>
+    <span class="cp-chip cache">Cache GET</span>
+    <span class="cp-chip op">hit？回傳</span>
+    <span class="cp-chip op">miss →</span>
+    <span class="cp-chip db">DB GET</span>
+    <span class="cp-chip op">→</span>
+    <span class="cp-chip cache">Cache SET</span>
+    <span class="cp-chip op">→</span>
+    <span class="cp-chip cli">回傳</span>
+  </div>
+  <p>步驟順序固定：<strong>先問快取，沒有才問權威來源，再回填</strong>。應用必須同時認得 Cache 與 DB 的介面。好處是快取掛了可以降級直打 DB（可用性高、延遲變差）；壞處是回填、失效、編碼格式全散落在業務程式碼。</p>
+
+  <p class="cp-sub">2 · Read-Through</p>
+  <p>應用只面對快取。Miss 時由快取層（或它前面的 library／proxy）自己去 load loader、填入、再回給呼叫端。</p>
+  <div class="cp-flow">
+    <span class="cp-chip cli">Client GET</span>
+    <span class="cp-chip op">→</span>
+    <span class="cp-chip cache">Cache GET</span>
+    <span class="cp-chip op">hit？回傳</span>
+    <span class="cp-chip op">miss → Cache 內部</span>
+    <span class="cp-chip db">Loader → DB</span>
+    <span class="cp-chip op">→ 填入後回傳</span>
+  </div>
+  <p>呼叫端變乾淨，回源策略可以集中（超時、重試、單 key 合併——那些手段留給失效模式那篇）。代價是：<strong>快取變成讀路徑上的必經節點</strong>。Cache 進程掛掉，讀就停，除非你另外做旁路。Read-Through 幾乎總是跟 Write-Through 或 Write-Back 成對出現，很少單獨搭配「應用自己寫 DB」。</p>
+
+  <div class="cp-split">
+    <div class="cp-pane read">
+      <div class="st">讀路徑上的 stale</div>
+      <div class="ss">冷讀本身不製造過期</div>
+      <ul>
+        <li>只要沒人寫，Cache-Aside 與 Read-Through 讀到的都是剛剛從 DB 填入的值。</li>
+        <li>Stale window 是被<strong>另一次寫入</strong>打開的：快取裡還是舊值，DB 已經是新值。</li>
+        <li>讀路徑能做的只有：縮短這個窗口（寫時刪／寫時更新）或給它上限（TTL）。</li>
+      </ul>
+    </div>
+    <div class="cp-pane write">
+      <div class="st">失敗時讀到什麼</div>
+      <div class="ss">Cache 掛 vs DB 掛</div>
+      <ul>
+        <li><strong>Cache 掛</strong>：Cache-Aside 變直打 DB；Read-Through 若無旁路就讀失敗。</li>
+        <li><strong>DB 掛、Cache hit</strong>：兩邊都能繼續吐舊值——這是快取「暫時頂住」的來源，也是你在賣過期資料。</li>
+        <li><strong>DB 掛、Cache miss</strong>：兩邊都讀不到。快取救不了沒預熱過的 key。</li>
+      </ul>
+    </div>
+  </div>
+
+  <div class="callout warn">
+    <div class="c-title"><span class="ic">陷阱</span>回填失敗不要假裝命中</div>
+    <p>Miss 後 DB 讀成功、但 <code>SET cache</code> 失敗，正確行為是<strong>把 DB 的值回給這次請求，快取維持空洞</strong>。下一次還是 miss，而不是回傳「我以為寫進去了」的幽靈值。把回填失敗當成硬錯誤而讓整次讀失敗，會把快取可用性問題放大成產品錯誤。</p>
+  </div>
+
+  <div class="oneliner">
+    <b>一句話答法</b>Cache-Aside：應用 miss 後自己打 DB 再回填，快取可丟。Read-Through：應用只打快取，loader 藏在裡面——乾淨，但快取變成讀路徑單點。
+  </div>
+</section>
+
+<section id="s3">
+  <div class="sec-head">
+    <span class="sec-num">03</span>
+    <h2>寫路徑：Aside 失效、Write-Through、Write-Back、Write-Around</h2>
+  </div>
+  <p class="sec-sub">寫入的 ACK 點決定延遲、耐久與 stale。把「先寫誰、何時刪快取、掛了丟什麼」講清楚，比背模式名字重要。</p>
+
+  <p class="cp-sub">1 · Cache-Aside 的寫：更新 DB，再讓快取失效</p>
+  <p>經典寫法不是「寫 DB 再寫 cache」，而是 <strong>Write DB → Delete cache key</strong>。下次讀走 miss 回填，自然拿到新值。若改成「寫 DB 再 SET cache」，兩次寫入之間任何失敗都會留下 DB 與 cache 長期分歧，而且你還得處理編碼、TTL 與部分更新。</p>
+  <div class="cp-flow">
+    <span class="cp-chip cli">Client SET B</span>
+    <span class="cp-chip op">→</span>
+    <span class="cp-chip db">DB SET B</span>
+    <span class="cp-chip op">成功後</span>
+    <span class="cp-chip cache">Cache DEL</span>
+    <span class="cp-chip warn">窗口：DB 已 B、cache 仍 A</span>
+  </div>
+  <p>Stale window 就在這兩步之間，通常是毫秒級。真正危險的是<strong>刪除失敗</strong>：DB 已是 B，cache 裡的 A 會一直活到 TTL。這時 TTL 不是效能參數，是一致性的最後保險。</p>
+
+  <p class="cp-sub">2 · Write-Through</p>
+  <p>應用寫入快取；快取<strong>同步</strong>把同一筆寫進 DB，兩邊都成功才 ACK。</p>
+  <div class="cp-flow">
+    <span class="cp-chip cli">Client SET B</span>
+    <span class="cp-chip op">→</span>
+    <span class="cp-chip cache">Cache SET B</span>
+    <span class="cp-chip op">同步</span>
+    <span class="cp-chip db">DB SET B</span>
+    <span class="cp-chip op">→</span>
+    <span class="cp-chip cli">ACK</span>
+  </div>
+  <p>寫延遲 ≈ cache + DB。換來的是：讀幾乎總能 hit 剛寫的值、cache 掛了資料仍在 DB。適合「讀多、寫不能丟、可接受寫變慢」——例如帳戶餘額的讀側加速，但仍以 DB 為準。</p>
+
+  <p class="cp-sub">3 · Write-Back（Write-Behind）</p>
+  <p>應用寫入快取後立刻 ACK；DB 由背景排程刷入。Cache 條目帶 dirty bit。</p>
+  <div class="cp-flow">
+    <span class="cp-chip cli">Client SET B</span>
+    <span class="cp-chip op">→</span>
+    <span class="cp-chip cache">Cache SET B · dirty</span>
+    <span class="cp-chip cli">立即 ACK</span>
+    <span class="cp-chip op">稍後</span>
+    <span class="cp-chip db">Flush → DB</span>
+  </div>
+  <div class="callout warn">
+    <div class="c-title"><span class="ic">陷阱</span>Write-Back 的權威暫時不在 DB</div>
+    <p>Flush 之前，DB 是舊的。任何繞過快取的讀（報表、ETL、另一個沒打 cache 的服務）都會讀到 A。<strong>Cache 在 flush 前崩潰 = 丟失已 ACK 給客戶端的寫入。</strong> 這不是「可能不一致」，是耐久性失敗。Write-Back 只適合能容忍丟失、或快取本身有 WAL／複寫的場景（本地 page cache、某些 LSM 的 memtable）——普通 Redis 單機當 Write-Back 緩衝，面試裡通常是扣分答案。</p>
+  </div>
+
+  <p class="cp-sub">4 · Write-Around</p>
+  <p>寫入只打 DB，<strong>不碰快取</strong>。用意是避免把「寫完很少再讀」的資料佔滿熱點集合（例如一次性匯入、日誌型更新）。</p>
+  <div class="cp-flow">
+    <span class="cp-chip cli">Client SET B</span>
+    <span class="cp-chip op">→</span>
+    <span class="cp-chip db">DB SET B</span>
+    <span class="cp-chip cache">Cache 仍為 A</span>
+    <span class="cp-chip bad">stale 直到 TTL／驅逐／顯式 DEL</span>
+  </div>
+  <p>若 key 本來就在 cache 裡，Write-Around 會製造<strong>最長、最容易被忽略的 stale window</strong>。實務上寫-around 幾乎一定要搭配「順便 DEL」或短 TTL；否則它只適合「這個 key 根本不該在 cache」的寫入。</p>
+
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>模式</th>
+          <th>寫入 ACK 點</th>
+          <th>Stale window 從哪來</th>
+          <th>Cache 崩潰會怎樣</th>
+          <th>典型動機</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td class="hl">Cache-Aside + DEL</td>
+          <td>DB 成功（再刪 cache）</td>
+          <td>DB 已新、DEL 尚未完成；DEL 失敗則拖到 TTL</td>
+          <td>不丟寫入；只是下一讀 miss</td>
+          <td>預設選擇、應用可控</td>
+        </tr>
+        <tr>
+          <td>Write-Through</td>
+          <td>Cache 與 DB 都成功</td>
+          <td>幾乎沒有（寫路徑同步）</td>
+          <td>不丟寫入；讀改打 DB 或等回填</td>
+          <td>讀要新、寫可較慢</td>
+        </tr>
+        <tr>
+          <td>Write-Back</td>
+          <td>只寫入 cache</td>
+          <td>DB 在 flush 前一直舊</td>
+          <td class="hl">可能丟失已 ACK 的寫入</td>
+          <td>極高寫入、可丟或快取本身耐久</td>
+        </tr>
+        <tr>
+          <td>Write-Around</td>
+          <td>只寫入 DB</td>
+          <td>cache 舊值活到 TTL／驅逐</td>
+          <td>不丟寫入；可能長期讀到舊值</td>
+          <td>避免寫入污染 working set</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="cap">ACK 點愈靠近快取，寫愈快、丟資料風險愈高；愈靠近 DB，愈耐久、stale 愈短、寫延遲愈高。</p>
+
+  <div class="oneliner">
+    <b>一句話答法</b>Aside 寫 DB 再 DEL cache；Through 同步雙寫才 ACK；Back 先 ACK 再刷盤（崩潰可能丟寫）；Around 只寫 DB、cache 靠 TTL 自己過期。
+  </div>
+</section>
+
+<section id="s4">
+  <div class="sec-head">
+    <span class="sec-num">04</span>
+    <h2>TTL 與 Eviction：命中率是容量的函數</h2>
+  </div>
+  <p class="sec-sub">快取會滿。滿了之後不是「再買記憶體」一句話能結束——你在選擇誰被犧牲，以及過期資料最多能活多久。</p>
+
+  <p>兩件獨立的事常被混成一件。 <strong>TTL</strong> 回答「這筆資料最多能舊多久」；<strong>Eviction</strong> 回答「容量不夠時踢誰」。TTL 到期的 key 即使還有空位也會消失；Eviction 則是在 TTL 還沒到、但記憶體先到時發生。</p>
+
+  <div class="formula">有效壽命 = min(TTL 剩餘, 被驅逐前的停留時間)</div>
+
+  <p class="cp-sub">1 · TTL 是 stale 的預算，不是命中率旋鈕</p>
+  <p>把 TTL 設成 24 小時，意思是你願意讓讀到最多一天前的值。它同時也是 Aside 刪除失敗時的安全網。把 TTL 調長可以提高命中率，代價是更舊的資料與更難除錯的「為什麼畫面上還是舊價」。</p>
+  <ul>
+    <li><strong>絕對 TTL</strong>：從寫入起算，讀命中不延長。適合「這個值在 T 之後一定錯」。</li>
+    <li><strong>滑動 TTL</strong>：每次 hit 重設。熱 key 可以幾乎不過期——也因此更需要 Eviction 來限制記憶體。</li>
+  </ul>
+  <p>同一批 key 設成同一個整秒過期，會讓回源對齊成尖峰。那是雪崩的原料，本篇只點到為止：TTL 要有散佈（jitter），細節留給失效模式那篇。</p>
+
+  <p class="cp-sub">2 · LRU / LFU / 純 TTL 在賭不同的局部性</p>
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>策略</th>
+          <th>留下誰</th>
+          <th>賭對的流量</th>
+          <th>賭錯的流量</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td class="hl">LRU</td>
+          <td>最近被碰到的</td>
+          <td>時間局部性：剛讀的很快再讀（session、動態首頁）</td>
+          <td>掃描型讀（一次掃過歷史資料）會把熱點洗掉</td>
+        </tr>
+        <tr>
+          <td>LFU</td>
+          <td>累計最常被碰到的</td>
+          <td>穩定熱點（熱門商品、設定檔）</td>
+          <td>過氣熱點佔著位置；新熱點要累積次數才進得去</td>
+        </tr>
+        <tr>
+          <td>TTL only</td>
+          <td>還沒到期的（先到期先走，或隨機）</td>
+          <td>每筆資料有明確時效、容量大致夠用</td>
+          <td>容量不足時，不熱的 key 跟熱 key 一起活到點</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="cap">沒有「命中率最高的演算法」，只有「與存取分布匹配的演算法」。掃描污染用 LRU 會很慘；LFU 則要處理頻率老化，否則去年的熱搜會永遠不走。</p>
+
+  <div class="callout accent">
+    <div class="c-title"><span class="ic">關鍵</span>先量 working set，再談演算法</div>
+    <p>若熱點集合永遠大於快取容量，換 LRU 或 LFU 只是換一種 miss 圖案，命中率不會奇蹟上升。面試裡先說：<strong>估計 working set 大小 × 物件平均體積，對上記憶體預算</strong>；容量明顯不夠就分層（本地小 LRU + 遠端大快取）或承認這份資料不該全部進 cache。演算法是微調，容量是一階項。</p>
+  </div>
+
+  <div class="oneliner">
+    <b>一句話答法</b>TTL 限制能有多舊；Eviction 限制能留多大。LRU 賭最近、LFU 賭最常；容量小於 working set 時，換演算法救不了命中率。
+  </div>
+</section>
+
+<section id="s5">
+  <div class="sec-head">
+    <span class="sec-num">05</span>
+    <h2>這份資料該不該快取</h2>
+  </div>
+  <p class="sec-sub">不是熱就快取。先問讀寫比、能忍多舊、物件有多大、以及 miss 與 stale 哪個比較貴。</p>
+
+  <div class="cp-check">
+    <div class="cp-q y">
+      <div class="ft">傾向快取</div>
+      <div class="fk">高讀、可舊、小物件、miss 很貴</div>
+      <div class="fs">設定檔、商品詳情、熱門 feed 頁、權限決策的投影、計算昂貴的聚合結果。讀／寫比高，且過期數秒到數分鐘可接受。</div>
+    </div>
+    <div class="cp-q n">
+      <div class="ft">傾向不快取</div>
+      <div class="fk">高寫、必須新、巨大、或根本不重複讀</div>
+      <div class="fs">一次性匯入、每請求都不同的個人化列、大 blob、強一致餘額（應由 DB 或專門帳本服務保證）。寫入會不斷失效，命中率趨近零，還多一次一致性負擔。</div>
+    </div>
+    <div class="cp-q m">
+      <div class="ft">可以快取，但要短 TTL 或專用模式</div>
+      <div class="fk">偶發寫、讀要「夠新」</div>
+      <div class="fs">庫存、價目、會話狀態。用 Aside + 短 TTL，或寫路徑顯式 DEL。不要用 Write-Back 除非你能接受丟更新。</div>
+    </div>
+    <div class="cp-q n">
+      <div class="ft">安全與正確性否決</div>
+      <div class="fk">機密、授權、一次性 token</div>
+      <div class="fs">被快取的副本多一個洩漏面，也多一個「撤銷後還命中」的窗口。這類資料要嘛不快取，要嘛 TTL 極短且失效必須同步成功。</div>
+    </div>
+  </div>
+
+  <p>把判準收成四個數字比空談「熱資料」有用：</p>
+  <ol>
+    <li><strong>讀／寫比</strong>：寫一次會作廢多少次潛在 hit？比接近 1 就別快取。</li>
+    <li><strong>可容忍 stale</strong>：產品能接受的最大過期時間，直接變成 TTL 上限。</li>
+    <li><strong>物件大小 × 基數</strong>：全量放得下嗎？放不下就只快取熱點，或只快取投影欄位。</li>
+    <li><strong>miss 代價 vs stale 代價</strong>：miss 是 80&nbsp;ms 的 DB，還是一次模型推論？stale 是錯一個推薦，還是錯一筆扣款？</li>
+  </ol>
+
+  <div class="callout warn">
+    <div class="c-title"><span class="ic">陷阱</span>「先快取再說」會把 DB 的正確性問題搬到過期策略</div>
+    <p>快取一旦上線，除錯單元就從「DB 裡是什麼」變成「這個 key 現在是哪一版、何時寫入、誰該刪它」。沒有 key 命名規範、沒有 TTL 預算、沒有寫路徑的 DEL，最後一定靠重啟 cache 當修復手段。那不是運維彈性，是設計失敗。</p>
+  </div>
+
+  <div class="oneliner">
+    <b>一句話答法</b>該快取 iff 讀遠多於寫、stale 可預算化、物件放得下、且 miss 比過期更貴。扣款與機密預設不進 cache。
+  </div>
+</section>
+
+<section id="s6">
+  <div class="sec-head">
+    <span class="sec-num">06</span>
+    <h2>互動 Demo：讀寫時序與淘汰對照</h2>
+  </div>
+  <p class="sec-sub">同一把 key 走完讀→寫→再讀→故障；或同一組存取序列看 LRU／LFU／TTL 各踢誰。</p>
+
+  <div class="demo" id="demo-cp">
+    <div class="demo-bar">
+      <span class="label">互動 · Cache Patterns</span>
+      <span class="label" style="text-transform:none;font-family:var(--sans);font-size:12px;color:var(--text-2)">先選模式，按「下一步」看 ACK 與 stale</span>
+    </div>
+    <div class="demo-body">
+      <p class="cp-mode-hint" id="cp-mode-hint">讀寫路徑：key <code>profile:42</code>，DB 初值 A。逐步看 miss 回填、寫入 ACK、以及 cache 崩潰時會不會丟資料。</p>
+
+      <div class="seg" role="group" aria-label="Demo 類型" id="cp-seg-mode">
+        <button data-mode="path" aria-pressed="true">讀寫路徑</button>
+        <button data-mode="evict" aria-pressed="false">淘汰策略</button>
+      </div>
+
+      <div class="seg" role="group" aria-label="情境切換" id="cp-seg-sc" style="margin-top:8px">
+        <button data-sc="aside" aria-pressed="true">Cache-Aside</button>
+        <button data-sc="readthru" aria-pressed="false">Read-Through</button>
+        <button data-sc="writethru" aria-pressed="false">Write-Through</button>
+        <button data-sc="writeback" aria-pressed="false">Write-Back</button>
+        <button data-sc="writearound" aria-pressed="false">Write-Around</button>
+      </div>
+
+      <div class="cp-ctrl">
+        <button class="btn primary" id="cp-btn-next">下一步</button>
+        <button class="btn" id="cp-btn-reset">重置</button>
+      </div>
+
+      <div class="cp-metric">
+        <span>步驟 <strong id="cp-m-step">0</strong></span>
+        <span>Cache hit <strong id="cp-m-hits">0</strong></span>
+        <span>DB 讀 <strong id="cp-m-dbr">0</strong></span>
+        <span>DB 寫 <strong id="cp-m-dbw">0</strong></span>
+        <span>Stale 讀 <strong id="cp-m-stale">0</strong></span>
+      </div>
+
+      <div class="legend">
+        <span><i class="dot ns-idle"></i>未參與</span>
+        <span><i class="dot ns-wait"></i>本步作用中</span>
+        <span><i class="dot ns-lock"></i>dirty／stale</span>
+        <span><i class="dot ns-ok"></i>已對齊／命中</span>
+        <span><i class="dot ns-bad"></i>崩潰／驅逐</span>
+      </div>
+
+      <div class="cp-actors" id="cp-actors" aria-live="polite">
+        <div class="cp-actor" data-role="client">
+          <div class="an">Client</div>
+          <div class="al">呼叫端</div>
+          <div class="av" id="cp-client-val">—</div>
+          <div class="ah" id="cp-client-hint">待命</div>
+        </div>
+        <div class="cp-actor" data-role="cache">
+          <div class="an">Cache</div>
+          <div class="al">可丟棄副本</div>
+          <div class="av" id="cp-cache-val">∅</div>
+          <div class="ah" id="cp-cache-hint">空</div>
+        </div>
+        <div class="cp-actor" data-role="db">
+          <div class="an">DB</div>
+          <div class="al">權威來源</div>
+          <div class="av" id="cp-db-val">A</div>
+          <div class="ah" id="cp-db-hint">初值 A</div>
+        </div>
+      </div>
+
+      <div id="cp-evict-view" hidden>
+        <div class="cp-slots" id="cp-slots" aria-label="快取槽位"></div>
+      </div>
+
+      <div class="cp-panels">
+        <div class="cp-panel">
+          <div class="pt">本步語義</div>
+          <div class="prow"><span class="pk">操作</span><span class="pv" id="cp-p-op">—</span></div>
+          <div class="prow"><span class="pk">ACK 點</span><span class="pv" id="cp-p-ack">—</span></div>
+          <div class="prow"><span class="pk">Stale window</span><span class="pv" id="cp-p-stale">—</span></div>
+          <div class="prow"><span class="pk">崩潰損失</span><span class="pv" id="cp-p-loss">—</span></div>
+        </div>
+        <div class="cp-panel">
+          <div class="pt">計數</div>
+          <div class="prow"><span class="pk">cache 狀態</span><span class="pv" id="cp-p-cstate">empty</span></div>
+          <div class="prow"><span class="pk">dirty bit</span><span class="pv" id="cp-p-dirty">false</span></div>
+          <div class="prow"><span class="pk">命中率（本回合）</span><span class="pv" id="cp-p-hr">—</span></div>
+          <div class="prow"><span class="pk">被踢出</span><span class="pv" id="cp-p-victim">—</span></div>
+        </div>
+      </div>
+
+      <div class="status-line" id="cp-status">選擇模式後按「下一步」。先走冷讀，再寫成 B，最後看崩潰。</div>
+      <div class="cp-verdict" id="cp-verdict">判定尚未產生——走完序列後會摘要 ACK、stale 與崩潰損失。</div>
+      <div class="cp-wire" id="cp-wire" aria-label="事件日誌"></div>
+    </div>
+  </div>
+
+  <div class="oneliner">
+    <b>一句話答法</b>Demo 要對的是時序：誰先寫、何時 ACK、哪一步 cache 與 DB 不同值、以及 Write-Back 崩潰會丟掉已確認的 B。
+  </div>
+</section>
+
+<section id="s7">
+  <div class="sec-head">
+    <span class="sec-num">07</span>
+    <h2>面試折衷與邊界</h2>
+  </div>
+  <p class="sec-sub">先畫兩條路徑，再講 TTL 與容量；防護手段與 Redis／CDN 產品細節留給後面的專篇。</p>
+
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>面試常問</th>
+          <th>建議答法骨架</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>為什麼要快取？</td>
+          <td>來源延遲、負載與成本。快取是可丟棄副本，不是第二個資料庫。</td>
+        </tr>
+        <tr>
+          <td>Cache-Aside 怎麼寫才不容易髒？</td>
+          <td>讀：miss → DB → SET。寫：DB 成功後 DEL（不要雙寫）；DEL 失敗靠 TTL 兜底。</td>
+        </tr>
+        <tr>
+          <td>Write-Through 和 Write-Back 怎麼選？</td>
+          <td>不能丟寫入、可接受寫延遲 → Through。寫爆、且快取本身耐久或允許丟 → Back。普通 Redis 單機當 Back 通常不該。</td>
+        </tr>
+        <tr>
+          <td>LRU 一定比較好嗎？</td>
+          <td>先看 working set 是否放得下。掃描流量用 LRU 會污染；穩定熱點 LFU 較穩。容量不夠時換演算法無效。</td>
+        </tr>
+        <tr>
+          <td>什麼資料不該快取？</td>
+          <td>高寫、必須強一致、超大物件、不重複讀、以及撤銷後不能再命中的機密／授權。</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="callout accent">
+    <div class="c-title"><span class="ic">差異化</span>本篇管什麼、不管什麼</div>
+    <p><strong>管</strong>：五種讀寫模式的步驟、stale 從哪來、失敗時讀到或丟失什麼、TTL／LRU／LFU 的容量取捨、該不該快取的判準。<strong>不管</strong>：穿透、擊穿、雪崩、Singleflight（<em>快取失效模式與雪崩防護</em>）；Redis 指令複雜度、RDB／AOF、Cluster slot（<em>Redis 架構與運維</em>）；<code>Cache-Control</code>、邊緣 <code>stale-if-error</code>（<em>CDN 與邊緣快取</em>）。與 <em>資料複寫基礎概念</em> 的界線：那裡的副本是權威的、有協定；這裡的副本隨時可以丟。</p>
+  </div>
+
+  <div class="callout warn">
+    <div class="c-title"><span class="ic">邊界</span>面試別把下一題提前答完</div>
+    <p>被問 Cache 模式時，不要展開 Bloom Filter、熱 key 互斥鎖或 TTL jitter 的實作——那是「miss 變成災害」的防護題。先把路徑與 ACK 講對，再主動一句「流量打空／同時失效是另一組手段」，分數通常更高。</p>
+  </div>
+
+  <div class="oneliner">
+    <b>一句話答法</b>先畫讀／寫兩張圖選模式，再用 TTL 預算 stale、用容量對 working set；Redis、CDN 與雪崩防護不要塞進同一段答案。
+  </div>
+</section>
+
+</div>
+
+      </div>
+    </main>
+  </div>
+
+  <script>
+    "use strict";
+    document.addEventListener("DOMContentLoaded", function () {
+      /* ===== TOC scrollspy, mobile accordion & desktop collapse ===== */
+      (function () {
+        var links = Array.prototype.slice.call(document.querySelectorAll(".toc-nav a"));
+        var map = {};
+        links.forEach(function (a) {
+          var href = a.getAttribute("href");
+          if (href && href.startsWith("#")) {
+            map[href.slice(1)] = a;
+          }
+        });
+        var secs = links.map(function (a) {
+          var href = a.getAttribute("href");
+          return href && href.startsWith("#") ? document.getElementById(href.slice(1)) : null;
+        }).filter(Boolean);
+
+        if (secs.length > 0 && typeof IntersectionObserver !== "undefined") {
+          var obs = new IntersectionObserver(function (entries) {
+            entries.forEach(function (e) {
+              if (e.isIntersecting) {
+                links.forEach(function (l) { l.classList.remove("active"); });
+                var act = map[e.target.id];
+                if (act) act.classList.add("active");
+              }
+            });
+          }, { rootMargin: "-20% 0px -70% 0px", threshold: 0 });
+          secs.forEach(function (s) { obs.observe(s); });
+        }
+
+        /* mobile：目錄 accordion（≤920px） */
+        var toggle = document.querySelector(".toc-toggle");
+        var nav = document.querySelector(".toc-nav");
+        if (toggle && nav) {
+          toggle.addEventListener("click", function () {
+            var open = nav.classList.toggle("open");
+            toggle.setAttribute("aria-expanded", open ? "true" : "false");
+          });
+          nav.addEventListener("click", function (e) {
+            if (e.target.closest("a") && window.innerWidth <= 920) {
+              nav.classList.remove("open");
+              toggle.setAttribute("aria-expanded", "false");
+            }
+          });
+        }
+
+        /* desktop：收合側欄（預設展開；不持久化） */
+        var collapseBtn = document.querySelector(".toc-collapse");
+        var reopenBtn = document.querySelector(".toc-reopen");
+        function setTocCollapsed(collapsed) {
+          document.body.classList.toggle("toc-collapsed", collapsed);
+          if (collapseBtn) collapseBtn.setAttribute("aria-expanded", collapsed ? "false" : "true");
+          if (reopenBtn) reopenBtn.setAttribute("aria-expanded", collapsed ? "false" : "true");
+          if (collapsed && reopenBtn) reopenBtn.focus();
+          else if (!collapsed && collapseBtn) collapseBtn.focus();
+        }
+        if (collapseBtn) {
+          collapseBtn.addEventListener("click", function () { setTocCollapsed(true); });
+        }
+        if (reopenBtn) {
+          reopenBtn.addEventListener("click", function () { setTocCollapsed(false); });
+        }
+      })();
+    });
+  </script>
+
+  
+<script>
+(function () {
+  "use strict";
+
+  var demo = document.getElementById("demo-cp");
+  if (!demo) return;
+
+  var mode = "path";
+  var scenario = "aside";
+  var step = 0;
+
+  var statusEl = document.getElementById("cp-status");
+  var verdictEl = document.getElementById("cp-verdict");
+  var wireEl = document.getElementById("cp-wire");
+  var btnNext = document.getElementById("cp-btn-next");
+  var btnReset = document.getElementById("cp-btn-reset");
+  var segMode = document.getElementById("cp-seg-mode");
+  var segSc = document.getElementById("cp-seg-sc");
+  var modeHint = document.getElementById("cp-mode-hint");
+  var actorsEl = document.getElementById("cp-actors");
+  var evictView = document.getElementById("cp-evict-view");
+  var slotsEl = document.getElementById("cp-slots");
+
+  var mStep = document.getElementById("cp-m-step");
+  var mHits = document.getElementById("cp-m-hits");
+  var mDbr = document.getElementById("cp-m-dbr");
+  var mDbw = document.getElementById("cp-m-dbw");
+  var mStale = document.getElementById("cp-m-stale");
+
+  var clientVal = document.getElementById("cp-client-val");
+  var clientHint = document.getElementById("cp-client-hint");
+  var cacheVal = document.getElementById("cp-cache-val");
+  var cacheHint = document.getElementById("cp-cache-hint");
+  var dbVal = document.getElementById("cp-db-val");
+  var dbHint = document.getElementById("cp-db-hint");
+
+  var pOp = document.getElementById("cp-p-op");
+  var pAck = document.getElementById("cp-p-ack");
+  var pStale = document.getElementById("cp-p-stale");
+  var pLoss = document.getElementById("cp-p-loss");
+  var pCstate = document.getElementById("cp-p-cstate");
+  var pDirty = document.getElementById("cp-p-dirty");
+  var pHr = document.getElementById("cp-p-hr");
+  var pVictim = document.getElementById("cp-p-victim");
+
+  var PATH_BTNS = [
+    ["aside", "Cache-Aside"],
+    ["readthru", "Read-Through"],
+    ["writethru", "Write-Through"],
+    ["writeback", "Write-Back"],
+    ["writearound", "Write-Around"]
+  ];
+  var EVICT_BTNS = [
+    ["lru", "LRU"],
+    ["lfu", "LFU"],
+    ["ttl", "TTL"]
+  ];
+
+  var PATH = {
+    aside: [
+      {
+        client: { val: "GET", hint: "冷讀 profile:42", cls: "on" },
+        cache: { val: "∅", hint: "MISS", cls: "on" },
+        db: { val: "A", hint: "未參與", cls: "" },
+        op: "Cache GET → miss", ack: "尚未回傳", staleWin: "無", loss: "—",
+        cstate: "empty", dirty: "false", hr: "0/1", victim: "—",
+        hits: 0, dbr: 0, dbw: 0, stale: 0,
+        status: "Cache-Aside：應用先問快取。空的，這次必須回源。",
+        log: [
+          { cls: "read", ar: "C→$", tg: "GET", tx: "GET profile:42 → MISS" }
+        ]
+      },
+      {
+        client: { val: "…", hint: "改打 DB", cls: "on" },
+        cache: { val: "∅", hint: "仍空", cls: "" },
+        db: { val: "A", hint: "GET A", cls: "on" },
+        op: "DB GET", ack: "尚未回傳", staleWin: "無", loss: "—",
+        cstate: "empty", dirty: "false", hr: "0/1", victim: "—",
+        hits: 0, dbr: 1, dbw: 0, stale: 0,
+        status: "應用自己打權威來源，讀到 A。快取還沒填。",
+        log: [
+          { cls: "read", ar: "C→DB", tg: "GET", tx: "GET profile:42 → A" }
+        ]
+      },
+      {
+        client: { val: "A", hint: "回傳 A", cls: "ok" },
+        cache: { val: "A", hint: "回填", cls: "ok" },
+        db: { val: "A", hint: "權威", cls: "" },
+        op: "Cache SET A；回傳 A", ack: "讀完成（值來自 DB）", staleWin: "無", loss: "—",
+        cstate: "filled", dirty: "false", hr: "0/1", victim: "—",
+        hits: 0, dbr: 1, dbw: 0, stale: 0,
+        status: "回填成功。這次是 miss，不算 hit。下次才走快取。",
+        log: [
+          { cls: "ok", ar: "C→$", tg: "SET", tx: "SET profile:42 = A" },
+          { cls: "note", ar: "·", tg: "note", tx: "回填失敗時仍應把 A 回給這次請求" }
+        ]
+      },
+      {
+        client: { val: "A", hint: "命中", cls: "ok" },
+        cache: { val: "A", hint: "HIT", cls: "ok" },
+        db: { val: "A", hint: "未參與", cls: "" },
+        op: "Cache GET → hit", ack: "讀完成（值來自 cache）", staleWin: "無", loss: "—",
+        cstate: "filled", dirty: "false", hr: "1/2", victim: "—",
+        hits: 1, dbr: 1, dbw: 0, stale: 0,
+        status: "熱讀命中。DB 完全沒被碰到。",
+        log: [
+          { cls: "ok", ar: "C→$", tg: "HIT", tx: "GET profile:42 → A" }
+        ]
+      },
+      {
+        client: { val: "SET B", hint: "寫入", cls: "on" },
+        cache: { val: "A", hint: "仍是舊值", cls: "dirty" },
+        db: { val: "B", hint: "已寫入 B", cls: "ok" },
+        op: "DB SET B", ack: "寫入尚未對客戶完成（還要 DEL）", staleWin: "已打開：DB=B、cache=A", loss: "—",
+        cstate: "stale", dirty: "false", hr: "1/2", victim: "—",
+        hits: 1, dbr: 1, dbw: 1, stale: 0,
+        status: "經典 Aside 寫法第一步：先讓權威來源變成 B。此刻若有讀會拿到舊的 A。",
+        log: [
+          { cls: "write", ar: "C→DB", tg: "SET", tx: "SET profile:42 = B" },
+          { cls: "note", ar: "·", tg: "stale", tx: "stale window 從這裡開始" }
+        ]
+      },
+      {
+        client: { val: "OK", hint: "寫入 ACK", cls: "ok" },
+        cache: { val: "∅", hint: "已 DEL", cls: "" },
+        db: { val: "B", hint: "權威 B", cls: "ok" },
+        op: "Cache DEL", ack: "DB 成功後才 ACK", staleWin: "已關閉", loss: "無（寫在 DB）",
+        cstate: "empty", dirty: "false", hr: "1/2", victim: "—",
+        hits: 1, dbr: 1, dbw: 1, stale: 0,
+        status: "刪除快取 key。若這一步失敗，A 會活到 TTL——TTL 是一致性保險。",
+        log: [
+          { cls: "write", ar: "C→$", tg: "DEL", tx: "DEL profile:42" }
+        ]
+      },
+      {
+        client: { val: "B", hint: "回填後回傳", cls: "ok" },
+        cache: { val: "B", hint: "miss 回填", cls: "ok" },
+        db: { val: "B", hint: "GET B", cls: "on" },
+        op: "讀：miss → DB GET B → SET", ack: "讀完成", staleWin: "無", loss: "無",
+        cstate: "filled", dirty: "false", hr: "1/3", victim: "—",
+        hits: 1, dbr: 2, dbw: 1, stale: 0,
+        status: "寫後再讀走 miss 回填，拿到 B。路徑正確。",
+        log: [
+          { cls: "read", ar: "C→$", tg: "MISS", tx: "GET → miss" },
+          { cls: "read", ar: "C→DB", tg: "GET", tx: "→ B，回填 cache" }
+        ]
+      },
+      {
+        client: { val: "—", hint: "下一讀改打 DB", cls: "" },
+        cache: { val: "∅", hint: "進程崩潰", cls: "bad" },
+        db: { val: "B", hint: "資料仍在", cls: "ok" },
+        op: "Cache crash", ack: "已 ACK 的寫入仍在 DB", staleWin: "—", loss: "無",
+        cstate: "down", dirty: "false", hr: "1/3", victim: "—",
+        hits: 1, dbr: 2, dbw: 1, stale: 0,
+        status: "快取整份丟掉。寫入安全，只是下一讀變慢。這就是「可丟棄副本」。",
+        verdict: { tone: "ok", text: "判定：Cache-Aside 崩潰不丟寫入。Stale 只出現在 DB SET 與 DEL 之間；DEL 失敗才會長駐到 TTL。" },
+        log: [
+          { cls: "bad", ar: "$", tg: "CRASH", tx: "cache process gone · DB 仍為 B" }
+        ]
+      }
+    ],
+    readthru: [
+      {
+        client: { val: "GET", hint: "只打 Cache", cls: "on" },
+        cache: { val: "∅", hint: "MISS，準備 load", cls: "on" },
+        db: { val: "A", hint: "尚未被 loader 碰到", cls: "" },
+        op: "Client → Cache GET", ack: "尚未回傳", staleWin: "無", loss: "—",
+        cstate: "empty", dirty: "false", hr: "0/1", victim: "—",
+        hits: 0, dbr: 0, dbw: 0, stale: 0,
+        status: "Read-Through：應用不認得 DB。Miss 由快取層自己回源。",
+        log: [
+          { cls: "read", ar: "C→$", tg: "GET", tx: "GET profile:42 · 應用不直打 DB" }
+        ]
+      },
+      {
+        client: { val: "…", hint: "仍在等 Cache", cls: "on" },
+        cache: { val: "∅", hint: "loader 進行中", cls: "on" },
+        db: { val: "A", hint: "被 Cache loader 讀取", cls: "on" },
+        op: "Cache loader → DB GET", ack: "尚未回傳", staleWin: "無", loss: "—",
+        cstate: "loading", dirty: "false", hr: "0/1", victim: "—",
+        hits: 0, dbr: 1, dbw: 0, stale: 0,
+        status: "回源發生在快取內部。客戶端看起來只是一次比較慢的 GET。",
+        log: [
+          { cls: "read", ar: "$→DB", tg: "LOAD", tx: "loader GET → A" }
+        ]
+      },
+      {
+        client: { val: "A", hint: "Cache 回傳", cls: "ok" },
+        cache: { val: "A", hint: "已填入", cls: "ok" },
+        db: { val: "A", hint: "權威", cls: "" },
+        op: "填入後回傳 A", ack: "讀完成", staleWin: "無", loss: "—",
+        cstate: "filled", dirty: "false", hr: "0/1", victim: "—",
+        hits: 0, dbr: 1, dbw: 0, stale: 0,
+        status: "應用程式碼沒有 SET cache 的句子——耦合被收到快取層。",
+        log: [
+          { cls: "ok", ar: "$→C", tg: "RET", tx: "return A" }
+        ]
+      },
+      {
+        client: { val: "A", hint: "命中", cls: "ok" },
+        cache: { val: "A", hint: "HIT", cls: "ok" },
+        db: { val: "A", hint: "未參與", cls: "" },
+        op: "Cache GET → hit", ack: "讀完成", staleWin: "無", loss: "—",
+        cstate: "filled", dirty: "false", hr: "1/2", victim: "—",
+        hits: 1, dbr: 1, dbw: 0, stale: 0,
+        status: "熱讀與 Aside 一樣快。差異在 miss 與故障時顯現。",
+        log: [
+          { cls: "ok", ar: "C→$", tg: "HIT", tx: "GET → A" }
+        ]
+      },
+      {
+        client: { val: "SET B", hint: "寫仍打 DB（本例）", cls: "on" },
+        cache: { val: "A", hint: "尚未失效", cls: "dirty" },
+        db: { val: "B", hint: "已更新", cls: "ok" },
+        op: "DB SET B（寫路徑另定）", ack: "DB 成功", staleWin: "DB=B、cache=A", loss: "—",
+        cstate: "stale", dirty: "false", hr: "1/2", victim: "—",
+        hits: 1, dbr: 1, dbw: 1, stale: 0,
+        status: "Read-Through 不定義寫。若寫入只打 DB、忘記讓 cache 失效，讀會繼續命中 A。",
+        log: [
+          { cls: "write", ar: "C→DB", tg: "SET", tx: "SET B · cache 仍為 A" }
+        ]
+      },
+      {
+        client: { val: "A", hint: "讀到過期值", cls: "dirty" },
+        cache: { val: "A", hint: "HIT 舊值", cls: "dirty" },
+        db: { val: "B", hint: "權威已是 B", cls: "" },
+        op: "Cache GET → stale hit", ack: "讀完成但值舊", staleWin: "仍開著", loss: "—",
+        cstate: "stale", dirty: "false", hr: "2/3", victim: "—",
+        hits: 2, dbr: 1, dbw: 1, stale: 1,
+        status: "這次是 stale 讀。Read-Through 命中率很好看，但不保證新。寫入必須 DEL 或走 Through／Back。",
+        log: [
+          { cls: "write", ar: "C→$", tg: "HIT", tx: "回傳 A · 與 DB=B 不一致" }
+        ]
+      },
+      {
+        client: { val: "ERR", hint: "沒有旁路", cls: "bad" },
+        cache: { val: "∅", hint: "進程崩潰", cls: "bad" },
+        db: { val: "B", hint: "還在，但應用打不到", cls: "" },
+        op: "Cache crash", ack: "讀失敗", staleWin: "—", loss: "不丟已寫入 DB 的 B；讀不可用",
+        cstate: "down", dirty: "false", hr: "2/3", victim: "—",
+        hits: 2, dbr: 1, dbw: 1, stale: 1,
+        status: "快取是讀路徑單點。沒有設計旁路時，DB 再健康也讀不到。",
+        verdict: { tone: "lock", text: "判定：Read-Through 讓應用變乾淨，但把可用性綁在快取上。寫入若不失效，命中會變成系統性的過期讀。" },
+        log: [
+          { cls: "bad", ar: "C→$", tg: "FAIL", tx: "cache down · 無 DB 旁路" }
+        ]
+      }
+    ],
+    writethru: [
+      {
+        client: { val: "GET", hint: "冷讀", cls: "on" },
+        cache: { val: "∅", hint: "MISS", cls: "on" },
+        db: { val: "A", hint: "loader／應用回源", cls: "on" },
+        op: "miss 回填 A", ack: "讀完成", staleWin: "無", loss: "—",
+        cstate: "filled", dirty: "false", hr: "0/1", victim: "—",
+        hits: 0, dbr: 1, dbw: 0, stale: 0,
+        status: "先把 cache 與 DB 都放到 A，準備對照寫路徑。",
+        log: [
+          { cls: "read", ar: "C→$→DB", tg: "FILL", tx: "miss → A → SET cache" }
+        ]
+      },
+      {
+        client: { val: "A", hint: "命中", cls: "ok" },
+        cache: { val: "A", hint: "HIT", cls: "ok" },
+        db: { val: "A", hint: "未參與", cls: "" },
+        op: "Cache GET → hit", ack: "讀完成", staleWin: "無", loss: "—",
+        cstate: "filled", dirty: "false", hr: "1/2", victim: "—",
+        hits: 1, dbr: 1, dbw: 0, stale: 0,
+        status: "熱讀命中。接下來寫 B。",
+        log: [
+          { cls: "ok", ar: "C→$", tg: "HIT", tx: "GET → A" }
+        ]
+      },
+      {
+        client: { val: "SET B", hint: "等待雙寫", cls: "on" },
+        cache: { val: "B", hint: "已寫入，尚未 ACK", cls: "on" },
+        db: { val: "A", hint: "同步寫入尚未完成", cls: "dirty" },
+        op: "Cache SET B（DB 未完成）", ack: "還沒——Through 要等 DB", staleWin: "瞬時：cache 新、DB 舊", loss: "若此刻崩潰，視實作而定",
+        cstate: "ahead", dirty: "true", hr: "1/2", victim: "—",
+        hits: 1, dbr: 1, dbw: 0, stale: 0,
+        status: "Write-Through 的中間態：快取先有 B，DB 還是 A。ACK 還不能發。",
+        log: [
+          { cls: "write", ar: "C→$", tg: "SET", tx: "cache = B · 等待 DB" }
+        ]
+      },
+      {
+        client: { val: "OK", hint: "雙寫成功才 ACK", cls: "ok" },
+        cache: { val: "B", hint: "與 DB 對齊", cls: "ok" },
+        db: { val: "B", hint: "同步寫入完成", cls: "ok" },
+        op: "Cache → DB SET B", ack: "Cache 與 DB 都成功", staleWin: "已關閉", loss: "無",
+        cstate: "filled", dirty: "false", hr: "1/2", victim: "—",
+        hits: 1, dbr: 1, dbw: 1, stale: 0,
+        status: "寫延遲 ≈ cache + DB。換來讀側幾乎總是新值。",
+        log: [
+          { cls: "write", ar: "$→DB", tg: "SET", tx: "DB = B" },
+          { cls: "ok", ar: "C", tg: "ACK", tx: "client 收到成功" }
+        ]
+      },
+      {
+        client: { val: "B", hint: "命中剛寫的值", cls: "ok" },
+        cache: { val: "B", hint: "HIT", cls: "ok" },
+        db: { val: "B", hint: "未參與", cls: "" },
+        op: "Cache GET → hit B", ack: "讀完成", staleWin: "無", loss: "無",
+        cstate: "filled", dirty: "false", hr: "2/3", victim: "—",
+        hits: 2, dbr: 1, dbw: 1, stale: 0,
+        status: "讀到 B，沒有 Aside 那種「先讀到舊值」的窗口。",
+        log: [
+          { cls: "ok", ar: "C→$", tg: "HIT", tx: "GET → B" }
+        ]
+      },
+      {
+        client: { val: "—", hint: "下一讀 miss 回源", cls: "" },
+        cache: { val: "∅", hint: "進程崩潰", cls: "bad" },
+        db: { val: "B", hint: "已持久化", cls: "ok" },
+        op: "Cache crash", ack: "已 ACK 的 B 在 DB", staleWin: "—", loss: "無",
+        cstate: "down", dirty: "false", hr: "2/3", victim: "—",
+        hits: 2, dbr: 1, dbw: 1, stale: 0,
+        status: "崩潰不丟已確認寫入。這是 Through 相對 Back 的核心承諾。",
+        verdict: { tone: "ok", text: "判定：Write-Through 用寫延遲換耐久與短 stale。ACK 點在雙寫之後；cache 可丟。" },
+        log: [
+          { cls: "bad", ar: "$", tg: "CRASH", tx: "cache gone · DB 仍為 B" }
+        ]
+      }
+    ],
+    writeback: [
+      {
+        client: { val: "GET", hint: "冷讀", cls: "on" },
+        cache: { val: "A", hint: "回填 A", cls: "ok" },
+        db: { val: "A", hint: "權威", cls: "" },
+        op: "miss 回填 A", ack: "讀完成", staleWin: "無", loss: "—",
+        cstate: "filled", dirty: "false", hr: "0/1", victim: "—",
+        hits: 0, dbr: 1, dbw: 0, stale: 0,
+        status: "預熱完成：cache=A、DB=A、dirty=false。",
+        log: [
+          { cls: "read", ar: "C→$→DB", tg: "FILL", tx: "miss → A" }
+        ]
+      },
+      {
+        client: { val: "OK", hint: "立刻 ACK", cls: "ok" },
+        cache: { val: "B", hint: "dirty", cls: "dirty" },
+        db: { val: "A", hint: "尚未 flush", cls: "dirty" },
+        op: "Cache SET B · dirty", ack: "只寫入 cache 就 ACK", staleWin: "DB 在 flush 前一直舊", loss: "此刻崩潰會丟 B",
+        cstate: "dirty", dirty: "true", hr: "0/1", victim: "—",
+        hits: 0, dbr: 1, dbw: 0, stale: 0,
+        status: "Write-Back：客戶端以為 B 已保存。權威其實暫時不在 DB。",
+        log: [
+          { cls: "write", ar: "C→$", tg: "SET", tx: "cache = B (dirty)" },
+          { cls: "ok", ar: "C", tg: "ACK", tx: "成功回傳 · DB 仍為 A" }
+        ]
+      },
+      {
+        client: { val: "B", hint: "命中未 flush 的值", cls: "ok" },
+        cache: { val: "B", hint: "HIT dirty", cls: "dirty" },
+        db: { val: "A", hint: "報表若直打 DB 會看到 A", cls: "dirty" },
+        op: "Cache GET → hit B", ack: "讀完成", staleWin: "任何旁路讀都舊", loss: "仍未 flush",
+        cstate: "dirty", dirty: "true", hr: "1/2", victim: "—",
+        hits: 1, dbr: 1, dbw: 0, stale: 0,
+        status: "走快取的讀是對的；繞過快取的讀（ETL、另一服務）是錯的。",
+        log: [
+          { cls: "ok", ar: "C→$", tg: "HIT", tx: "GET → B" },
+          { cls: "note", ar: "·", tg: "note", tx: "DB 旁路讀仍為 A" }
+        ]
+      },
+      {
+        client: { val: "B?", hint: "已 ACK 的值消失", cls: "bad" },
+        cache: { val: "∅", hint: "崩潰，dirty 沒了", cls: "bad" },
+        db: { val: "A", hint: "從未收到 B", cls: "dirty" },
+        op: "Cache crash before flush", ack: "當時已對客戶 ACK", staleWin: "—", loss: "已確認的 B",
+        cstate: "down", dirty: "lost", hr: "1/2", victim: "—",
+        hits: 1, dbr: 1, dbw: 0, stale: 0,
+        status: "這不是「短暫不一致」，是耐久性失敗：客戶端拿到成功，資料卻回到 A。",
+        verdict: { tone: "bad", text: "判定：Write-Back 把 ACK 提前到快取。Flush 前崩潰 = 丟失已確認寫入。普通單機 Redis 不當這個緩衝。" },
+        log: [
+          { cls: "bad", ar: "$", tg: "CRASH", tx: "dirty B 消失 · DB 仍為 A" }
+        ]
+      }
+    ],
+    writearound: [
+      {
+        client: { val: "A", hint: "已預熱", cls: "ok" },
+        cache: { val: "A", hint: "熱資料", cls: "ok" },
+        db: { val: "A", hint: "權威", cls: "" },
+        op: "預熱 hit 路徑就緒", ack: "—", staleWin: "無", loss: "—",
+        cstate: "filled", dirty: "false", hr: "1/1", victim: "—",
+        hits: 1, dbr: 1, dbw: 0, stale: 0,
+        status: "假設 profile:42 已在 cache。Write-Around 專門處理「寫入不想污染 working set」。",
+        log: [
+          { cls: "ok", ar: "C→$", tg: "HIT", tx: "預熱 GET → A" }
+        ]
+      },
+      {
+        client: { val: "OK", hint: "寫入只打 DB", cls: "ok" },
+        cache: { val: "A", hint: "沒被碰到", cls: "dirty" },
+        db: { val: "B", hint: "已是 B", cls: "ok" },
+        op: "DB SET B · cache 不動", ack: "DB 成功", staleWin: "打開：直到 TTL／DEL／驅逐", loss: "無",
+        cstate: "stale", dirty: "false", hr: "1/1", victim: "—",
+        hits: 1, dbr: 1, dbw: 1, stale: 0,
+        status: "寫入繞過快取。這能避免把冷寫入灌進 LRU，但舊值 A 還坐在槽位上。",
+        log: [
+          { cls: "write", ar: "C→DB", tg: "SET", tx: "DB = B · cache 未 DEL" }
+        ]
+      },
+      {
+        client: { val: "A", hint: "過期命中", cls: "dirty" },
+        cache: { val: "A", hint: "HIT 舊值", cls: "dirty" },
+        db: { val: "B", hint: "權威 B", cls: "" },
+        op: "Cache GET → stale hit", ack: "讀完成但值舊", staleWin: "仍開著", loss: "無",
+        cstate: "stale", dirty: "false", hr: "2/2", victim: "—",
+        hits: 2, dbr: 1, dbw: 1, stale: 1,
+        status: "Write-Around 最容易被忽略的後果：命中率很好看，答案是錯的。",
+        log: [
+          { cls: "write", ar: "C→$", tg: "HIT", tx: "回傳 A · stale" }
+        ]
+      },
+      {
+        client: { val: "—", hint: "等回填", cls: "" },
+        cache: { val: "∅", hint: "TTL 到期", cls: "" },
+        db: { val: "B", hint: "權威", cls: "" },
+        op: "TTL expire", ack: "—", staleWin: "因過期而關閉", loss: "無",
+        cstate: "empty", dirty: "false", hr: "2/2", victim: "A (TTL)",
+        hits: 2, dbr: 1, dbw: 1, stale: 1,
+        status: "沒有顯式 DEL 時，TTL 是唯一關門人。窗口長度 = 你設的過期時間。",
+        log: [
+          { cls: "note", ar: "$", tg: "TTL", tx: "profile:42 expired" }
+        ]
+      },
+      {
+        client: { val: "B", hint: "miss 回填新值", cls: "ok" },
+        cache: { val: "B", hint: "重新填入", cls: "ok" },
+        db: { val: "B", hint: "GET B", cls: "on" },
+        op: "miss → DB → SET B", ack: "讀完成", staleWin: "無", loss: "無",
+        cstate: "filled", dirty: "false", hr: "2/3", victim: "—",
+        hits: 2, dbr: 2, dbw: 1, stale: 1,
+        status: "過期後的第一次讀才對齊。實務上 Around 幾乎一定要順便 DEL 或把 TTL 壓短。",
+        log: [
+          { cls: "read", ar: "C→$→DB", tg: "FILL", tx: "miss → B" }
+        ]
+      },
+      {
+        client: { val: "—", hint: "下一讀 miss", cls: "" },
+        cache: { val: "∅", hint: "進程崩潰", cls: "bad" },
+        db: { val: "B", hint: "寫入安全", cls: "ok" },
+        op: "Cache crash", ack: "已 ACK 的寫在 DB", staleWin: "—", loss: "無",
+        cstate: "down", dirty: "false", hr: "2/3", victim: "—",
+        hits: 2, dbr: 2, dbw: 1, stale: 1,
+        status: "崩潰不丟寫入。Write-Around 的代價是過期讀，不是丟資料。",
+        verdict: { tone: "lock", text: "判定：Write-Around 保護 working set，但若 key 已在 cache，會留下最長 stale window。搭配 DEL 或短 TTL，否則不要用。" },
+        log: [
+          { cls: "bad", ar: "$", tg: "CRASH", tx: "cache gone · DB 仍為 B" }
+        ]
+      }
+    ]
+  };
+
+  var ACCESSES = ["A", "A", "B", "C", "D"];
+  var CAP = 3;
+  var TTL_LIFE = 3;
+
+  function cloneSlots(list) {
+    return list.map(function (e) {
+      return { key: e.key, freq: e.freq, last: e.last, inserted: e.inserted, cls: e.cls };
+    });
+  }
+
+  function simulateEviction(policy) {
+    var map = [];
+    var clock = 0;
+    var hits = 0;
+    var frames = [];
+
+    function expire() {
+      if (policy !== "ttl") return [];
+      var dead = [];
+      var keep = [];
+      for (var i = 0; i < map.length; i++) {
+        if (clock - map[i].inserted >= TTL_LIFE) dead.push(map[i].key);
+        else keep.push(map[i]);
+      }
+      map = keep;
+      return dead;
+    }
+
+    function find(k) {
+      for (var i = 0; i < map.length; i++) if (map[i].key === k) return i;
+      return -1;
+    }
+
+    function pickVictim() {
+      var best = 0;
+      for (var i = 1; i < map.length; i++) {
+        if (policy === "lfu") {
+          if (map[i].freq < map[best].freq) best = i;
+          else if (map[i].freq === map[best].freq && map[i].last < map[best].last) best = i;
+        } else if (policy === "lru") {
+          if (map[i].last < map[best].last) best = i;
+        } else if (map[i].inserted < map[best].inserted) best = i;
+      }
+      return best;
+    }
+
+    for (var n = 0; n < ACCESSES.length; n++) {
+      var k = ACCESSES[n];
+      clock += 1;
+      var expired = expire();
+      for (var j = 0; j < map.length; j++) map[j].cls = "";
+      var idx = find(k);
+      var hit = idx !== -1;
+      var victimKey = "—";
+      var op;
+      if (hit) {
+        map[idx].freq += 1;
+        map[idx].last = clock;
+        map[idx].cls = "hit";
+        hits += 1;
+        op = "GET " + k + " → HIT";
+      } else {
+        if (map.length >= CAP) {
+          var v = pickVictim();
+          victimKey = map[v].key;
+          map[v].cls = "evict";
+          map.splice(v, 1);
+        }
+        map.push({ key: k, freq: 1, last: clock, inserted: clock, cls: "fresh" });
+        op = "GET " + k + " → MISS，寫入槽位";
+      }
+      var reads = n + 1;
+      var staleNote = expired.length ? ("TTL 先帶走 " + expired.join(",")) : "無";
+      var loss = victimKey !== "—" ? ("驅逐 " + victimKey) : (expired.length ? ("過期 " + expired.join(",")) : "無");
+      var policyLabel = policy === "lru" ? "最近最少用" : policy === "lfu" ? "最少頻次（同頻用 LRU 決勝）" : "絕對 TTL=" + TTL_LIFE + " 步";
+      frames.push({
+        slots: cloneSlots(map),
+        op: op,
+        ack: policyLabel,
+        staleWin: staleNote,
+        loss: loss,
+        cstate: map.map(function (e) { return e.key; }).join(",") || "empty",
+        dirty: "n/a",
+        hr: hits + "/" + reads,
+        victim: victimKey,
+        hits: hits,
+        dbr: reads - hits,
+        dbw: 0,
+        stale: 0,
+        status: hit
+          ? (k + " 命中。" + (policy === "lfu" ? ("頻次現為 " + map[find(k)].freq + "。") : "更新近用時間。"))
+          : (k + " 未命中。" + (victimKey !== "—" ? ("容量滿，踢出 " + victimKey + "。") : (expired.length ? ("先過期 " + expired.join(",") + "。") : "仍有空位。"))),
+        log: [
+          { cls: hit ? "ok" : "read", ar: "t" + clock, tg: hit ? "HIT" : "MISS", tx: "GET " + k + (victimKey !== "—" ? (" · evict " + victimKey) : "") + (expired.length ? (" · ttl-expire " + expired.join(",")) : "") }
+        ],
+        verdict: n === ACCESSES.length - 1 ? finishEvictVerdict(policy, hits, reads, map, victimKey) : null
+      });
+    }
+    return frames;
+  }
+
+  function finishEvictVerdict(policy, hits, reads, map, lastVictim) {
+    var remain = map.map(function (e) { return e.key; }).join(", ");
+    if (policy === "lru") {
+      return { tone: "lock", text: "判定：同一序列 A,A,B,C,D、容量 3。LRU 在 D 進來時踢掉 A（最舊），即使 A 被讀過兩次。留下 " + remain + "。" };
+    }
+    if (policy === "lfu") {
+      return { tone: "ok", text: "判定：LFU 保住 A（頻次 2），改踢較冷的 B。留下 " + remain + "。熱點穩定時這通常比 LRU 準。" };
+    }
+    return { tone: "lock", text: "判定：絕對 TTL=3 步，A 在第 3 步就過期——與是否熱點無關，容量也還沒滿。TTL 是時效預算，不是「留下熱資料」的演算法。" };
+  }
+
+  var EVICT_CACHE = {};
+
+  function framesOf() {
+    if (mode === "path") return PATH[scenario] || PATH.aside;
+    if (!EVICT_CACHE[scenario]) EVICT_CACHE[scenario] = simulateEviction(scenario);
+    return EVICT_CACHE[scenario];
+  }
+
+  function setActor(el, hintEl, spec) {
+    if (!el) return;
+    el.textContent = spec.val;
+    if (hintEl) hintEl.textContent = spec.hint;
+    var box = el.parentNode;
+    box.className = "cp-actor" + (spec.cls ? " " + spec.cls : "");
+  }
+
+  function setText(el, v) {
+    if (el) el.textContent = v;
+  }
+
+  function paintSlots(slots) {
+    if (!slotsEl) return;
+    slotsEl.innerHTML = "";
+    var i;
+    for (i = 0; i < CAP; i++) {
+      var div = document.createElement("div");
+      var item = slots[i];
+      if (!item) {
+        div.className = "cp-slot empty";
+        div.innerHTML = '<div class="sk">empty</div><div class="sm">slot ' + (i + 1) + "</div>";
+      } else {
+        div.className = "cp-slot" + (item.cls ? " " + item.cls : "");
+        var meta = "f=" + item.freq + " · t=" + item.last;
+        if (mode === "evict" && scenario === "ttl") meta = "in@" + item.inserted + " · f=" + item.freq;
+        div.innerHTML = '<div class="sk">' + item.key + '</div><div class="sm">' + meta + "</div>";
+      }
+      slotsEl.appendChild(div);
+    }
+  }
+
+  function appendLog(rows, replace) {
+    if (!wireEl) return;
+    if (replace) wireEl.innerHTML = "";
+    for (var i = 0; i < rows.length; i++) {
+      var r = rows[i];
+      var row = document.createElement("div");
+      row.className = "cp-row " + (r.cls || "note");
+      row.innerHTML = '<span class="ar">' + r.ar + '</span><span class="tg">' + r.tg + '</span><span class="tx">' + r.tx + "</span>";
+      wireEl.appendChild(row);
+    }
+    wireEl.scrollTop = wireEl.scrollHeight;
+  }
+
+  function idlePath() {
+    setActor(clientVal, clientHint, { val: "—", hint: "待命", cls: "" });
+    setActor(cacheVal, cacheHint, { val: "∅", hint: "空", cls: "" });
+    setActor(dbVal, dbHint, { val: "A", hint: "初值 A", cls: "" });
+    setText(mStep, "0");
+    setText(mHits, "0");
+    setText(mDbr, "0");
+    setText(mDbw, "0");
+    setText(mStale, "0");
+    setText(pOp, "—");
+    setText(pAck, "—");
+    setText(pStale, "—");
+    setText(pLoss, "—");
+    setText(pCstate, "empty");
+    setText(pDirty, "false");
+    setText(pHr, "—");
+    setText(pVictim, "—");
+    if (statusEl) statusEl.textContent = "選擇模式後按「下一步」。先走冷讀，再寫成 B，最後看崩潰。";
+    if (verdictEl) {
+      verdictEl.className = "cp-verdict";
+      verdictEl.textContent = "判定尚未產生——走完序列後會摘要 ACK、stale 與崩潰損失。";
+    }
+    if (wireEl) wireEl.innerHTML = "";
+  }
+
+  function idleEvict() {
+    paintSlots([]);
+    setText(mStep, "0");
+    setText(mHits, "0");
+    setText(mDbr, "0");
+    setText(mDbw, "0");
+    setText(mStale, "0");
+    setText(pOp, "—");
+    setText(pAck, scenario === "lru" ? "最近最少用" : scenario === "lfu" ? "最少頻次" : "絕對 TTL=3");
+    setText(pStale, "—");
+    setText(pLoss, "—");
+    setText(pCstate, "empty");
+    setText(pDirty, "n/a");
+    setText(pHr, "—");
+    setText(pVictim, "—");
+    if (statusEl) statusEl.textContent = "容量 3，序列 A → A → B → C → D。按「下一步」看誰被留下。";
+    if (verdictEl) {
+      verdictEl.className = "cp-verdict";
+      verdictEl.textContent = "判定尚未產生——對照三種策略在 D 進入時的受害者。";
+    }
+    if (wireEl) wireEl.innerHTML = "";
+  }
+
+  function applyFrame(f, idx, total) {
+    setText(mStep, String(idx + 1) + " / " + total);
+    setText(mHits, String(f.hits));
+    setText(mDbr, String(f.dbr));
+    setText(mDbw, String(f.dbw));
+    setText(mStale, String(f.stale));
+    setText(pOp, f.op);
+    setText(pAck, f.ack);
+    setText(pStale, f.staleWin);
+    setText(pLoss, f.loss);
+    setText(pCstate, f.cstate);
+    setText(pDirty, f.dirty);
+    setText(pHr, f.hr);
+    setText(pVictim, f.victim);
+    if (statusEl) statusEl.textContent = f.status;
+    if (f.client) setActor(clientVal, clientHint, f.client);
+    if (f.cache) setActor(cacheVal, cacheHint, f.cache);
+    if (f.db) setActor(dbVal, dbHint, f.db);
+    if (f.slots) paintSlots(f.slots);
+    appendLog(f.log || [], idx === 0);
+    if (f.verdict && verdictEl) {
+      verdictEl.className = "cp-verdict tone-" + f.verdict.tone;
+      verdictEl.textContent = f.verdict.text;
+    }
+  }
+
+  function rebuildScButtons() {
+    var defs = mode === "path" ? PATH_BTNS : EVICT_BTNS;
+    if (!defs.some(function (d) { return d[0] === scenario; })) {
+      scenario = defs[0][0];
+    }
+    segSc.innerHTML = "";
+    for (var i = 0; i < defs.length; i++) {
+      var b = document.createElement("button");
+      b.setAttribute("data-sc", defs[i][0]);
+      b.setAttribute("aria-pressed", defs[i][0] === scenario ? "true" : "false");
+      b.textContent = defs[i][1];
+      segSc.appendChild(b);
+    }
+  }
+
+  function setModeUi() {
+    var path = mode === "path";
+    if (actorsEl) actorsEl.hidden = !path;
+    if (evictView) evictView.hidden = path;
+    if (modeHint) {
+      modeHint.innerHTML = path
+        ? "讀寫路徑：key <code>profile:42</code>，DB 初值 A。逐步看 miss 回填、寫入 ACK、以及 cache 崩潰時會不會丟資料。"
+        : "淘汰策略：容量 3，同一序列 <code>A, A, B, C, D</code>。LRU 踢最舊、LFU 踢最冷、絕對 TTL=3 步則讓時間先帶走 A。";
+    }
+    rebuildScButtons();
+  }
+
+  function reset(keepLog) {
+    step = 0;
+    if (btnNext) btnNext.disabled = false;
+    setModeUi();
+    if (mode === "path") idlePath();
+    else idleEvict();
+    if (!keepLog && wireEl) wireEl.innerHTML = "";
+  }
+
+  function onNext() {
+    var frames = framesOf();
+    if (step >= frames.length) return;
+    applyFrame(frames[step], step, frames.length);
+    step += 1;
+    if (step >= frames.length && btnNext) btnNext.disabled = true;
+  }
+
+  if (segMode) {
+    segMode.addEventListener("click", function (e) {
+      var btn = e.target.closest("button[data-mode]");
+      if (!btn) return;
+      mode = btn.getAttribute("data-mode");
+      Array.prototype.forEach.call(segMode.querySelectorAll("button[data-mode]"), function (b) {
+        b.setAttribute("aria-pressed", b === btn ? "true" : "false");
+      });
+      scenario = mode === "path" ? "aside" : "lru";
+      reset(true);
+    });
+  }
+
+  if (segSc) {
+    segSc.addEventListener("click", function (e) {
+      var btn = e.target.closest("button[data-sc]");
+      if (!btn) return;
+      scenario = btn.getAttribute("data-sc");
+      Array.prototype.forEach.call(segSc.querySelectorAll("button[data-sc]"), function (b) {
+        b.setAttribute("aria-pressed", b === btn ? "true" : "false");
+      });
+      reset(true);
+    });
+  }
+
+  if (btnNext) btnNext.addEventListener("click", onNext);
+  if (btnReset) btnReset.addEventListener("click", function () { reset(true); });
+
+  reset(false);
+})();
+</script>
+
+
+<!-- FULLSCREEN-FEATURE:START -->
+<style>
+  .fs-toggle {
+    position: fixed;
+    top: 18px;
+    right: 18px;
+    z-index: 1000;
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    font-family: var(--sans, system-ui, -apple-system, "Segoe UI", sans-serif);
+    font-size: 12.5px;
+    line-height: 1;
+    color: var(--text-2, #6b7078);
+    background: var(--bg, #ffffff);
+    border: 1px solid var(--border-strong, #dedcd8);
+    border-radius: 999px;
+    padding: 7px 13px 7px 11px;
+    cursor: pointer;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, .06), 0 4px 12px rgba(0, 0, 0, .04);
+    transition: background .15s, border-color .15s, color .15s;
+  }
+
+  .fs-toggle:hover {
+    background: var(--bg-soft, #fafaf9);
+    color: var(--text, #262a2f);
+    border-color: var(--text-3, #9aa0a8);
+  }
+
+  .fs-toggle:focus-visible {
+    outline: 2px solid var(--accent, #3f6188);
+    outline-offset: 2px;
+  }
+
+  .fs-toggle[aria-pressed="true"] {
+    background: var(--accent, #3f6188);
+    color: #fff;
+    border-color: var(--accent, #3f6188);
+  }
+
+  .fs-toggle .fs-ic {
+    flex: 0 0 auto;
+    display: block;
+  }
+
+  @media print {
+    .fs-toggle { display: none !important; }
+  }
+
+  @media (max-width: 480px) {
+    .fs-toggle { padding: 8px; }
+    .fs-toggle .fs-label { display: none; }
+  }
+</style>
+<button id="fs-toggle-btn" class="fs-toggle" type="button" aria-pressed="false"
+        aria-label="切換全螢幕檢視 (快捷鍵 F)" title="全螢幕檢視 (F)">
+  <svg class="fs-ic fs-ic-expand" viewBox="0 0 24 24" width="15" height="15" fill="none"
+       stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+    <path d="M8 3H5a2 2 0 0 0-2 2v3m18 0V5a2 2 0 0 0-2-2h-3m0 18h3a2 2 0 0 0 2-2v-3M3 16v3a2 2 0 0 0 2 2h3"/>
+  </svg>
+  <svg class="fs-ic fs-ic-compress" viewBox="0 0 24 24" width="15" height="15" fill="none"
+       stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="display:none">
+    <path d="M8 3v3a2 2 0 0 1-2 2H3m18 0h-3a2 2 0 0 1-2-2V3m0 18v-3a2 2 0 0 1 2-2h3M3 16h3a2 2 0 0 1 2 2v3"/>
+  </svg>
+  <span class="fs-label">全螢幕</span>
+</button>
+<script>
+  "use strict";
+  (function () {
+    var btn = document.getElementById("fs-toggle-btn");
+    if (!btn) return;
+    var docEl = document.documentElement;
+    var canFs = !!(docEl.requestFullscreen || docEl.webkitRequestFullscreen);
+    // 不支援 Fullscreen API (如 iPhone Safari) → 隱藏按鈕，避免壞掉的 UI
+    if (!canFs) { btn.style.display = "none"; return; }
+
+    var expandIc = btn.querySelector(".fs-ic-expand");
+    var compressIc = btn.querySelector(".fs-ic-compress");
+    var label = btn.querySelector(".fs-label");
+
+    function isFs() {
+      return !!(document.fullscreenElement || document.webkitFullscreenElement);
+    }
+    function enter() {
+      if (docEl.requestFullscreen) docEl.requestFullscreen();
+      else if (docEl.webkitRequestFullscreen) docEl.webkitRequestFullscreen();
+    }
+    function exit() {
+      if (document.exitFullscreen) document.exitFullscreen();
+      else if (document.webkitExitFullscreen) document.webkitExitFullscreen();
+    }
+    function toggle() { isFs() ? exit() : enter(); }
+    function sync() {
+      var on = isFs();
+      btn.setAttribute("aria-pressed", on ? "true" : "false");
+      if (label) label.textContent = on ? "離開全螢幕" : "全螢幕";
+      if (expandIc) expandIc.style.display = on ? "none" : "block";
+      if (compressIc) compressIc.style.display = on ? "block" : "none";
+    }
+
+    btn.addEventListener("click", toggle);
+    document.addEventListener("fullscreenchange", sync);
+    document.addEventListener("webkitfullscreenchange", sync);
+    document.addEventListener("keydown", function (e) {
+      if (e.key !== "f" && e.key !== "F") return;
+      if (e.metaKey || e.ctrlKey || e.altKey) return;
+      var t = e.target;
+      var tag = t && t.tagName ? t.tagName.toUpperCase() : "";
+      if (tag === "INPUT" || tag === "TEXTAREA" || (t && t.isContentEditable)) return;
+      e.preventDefault();
+      toggle();
+    });
+    sync();
+  })();
+</script>
+<!-- FULLSCREEN-FEATURE:END -->
+</body>
+</html>

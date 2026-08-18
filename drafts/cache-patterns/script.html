@@ -1,0 +1,768 @@
+<script>
+(function () {
+  "use strict";
+
+  var demo = document.getElementById("demo-cp");
+  if (!demo) return;
+
+  var mode = "path";
+  var scenario = "aside";
+  var step = 0;
+
+  var statusEl = document.getElementById("cp-status");
+  var verdictEl = document.getElementById("cp-verdict");
+  var wireEl = document.getElementById("cp-wire");
+  var btnNext = document.getElementById("cp-btn-next");
+  var btnReset = document.getElementById("cp-btn-reset");
+  var segMode = document.getElementById("cp-seg-mode");
+  var segSc = document.getElementById("cp-seg-sc");
+  var modeHint = document.getElementById("cp-mode-hint");
+  var actorsEl = document.getElementById("cp-actors");
+  var evictView = document.getElementById("cp-evict-view");
+  var slotsEl = document.getElementById("cp-slots");
+
+  var mStep = document.getElementById("cp-m-step");
+  var mHits = document.getElementById("cp-m-hits");
+  var mDbr = document.getElementById("cp-m-dbr");
+  var mDbw = document.getElementById("cp-m-dbw");
+  var mStale = document.getElementById("cp-m-stale");
+
+  var clientVal = document.getElementById("cp-client-val");
+  var clientHint = document.getElementById("cp-client-hint");
+  var cacheVal = document.getElementById("cp-cache-val");
+  var cacheHint = document.getElementById("cp-cache-hint");
+  var dbVal = document.getElementById("cp-db-val");
+  var dbHint = document.getElementById("cp-db-hint");
+
+  var pOp = document.getElementById("cp-p-op");
+  var pAck = document.getElementById("cp-p-ack");
+  var pStale = document.getElementById("cp-p-stale");
+  var pLoss = document.getElementById("cp-p-loss");
+  var pCstate = document.getElementById("cp-p-cstate");
+  var pDirty = document.getElementById("cp-p-dirty");
+  var pHr = document.getElementById("cp-p-hr");
+  var pVictim = document.getElementById("cp-p-victim");
+
+  var PATH_BTNS = [
+    ["aside", "Cache-Aside"],
+    ["readthru", "Read-Through"],
+    ["writethru", "Write-Through"],
+    ["writeback", "Write-Back"],
+    ["writearound", "Write-Around"]
+  ];
+  var EVICT_BTNS = [
+    ["lru", "LRU"],
+    ["lfu", "LFU"],
+    ["ttl", "TTL"]
+  ];
+
+  var PATH = {
+    aside: [
+      {
+        client: { val: "GET", hint: "冷讀 profile:42", cls: "on" },
+        cache: { val: "∅", hint: "MISS", cls: "on" },
+        db: { val: "A", hint: "未參與", cls: "" },
+        op: "Cache GET → miss", ack: "尚未回傳", staleWin: "無", loss: "—",
+        cstate: "empty", dirty: "false", hr: "0/1", victim: "—",
+        hits: 0, dbr: 0, dbw: 0, stale: 0,
+        status: "Cache-Aside：應用先問快取。空的，這次必須回源。",
+        log: [
+          { cls: "read", ar: "C→$", tg: "GET", tx: "GET profile:42 → MISS" }
+        ]
+      },
+      {
+        client: { val: "…", hint: "改打 DB", cls: "on" },
+        cache: { val: "∅", hint: "仍空", cls: "" },
+        db: { val: "A", hint: "GET A", cls: "on" },
+        op: "DB GET", ack: "尚未回傳", staleWin: "無", loss: "—",
+        cstate: "empty", dirty: "false", hr: "0/1", victim: "—",
+        hits: 0, dbr: 1, dbw: 0, stale: 0,
+        status: "應用自己打權威來源，讀到 A。快取還沒填。",
+        log: [
+          { cls: "read", ar: "C→DB", tg: "GET", tx: "GET profile:42 → A" }
+        ]
+      },
+      {
+        client: { val: "A", hint: "回傳 A", cls: "ok" },
+        cache: { val: "A", hint: "回填", cls: "ok" },
+        db: { val: "A", hint: "權威", cls: "" },
+        op: "Cache SET A；回傳 A", ack: "讀完成（值來自 DB）", staleWin: "無", loss: "—",
+        cstate: "filled", dirty: "false", hr: "0/1", victim: "—",
+        hits: 0, dbr: 1, dbw: 0, stale: 0,
+        status: "回填成功。這次是 miss，不算 hit。下次才走快取。",
+        log: [
+          { cls: "ok", ar: "C→$", tg: "SET", tx: "SET profile:42 = A" },
+          { cls: "note", ar: "·", tg: "note", tx: "回填失敗時仍應把 A 回給這次請求" }
+        ]
+      },
+      {
+        client: { val: "A", hint: "命中", cls: "ok" },
+        cache: { val: "A", hint: "HIT", cls: "ok" },
+        db: { val: "A", hint: "未參與", cls: "" },
+        op: "Cache GET → hit", ack: "讀完成（值來自 cache）", staleWin: "無", loss: "—",
+        cstate: "filled", dirty: "false", hr: "1/2", victim: "—",
+        hits: 1, dbr: 1, dbw: 0, stale: 0,
+        status: "熱讀命中。DB 完全沒被碰到。",
+        log: [
+          { cls: "ok", ar: "C→$", tg: "HIT", tx: "GET profile:42 → A" }
+        ]
+      },
+      {
+        client: { val: "SET B", hint: "寫入", cls: "on" },
+        cache: { val: "A", hint: "仍是舊值", cls: "dirty" },
+        db: { val: "B", hint: "已寫入 B", cls: "ok" },
+        op: "DB SET B", ack: "寫入尚未對客戶完成（還要 DEL）", staleWin: "已打開：DB=B、cache=A", loss: "—",
+        cstate: "stale", dirty: "false", hr: "1/2", victim: "—",
+        hits: 1, dbr: 1, dbw: 1, stale: 0,
+        status: "經典 Aside 寫法第一步：先讓權威來源變成 B。此刻若有讀會拿到舊的 A。",
+        log: [
+          { cls: "write", ar: "C→DB", tg: "SET", tx: "SET profile:42 = B" },
+          { cls: "note", ar: "·", tg: "stale", tx: "stale window 從這裡開始" }
+        ]
+      },
+      {
+        client: { val: "OK", hint: "寫入 ACK", cls: "ok" },
+        cache: { val: "∅", hint: "已 DEL", cls: "" },
+        db: { val: "B", hint: "權威 B", cls: "ok" },
+        op: "Cache DEL", ack: "DB 成功後才 ACK", staleWin: "已關閉", loss: "無（寫在 DB）",
+        cstate: "empty", dirty: "false", hr: "1/2", victim: "—",
+        hits: 1, dbr: 1, dbw: 1, stale: 0,
+        status: "刪除快取 key。若這一步失敗，A 會活到 TTL——TTL 是一致性保險。",
+        log: [
+          { cls: "write", ar: "C→$", tg: "DEL", tx: "DEL profile:42" }
+        ]
+      },
+      {
+        client: { val: "B", hint: "回填後回傳", cls: "ok" },
+        cache: { val: "B", hint: "miss 回填", cls: "ok" },
+        db: { val: "B", hint: "GET B", cls: "on" },
+        op: "讀：miss → DB GET B → SET", ack: "讀完成", staleWin: "無", loss: "無",
+        cstate: "filled", dirty: "false", hr: "1/3", victim: "—",
+        hits: 1, dbr: 2, dbw: 1, stale: 0,
+        status: "寫後再讀走 miss 回填，拿到 B。路徑正確。",
+        log: [
+          { cls: "read", ar: "C→$", tg: "MISS", tx: "GET → miss" },
+          { cls: "read", ar: "C→DB", tg: "GET", tx: "→ B，回填 cache" }
+        ]
+      },
+      {
+        client: { val: "—", hint: "下一讀改打 DB", cls: "" },
+        cache: { val: "∅", hint: "進程崩潰", cls: "bad" },
+        db: { val: "B", hint: "資料仍在", cls: "ok" },
+        op: "Cache crash", ack: "已 ACK 的寫入仍在 DB", staleWin: "—", loss: "無",
+        cstate: "down", dirty: "false", hr: "1/3", victim: "—",
+        hits: 1, dbr: 2, dbw: 1, stale: 0,
+        status: "快取整份丟掉。寫入安全，只是下一讀變慢。這就是「可丟棄副本」。",
+        verdict: { tone: "ok", text: "判定：Cache-Aside 崩潰不丟寫入。Stale 只出現在 DB SET 與 DEL 之間；DEL 失敗才會長駐到 TTL。" },
+        log: [
+          { cls: "bad", ar: "$", tg: "CRASH", tx: "cache process gone · DB 仍為 B" }
+        ]
+      }
+    ],
+    readthru: [
+      {
+        client: { val: "GET", hint: "只打 Cache", cls: "on" },
+        cache: { val: "∅", hint: "MISS，準備 load", cls: "on" },
+        db: { val: "A", hint: "尚未被 loader 碰到", cls: "" },
+        op: "Client → Cache GET", ack: "尚未回傳", staleWin: "無", loss: "—",
+        cstate: "empty", dirty: "false", hr: "0/1", victim: "—",
+        hits: 0, dbr: 0, dbw: 0, stale: 0,
+        status: "Read-Through：應用不認得 DB。Miss 由快取層自己回源。",
+        log: [
+          { cls: "read", ar: "C→$", tg: "GET", tx: "GET profile:42 · 應用不直打 DB" }
+        ]
+      },
+      {
+        client: { val: "…", hint: "仍在等 Cache", cls: "on" },
+        cache: { val: "∅", hint: "loader 進行中", cls: "on" },
+        db: { val: "A", hint: "被 Cache loader 讀取", cls: "on" },
+        op: "Cache loader → DB GET", ack: "尚未回傳", staleWin: "無", loss: "—",
+        cstate: "loading", dirty: "false", hr: "0/1", victim: "—",
+        hits: 0, dbr: 1, dbw: 0, stale: 0,
+        status: "回源發生在快取內部。客戶端看起來只是一次比較慢的 GET。",
+        log: [
+          { cls: "read", ar: "$→DB", tg: "LOAD", tx: "loader GET → A" }
+        ]
+      },
+      {
+        client: { val: "A", hint: "Cache 回傳", cls: "ok" },
+        cache: { val: "A", hint: "已填入", cls: "ok" },
+        db: { val: "A", hint: "權威", cls: "" },
+        op: "填入後回傳 A", ack: "讀完成", staleWin: "無", loss: "—",
+        cstate: "filled", dirty: "false", hr: "0/1", victim: "—",
+        hits: 0, dbr: 1, dbw: 0, stale: 0,
+        status: "應用程式碼沒有 SET cache 的句子——耦合被收到快取層。",
+        log: [
+          { cls: "ok", ar: "$→C", tg: "RET", tx: "return A" }
+        ]
+      },
+      {
+        client: { val: "A", hint: "命中", cls: "ok" },
+        cache: { val: "A", hint: "HIT", cls: "ok" },
+        db: { val: "A", hint: "未參與", cls: "" },
+        op: "Cache GET → hit", ack: "讀完成", staleWin: "無", loss: "—",
+        cstate: "filled", dirty: "false", hr: "1/2", victim: "—",
+        hits: 1, dbr: 1, dbw: 0, stale: 0,
+        status: "熱讀與 Aside 一樣快。差異在 miss 與故障時顯現。",
+        log: [
+          { cls: "ok", ar: "C→$", tg: "HIT", tx: "GET → A" }
+        ]
+      },
+      {
+        client: { val: "SET B", hint: "寫仍打 DB（本例）", cls: "on" },
+        cache: { val: "A", hint: "尚未失效", cls: "dirty" },
+        db: { val: "B", hint: "已更新", cls: "ok" },
+        op: "DB SET B（寫路徑另定）", ack: "DB 成功", staleWin: "DB=B、cache=A", loss: "—",
+        cstate: "stale", dirty: "false", hr: "1/2", victim: "—",
+        hits: 1, dbr: 1, dbw: 1, stale: 0,
+        status: "Read-Through 不定義寫。若寫入只打 DB、忘記讓 cache 失效，讀會繼續命中 A。",
+        log: [
+          { cls: "write", ar: "C→DB", tg: "SET", tx: "SET B · cache 仍為 A" }
+        ]
+      },
+      {
+        client: { val: "A", hint: "讀到過期值", cls: "dirty" },
+        cache: { val: "A", hint: "HIT 舊值", cls: "dirty" },
+        db: { val: "B", hint: "權威已是 B", cls: "" },
+        op: "Cache GET → stale hit", ack: "讀完成但值舊", staleWin: "仍開著", loss: "—",
+        cstate: "stale", dirty: "false", hr: "2/3", victim: "—",
+        hits: 2, dbr: 1, dbw: 1, stale: 1,
+        status: "這次是 stale 讀。Read-Through 命中率很好看，但不保證新。寫入必須 DEL 或走 Through／Back。",
+        log: [
+          { cls: "write", ar: "C→$", tg: "HIT", tx: "回傳 A · 與 DB=B 不一致" }
+        ]
+      },
+      {
+        client: { val: "ERR", hint: "沒有旁路", cls: "bad" },
+        cache: { val: "∅", hint: "進程崩潰", cls: "bad" },
+        db: { val: "B", hint: "還在，但應用打不到", cls: "" },
+        op: "Cache crash", ack: "讀失敗", staleWin: "—", loss: "不丟已寫入 DB 的 B；讀不可用",
+        cstate: "down", dirty: "false", hr: "2/3", victim: "—",
+        hits: 2, dbr: 1, dbw: 1, stale: 1,
+        status: "快取是讀路徑單點。沒有設計旁路時，DB 再健康也讀不到。",
+        verdict: { tone: "lock", text: "判定：Read-Through 讓應用變乾淨，但把可用性綁在快取上。寫入若不失效，命中會變成系統性的過期讀。" },
+        log: [
+          { cls: "bad", ar: "C→$", tg: "FAIL", tx: "cache down · 無 DB 旁路" }
+        ]
+      }
+    ],
+    writethru: [
+      {
+        client: { val: "GET", hint: "冷讀", cls: "on" },
+        cache: { val: "∅", hint: "MISS", cls: "on" },
+        db: { val: "A", hint: "loader／應用回源", cls: "on" },
+        op: "miss 回填 A", ack: "讀完成", staleWin: "無", loss: "—",
+        cstate: "filled", dirty: "false", hr: "0/1", victim: "—",
+        hits: 0, dbr: 1, dbw: 0, stale: 0,
+        status: "先把 cache 與 DB 都放到 A，準備對照寫路徑。",
+        log: [
+          { cls: "read", ar: "C→$→DB", tg: "FILL", tx: "miss → A → SET cache" }
+        ]
+      },
+      {
+        client: { val: "A", hint: "命中", cls: "ok" },
+        cache: { val: "A", hint: "HIT", cls: "ok" },
+        db: { val: "A", hint: "未參與", cls: "" },
+        op: "Cache GET → hit", ack: "讀完成", staleWin: "無", loss: "—",
+        cstate: "filled", dirty: "false", hr: "1/2", victim: "—",
+        hits: 1, dbr: 1, dbw: 0, stale: 0,
+        status: "熱讀命中。接下來寫 B。",
+        log: [
+          { cls: "ok", ar: "C→$", tg: "HIT", tx: "GET → A" }
+        ]
+      },
+      {
+        client: { val: "SET B", hint: "等待雙寫", cls: "on" },
+        cache: { val: "B", hint: "已寫入，尚未 ACK", cls: "on" },
+        db: { val: "A", hint: "同步寫入尚未完成", cls: "dirty" },
+        op: "Cache SET B（DB 未完成）", ack: "還沒——Through 要等 DB", staleWin: "瞬時：cache 新、DB 舊", loss: "若此刻崩潰，視實作而定",
+        cstate: "ahead", dirty: "true", hr: "1/2", victim: "—",
+        hits: 1, dbr: 1, dbw: 0, stale: 0,
+        status: "Write-Through 的中間態：快取先有 B，DB 還是 A。ACK 還不能發。",
+        log: [
+          { cls: "write", ar: "C→$", tg: "SET", tx: "cache = B · 等待 DB" }
+        ]
+      },
+      {
+        client: { val: "OK", hint: "雙寫成功才 ACK", cls: "ok" },
+        cache: { val: "B", hint: "與 DB 對齊", cls: "ok" },
+        db: { val: "B", hint: "同步寫入完成", cls: "ok" },
+        op: "Cache → DB SET B", ack: "Cache 與 DB 都成功", staleWin: "已關閉", loss: "無",
+        cstate: "filled", dirty: "false", hr: "1/2", victim: "—",
+        hits: 1, dbr: 1, dbw: 1, stale: 0,
+        status: "寫延遲 ≈ cache + DB。換來讀側幾乎總是新值。",
+        log: [
+          { cls: "write", ar: "$→DB", tg: "SET", tx: "DB = B" },
+          { cls: "ok", ar: "C", tg: "ACK", tx: "client 收到成功" }
+        ]
+      },
+      {
+        client: { val: "B", hint: "命中剛寫的值", cls: "ok" },
+        cache: { val: "B", hint: "HIT", cls: "ok" },
+        db: { val: "B", hint: "未參與", cls: "" },
+        op: "Cache GET → hit B", ack: "讀完成", staleWin: "無", loss: "無",
+        cstate: "filled", dirty: "false", hr: "2/3", victim: "—",
+        hits: 2, dbr: 1, dbw: 1, stale: 0,
+        status: "讀到 B，沒有 Aside 那種「先讀到舊值」的窗口。",
+        log: [
+          { cls: "ok", ar: "C→$", tg: "HIT", tx: "GET → B" }
+        ]
+      },
+      {
+        client: { val: "—", hint: "下一讀 miss 回源", cls: "" },
+        cache: { val: "∅", hint: "進程崩潰", cls: "bad" },
+        db: { val: "B", hint: "已持久化", cls: "ok" },
+        op: "Cache crash", ack: "已 ACK 的 B 在 DB", staleWin: "—", loss: "無",
+        cstate: "down", dirty: "false", hr: "2/3", victim: "—",
+        hits: 2, dbr: 1, dbw: 1, stale: 0,
+        status: "崩潰不丟已確認寫入。這是 Through 相對 Back 的核心承諾。",
+        verdict: { tone: "ok", text: "判定：Write-Through 用寫延遲換耐久與短 stale。ACK 點在雙寫之後；cache 可丟。" },
+        log: [
+          { cls: "bad", ar: "$", tg: "CRASH", tx: "cache gone · DB 仍為 B" }
+        ]
+      }
+    ],
+    writeback: [
+      {
+        client: { val: "GET", hint: "冷讀", cls: "on" },
+        cache: { val: "A", hint: "回填 A", cls: "ok" },
+        db: { val: "A", hint: "權威", cls: "" },
+        op: "miss 回填 A", ack: "讀完成", staleWin: "無", loss: "—",
+        cstate: "filled", dirty: "false", hr: "0/1", victim: "—",
+        hits: 0, dbr: 1, dbw: 0, stale: 0,
+        status: "預熱完成：cache=A、DB=A、dirty=false。",
+        log: [
+          { cls: "read", ar: "C→$→DB", tg: "FILL", tx: "miss → A" }
+        ]
+      },
+      {
+        client: { val: "OK", hint: "立刻 ACK", cls: "ok" },
+        cache: { val: "B", hint: "dirty", cls: "dirty" },
+        db: { val: "A", hint: "尚未 flush", cls: "dirty" },
+        op: "Cache SET B · dirty", ack: "只寫入 cache 就 ACK", staleWin: "DB 在 flush 前一直舊", loss: "此刻崩潰會丟 B",
+        cstate: "dirty", dirty: "true", hr: "0/1", victim: "—",
+        hits: 0, dbr: 1, dbw: 0, stale: 0,
+        status: "Write-Back：客戶端以為 B 已保存。權威其實暫時不在 DB。",
+        log: [
+          { cls: "write", ar: "C→$", tg: "SET", tx: "cache = B (dirty)" },
+          { cls: "ok", ar: "C", tg: "ACK", tx: "成功回傳 · DB 仍為 A" }
+        ]
+      },
+      {
+        client: { val: "B", hint: "命中未 flush 的值", cls: "ok" },
+        cache: { val: "B", hint: "HIT dirty", cls: "dirty" },
+        db: { val: "A", hint: "報表若直打 DB 會看到 A", cls: "dirty" },
+        op: "Cache GET → hit B", ack: "讀完成", staleWin: "任何旁路讀都舊", loss: "仍未 flush",
+        cstate: "dirty", dirty: "true", hr: "1/2", victim: "—",
+        hits: 1, dbr: 1, dbw: 0, stale: 0,
+        status: "走快取的讀是對的；繞過快取的讀（ETL、另一服務）是錯的。",
+        log: [
+          { cls: "ok", ar: "C→$", tg: "HIT", tx: "GET → B" },
+          { cls: "note", ar: "·", tg: "note", tx: "DB 旁路讀仍為 A" }
+        ]
+      },
+      {
+        client: { val: "B?", hint: "已 ACK 的值消失", cls: "bad" },
+        cache: { val: "∅", hint: "崩潰，dirty 沒了", cls: "bad" },
+        db: { val: "A", hint: "從未收到 B", cls: "dirty" },
+        op: "Cache crash before flush", ack: "當時已對客戶 ACK", staleWin: "—", loss: "已確認的 B",
+        cstate: "down", dirty: "lost", hr: "1/2", victim: "—",
+        hits: 1, dbr: 1, dbw: 0, stale: 0,
+        status: "這不是「短暫不一致」，是耐久性失敗：客戶端拿到成功，資料卻回到 A。",
+        verdict: { tone: "bad", text: "判定：Write-Back 把 ACK 提前到快取。Flush 前崩潰 = 丟失已確認寫入。普通單機 Redis 不當這個緩衝。" },
+        log: [
+          { cls: "bad", ar: "$", tg: "CRASH", tx: "dirty B 消失 · DB 仍為 A" }
+        ]
+      }
+    ],
+    writearound: [
+      {
+        client: { val: "A", hint: "已預熱", cls: "ok" },
+        cache: { val: "A", hint: "熱資料", cls: "ok" },
+        db: { val: "A", hint: "權威", cls: "" },
+        op: "預熱 hit 路徑就緒", ack: "—", staleWin: "無", loss: "—",
+        cstate: "filled", dirty: "false", hr: "1/1", victim: "—",
+        hits: 1, dbr: 1, dbw: 0, stale: 0,
+        status: "假設 profile:42 已在 cache。Write-Around 專門處理「寫入不想污染 working set」。",
+        log: [
+          { cls: "ok", ar: "C→$", tg: "HIT", tx: "預熱 GET → A" }
+        ]
+      },
+      {
+        client: { val: "OK", hint: "寫入只打 DB", cls: "ok" },
+        cache: { val: "A", hint: "沒被碰到", cls: "dirty" },
+        db: { val: "B", hint: "已是 B", cls: "ok" },
+        op: "DB SET B · cache 不動", ack: "DB 成功", staleWin: "打開：直到 TTL／DEL／驅逐", loss: "無",
+        cstate: "stale", dirty: "false", hr: "1/1", victim: "—",
+        hits: 1, dbr: 1, dbw: 1, stale: 0,
+        status: "寫入繞過快取。這能避免把冷寫入灌進 LRU，但舊值 A 還坐在槽位上。",
+        log: [
+          { cls: "write", ar: "C→DB", tg: "SET", tx: "DB = B · cache 未 DEL" }
+        ]
+      },
+      {
+        client: { val: "A", hint: "過期命中", cls: "dirty" },
+        cache: { val: "A", hint: "HIT 舊值", cls: "dirty" },
+        db: { val: "B", hint: "權威 B", cls: "" },
+        op: "Cache GET → stale hit", ack: "讀完成但值舊", staleWin: "仍開著", loss: "無",
+        cstate: "stale", dirty: "false", hr: "2/2", victim: "—",
+        hits: 2, dbr: 1, dbw: 1, stale: 1,
+        status: "Write-Around 最容易被忽略的後果：命中率很好看，答案是錯的。",
+        log: [
+          { cls: "write", ar: "C→$", tg: "HIT", tx: "回傳 A · stale" }
+        ]
+      },
+      {
+        client: { val: "—", hint: "等回填", cls: "" },
+        cache: { val: "∅", hint: "TTL 到期", cls: "" },
+        db: { val: "B", hint: "權威", cls: "" },
+        op: "TTL expire", ack: "—", staleWin: "因過期而關閉", loss: "無",
+        cstate: "empty", dirty: "false", hr: "2/2", victim: "A (TTL)",
+        hits: 2, dbr: 1, dbw: 1, stale: 1,
+        status: "沒有顯式 DEL 時，TTL 是唯一關門人。窗口長度 = 你設的過期時間。",
+        log: [
+          { cls: "note", ar: "$", tg: "TTL", tx: "profile:42 expired" }
+        ]
+      },
+      {
+        client: { val: "B", hint: "miss 回填新值", cls: "ok" },
+        cache: { val: "B", hint: "重新填入", cls: "ok" },
+        db: { val: "B", hint: "GET B", cls: "on" },
+        op: "miss → DB → SET B", ack: "讀完成", staleWin: "無", loss: "無",
+        cstate: "filled", dirty: "false", hr: "2/3", victim: "—",
+        hits: 2, dbr: 2, dbw: 1, stale: 1,
+        status: "過期後的第一次讀才對齊。實務上 Around 幾乎一定要順便 DEL 或把 TTL 壓短。",
+        log: [
+          { cls: "read", ar: "C→$→DB", tg: "FILL", tx: "miss → B" }
+        ]
+      },
+      {
+        client: { val: "—", hint: "下一讀 miss", cls: "" },
+        cache: { val: "∅", hint: "進程崩潰", cls: "bad" },
+        db: { val: "B", hint: "寫入安全", cls: "ok" },
+        op: "Cache crash", ack: "已 ACK 的寫在 DB", staleWin: "—", loss: "無",
+        cstate: "down", dirty: "false", hr: "2/3", victim: "—",
+        hits: 2, dbr: 2, dbw: 1, stale: 1,
+        status: "崩潰不丟寫入。Write-Around 的代價是過期讀，不是丟資料。",
+        verdict: { tone: "lock", text: "判定：Write-Around 保護 working set，但若 key 已在 cache，會留下最長 stale window。搭配 DEL 或短 TTL，否則不要用。" },
+        log: [
+          { cls: "bad", ar: "$", tg: "CRASH", tx: "cache gone · DB 仍為 B" }
+        ]
+      }
+    ]
+  };
+
+  var ACCESSES = ["A", "A", "B", "C", "D"];
+  var CAP = 3;
+  var TTL_LIFE = 3;
+
+  function cloneSlots(list) {
+    return list.map(function (e) {
+      return { key: e.key, freq: e.freq, last: e.last, inserted: e.inserted, cls: e.cls };
+    });
+  }
+
+  function simulateEviction(policy) {
+    var map = [];
+    var clock = 0;
+    var hits = 0;
+    var frames = [];
+
+    function expire() {
+      if (policy !== "ttl") return [];
+      var dead = [];
+      var keep = [];
+      for (var i = 0; i < map.length; i++) {
+        if (clock - map[i].inserted >= TTL_LIFE) dead.push(map[i].key);
+        else keep.push(map[i]);
+      }
+      map = keep;
+      return dead;
+    }
+
+    function find(k) {
+      for (var i = 0; i < map.length; i++) if (map[i].key === k) return i;
+      return -1;
+    }
+
+    function pickVictim() {
+      var best = 0;
+      for (var i = 1; i < map.length; i++) {
+        if (policy === "lfu") {
+          if (map[i].freq < map[best].freq) best = i;
+          else if (map[i].freq === map[best].freq && map[i].last < map[best].last) best = i;
+        } else if (policy === "lru") {
+          if (map[i].last < map[best].last) best = i;
+        } else if (map[i].inserted < map[best].inserted) best = i;
+      }
+      return best;
+    }
+
+    for (var n = 0; n < ACCESSES.length; n++) {
+      var k = ACCESSES[n];
+      clock += 1;
+      var expired = expire();
+      for (var j = 0; j < map.length; j++) map[j].cls = "";
+      var idx = find(k);
+      var hit = idx !== -1;
+      var victimKey = "—";
+      var op;
+      if (hit) {
+        map[idx].freq += 1;
+        map[idx].last = clock;
+        map[idx].cls = "hit";
+        hits += 1;
+        op = "GET " + k + " → HIT";
+      } else {
+        if (map.length >= CAP) {
+          var v = pickVictim();
+          victimKey = map[v].key;
+          map[v].cls = "evict";
+          map.splice(v, 1);
+        }
+        map.push({ key: k, freq: 1, last: clock, inserted: clock, cls: "fresh" });
+        op = "GET " + k + " → MISS，寫入槽位";
+      }
+      var reads = n + 1;
+      var staleNote = expired.length ? ("TTL 先帶走 " + expired.join(",")) : "無";
+      var loss = victimKey !== "—" ? ("驅逐 " + victimKey) : (expired.length ? ("過期 " + expired.join(",")) : "無");
+      var policyLabel = policy === "lru" ? "最近最少用" : policy === "lfu" ? "最少頻次（同頻用 LRU 決勝）" : "絕對 TTL=" + TTL_LIFE + " 步";
+      frames.push({
+        slots: cloneSlots(map),
+        op: op,
+        ack: policyLabel,
+        staleWin: staleNote,
+        loss: loss,
+        cstate: map.map(function (e) { return e.key; }).join(",") || "empty",
+        dirty: "n/a",
+        hr: hits + "/" + reads,
+        victim: victimKey,
+        hits: hits,
+        dbr: reads - hits,
+        dbw: 0,
+        stale: 0,
+        status: hit
+          ? (k + " 命中。" + (policy === "lfu" ? ("頻次現為 " + map[find(k)].freq + "。") : "更新近用時間。"))
+          : (k + " 未命中。" + (victimKey !== "—" ? ("容量滿，踢出 " + victimKey + "。") : (expired.length ? ("先過期 " + expired.join(",") + "。") : "仍有空位。"))),
+        log: [
+          { cls: hit ? "ok" : "read", ar: "t" + clock, tg: hit ? "HIT" : "MISS", tx: "GET " + k + (victimKey !== "—" ? (" · evict " + victimKey) : "") + (expired.length ? (" · ttl-expire " + expired.join(",")) : "") }
+        ],
+        verdict: n === ACCESSES.length - 1 ? finishEvictVerdict(policy, hits, reads, map, victimKey) : null
+      });
+    }
+    return frames;
+  }
+
+  function finishEvictVerdict(policy, hits, reads, map, lastVictim) {
+    var remain = map.map(function (e) { return e.key; }).join(", ");
+    if (policy === "lru") {
+      return { tone: "lock", text: "判定：同一序列 A,A,B,C,D、容量 3。LRU 在 D 進來時踢掉 A（最舊），即使 A 被讀過兩次。留下 " + remain + "。" };
+    }
+    if (policy === "lfu") {
+      return { tone: "ok", text: "判定：LFU 保住 A（頻次 2），改踢較冷的 B。留下 " + remain + "。熱點穩定時這通常比 LRU 準。" };
+    }
+    return { tone: "lock", text: "判定：絕對 TTL=3 步，A 在第 3 步就過期——與是否熱點無關，容量也還沒滿。TTL 是時效預算，不是「留下熱資料」的演算法。" };
+  }
+
+  var EVICT_CACHE = {};
+
+  function framesOf() {
+    if (mode === "path") return PATH[scenario] || PATH.aside;
+    if (!EVICT_CACHE[scenario]) EVICT_CACHE[scenario] = simulateEviction(scenario);
+    return EVICT_CACHE[scenario];
+  }
+
+  function setActor(el, hintEl, spec) {
+    if (!el) return;
+    el.textContent = spec.val;
+    if (hintEl) hintEl.textContent = spec.hint;
+    var box = el.parentNode;
+    box.className = "cp-actor" + (spec.cls ? " " + spec.cls : "");
+  }
+
+  function setText(el, v) {
+    if (el) el.textContent = v;
+  }
+
+  function paintSlots(slots) {
+    if (!slotsEl) return;
+    slotsEl.innerHTML = "";
+    var i;
+    for (i = 0; i < CAP; i++) {
+      var div = document.createElement("div");
+      var item = slots[i];
+      if (!item) {
+        div.className = "cp-slot empty";
+        div.innerHTML = '<div class="sk">empty</div><div class="sm">slot ' + (i + 1) + "</div>";
+      } else {
+        div.className = "cp-slot" + (item.cls ? " " + item.cls : "");
+        var meta = "f=" + item.freq + " · t=" + item.last;
+        if (mode === "evict" && scenario === "ttl") meta = "in@" + item.inserted + " · f=" + item.freq;
+        div.innerHTML = '<div class="sk">' + item.key + '</div><div class="sm">' + meta + "</div>";
+      }
+      slotsEl.appendChild(div);
+    }
+  }
+
+  function appendLog(rows, replace) {
+    if (!wireEl) return;
+    if (replace) wireEl.innerHTML = "";
+    for (var i = 0; i < rows.length; i++) {
+      var r = rows[i];
+      var row = document.createElement("div");
+      row.className = "cp-row " + (r.cls || "note");
+      row.innerHTML = '<span class="ar">' + r.ar + '</span><span class="tg">' + r.tg + '</span><span class="tx">' + r.tx + "</span>";
+      wireEl.appendChild(row);
+    }
+    wireEl.scrollTop = wireEl.scrollHeight;
+  }
+
+  function idlePath() {
+    setActor(clientVal, clientHint, { val: "—", hint: "待命", cls: "" });
+    setActor(cacheVal, cacheHint, { val: "∅", hint: "空", cls: "" });
+    setActor(dbVal, dbHint, { val: "A", hint: "初值 A", cls: "" });
+    setText(mStep, "0");
+    setText(mHits, "0");
+    setText(mDbr, "0");
+    setText(mDbw, "0");
+    setText(mStale, "0");
+    setText(pOp, "—");
+    setText(pAck, "—");
+    setText(pStale, "—");
+    setText(pLoss, "—");
+    setText(pCstate, "empty");
+    setText(pDirty, "false");
+    setText(pHr, "—");
+    setText(pVictim, "—");
+    if (statusEl) statusEl.textContent = "選擇模式後按「下一步」。先走冷讀，再寫成 B，最後看崩潰。";
+    if (verdictEl) {
+      verdictEl.className = "cp-verdict";
+      verdictEl.textContent = "判定尚未產生——走完序列後會摘要 ACK、stale 與崩潰損失。";
+    }
+    if (wireEl) wireEl.innerHTML = "";
+  }
+
+  function idleEvict() {
+    paintSlots([]);
+    setText(mStep, "0");
+    setText(mHits, "0");
+    setText(mDbr, "0");
+    setText(mDbw, "0");
+    setText(mStale, "0");
+    setText(pOp, "—");
+    setText(pAck, scenario === "lru" ? "最近最少用" : scenario === "lfu" ? "最少頻次" : "絕對 TTL=3");
+    setText(pStale, "—");
+    setText(pLoss, "—");
+    setText(pCstate, "empty");
+    setText(pDirty, "n/a");
+    setText(pHr, "—");
+    setText(pVictim, "—");
+    if (statusEl) statusEl.textContent = "容量 3，序列 A → A → B → C → D。按「下一步」看誰被留下。";
+    if (verdictEl) {
+      verdictEl.className = "cp-verdict";
+      verdictEl.textContent = "判定尚未產生——對照三種策略在 D 進入時的受害者。";
+    }
+    if (wireEl) wireEl.innerHTML = "";
+  }
+
+  function applyFrame(f, idx, total) {
+    setText(mStep, String(idx + 1) + " / " + total);
+    setText(mHits, String(f.hits));
+    setText(mDbr, String(f.dbr));
+    setText(mDbw, String(f.dbw));
+    setText(mStale, String(f.stale));
+    setText(pOp, f.op);
+    setText(pAck, f.ack);
+    setText(pStale, f.staleWin);
+    setText(pLoss, f.loss);
+    setText(pCstate, f.cstate);
+    setText(pDirty, f.dirty);
+    setText(pHr, f.hr);
+    setText(pVictim, f.victim);
+    if (statusEl) statusEl.textContent = f.status;
+    if (f.client) setActor(clientVal, clientHint, f.client);
+    if (f.cache) setActor(cacheVal, cacheHint, f.cache);
+    if (f.db) setActor(dbVal, dbHint, f.db);
+    if (f.slots) paintSlots(f.slots);
+    appendLog(f.log || [], idx === 0);
+    if (f.verdict && verdictEl) {
+      verdictEl.className = "cp-verdict tone-" + f.verdict.tone;
+      verdictEl.textContent = f.verdict.text;
+    }
+  }
+
+  function rebuildScButtons() {
+    var defs = mode === "path" ? PATH_BTNS : EVICT_BTNS;
+    if (!defs.some(function (d) { return d[0] === scenario; })) {
+      scenario = defs[0][0];
+    }
+    segSc.innerHTML = "";
+    for (var i = 0; i < defs.length; i++) {
+      var b = document.createElement("button");
+      b.setAttribute("data-sc", defs[i][0]);
+      b.setAttribute("aria-pressed", defs[i][0] === scenario ? "true" : "false");
+      b.textContent = defs[i][1];
+      segSc.appendChild(b);
+    }
+  }
+
+  function setModeUi() {
+    var path = mode === "path";
+    if (actorsEl) actorsEl.hidden = !path;
+    if (evictView) evictView.hidden = path;
+    if (modeHint) {
+      modeHint.innerHTML = path
+        ? "讀寫路徑：key <code>profile:42</code>，DB 初值 A。逐步看 miss 回填、寫入 ACK、以及 cache 崩潰時會不會丟資料。"
+        : "淘汰策略：容量 3，同一序列 <code>A, A, B, C, D</code>。LRU 踢最舊、LFU 踢最冷、絕對 TTL=3 步則讓時間先帶走 A。";
+    }
+    rebuildScButtons();
+  }
+
+  function reset(keepLog) {
+    step = 0;
+    if (btnNext) btnNext.disabled = false;
+    setModeUi();
+    if (mode === "path") idlePath();
+    else idleEvict();
+    if (!keepLog && wireEl) wireEl.innerHTML = "";
+  }
+
+  function onNext() {
+    var frames = framesOf();
+    if (step >= frames.length) return;
+    applyFrame(frames[step], step, frames.length);
+    step += 1;
+    if (step >= frames.length && btnNext) btnNext.disabled = true;
+  }
+
+  if (segMode) {
+    segMode.addEventListener("click", function (e) {
+      var btn = e.target.closest("button[data-mode]");
+      if (!btn) return;
+      mode = btn.getAttribute("data-mode");
+      Array.prototype.forEach.call(segMode.querySelectorAll("button[data-mode]"), function (b) {
+        b.setAttribute("aria-pressed", b === btn ? "true" : "false");
+      });
+      scenario = mode === "path" ? "aside" : "lru";
+      reset(true);
+    });
+  }
+
+  if (segSc) {
+    segSc.addEventListener("click", function (e) {
+      var btn = e.target.closest("button[data-sc]");
+      if (!btn) return;
+      scenario = btn.getAttribute("data-sc");
+      Array.prototype.forEach.call(segSc.querySelectorAll("button[data-sc]"), function (b) {
+        b.setAttribute("aria-pressed", b === btn ? "true" : "false");
+      });
+      reset(true);
+    });
+  }
+
+  if (btnNext) btnNext.addEventListener("click", onNext);
+  if (btnReset) btnReset.addEventListener("click", function () { reset(true); });
+
+  reset(false);
+})();
+</script>
