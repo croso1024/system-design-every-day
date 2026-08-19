@@ -1,0 +1,502 @@
+<script>
+(function () {
+  "use strict";
+
+  var demo = document.getElementById("demo-cfm");
+  if (!demo) return;
+
+  var TICKS = 8;
+  var CAP = 160;
+  var SCALE = 800;
+  var BAR_MAX = 100;
+  var N_KEYS = 40;
+  var FPR = 0.03;
+
+  var sc = "pen";
+  var qps = 200;
+  var ttl = "aligned";
+  var sf = false;
+  var bloom = false;
+  var step = 0;
+  var series = [];
+
+  var statusEl = document.getElementById("cfm-status");
+  var verdictEl = document.getElementById("cfm-verdict");
+  var wireEl = document.getElementById("cfm-wire");
+  var chartEl = document.getElementById("cfm-chart");
+  var capLine = document.getElementById("cfm-cap-line");
+  var hintEl = document.getElementById("cfm-mode-hint");
+  var btnNext = document.getElementById("cfm-btn-next");
+  var btnReset = document.getElementById("cfm-btn-reset");
+
+  var mT = document.getElementById("cfm-m-t");
+  var mIn = document.getElementById("cfm-m-in");
+  var mOr = document.getElementById("cfm-m-or");
+  var mCo = document.getElementById("cfm-m-co");
+  var mOv = document.getElementById("cfm-m-ov");
+
+  var inVal = document.getElementById("cfm-in-val");
+  var inHint = document.getElementById("cfm-in-hint");
+  var cacheVal = document.getElementById("cfm-cache-val");
+  var cacheHint = document.getElementById("cfm-cache-hint");
+  var originVal = document.getElementById("cfm-origin-val");
+  var originHint = document.getElementById("cfm-origin-hint");
+  var actorIn = demo.querySelector('.cfm-actor[data-role="in"]');
+  var actorCache = demo.querySelector('.cfm-actor[data-role="cache"]');
+  var actorOrigin = demo.querySelector('.cfm-actor[data-role="origin"]');
+
+  var pSc = document.getElementById("cfm-p-sc");
+  var pOr = document.getElementById("cfm-p-or");
+  var pBl = document.getElementById("cfm-p-bl");
+  var pCo = document.getElementById("cfm-p-co");
+  var pSum = document.getElementById("cfm-p-sum");
+  var pOt = document.getElementById("cfm-p-ot");
+  var pPk = document.getElementById("cfm-p-pk");
+  var pUtil = document.getElementById("cfm-p-util");
+
+  var HINTS = {
+    pen: "穿透：t=3 起大量隨機空 key。開關 Bloom 才會顯著改變回源；Singleflight 幾乎沒用。",
+    brk: "擊穿：t=3 熱 key 到期。Singleflight 把 N 次回源收成 1；TTL 抖動對單把 key 幾乎無效。",
+    ava: "雪崩：對齊時 t=3 整批到期。TTL 抖動把 K 攤開；Singleflight 只把每把的 N 收成 1。"
+  };
+  var SC_LABEL = { pen: "穿透 / 打空", brk: "擊穿 / 熱 key", ava: "雪崩 / 集體到期" };
+
+  function bindSeg(id, attr, apply) {
+    var root = document.getElementById(id);
+    if (!root) return;
+    root.addEventListener("click", function (ev) {
+      var btn = ev.target.closest("button");
+      if (!btn || !root.contains(btn)) return;
+      var val = btn.getAttribute(attr);
+      if (val == null) return;
+      apply(val);
+      Array.prototype.forEach.call(root.querySelectorAll("button"), function (b) {
+        b.setAttribute("aria-pressed", b === btn ? "true" : "false");
+      });
+      reset();
+    });
+  }
+
+  bindSeg("cfm-seg-sc", "data-sc", function (v) { sc = v; });
+  bindSeg("cfm-seg-qps", "data-qps", function (v) { qps = parseInt(v, 10); });
+  bindSeg("cfm-seg-ttl", "data-ttl", function (v) { ttl = v; });
+  bindSeg("cfm-seg-sf", "data-sf", function (v) { sf = v === "on"; });
+  bindSeg("cfm-seg-bloom", "data-bloom", function (v) { bloom = v === "on"; });
+
+  function buildSeries() {
+    var ticks = [];
+    var hotCached = true;
+    var coldKeys = 0;
+
+    for (var t = 0; t < TICKS; t++) {
+      var origin = 0;
+      var hits = 0;
+      var coalesced = 0;
+      var bloomReject = 0;
+      var logs = [];
+      var status = "";
+
+      if (sc === "pen") {
+        var fakeRatio = 0.12;
+        if (t >= 3 && t <= 6) fakeRatio = 0.85;
+        if (t === 7) fakeRatio = 0.4;
+        var fake = Math.round(qps * fakeRatio);
+        var real = qps - fake;
+        hits = real;
+        if (bloom) {
+          var fp = fake === 0 ? 0 : Math.max(1, Math.round(fake * FPR));
+          if (fake === 0) fp = 0;
+          if (fp > fake) fp = fake;
+          bloomReject = fake - fp;
+          origin = fp;
+          logs.push({
+            cls: "ok", ar: "BF", tg: "drop",
+            tx: "Bloom 攔截 " + bloomReject + " 個空 key；FPR 放行 " + fp
+          });
+        } else {
+          origin = fake;
+          logs.push({
+            cls: "bad", ar: "C→O", tg: "MISS",
+            tx: fake + " 個不存在的 key 全部回源"
+          });
+        }
+        if (sf) {
+          logs.push({
+            cls: "note", ar: "·", tg: "sf",
+            tx: "Singleflight 無效：空 key 幾乎不重複，乘數 ≈ 1"
+          });
+        }
+        if (ttl === "jitter") {
+          logs.push({
+            cls: "note", ar: "·", tg: "ttl",
+            tx: "TTL 抖動不擋打空——這些 key 從來沒被快取過"
+          });
+        }
+        if (t === 3) {
+          logs.push({
+            cls: "warn", ar: "t", tg: "scan",
+            tx: "掃描開始，打空比例升到 " + Math.round(fakeRatio * 100) + "%"
+          });
+        }
+        status = bloom
+          ? "Bloom 把確定不存在的請求擋在 origin 外。假陽性仍漏打 " + origin + "。"
+          : "穿透進行中：origin 在為不存在的 key 付帳。";
+      } else if (sc === "brk") {
+        var hot = Math.round(qps * 0.72);
+        var other = qps - hot;
+        var otherMiss = Math.round(other * 0.06);
+        var otherHit = other - otherMiss;
+        if (t === 3) hotCached = false;
+
+        if (hotCached) {
+          hits = hot + otherHit;
+          origin = otherMiss;
+          logs.push({ cls: "ok", ar: "C", tg: "HIT", tx: "sku:hot × " + hot + " 命中" });
+          status = "熱 key 命中。origin 只吃背景 miss。";
+        } else if (sf) {
+          origin = 1 + otherMiss;
+          coalesced = Math.max(0, hot - 1);
+          hits = otherHit;
+          logs.push({
+            cls: "warn", ar: "lock", tg: "SF",
+            tx: "1 次重建，" + coalesced + " 個 waiter 合併"
+          });
+          if (origin <= CAP) {
+            hotCached = true;
+            logs.push({ cls: "ok", ar: "O→C", tg: "SET", tx: "重建成功，下一刻恢復命中" });
+            status = "Singleflight 把擊穿收成 1 次回源。waiter 在等，origin 活著。";
+          } else {
+            status = "合併後仍超容量。";
+            logs.push({ cls: "bad", ar: "O", tg: "OVER", tx: "超容量，熱 key 未回填" });
+          }
+        } else {
+          origin = hot + otherMiss;
+          hits = otherHit;
+          logs.push({
+            cls: "bad", ar: "C→O", tg: "HERD",
+            tx: hot + " 個併發 miss 各自回源"
+          });
+          if (origin <= CAP) {
+            hotCached = true;
+            logs.push({
+              cls: "ok", ar: "O→C", tg: "SET",
+              tx: "origin 撐住，但做了多餘的重複查詢"
+            });
+            status = "沒有合併，QPS 仍在容量內。origin 被同一把 key 重複擊中。";
+          } else {
+            logs.push({
+              cls: "bad", ar: "O", tg: "OVER",
+              tx: "超容量 " + (origin - CAP) + "，重建失敗，熱 key 仍空"
+            });
+            status = "Herd 打死 origin。熱 key 沒回填，下一刻繼續打穿。";
+          }
+        }
+        if (ttl === "jitter" && t === 0) {
+          logs.push({
+            cls: "note", ar: "·", tg: "ttl",
+            tx: "TTL 抖動對單把熱 key 的到期尖峰幾乎沒幫助"
+          });
+        }
+        if (bloom && t === 0) {
+          logs.push({
+            cls: "note", ar: "·", tg: "bf",
+            tx: "Bloom 不管擊穿：這把 key 確實存在"
+          });
+        }
+      } else {
+        var scheduled = 0;
+        if (ttl === "jitter") {
+          if (t >= 2 && t <= 6) scheduled = 8;
+        } else if (t === 3) {
+          scheduled = N_KEYS;
+        }
+        var dying = Math.min(N_KEYS, scheduled + coldKeys);
+        var perKey = qps / N_KEYS;
+        var missQps = Math.round(dying * perKey);
+        var otherMiss = Math.round(qps * 0.03);
+        var bgHit = qps - missQps - otherMiss;
+        if (bgHit < 0) bgHit = 0;
+
+        if (dying === 0) {
+          origin = otherMiss;
+          hits = qps - otherMiss;
+          coldKeys = 0;
+          logs.push({ cls: "ok", ar: "C", tg: "HIT", tx: "working set 仍熱，無集體到期" });
+          status = "尚未集體到期。origin 只吃背景 miss。";
+        } else if (sf) {
+          origin = dying + otherMiss;
+          coalesced = Math.max(0, missQps - dying);
+          hits = bgHit;
+          logs.push({
+            cls: "warn", ar: "SF", tg: "K→1",
+            tx: dying + " 把 key 各重建 1 次，合併掉 " + coalesced
+          });
+          if (origin <= CAP) {
+            coldKeys = 0;
+            logs.push({ cls: "ok", ar: "O→C", tg: "FILL", tx: "本刻到期的 key 已回填" });
+            status = "合併把每把 N 收成 1。K=" + dying + " 仍低於容量。";
+          } else {
+            coldKeys = dying;
+            logs.push({
+              cls: "bad", ar: "O", tg: "OVER",
+              tx: "K 次重建仍超容量，這批 key 下一刻仍冷"
+            });
+            status = "Singleflight 救不了「同時死掉的 key 數」。需要 TTL 抖動把 K 攤開。";
+          }
+        } else {
+          origin = missQps + otherMiss;
+          hits = bgHit;
+          logs.push({
+            cls: "bad", ar: "C→O", tg: "MISS",
+            tx: dying + " 把 key × 每把約 " + Math.round(perKey) + " 次 → 回源 " + missQps
+          });
+          if (origin <= CAP) {
+            coldKeys = 0;
+            status = "沒合併，但本刻到期量仍在容量內。";
+          } else {
+            coldKeys = dying;
+            logs.push({
+              cls: "bad", ar: "O", tg: "OVER",
+              tx: "超容量 " + (origin - CAP) + "，冷 key 堆積"
+            });
+            status = "集體 miss 打穿 origin。對齊 TTL 把 working set 同時變冷。";
+          }
+        }
+        if (bloom && t === 0) {
+          logs.push({
+            cls: "note", ar: "·", tg: "bf",
+            tx: "Bloom 不管雪崩：這些 key 都在集合裡"
+          });
+        }
+      }
+
+      var overload = Math.max(0, origin - CAP);
+      ticks.push({
+        t: t,
+        inbound: qps,
+        origin: origin,
+        hits: hits,
+        coalesced: coalesced,
+        bloomReject: bloomReject,
+        overload: overload,
+        util: Math.round((origin / CAP) * 100),
+        logs: logs,
+        status: status
+      });
+    }
+    return ticks;
+  }
+
+  function barClass(origin, reached) {
+    if (!reached) return "future";
+    if (origin > CAP) return "bad";
+    if (origin > CAP * 0.8) return "warn";
+    return "ok";
+  }
+
+  function actorClass(el, name) {
+    el.classList.remove("on", "ok", "dirty", "bad");
+    if (name) el.classList.add(name);
+  }
+
+  function setText(el, text) {
+    if (el) el.textContent = text;
+  }
+
+  function toneUtil(el, origin) {
+    el.classList.remove("good", "warn", "bad");
+    if (origin > CAP) el.classList.add("bad");
+    else if (origin > CAP * 0.8) el.classList.add("warn");
+    else el.classList.add("good");
+  }
+
+  function positionCap() {
+    if (!capLine || !chartEl) return;
+    var px = Math.round((CAP / SCALE) * BAR_MAX);
+    capLine.style.bottom = (8 + 22 + px) + "px";
+  }
+
+  function renderChart() {
+    var html = "";
+    var i;
+    for (i = 0; i < TICKS; i++) {
+      var row = series[i];
+      var reached = i < step;
+      var h = Math.max(3, Math.round((row.origin / SCALE) * BAR_MAX));
+      var n = reached ? String(row.origin) : "";
+      html += '<div class="cfm-col">';
+      html += '<div class="cfm-bar-n">' + n + "</div>";
+      html += '<div class="cfm-bar ' + barClass(row.origin, reached) + '" style="height:' + h + 'px"></div>';
+      html += '<div class="cfm-tick">t' + i + "</div>";
+      html += "</div>";
+    }
+    chartEl.innerHTML = html;
+    positionCap();
+  }
+
+  function appendLogs(logs) {
+    var i;
+    for (i = 0; i < logs.length; i++) {
+      var L = logs[i];
+      var row = document.createElement("div");
+      row.className = "cfm-row " + L.cls;
+      row.innerHTML =
+        '<span class="ar">' + L.ar + "</span>" +
+        '<span class="tg">' + L.tg + "</span>" +
+        '<span class="tx">' + L.tx + "</span>";
+      wireEl.appendChild(row);
+    }
+    wireEl.scrollTop = wireEl.scrollHeight;
+  }
+
+  function totalsTo(n) {
+    var sum = 0;
+    var overTicks = 0;
+    var peak = 0;
+    var i;
+    for (i = 0; i < n; i++) {
+      sum += series[i].origin;
+      if (series[i].overload > 0) overTicks += 1;
+      if (series[i].origin > peak) peak = series[i].origin;
+    }
+    return { sum: sum, overTicks: overTicks, peak: peak };
+  }
+
+  function paintIdle() {
+    setText(mT, "0");
+    setText(mIn, "0");
+    setText(mOr, "0");
+    setText(mCo, "0");
+    setText(mOv, "0");
+    setText(inVal, "—");
+    setText(inHint, "待命");
+    setText(cacheVal, "—");
+    setText(cacheHint, "待命");
+    setText(originVal, "—");
+    setText(originHint, "容量 " + CAP);
+    actorClass(actorIn, "");
+    actorClass(actorCache, "");
+    actorClass(actorOrigin, "");
+    setText(pSc, SC_LABEL[sc]);
+    setText(pOr, "—");
+    setText(pBl, "—");
+    setText(pCo, "—");
+    setText(pSum, "0");
+    setText(pOt, "0");
+    setText(pPk, "0");
+    setText(pUtil, "—");
+    pOr.classList.remove("good", "warn", "bad");
+    pUtil.classList.remove("good", "warn", "bad");
+    pOt.classList.remove("good", "warn", "bad");
+    pPk.classList.remove("good", "warn", "bad");
+    setText(statusEl, "選擇故障與防護後按「下一步」。origin 容量固定 " + CAP + "；柱高超過虛線即過載。");
+    verdictEl.className = "cfm-verdict";
+    setText(verdictEl, "判定尚未產生——走完 8 個時刻後會摘要峰值與過載。");
+    wireEl.innerHTML = "";
+    btnNext.disabled = false;
+  }
+
+  function finishVerdict() {
+    var tot = totalsTo(TICKS);
+    var tone = "ok";
+    var text;
+    if (tot.overTicks > 0) {
+      tone = "bad";
+      text = "判定：峰值 origin " + tot.peak + "，有 " + tot.overTicks +
+        " 個時刻超過容量 " + CAP + "。";
+    } else if (tot.peak > CAP * 0.8) {
+      tone = "lock";
+      text = "判定：勉強撐住。峰值 " + tot.peak + " 已靠近容量 " + CAP + "。";
+    } else {
+      text = "判定：origin 全程低於容量。峰值 " + tot.peak + "。";
+    }
+    if (sc === "pen") {
+      text += bloom
+        ? " Bloom 把打空從「每次回源」變成 FPR 漏打。"
+        : " 未開 Bloom，掃描的空 key 直接變成 origin 帳單。";
+    } else if (sc === "brk") {
+      text += sf
+        ? " Singleflight 把熱 key 的 N 次回源收成 1。"
+        : " 沒有合併時，熱 key 到期 = 尖峰 inbound 打同一條查詢。";
+    } else {
+      text += (ttl === "jitter" ? " TTL 抖動把 K 攤成緩坡。" : " 對齊 TTL 讓 K 把 key 同一刻重建。") +
+        (sf ? " Singleflight 只再把每把的 N 收成 1。" : " 未合併時每把還乘上併發。");
+    }
+    verdictEl.className = "cfm-verdict tone-" + tone;
+    setText(verdictEl, text);
+    btnNext.disabled = true;
+  }
+
+  function paintStep() {
+    var row = series[step - 1];
+    var tot = totalsTo(step);
+    var served = row.hits + row.bloomReject;
+
+    setText(mT, String(row.t));
+    setText(mIn, String(row.inbound));
+    setText(mOr, String(row.origin));
+    setText(mCo, String(row.coalesced));
+    setText(mOv, String(row.overload));
+
+    setText(inVal, String(row.inbound));
+    setText(inHint, "讀 QPS");
+    actorClass(actorIn, "on");
+
+    setText(cacheVal, String(served));
+    setText(cacheHint, row.bloomReject ? ("命中 " + row.hits + " · 攔截 " + row.bloomReject) : ("命中 " + row.hits));
+    actorClass(actorCache, row.bloomReject || row.hits > row.origin ? "ok" : "dirty");
+
+    setText(originVal, row.origin + " / " + CAP);
+    if (row.overload > 0) {
+      setText(originHint, "過載 +" + row.overload);
+      actorClass(actorOrigin, "bad");
+    } else if (row.origin > CAP * 0.8) {
+      setText(originHint, "接近容量");
+      actorClass(actorOrigin, "dirty");
+    } else {
+      setText(originHint, "低於容量");
+      actorClass(actorOrigin, "ok");
+    }
+
+    setText(pSc, SC_LABEL[sc]);
+    setText(pOr, String(row.origin));
+    toneUtil(pOr, row.origin);
+    setText(pBl, String(row.bloomReject));
+    setText(pCo, String(row.coalesced));
+    setText(pSum, String(tot.sum));
+    setText(pOt, String(tot.overTicks));
+    pOt.classList.remove("good", "warn", "bad");
+    pOt.classList.add(tot.overTicks > 0 ? "bad" : "good");
+    setText(pPk, String(tot.peak));
+    toneUtil(pPk, tot.peak);
+    setText(pUtil, row.util + "%");
+    toneUtil(pUtil, row.origin);
+
+    setText(statusEl, "t=" + row.t + " · " + row.status);
+    appendLogs(row.logs);
+    renderChart();
+
+    if (step >= TICKS) finishVerdict();
+  }
+
+  function reset() {
+    series = buildSeries();
+    step = 0;
+    hintEl.textContent = HINTS[sc];
+    paintIdle();
+    renderChart();
+  }
+
+  btnNext.addEventListener("click", function () {
+    if (step >= TICKS) return;
+    step += 1;
+    paintStep();
+  });
+
+  btnReset.addEventListener("click", function () {
+    reset();
+  });
+
+  reset();
+})();
+</script>
