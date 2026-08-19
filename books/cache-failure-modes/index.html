@@ -1,0 +1,2802 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>快取失效模式與雪崩防護 | System Design Every Day</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@300;400;500;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+  <script>
+    mermaid.initialize({
+      startOnLoad: true,
+      theme: 'default',
+      securityLevel: 'loose'
+    });
+  </script>
+  <style>
+    :root {
+      --bg: #ffffff;
+      --bg-soft: #fafaf9;
+      --text: #262a2f;
+      --text-2: #6b7078;
+      --text-3: #9aa0a8;
+      --border: #ecebe8;
+      --border-strong: #dedcd8;
+      --code-bg: #f6f5f3;
+      --accent: #3f6188;
+      --accent-soft: #eef2f7;
+      --accent-line: #cdd9e6;
+      --ok: #4d7d68;
+      --ok-soft: #eef4f1;
+      --warn: #a3743e;
+      --warn-soft: #f6f0e7;
+      --bad: #a8554f;
+      --bad-soft: #f6ecea;
+      --radius: 10px;
+      --radius-sm: 7px;
+      --maxw: 760px;
+      --sans: "Noto Sans TC", system-ui, -apple-system, "Segoe UI", sans-serif;
+      --mono: "JetBrains Mono", "SFMono-Regular", Menlo, Consolas, monospace;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    html {
+      scroll-behavior: smooth;
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      html {
+        scroll-behavior: auto;
+      }
+      * {
+        animation-duration: .001ms !important;
+        transition-duration: .001ms !important;
+      }
+    }
+
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font-family: var(--sans);
+      font-weight: 400;
+      font-size: 16px;
+      line-height: 1.78;
+      -webkit-font-smoothing: antialiased;
+      letter-spacing: .005em;
+    }
+
+    ::selection {
+      background: var(--accent-soft);
+    }
+
+    /* ---------- layout ---------- */
+    .wrap {
+      display: flex;
+      max-width: 1180px;
+      margin: 0 auto;
+      gap: 0;
+    }
+
+    .toc {
+      width: 248px;
+      flex: 0 0 248px;
+      position: sticky;
+      top: 0;
+      height: 100vh;
+      padding: 54px 22px 40px 28px;
+      overflow-y: auto;
+      border-right: 1px solid var(--border);
+      transition: width .2s ease, flex-basis .2s ease, padding .2s ease, opacity .15s ease, border-color .15s ease;
+    }
+
+    .toc-kicker {
+      font-family: var(--mono);
+      font-size: 11px;
+      letter-spacing: .14em;
+      text-transform: uppercase;
+      color: var(--text-3);
+      margin-bottom: 20px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+    }
+
+    /* desktop：側欄內收合鈕；mobile 隱藏（沿用既有 .toc-toggle） */
+    .toc-collapse {
+      display: none;
+      flex: 0 0 auto;
+      align-items: center;
+      justify-content: center;
+      width: 28px;
+      height: 28px;
+      padding: 0;
+      border: none;
+      background: none;
+      border-radius: 6px;
+      color: var(--text-2);
+      line-height: 1;
+      cursor: pointer;
+    }
+
+    .toc-collapse:hover {
+      color: var(--text);
+      background: var(--bg-soft);
+    }
+
+    .toc-collapse:focus-visible {
+      outline: 2px solid var(--accent);
+      outline-offset: 2px;
+    }
+
+    .toc-collapse svg {
+      display: block;
+    }
+
+    /* desktop：側欄收合後的展開鈕（預設隱藏） */
+    .toc-reopen {
+      display: none;
+      position: fixed;
+      top: 18px;
+      left: 18px;
+      z-index: 900;
+      align-items: center;
+      gap: 7px;
+      font-size: 12.5px;
+      line-height: 1;
+      color: var(--text-2);
+      background: var(--bg);
+      border: 1px solid var(--border-strong);
+      border-radius: 999px;
+      padding: 7px 13px 7px 11px;
+      box-shadow: 0 1px 3px rgba(0, 0, 0, .06), 0 4px 12px rgba(0, 0, 0, .04);
+      cursor: pointer;
+      transition: background .15s, border-color .15s, color .15s;
+    }
+
+    .toc-reopen:hover {
+      background: var(--bg-soft);
+      color: var(--text);
+      border-color: var(--text-3);
+    }
+
+    .toc-reopen svg {
+      flex: 0 0 auto;
+      display: block;
+    }
+
+    @media (min-width: 921px) {
+      .toc-collapse {
+        display: inline-flex;
+      }
+
+      body.toc-collapsed .toc {
+        width: 0;
+        flex-basis: 0;
+        padding: 0;
+        opacity: 0;
+        overflow: hidden;
+        border-right-color: transparent;
+        pointer-events: none;
+      }
+
+      body.toc-collapsed .toc-reopen {
+        display: inline-flex;
+      }
+    }
+
+    .toc-kicker a {
+      color: var(--text-3);
+      text-decoration: none;
+      border-bottom: none;
+      transition: color .15s;
+    }
+
+    .toc-kicker a:hover {
+      color: var(--text);
+    }
+
+    .toc-title {
+      font-size: 15px;
+      font-weight: 700;
+      line-height: 1.4;
+      margin: 0 0 24px;
+    }
+
+    .toc a {
+      display: flex;
+      gap: 10px;
+      align-items: baseline;
+      text-decoration: none;
+      color: var(--text-2);
+      font-size: 13.5px;
+      padding: 6px 10px;
+      border-radius: 6px;
+      line-height: 1.45;
+      transition: background .15s, color .15s;
+      border-bottom: none;
+    }
+
+    .toc a:hover {
+      background: var(--bg-soft);
+      color: var(--text);
+      border-bottom: none;
+    }
+
+    .toc a.active {
+      color: var(--accent);
+      background: var(--accent-soft);
+      font-weight: 500;
+      border-bottom: none;
+    }
+
+    .toc a .n {
+      font-family: var(--mono);
+      font-size: 11px;
+      color: var(--text-3);
+      flex: 0 0 18px;
+    }
+
+    .toc a.active .n {
+      color: var(--accent);
+    }
+
+    main {
+      flex: 1 1 auto;
+      min-width: 0;
+      padding: 0 40px;
+    }
+
+    .inner {
+      max-width: var(--maxw);
+      margin: 0 auto;
+      padding: 72px 0 140px;
+    }
+
+    /* ---------- hero ---------- */
+    .hero {
+      margin-bottom: 64px;
+    }
+
+    .hero .eyebrow {
+      font-family: var(--mono);
+      font-size: 12px;
+      letter-spacing: .16em;
+      text-transform: uppercase;
+      color: var(--accent);
+      margin-bottom: 18px;
+    }
+
+    .hero h1 {
+      font-size: 40px;
+      line-height: 1.18;
+      font-weight: 700;
+      margin: 0 0 18px;
+      letter-spacing: -.01em;
+    }
+
+    .hero .lede {
+      font-size: 18px;
+      line-height: 1.7;
+      color: var(--text-2);
+      font-weight: 300;
+      margin: 0;
+      max-width: 620px;
+    }
+
+    .hero .meta {
+      margin-top: 28px;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+
+    .tag {
+      font-family: var(--mono);
+      font-size: 12px;
+      color: var(--text-2);
+      border: 1px solid var(--border-strong);
+      padding: 4px 11px;
+      border-radius: 999px;
+      background: var(--bg-soft);
+    }
+
+    /* ---------- sections ---------- */
+    section {
+      padding-top: 30px;
+      scroll-margin-top: 24px;
+    }
+
+    .sec-head {
+      display: flex;
+      align-items: baseline;
+      gap: 14px;
+      margin: 0 0 8px;
+    }
+
+    .sec-num {
+      font-family: var(--mono);
+      font-size: 13px;
+      color: var(--text-3);
+      font-weight: 500;
+      padding-top: 6px;
+      flex: 0 0 auto;
+    }
+
+    h2 {
+      font-size: 27px;
+      font-weight: 700;
+      line-height: 1.3;
+      margin: 0;
+      letter-spacing: -.01em;
+    }
+
+    .sec-sub {
+      color: var(--text-2);
+      font-size: 15px;
+      margin: 2px 0 28px 0;
+      font-weight: 300;
+    }
+
+    h3 {
+      font-size: 18.5px;
+      font-weight: 700;
+      margin: 38px 0 12px;
+      line-height: 1.45;
+    }
+
+    h4 {
+      font-size: 15.5px;
+      font-weight: 700;
+      margin: 26px 0 8px;
+      color: var(--text);
+    }
+
+    p {
+      margin: 0 0 16px;
+    }
+
+    a {
+      color: var(--accent);
+      text-decoration: none;
+      border-bottom: 1px solid var(--accent-line);
+      transition: border-color .15s;
+    }
+
+    a:hover {
+      border-color: var(--accent);
+    }
+
+    strong {
+      font-weight: 700;
+    }
+
+    em {
+      font-style: normal;
+      background: var(--accent-soft);
+      padding: 0 4px;
+      border-radius: 4px;
+      font-weight: 500;
+      color: #2f4d6e;
+    }
+
+    hr.div {
+      border: none;
+      border-top: 1px solid var(--border);
+      margin: 46px 0;
+    }
+
+    ul, ol {
+      margin: 0 0 18px;
+      padding-left: 22px;
+    }
+
+    li {
+      margin: 7px 0;
+      padding-left: 4px;
+    }
+
+    li::marker {
+      color: var(--text-3);
+    }
+
+    code {
+      font-family: var(--mono);
+      font-size: .86em;
+      background: var(--code-bg);
+      padding: 2px 6px;
+      border-radius: 5px;
+      color: #43494f;
+    }
+
+    pre {
+      background: var(--code-bg);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 16px 18px;
+      overflow-x: auto;
+      margin: 0 0 20px;
+      line-height: 1.6;
+    }
+
+    pre code {
+      background: none;
+      padding: 0;
+      font-size: 13px;
+    }
+
+    /* ---------- math notation ---------- */
+    /* 行內數學變數，如 W、R、N。本站不載入 MathJax/KaTeX，請勿使用 $...$ 或 \[...\] LaTeX 分隔符。 */
+    var {
+      font-family: var(--mono);
+      font-style: normal;
+      font-weight: 500;
+      color: var(--accent);
+    }
+
+    /* 區塊數學公式，置中等寬呈現，記得將 > < & 轉義為 &gt; &lt; &amp;。 */
+    .formula {
+      font-family: var(--mono);
+      font-size: 15px;
+      text-align: center;
+      background: var(--bg-soft);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      padding: 14px 18px;
+      margin: 0 0 20px;
+      color: var(--text);
+      letter-spacing: .03em;
+      overflow-x: auto;
+    }
+
+    /* ---------- callouts ---------- */
+    .callout {
+      border: 1px solid var(--border);
+      border-left: 3px solid var(--border-strong);
+      background: var(--bg-soft);
+      border-radius: var(--radius-sm);
+      padding: 15px 18px;
+      margin: 0 0 22px;
+      font-size: 14.5px;
+    }
+
+    .callout .c-title {
+      font-weight: 700;
+      font-size: 13px;
+      letter-spacing: .02em;
+      margin-bottom: 5px;
+      display: flex;
+      gap: 7px;
+      align-items: center;
+    }
+
+    .callout p:last-child {
+      margin-bottom: 0;
+    }
+
+    .callout.accent {
+      border-left-color: var(--accent);
+      background: var(--accent-soft);
+    }
+
+    .callout.accent .c-title {
+      color: #2f4d6e;
+    }
+
+    .callout.warn {
+      border-left-color: var(--warn);
+      background: var(--warn-soft);
+    }
+
+    .callout.warn .c-title {
+      color: var(--warn);
+    }
+
+    .callout .ic {
+      font-family: var(--mono);
+      font-size: 11px;
+      border: 1px solid currentColor;
+      border-radius: 4px;
+      padding: 0 4px;
+      line-height: 1.5;
+      opacity: .8;
+    }
+
+    .oneliner {
+      border: 1px dashed var(--accent-line);
+      border-radius: var(--radius-sm);
+      padding: 13px 16px;
+      margin: 0 0 22px;
+      font-size: 14.5px;
+      background: #fbfcfd;
+    }
+
+    .oneliner b {
+      font-family: var(--mono);
+      font-size: 11px;
+      letter-spacing: .08em;
+      color: var(--accent);
+      display: block;
+      margin-bottom: 4px;
+      text-transform: uppercase;
+    }
+
+    /* ---------- tables ---------- */
+    .tbl-wrap {
+      overflow-x: auto;
+      margin: 0 0 24px;
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+    }
+
+    table {
+      border-collapse: collapse;
+      width: 100%;
+      font-size: 14px;
+      min-width: 520px;
+    }
+
+    th, td {
+      text-align: left;
+      padding: 11px 14px;
+      border-bottom: 1px solid var(--border);
+      vertical-align: top;
+    }
+
+    th {
+      font-weight: 700;
+      background: var(--bg-soft);
+      font-size: 12.5px;
+      letter-spacing: .02em;
+      color: var(--text-2);
+      position: sticky;
+      top: 0;
+    }
+
+    tr:last-child td {
+      border-bottom: none;
+    }
+
+    td.hl {
+      background: var(--accent-soft);
+    }
+
+    .cap {
+      font-size: 12.5px;
+      color: var(--text-3);
+      margin: -12px 0 26px;
+      font-family: var(--mono);
+    }
+
+    /* ---------- interactive shell ---------- */
+    .demo {
+      border: 1px solid var(--border-strong);
+      border-radius: var(--radius);
+      background: var(--bg);
+      margin: 24px 0 26px;
+      overflow: hidden;
+    }
+
+    .demo-bar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      flex-wrap: wrap;
+      padding: 13px 16px;
+      border-bottom: 1px solid var(--border);
+      background: var(--bg-soft);
+    }
+
+    .demo-bar .label {
+      font-family: var(--mono);
+      font-size: 11px;
+      letter-spacing: .1em;
+      text-transform: uppercase;
+      color: var(--text-3);
+    }
+
+    .demo-body {
+      padding: 20px 18px;
+    }
+
+    .seg {
+      display: inline-flex;
+      border: 1px solid var(--border-strong);
+      border-radius: 999px;
+      overflow: hidden;
+      background: var(--bg);
+    }
+
+    .seg button {
+      border: none;
+      background: none;
+      font-family: var(--sans);
+      font-size: 12.5px;
+      color: var(--text-2);
+      padding: 6px 14px;
+      cursor: pointer;
+      transition: background .15s, color .15s;
+    }
+
+    .seg button:hover {
+      color: var(--text);
+    }
+
+    .seg button[aria-pressed="true"] {
+      background: var(--accent);
+      color: #fff;
+    }
+
+    .btn {
+      font-family: var(--sans);
+      font-size: 13px;
+      border: 1px solid var(--border-strong);
+      background: var(--bg);
+      color: var(--text);
+      padding: 7px 16px;
+      border-radius: 7px;
+      cursor: pointer;
+      transition: background .15s, border-color .15s;
+    }
+
+    .btn:hover {
+      background: var(--bg-soft);
+      border-color: var(--text-3);
+    }
+
+    .btn.primary {
+      background: var(--accent);
+      color: #fff;
+      border-color: var(--accent);
+    }
+
+    .btn.primary:hover {
+      background: #365578;
+    }
+
+    .btn:disabled {
+      opacity: .4;
+      cursor: not-allowed;
+    }
+
+    .btn:focus-visible, .seg button:focus-visible, .toc a:focus-visible, a:focus-visible,
+    summary:focus-visible {
+      outline: 2px solid var(--accent);
+      outline-offset: 2px;
+      border-radius: 4px;
+    }
+
+    .status-line {
+      font-size: 13.5px;
+      color: var(--text-2);
+      min-height: 42px;
+      margin-top: 14px;
+      background: var(--bg-soft);
+      border-radius: var(--radius-sm);
+      padding: 10px 13px;
+      border: 1px solid var(--border);
+    }
+
+    .status-line b {
+      color: var(--text);
+    }
+
+    .legend {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 14px;
+      font-size: 11.5px;
+      color: var(--text-2);
+      margin-top: 14px;
+      font-family: var(--mono);
+    }
+
+    .legend span {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .dot {
+      width: 9px;
+      height: 9px;
+      border-radius: 3px;
+      display: inline-block;
+      border: 1px solid rgba(0, 0, 0, .08);
+    }
+
+    /* node states used across diagrams */
+    .nstate-idle {
+      fill: #fff;
+      stroke: var(--border-strong);
+    }
+
+    .ns-idle {
+      background: #fff;
+      border-color: var(--border-strong);
+    }
+
+    .ns-lock {
+      background: var(--warn-soft);
+      border-color: var(--warn);
+    }
+
+    .ns-ok {
+      background: var(--ok-soft);
+      border-color: var(--ok);
+    }
+
+    .ns-bad {
+      background: var(--bad-soft);
+      border-color: var(--bad);
+    }
+
+    .ns-wait {
+      background: var(--accent-soft);
+      border-color: var(--accent);
+    }
+
+    /* spectrum */
+    .spectrum {
+      position: relative;
+      margin: 26px 6px 10px;
+    }
+
+    .spec-track {
+      height: 4px;
+      border-radius: 2px;
+      background: linear-gradient(90deg, #9fb6cf, #e7e5e1 50%, #c9d8c9);
+      position: relative;
+    }
+
+    .spec-ends {
+      display: flex;
+      justify-content: space-between;
+      font-family: var(--mono);
+      font-size: 11px;
+      color: var(--text-2);
+      margin-top: 10px;
+    }
+
+    .spec-mark {
+      position: absolute;
+      top: -12px;
+      transform: translateX(-50%);
+      cursor: pointer;
+      text-align: center;
+      background: none;
+      border: none;
+      padding: 0;
+    }
+
+    .spec-mark .pin {
+      width: 18px;
+      height: 18px;
+      border-radius: 50%;
+      background: #fff;
+      border: 2px solid var(--border-strong);
+      margin: 0 auto;
+      transition: border-color .15s, transform .15s, box-shadow .15s;
+      display: block;
+    }
+
+    .spec-mark .pn {
+      font-family: var(--mono);
+      font-size: 12px;
+      margin-top: 8px;
+      color: var(--text-2);
+      font-weight: 500;
+      white-space: nowrap;
+      display: block;
+    }
+
+    .spec-mark[aria-pressed="true"] .pin {
+      border-color: var(--accent);
+      transform: scale(1.18);
+      box-shadow: 0 0 0 4px var(--accent-soft);
+    }
+
+    .spec-mark[aria-pressed="true"] .pn {
+      color: var(--accent);
+    }
+
+    .spec-panel {
+      margin-top: 34px;
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 18px;
+      background: var(--bg-soft);
+    }
+
+    .spec-panel h4 {
+      margin: 0 0 4px;
+    }
+
+    .spec-panel .pmeta {
+      font-family: var(--mono);
+      font-size: 12px;
+      color: var(--text-3);
+      margin-bottom: 14px;
+    }
+
+    .bars {
+      display: grid;
+      grid-template-columns: 78px 1fr 56px;
+      gap: 9px 12px;
+      align-items: center;
+    }
+
+    .bars .blabel {
+      font-size: 13px;
+      color: var(--text-2);
+    }
+
+    .bars .btrack {
+      height: 8px;
+      background: #e9e7e3;
+      border-radius: 4px;
+      overflow: hidden;
+    }
+
+    .bars .bfill {
+      height: 100%;
+      border-radius: 4px;
+      background: var(--accent);
+      transition: width .4s ease;
+    }
+
+    .bars .bval {
+      font-family: var(--mono);
+      font-size: 11px;
+      color: var(--text-2);
+      text-align: right;
+    }
+
+    /* generic actor diagram */
+    .actors {
+      display: flex;
+      gap: 12px;
+      flex-wrap: wrap;
+    }
+
+    .actor {
+      flex: 1 1 0;
+      min-width: 96px;
+      border: 1.5px solid var(--border-strong);
+      border-radius: var(--radius-sm);
+      padding: 11px 10px;
+      text-align: center;
+      background: #fff;
+      transition: background .25s, border-color .25s;
+    }
+
+    .actor .aname {
+      font-weight: 700;
+      font-size: 13px;
+    }
+
+    .actor .arole {
+      font-family: var(--mono);
+      font-size: 10.5px;
+      color: var(--text-3);
+      margin-top: 2px;
+    }
+
+    .actor .astate {
+      font-size: 11.5px;
+      margin-top: 8px;
+      font-family: var(--mono);
+      color: var(--text-2);
+      min-height: 16px;
+    }
+
+    .coordinator {
+      border-style: dashed;
+    }
+
+    .flowsteps {
+      margin-top: 16px;
+    }
+
+    .stepitem {
+      display: flex;
+      gap: 11px;
+      font-size: 13.5px;
+      padding: 7px 0;
+      color: var(--text-3);
+      border-top: 1px solid var(--border);
+    }
+
+    .stepitem:first-child {
+      border-top: none;
+    }
+
+    .stepitem.done {
+      color: var(--text);
+    }
+
+    .stepitem.cur {
+      color: var(--text);
+      font-weight: 500;
+    }
+
+    .stepitem .sx {
+      font-family: var(--mono);
+      font-size: 11px;
+      flex: 0 0 26px;
+      color: var(--text-3);
+      padding-top: 2px;
+    }
+
+    .stepitem.cur .sx {
+      color: var(--accent);
+    }
+
+    /* timeline lab (TCC) */
+    .tl-scenarios {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      margin-bottom: 6px;
+    }
+
+    .tl-opt {
+      display: flex;
+      gap: 11px;
+      align-items: flex-start;
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      padding: 10px 13px;
+      cursor: pointer;
+      background: #fff;
+      transition: border-color .15s, background .15s;
+    }
+
+    .tl-opt:hover {
+      background: var(--bg-soft);
+    }
+
+    .tl-opt[aria-pressed="true"] {
+      border-color: var(--accent);
+      background: var(--accent-soft);
+    }
+
+    .tl-opt .tlname {
+      font-weight: 700;
+      font-size: 13.5px;
+    }
+
+    .tl-opt .tldesc {
+      font-size: 12.5px;
+      color: var(--text-2);
+      margin-top: 2px;
+    }
+
+    .tl-opt .tlbadge {
+      font-family: var(--mono);
+      font-size: 10px;
+      border: 1px solid var(--border-strong);
+      border-radius: 4px;
+      padding: 1px 5px;
+      color: var(--text-3);
+      flex: 0 0 auto;
+      margin-top: 1px;
+    }
+
+    .tl-result {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
+      margin-top: 16px;
+    }
+
+    @media (max-width: 560px) {
+      .tl-result {
+        grid-template-columns: 1fr;
+      }
+    }
+
+    .tl-card {
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      padding: 13px 14px;
+      font-size: 13px;
+    }
+
+    .tl-card .tch {
+      font-family: var(--mono);
+      font-size: 11px;
+      letter-spacing: .06em;
+      text-transform: uppercase;
+      margin-bottom: 8px;
+      color: var(--text-3);
+    }
+
+    .tl-card.naive {
+      border-left: 3px solid var(--bad);
+    }
+
+    .tl-card.fixed {
+      border-left: 3px solid var(--ok);
+    }
+
+    .tl-card .verdict {
+      font-weight: 700;
+      margin-top: 8px;
+      font-size: 13px;
+    }
+
+    .tl-card.naive .verdict {
+      color: var(--bad);
+    }
+
+    .tl-card.fixed .verdict {
+      color: var(--ok);
+    }
+
+    /* saga chain */
+    .saga-chain {
+      display: flex;
+      flex-direction: column;
+      gap: 0;
+      margin-top: 8px;
+    }
+
+    .saga-step {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .saga-box {
+      flex: 1 1 auto;
+      border: 1.5px solid var(--border-strong);
+      border-radius: var(--radius-sm);
+      padding: 10px 13px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      background: #fff;
+      transition: .25s;
+    }
+
+    .saga-box .sgn {
+      font-weight: 600;
+      font-size: 13.5px;
+    }
+
+    .saga-box .sgs {
+      font-family: var(--mono);
+      font-size: 11px;
+      color: var(--text-3);
+    }
+
+    .saga-arrow {
+      height: 18px;
+      width: 2px;
+      background: var(--border-strong);
+      margin-left: 18px;
+    }
+
+    .saga-pick {
+      font-size: 12.5px;
+      color: var(--text-2);
+      margin: 4px 0 10px;
+    }
+
+    .saga-pick select {
+      font-family: var(--sans);
+      font-size: 13px;
+      padding: 5px 8px;
+      border: 1px solid var(--border-strong);
+      border-radius: 6px;
+      background: #fff;
+      color: var(--text);
+    }
+
+    /* outbox toggle */
+    .ob-stage {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      margin-top: 8px;
+    }
+
+    .ob-row {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      font-size: 13px;
+    }
+
+    .ob-chip {
+      border: 1.5px solid var(--border-strong);
+      border-radius: var(--radius-sm);
+      padding: 9px 12px;
+      background: #fff;
+      font-size: 13px;
+      transition: .25s;
+      flex: 0 0 auto;
+    }
+
+    .ob-chip .obt {
+      font-weight: 600;
+    }
+
+    .ob-chip .obs {
+      font-family: var(--mono);
+      font-size: 10.5px;
+      color: var(--text-3);
+    }
+
+    .ob-flow {
+      font-family: var(--mono);
+      font-size: 11px;
+      color: var(--text-3);
+    }
+
+    /* wizard */
+    .wiz-q {
+      margin-bottom: 16px;
+    }
+
+    .wiz-q .wq {
+      font-size: 14px;
+      font-weight: 600;
+      margin-bottom: 8px;
+    }
+
+    .wiz-opts {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+
+    .wiz-opts button {
+      font-family: var(--sans);
+      font-size: 13px;
+      border: 1px solid var(--border-strong);
+      background: #fff;
+      color: var(--text-2);
+      padding: 7px 14px;
+      border-radius: 7px;
+      cursor: pointer;
+      transition: .15s;
+    }
+
+    .wiz-opts button:hover {
+      border-color: var(--text-3);
+      color: var(--text);
+    }
+
+    .wiz-opts button[aria-pressed="true"] {
+      background: var(--accent);
+      color: #fff;
+      border-color: var(--accent);
+    }
+
+    .wiz-result {
+      margin-top: 18px;
+      border: 1px solid var(--accent-line);
+      border-radius: var(--radius);
+      padding: 16px 18px;
+      background: var(--accent-soft);
+      font-size: 14px;
+      display: none;
+    }
+
+    .wiz-result.show {
+      display: block;
+    }
+
+    .wiz-result .wr-pick {
+      font-size: 17px;
+      font-weight: 700;
+      color: #2f4d6e;
+      margin-bottom: 6px;
+    }
+
+    .wiz-result .wr-why {
+      color: #3a5572;
+    }
+
+    /* FAQ */
+    details.faq {
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      margin-bottom: 10px;
+      background: #fff;
+      overflow: hidden;
+    }
+
+    details.faq summary {
+      cursor: pointer;
+      padding: 14px 16px;
+      font-weight: 600;
+      font-size: 14.5px;
+      list-style: none;
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      align-items: center;
+    }
+
+    details.faq summary::-webkit-details-marker {
+      display: none;
+    }
+
+    details.faq summary .q {
+      font-family: var(--mono);
+      font-size: 11px;
+      color: var(--accent);
+      flex: 0 0 auto;
+    }
+
+    details.faq summary .chev {
+      transition: transform .2s;
+      color: var(--text-3);
+      flex: 0 0 auto;
+      font-size: 13px;
+    }
+
+    details.faq[open] summary .chev {
+      transform: rotate(90deg);
+    }
+
+    details.faq .ans {
+      padding: 0 16px 16px;
+      font-size: 14px;
+      color: var(--text-2);
+    }
+
+    details.faq .ans p {
+      margin: 0 0 10px;
+    }
+
+    details.faq .ans p:last-child {
+      margin: 0;
+    }
+
+    .trap {
+      display: flex;
+      gap: 10px;
+      font-size: 14px;
+      margin: 9px 0;
+    }
+
+    .trap .tn {
+      font-family: var(--mono);
+      font-size: 11px;
+      color: var(--bad);
+      flex: 0 0 auto;
+      border: 1px solid var(--bad-soft);
+      background: var(--bad-soft);
+      border-radius: 4px;
+      padding: 1px 6px;
+      height: fit-content;
+      margin-top: 2px;
+    }
+
+    /* mobile responsive */
+    .toc-toggle {
+      display: none;
+    }
+
+    @media (max-width: 920px) {
+      .wrap {
+        flex-direction: column;
+      }
+      .toc {
+        position: static;
+        width: auto;
+        height: auto;
+        border-right: none;
+        border-bottom: 1px solid var(--border);
+        padding: 18px 22px;
+        transition: none;
+      }
+      .toc-title {
+        margin-bottom: 0;
+      }
+      .toc-kicker {
+        margin-bottom: 10px;
+      }
+      .toc-nav {
+        display: none;
+        margin-top: 16px;
+      }
+      .toc-nav.open {
+        display: block;
+      }
+      .toc-toggle {
+        display: inline-block;
+        margin-top: 10px;
+      }
+      .toc-collapse,
+      .toc-reopen {
+        display: none !important;
+      }
+      main {
+        padding: 0 22px;
+      }
+      .inner {
+        padding: 40px 0 100px;
+      }
+      .hero h1 {
+        font-size: 31px;
+      }
+    }
+
+    @media print {
+      .toc-reopen { display: none !important; }
+    }
+
+    @media (max-width: 480px) {
+      body {
+        font-size: 15px;
+      }
+      .hero h1 {
+        font-size: 27px;
+      }
+      h2 {
+        font-size: 23px;
+      }
+      .demo-body {
+        padding: 16px 13px;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <!-- ===================== TOC SIDEBAR ===================== -->
+    <nav class="toc" id="toc-panel" aria-label="目錄">
+      <div class="toc-kicker">
+        <a href="../index.html">← 返回目錄</a>
+        <button class="toc-collapse" type="button" aria-expanded="true" aria-controls="toc-panel"
+                aria-label="收合目錄" title="收合目錄">
+          <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor"
+               stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M15 18l-6-6 6-6"/>
+          </svg>
+        </button>
+      </div>
+      <div class="toc-title">快取失效模式與雪崩防護</div>
+      <button class="btn toc-toggle" type="button" aria-expanded="false" aria-controls="toc-nav">目錄 ▾</button>
+      <div class="toc-nav" id="toc-nav">
+        <a href="#s1"><span class="n">01</span>總覽與定位</a>
+        <a href="#s2"><span class="n">02</span>穿透：請求打空</a>
+        <a href="#s3"><span class="n">03</span>擊穿：單點被打穿</a>
+        <a href="#s4"><span class="n">04</span>雪崩：大量同時到期</a>
+        <a href="#s5"><span class="n">05</span>Thundering Herd 與 Singleflight</a>
+        <a href="#s6"><span class="n">06</span>互動 Demo：QPS、TTL 分佈與回源負載</a>
+        <a href="#s7"><span class="n">07</span>面試折衷與邊界</a>
+      </div>
+    </nav>
+    <button class="btn toc-reopen" type="button" aria-expanded="true" aria-controls="toc-panel"
+            aria-label="展開目錄" title="展開目錄">
+      <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor"
+           stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M9 18l6-6-6-6"/>
+      </svg>
+      <span>目錄</span>
+    </button>
+
+    <!-- ===================== MAIN CONTENT ===================== -->
+    <main>
+      <div class="inner">
+        <style>
+  /* 本篇專屬：cfm-* 命名空間，不覆蓋全站 base 類別 */
+  #cfm-root {
+    --cfm-c: #3f6188; --cfm-c-soft: #eef2f7;
+    --cfm-s: #4d7d68; --cfm-s-soft: #eef4f1;
+    --cfm-w: #a3743e; --cfm-w-soft: #f6f0e7;
+    --cfm-bad: #a8554f; --cfm-bad-soft: #f6ecea;
+    --cfm-alt: #6b6f9a; --cfm-alt-soft: #eef0f6;
+  }
+  .cfm-sub { font-weight: 700; font-size: 14px; margin: 20px 0 6px; padding-left: 10px; border-left: 3px solid var(--accent); color: var(--text); }
+
+  .cfm-cards { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin: 12px 0 6px; }
+  @media (max-width: 760px) { .cfm-cards { grid-template-columns: 1fr; } }
+  .cfm-card { border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 12px 14px; background: #fff; border-left-width: 4px; }
+  .cfm-card.pen { border-left-color: var(--cfm-c); background: var(--cfm-c-soft); }
+  .cfm-card.brk { border-left-color: var(--cfm-w); background: var(--cfm-w-soft); }
+  .cfm-card.ava { border-left-color: var(--cfm-bad); background: var(--cfm-bad-soft); }
+  .cfm-card .ct { font-weight: 700; font-size: 13.5px; margin-bottom: 3px; }
+  .cfm-card .cl { font-family: var(--mono); font-size: 11px; color: var(--text-3); margin-bottom: 6px; letter-spacing: .04em; }
+  .cfm-card .cs { font-size: 12.5px; color: var(--text-2); line-height: 1.55; }
+
+  .cfm-flow { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin: 10px 0 4px; font-family: var(--mono); font-size: 12px; }
+  .cfm-chip { border: 1px solid var(--border-strong); border-radius: 6px; padding: 6px 10px; background: #fff; font-weight: 600; color: var(--text); }
+  .cfm-chip.cli { background: var(--cfm-c-soft); border-color: var(--cfm-c); color: var(--cfm-c); }
+  .cfm-chip.cache { background: var(--cfm-alt-soft); border-color: var(--cfm-alt); color: var(--cfm-alt); }
+  .cfm-chip.db { background: var(--cfm-s-soft); border-color: var(--cfm-s); color: var(--cfm-s); }
+  .cfm-chip.op { background: var(--bg-soft); color: var(--text-3); border-style: dashed; font-weight: 500; }
+  .cfm-chip.bad { background: var(--cfm-bad-soft); border-color: var(--cfm-bad); color: var(--cfm-bad); }
+  .cfm-chip.warn { background: var(--cfm-w-soft); border-color: var(--cfm-w); color: var(--cfm-w); }
+
+  .cfm-split { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin: 12px 0; }
+  @media (max-width: 640px) { .cfm-split { grid-template-columns: 1fr; } }
+  .cfm-pane {
+    border: 1px solid var(--border); border-radius: var(--radius-sm);
+    background: #fff; padding: 14px; border-top: 3px solid var(--border-strong);
+  }
+  .cfm-pane.ok { border-top-color: var(--cfm-s); }
+  .cfm-pane.warn { border-top-color: var(--cfm-w); }
+  .cfm-pane.bad { border-top-color: var(--cfm-bad); }
+  .cfm-pane.read { border-top-color: var(--cfm-c); }
+  .cfm-pane .st { font-weight: 700; font-size: 14px; margin-bottom: 2px; }
+  .cfm-pane .ss { font-family: var(--mono); font-size: 11px; color: var(--text-3); margin-bottom: 8px; letter-spacing: .04em; }
+  .cfm-pane ul { margin: 0; padding-left: 1.15em; font-size: 13px; color: var(--text-2); line-height: 1.65; }
+
+  .cfm-ctrl { display: flex; flex-wrap: wrap; gap: 10px; margin: 10px 0 8px; align-items: center; }
+  .cfm-metric { display: flex; flex-wrap: wrap; gap: 14px; margin: 8px 0 4px; font-size: 13px; color: var(--text-2); }
+  .cfm-metric strong { color: var(--text); font-family: var(--mono); font-size: 12.5px; }
+
+  .cfm-actors { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin: 12px 0 6px; }
+  @media (max-width: 640px) { .cfm-actors { grid-template-columns: 1fr; } }
+  .cfm-actor {
+    border: 1.5px solid var(--border-strong); border-radius: var(--radius-sm);
+    padding: 12px 12px 10px; background: #fff; text-align: center;
+    transition: background .18s, border-color .18s, box-shadow .18s;
+  }
+  .cfm-actor .an { font-weight: 700; font-size: 13px; letter-spacing: .03em; }
+  .cfm-actor .al { font-family: var(--mono); font-size: 10.5px; color: var(--text-3); margin-top: 2px; }
+  .cfm-actor .av { font-family: var(--mono); font-size: 16px; font-weight: 700; margin-top: 8px; color: var(--text); }
+  .cfm-actor .ah { font-size: 11.5px; color: var(--text-2); margin-top: 4px; min-height: 1.4em; }
+  .cfm-actor.on { background: var(--accent-soft); border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+  .cfm-actor.on .an { color: var(--accent); }
+  .cfm-actor.ok { background: var(--ok-soft); border-color: var(--ok); }
+  .cfm-actor.ok .an { color: var(--ok); }
+  .cfm-actor.dirty { background: var(--warn-soft); border-color: var(--warn); }
+  .cfm-actor.dirty .an { color: var(--warn); }
+  .cfm-actor.bad { background: var(--bad-soft); border-color: var(--bad); }
+  .cfm-actor.bad .an { color: var(--bad); }
+
+  .cfm-chart-wrap {
+    border: 1px solid var(--border); border-radius: var(--radius-sm);
+    background: #fff; padding: 18px 12px 8px; margin: 10px 0 6px; position: relative;
+  }
+  .cfm-cap-line {
+    position: absolute; left: 12px; right: 12px;
+    border-top: 1.5px dashed var(--warn);
+    pointer-events: none; z-index: 1;
+  }
+  .cfm-cap-lab {
+    position: absolute; right: 16px; transform: translateY(-9px);
+    font-family: var(--mono); font-size: 10px; color: var(--warn);
+    background: #fff; padding: 0 4px;
+  }
+  .cfm-chart {
+    display: flex; align-items: flex-end; gap: 6px;
+    height: 132px; position: relative; z-index: 2;
+  }
+  .cfm-col { flex: 1; display: flex; flex-direction: column; align-items: center; height: 100%; justify-content: flex-end; }
+  .cfm-bar {
+    width: 100%; max-width: 36px;
+    background: var(--accent-soft); border: 1.5px solid var(--accent);
+    border-radius: 4px 4px 0 0; min-height: 3px;
+    transition: height .18s, background .18s, border-color .18s;
+  }
+  .cfm-bar.future { background: var(--bg-soft); border-color: var(--border-strong); border-style: dashed; }
+  .cfm-bar.ok { background: var(--ok-soft); border-color: var(--ok); }
+  .cfm-bar.warn { background: var(--warn-soft); border-color: var(--warn); }
+  .cfm-bar.bad { background: var(--bad-soft); border-color: var(--bad); }
+  .cfm-bar-n {
+    font-family: var(--mono); font-size: 10px; color: var(--text-3);
+    margin-bottom: 4px; min-height: 1.1em;
+  }
+  .cfm-tick {
+    font-family: var(--mono); font-size: 10px; color: var(--text-3); margin-top: 6px;
+  }
+
+  .cfm-panels { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 12px; }
+  @media (max-width: 640px) { .cfm-panels { grid-template-columns: 1fr; } }
+  .cfm-panel { border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 12px; background: #fff; }
+  .cfm-panel .pt {
+    font-size: 11px; color: var(--text-3); letter-spacing: .06em; text-transform: uppercase;
+    font-family: var(--mono); margin-bottom: 8px;
+  }
+  .cfm-panel .prow {
+    display: flex; justify-content: space-between; gap: 8px;
+    font-family: var(--mono); font-size: 12px; padding: 4px 0;
+    border-bottom: 1px dashed var(--border);
+  }
+  .cfm-panel .prow:last-child { border-bottom: none; }
+  .cfm-panel .pk { color: var(--text-3); white-space: nowrap; }
+  .cfm-panel .pv { color: var(--text); font-weight: 600; text-align: right; }
+  .cfm-panel .pv.good { color: var(--ok); }
+  .cfm-panel .pv.bad { color: var(--bad); }
+  .cfm-panel .pv.warn { color: var(--warn); }
+
+  .cfm-wire {
+    border: 1px solid var(--border); border-radius: var(--radius-sm);
+    background: #fff; padding: 8px 10px; margin-top: 10px; max-height: 260px; overflow-y: auto;
+  }
+  .cfm-row {
+    display: flex; align-items: baseline; gap: 8px;
+    font-family: var(--mono); font-size: 11.5px; padding: 4px 0;
+    border-bottom: 1px dashed var(--border);
+  }
+  .cfm-row:last-child { border-bottom: none; }
+  .cfm-row .ar { width: 36px; flex: none; text-align: center; color: var(--text-3); font-weight: 700; }
+  .cfm-row .tg {
+    flex: none; border-radius: 4px; padding: 2px 6px; font-size: 10.5px; font-weight: 700;
+    border: 1px solid var(--border-strong); background: var(--bg-soft); color: var(--text-3);
+  }
+  .cfm-row .tx { color: var(--text-2); line-height: 1.5; }
+  .cfm-row.read .tg { background: var(--cfm-c-soft); border-color: var(--cfm-c); color: var(--cfm-c); }
+  .cfm-row.ok .tg { background: var(--cfm-s-soft); border-color: var(--cfm-s); color: var(--cfm-s); }
+  .cfm-row.warn .tg { background: var(--cfm-w-soft); border-color: var(--cfm-w); color: var(--cfm-w); }
+  .cfm-row.bad .tg { background: var(--cfm-bad-soft); border-color: var(--cfm-bad); color: var(--cfm-bad); }
+  .cfm-row.bad .tx { color: var(--bad); }
+  .cfm-row.note { background: var(--bg-soft); border-radius: 4px; }
+  .cfm-row.note .tx { color: var(--text-3); }
+
+  .cfm-verdict {
+    margin-top: 10px; padding: 10px 12px; border-radius: var(--radius-sm);
+    border: 1px solid var(--border); background: var(--bg-soft);
+    font-size: 13px; color: var(--text-2); line-height: 1.55;
+  }
+  .cfm-verdict.tone-ok { border-left: 3px solid var(--ok); background: var(--ok-soft); color: var(--text); }
+  .cfm-verdict.tone-lock { border-left: 3px solid var(--warn); background: var(--warn-soft); color: var(--text); }
+  .cfm-verdict.tone-bad { border-left: 3px solid var(--bad); background: var(--bad-soft); color: var(--text); }
+
+  .cfm-mode-hint { font-size: 12.5px; color: var(--text-2); margin: 8px 0 4px; line-height: 1.55; }
+</style>
+
+<div id="cfm-root">
+
+<section id="s1">
+  <div class="sec-head">
+    <span class="sec-num">01</span>
+    <h2>總覽與定位</h2>
+  </div>
+  <p class="sec-sub">前一篇把 Cache-Aside 的讀寫路徑講完了。本篇只處理下一題：miss 一旦變成「同時、大量、打空」，origin 會不會被打死。</p>
+
+  <p>快取正常時，幾乎所有讀都停在副本上。失效模式談的不是「某次 miss 多 80&nbsp;ms」，而是 <strong>miss 的形狀突然改變</strong>——請求打到根本不存在的 key、一把熱 key 到期、或幾千把 key 同一秒過期。這三種形狀打到 origin 的方式不同，對應的防護也不同；混成一句「加個鎖」通常答不到點上。</p>
+
+  <div class="cfm-cards">
+    <div class="cfm-card pen">
+      <div class="ct">打空 · 穿透</div>
+      <div class="cl">Cache Penetration</div>
+      <div class="cs">請求的 key 在 DB 裡從來沒有。Cache 永遠 miss，每次都打到 origin。掃描不存在的商品 ID、惡意隨機 key，都長這樣。</div>
+    </div>
+    <div class="cfm-card brk">
+      <div class="ct">單點打穿 · 擊穿</div>
+      <div class="cl">Breakdown / Hot Key</div>
+      <div class="cs">一把極熱的 key 到期或被踢。原本被快取擋住的流量，同一瞬間全部回源。問題在「這一把」，不在「很多把」。</div>
+    </div>
+    <div class="cfm-card ava">
+      <div class="ct">大量同時到期 · 雪崩</div>
+      <div class="cl">Cache Avalanche</div>
+      <div class="cs">很多把 key 的 TTL 對齊，或一次 flush。同一秒大量 miss，origin 看到的是「整個 working set 同時變冷」。</div>
+    </div>
+  </div>
+
+  <p>這三類都會被 <strong>Thundering Herd</strong> 放大：同一個 miss 上疊了 N 個併發請求，於是 origin 不是打 1 次，而是打 N 次。Singleflight／請求合併處理的是這個放大機制，不是上面三種根因本身。</p>
+
+  <div class="callout accent">
+    <div class="c-title"><span class="ic">座標</span>路徑已經會了，本篇管災害形狀</div>
+    <p><em>快取策略</em> 負責讀寫誰先走、ACK 在哪、TTL／LRU／LFU 踢誰——那些定義這裡不重述。本篇假設你已經會 Cache-Aside：miss → origin → SET。<br>
+    Redis 的 <code>maxmemory</code> policy、大 key／熱 key 偵測與拆分，留給 <em>Redis 架構與運維</em>。邊緣的 <code>stale-if-error</code>、Purge、Origin Shield，留給 <em>CDN 與邊緣快取</em>。這裡只談應用層快取被打穿時，origin 前面還能擋什麼。</p>
+  </div>
+
+  <div class="oneliner">
+    <b>一句話答法</b>先問 miss 的形狀：打空（穿透）、單點到期（擊穿）、還是集體到期（雪崩）。再決定 Bloom／空值、互斥重建，還是 TTL 抖動；Singleflight 是放大鏡的開關，不是根因解法。
+  </div>
+</section>
+
+<section id="s2">
+  <div class="sec-head">
+    <span class="sec-num">02</span>
+    <h2>穿透：請求打空</h2>
+  </div>
+  <p class="sec-sub">key 在權威來源裡不存在。快取沒東西可填（或填了立刻被下一次隨機 key 錯過），origin 為空氣付帳。</p>
+
+  <p>Cache-Aside 對「存在的熱資料」很有效：miss 一次、回填、之後命中。穿透把這個迴路拆掉——<strong>回填的對象根本沒有</strong>。每次 GET 都 miss，每次都打 DB，回傳 not found。攻擊者用隨機 ID 掃描、爬蟲打過期目錄、客戶端 bug 產生不存在的外鍵，流量形態都一樣。</p>
+
+  <div class="cfm-flow">
+    <span class="cfm-chip cli">GET sku:????</span>
+    <span class="cfm-chip op">→</span>
+    <span class="cfm-chip cache">MISS</span>
+    <span class="cfm-chip op">→</span>
+    <span class="cfm-chip bad">DB SELECT 0 rows</span>
+    <span class="cfm-chip op">→</span>
+    <span class="cfm-chip warn">不回填（或回填了也沒人再打同一把）</span>
+  </div>
+
+  <p class="cfm-sub">1 · 空值快取（Negative Caching）</p>
+  <p>miss 且 DB 確認不存在時，把「空」本身寫進快取，帶<strong>比正常值更短的 TTL</strong>。下一次同一把 key 不會再打 origin。</p>
+
+  <div class="cfm-split">
+    <div class="cfm-pane ok">
+      <div class="st">適用</div>
+      <div class="ss">重複打同一批不存在的 key</div>
+      <ul>
+        <li>用戶重試、錯誤書籤、已下架但仍被分享的 URL</li>
+        <li>實作便宜：Cache-Aside 多一個 SET nil</li>
+        <li>TTL 短，資料真的被建立後，空值很快過期</li>
+      </ul>
+    </div>
+    <div class="cfm-pane warn">
+      <div class="st">代價</div>
+      <div class="ss">記憶體 + 假陰性窗口</div>
+      <ul>
+        <li>空值也佔 slot。隨機 key 攻擊下，空值集合可以跟攻擊基數一樣大，把熱資料擠出去</li>
+        <li>物品在空值 TTL 內被建立，讀到的仍是「不存在」——這是正確性窗口，要寫入路徑主動 DEL 空值</li>
+        <li>對「每把 key 只打一次」的掃描幾乎無效</li>
+      </ul>
+    </div>
+  </div>
+
+  <p class="cfm-sub">2 · Bloom Filter</p>
+  <p>先把「確定存在的 ID 集合」放進一個位元陣列。查詢時：</p>
+  <ul>
+    <li><strong>Filter 說不在</strong>：一定不在（無假陰性，前提是集合更新正確、且沒用會刪除的普通 Bloom）。直接回 not found，不打 origin。</li>
+    <li><strong>Filter 說可能在</strong>：再走 Cache → DB。這步會有假陽性（False Positive）——不存在的 key 被當成「也許存在」，仍會打一次 origin。</li>
+  </ul>
+
+  <div class="formula">FPR ≈ (1 − e<sup>−k · n / m</sup>)<sup>k</sup></div>
+  <p><var>m</var> 是位元數，<var>n</var> 是插入的真實 ID 數，<var>k</var> 是 hash 函數個數。誤判率由這三個數決定，不是魔法。</p>
+
+  <div class="callout accent">
+    <div class="c-title"><span class="ic">關鍵</span>Bloom 擋的是「確定沒有」，不是「確定有」</div>
+    <p>面試常被反問：假陽性有什麼關係？答：<strong>假陽性 = 多打一次 origin，安全性仍在</strong>；若實作成「Filter 說沒有就當沒有」而集合漏插，才會變成假陰性——用戶看不到真實存在的資料。所以目錄變更時要重建或用 Counting Bloom／Cuckoo；刪除頻繁的集合，普通 Bloom 會越來越髒。</p>
+  </div>
+
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>手段</th>
+          <th>擋什麼攻擊</th>
+          <th>主要代價</th>
+          <th>不該用的時候</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>空值快取</td>
+          <td>重複的同一批空 key</td>
+          <td>額外記憶體；建立後的假陰性窗口</td>
+          <td>key 幾乎不重複（純隨機掃描）</td>
+        </tr>
+        <tr>
+          <td>Bloom Filter</td>
+          <td>隨機、一次性的空 key</td>
+          <td><var>m</var> 的記憶體；FPR 仍漏打 origin；刪除／變更要重建</td>
+          <td>集合變化極快、或必須支援即時刪除卻不願重建</td>
+        </tr>
+        <tr>
+          <td>參數校驗 / 權限</td>
+          <td>格式非法、越權 ID</td>
+          <td>幾乎免費</td>
+          <td>——這應該是第一道，不是快取手段</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="cap">穿透的根因是「origin 在回答不存在」。先讓非法請求在應用層死掉；剩下的才用空值與 Bloom 分擔。</p>
+
+  <div class="callout warn">
+    <div class="c-title"><span class="ic">陷阱</span>空值 TTL 設太長，等於短暫地「刪除」剛上架的資料</div>
+    <p>負快取與真實資料的寫入必須成對：建立／恢復一個 ID 時，DEL 對應空值，並更新 Bloom（或標記重建）。只在讀路徑塞 nil、寫路徑忘記，會出現「後台已上架、前台仍 404」——這比多打幾次 DB 更難查。</p>
+  </div>
+
+  <div class="oneliner">
+    <b>一句話答法</b>穿透是打不存在的 key。重複空 key 用短 TTL 空值快取；隨機掃描用 Bloom 在 origin 前攔截。FPR 換的是少量多餘回源，漏插集合才會錯資料。
+  </div>
+</section>
+
+<section id="s3">
+  <div class="sec-head">
+    <span class="sec-num">03</span>
+    <h2>擊穿：單點被打穿</h2>
+  </div>
+  <p class="sec-sub">一把熱 key 到期或被驅逐。流量形狀從「幾乎全命中」瞬間變成「全部打同一條 origin 查詢」。</p>
+
+  <p>擊穿跟穿透相反：資料<strong>存在而且極熱</strong>。Cache-Aside 在 TTL 到期的那一刻，所有併發讀同時 miss，一起跑去重建。origin 上那條查詢若是聚合、多表 join、或要打下游，一台 DB 連線池可以在幾百毫秒內被打乾。</p>
+
+  <div class="cfm-flow">
+    <span class="cfm-chip cache">sku:hot TTL=0</span>
+    <span class="cfm-chip op">→</span>
+    <span class="cfm-chip bad">N 個併發 MISS</span>
+    <span class="cfm-chip op">→</span>
+    <span class="cfm-chip bad">N × origin query</span>
+    <span class="cfm-chip op">→</span>
+    <span class="cfm-chip warn">連線池耗盡 · 尾延遲爆炸</span>
+  </div>
+
+  <p class="cfm-sub">1 · 互斥重建鎖（Mutex / Single-flight lock）</p>
+  <p>只有拿到鎖的那一個請求去打 origin 並 SET；其他人等鎖，然後讀剛填好的快取。分散式場景常用 <code>SET key NX PX</code> 當鎖。</p>
+
+  <div class="cfm-split">
+    <div class="cfm-pane ok">
+      <div class="st">適用</div>
+      <div class="ss">重建貴、熱度集中在少數 key</div>
+      <ul>
+        <li>首頁聚合、庫存投影、權限決策快照</li>
+        <li>能把 origin QPS 從 N 降到 1</li>
+        <li>與 Singleflight 搭配：鎖是「誰去重建」，合併是「誰共用結果」</li>
+      </ul>
+    </div>
+    <div class="cfm-pane warn">
+      <div class="st">代價</div>
+      <div class="ss">鎖持有時間 = 重建延遲</div>
+      <ul>
+        <li>等待者的尾延遲被對齊到重建耗時；P99 會明顯變差</li>
+        <li>持有者崩潰或超時：鎖要有 TTL，否則死鎖；TTL 太短會雙重建，太長會卡住</li>
+        <li>沒搶到鎖的人若立刻 fallback 打 DB，鎖等於沒加</li>
+      </ul>
+    </div>
+  </div>
+
+  <p class="cfm-sub">2 · 邏輯過期（Logical Expire / 軟 TTL）</p>
+  <p>快取值裡帶 <code>expireAt</code>。物理 TTL 設得比邏輯期限長（或不設）。讀到邏輯過期時：<strong>先把舊值回給這次請求</strong>，再非同步重建。用戶幾乎總是命中；過期只觸發背景更新。</p>
+
+  <div class="callout accent">
+    <div class="c-title"><span class="ic">關鍵</span>邏輯過期是在買 stale，換 origin 平穩</div>
+    <p>這與 Write-Back 的 dirty 不同：權威來源仍是 DB，快取只是承認「我願意再賣幾百毫秒的舊首頁」。產品必須能說出可容忍 stale。一旦重建失敗，你還在賣舊值——要有失敗預算（重試、熔斷、降級預設值），不能假裝一定會更新成功。</p>
+  </div>
+
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>手段</th>
+          <th>用戶讀到什麼</th>
+          <th>origin 在到期瞬間</th>
+          <th>主要代價</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>互斥重建</td>
+          <td>等鎖；成功後是新值</td>
+          <td>1 次查詢</td>
+          <td>尾延遲 = 鎖持有時間；要處理鎖失效</td>
+        </tr>
+        <tr>
+          <td>邏輯過期</td>
+          <td>立即拿到可能過期的舊值</td>
+          <td>背景 1 次</td>
+          <td>明確的 stale 窗口；重建失敗會一直舊</td>
+        </tr>
+        <tr>
+          <td>什麼都不做</td>
+          <td>同時 miss，大家一起等 origin</td>
+          <td class="hl">N 次查詢</td>
+          <td>連線池與尾延遲一起炸</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="cap">熱 key 的「拆分到多個 shard／多個 replica」屬於 Redis 運維與資料模型，本篇不展開；這裡只處理「到期那一瞬誰去重建」。</p>
+
+  <div class="callout warn">
+    <div class="c-title"><span class="ic">陷阱</span>本地鎖擋不住多實例</div>
+    <p>每個 API 進程自己 <code>synchronized</code>，十個 pod 仍會打出十次 origin。互斥要放在快取層或用分散式鎖；Singleflight 若只在進程內，效果上限是「實例數 × 1」。面試被追問規模時，先說清楚鎖的範圍。</p>
+  </div>
+
+  <div class="oneliner">
+    <b>一句話答法</b>擊穿是熱 key 到期。互斥鎖把重建收成 1 次、用尾延遲買單；邏輯過期繼續賣舊值、用 stale 買單。不要讓 N 個 miss 各自打 origin。
+  </div>
+</section>
+
+<section id="s4">
+  <div class="sec-head">
+    <span class="sec-num">04</span>
+    <h2>雪崩：大量同時到期</h2>
+  </div>
+  <p class="sec-sub">很多把 key 在同一時間窗變冷。origin 看到的不是一把熱查詢，而是 working set 整體回源。</p>
+
+  <p>雪崩常被講成「快取掛了」。快取進程崩潰確實會讓所有讀回源，但更常見、也更可預防的是 <strong>TTL 對齊</strong>：上線時用同一個 <code>EXPIRE 3600</code> 寫入整批物件，一小時後它們一起死。部署腳本 flush、同一輪預熱、甚至「整點過期」的產品習慣，都會製造對齊。</p>
+
+  <div class="cfm-flow">
+    <span class="cfm-chip warn">TTL=3600 整批寫入</span>
+    <span class="cfm-chip op">→</span>
+    <span class="cfm-chip cache">一小時後同時 MISS</span>
+    <span class="cfm-chip op">→</span>
+    <span class="cfm-chip bad">origin QPS ≈ 讀 QPS</span>
+  </div>
+
+  <p class="cfm-sub">1 · TTL 抖動（Jitter）</p>
+  <p>真正寫入的過期時間不是常數，而是：</p>
+  <div class="formula">TTL<sub>actual</sub> = TTL<sub>base</sub> ± random(0, jitter)</div>
+  <p>例如 base 3600 秒、jitter 600 秒，過期被攤到 50 分鐘到 70 分鐘的窗口。origin 的重建曲線從一根尖刺變成一道緩坡。</p>
+
+  <div class="cfm-split">
+    <div class="cfm-pane ok">
+      <div class="st">適用</div>
+      <div class="ss">大批量、同質、可容忍一點時效差</div>
+      <ul>
+        <li>商品詳情、設定檔、feed 投影</li>
+        <li>幾乎零執行期成本：SET 時多一個隨機數</li>
+        <li>與 Singleflight 正交：抖動減少「同時有多少把 key 死」，合併減少「每一把死的時候打幾次」</li>
+      </ul>
+    </div>
+    <div class="cfm-pane warn">
+      <div class="st">代價</div>
+      <div class="ss">新鮮度變得不可預測</div>
+      <ul>
+        <li>有的 key 比基準多活 jitter，stale 上限被拉開</li>
+        <li>有的 key 提早過期，命中率略降、origin 多吃一點平穩流量</li>
+        <li>不能解決「快取整個掛掉」——那要靠 origin 限流、降級、或多層快取</li>
+      </ul>
+    </div>
+  </div>
+
+  <p class="cfm-sub">2 · 預熱（Warmup）</p>
+  <p>在流量到來前，由一個受控的 builder 把 working set 寫進快取。到期前也可以提前重建（主動 refresh），讓用戶路徑幾乎不 miss。</p>
+  <ul>
+    <li><strong>適用</strong>：發版、快取叢集更換、已知的流量高峰（秒殺開始前）。origin 的尖峰被你安排在「可以加班」的時間。</li>
+    <li><strong>代價</strong>：預熱本身就是一次 origin 突發，要限速；資料若在預熱後變更，第一波用戶仍可能讀到舊快照；working set 估錯會預熱一堆沒人讀的 key。</li>
+  </ul>
+
+  <div class="callout accent">
+    <div class="c-title"><span class="ic">關鍵</span>擊穿是一把，雪崩是一批——Singleflight 救不了後者的全部</div>
+    <p>40 把 key 同時到期，即使每把都 Singleflight，origin 仍會收到 40 次重建。合併只把「每把 N 次」收成「每把 1 次」。要把 40 攤開，靠的是 TTL 抖動或錯開預熱。面試把兩個詞互換，會被追問「那 40 次誰來擋」。</p>
+  </div>
+
+  <div class="callout warn">
+    <div class="c-title"><span class="ic">陷阱</span>flushall 是人為雪崩</div>
+    <p>線上為了「清髒資料」對整個 cache 下 flush，等於把 TTL 對齊到現在。正確做法是按 key 模式逐步失效、或發版用版本化前綴（<code>v12:sku:</code>）讓舊資料自然過期。防護策略擋不住自己下的指令。</p>
+  </div>
+
+  <div class="oneliner">
+    <b>一句話答法</b>雪崩是 TTL 對齊（或整池消失）。寫入加 jitter 把重建攤開；高峰前預熱把 miss 從用戶路徑拿走。Singleflight 只收斂每一把的併發，不收斂「有多少把同時死」。
+  </div>
+</section>
+
+<section id="s5">
+  <div class="sec-head">
+    <span class="sec-num">05</span>
+    <h2>Thundering Herd 與 Singleflight</h2>
+  </div>
+  <p class="sec-sub">同一把 key 上的併發 miss，會把一次重建放大成 N 次。請求合併是放大倍數的開關。</p>
+
+  <p>Thundering Herd 不是第四種根因，是前三種的<strong>乘數</strong>。穿透時隨機 key 通常不重複，乘數接近 1，所以 Bloom 比合併有用。擊穿與雪崩時，同一把熱 key 上可能疊著幾百個等待中的讀，乘數就是那幾百。</p>
+
+  <p class="cfm-sub">請求合併（Singleflight / Request Coalescing）</p>
+  <p>進程（或快取節點）為每個 in-flight 的 key 留一個 waiter 清單：第一個 miss 去 origin，後來者掛在同一趟結果上。Go 的 <code>singleflight</code>、許多 HTTP 快取的 collapsing 都是這個模型。</p>
+
+  <div class="cfm-split">
+    <div class="cfm-pane read">
+      <div class="st">和互斥鎖差在哪</div>
+      <div class="ss">合併 vs 互斥</div>
+      <ul>
+        <li>鎖回答「誰被允許打 origin」</li>
+        <li>合併回答「沒去打的人如何拿到結果」</li>
+        <li>只有鎖、沒有等待共用：輸家可能 timeout 或自己打 DB</li>
+        <li>只有合併、沒有超時：贏家卡死，所有 waiter 一起卡死</li>
+      </ul>
+    </div>
+    <div class="cfm-pane warn">
+      <div class="st">代價</div>
+      <div class="ss">尾延遲對齊 + 範圍有限</div>
+      <ul>
+        <li>所有 waiter 的延遲 = 那一次重建延遲（尾部被「對齊」而不是「平均」）</li>
+        <li>進程內合併的上限 = 實例數；跨實例要靠快取層或分散式協調</li>
+        <li>超時後若所有人一起重試，Herd 在下一毫秒重現——重試必須抖動</li>
+      </ul>
+    </div>
+  </div>
+
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>故障形狀</th>
+          <th>Herd 乘數</th>
+          <th>合併能降多少 origin</th>
+          <th>還需要什麼</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>穿透（隨機空 key）</td>
+          <td>≈ 1（key 不重複）</td>
+          <td>幾乎 0</td>
+          <td>Bloom + 空值</td>
+        </tr>
+        <tr>
+          <td>擊穿（一把熱 key）</td>
+          <td>≈ 併發讀取數 N</td>
+          <td class="hl">N → 1</td>
+          <td>邏輯過期可再把用戶路徑從「等」改成「賣舊」</td>
+        </tr>
+        <tr>
+          <td>雪崩（K 把同時死）</td>
+          <td>每把各有自己的 N</td>
+          <td>KN → K</td>
+          <td>TTL 抖動把 K 攤開；否則 origin 仍吃 K 次重建</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="cap">Demo 裡把 QPS 拉到尖峰、開關 Singleflight 與 TTL 抖動，就是在看這張表的數字移動。</p>
+
+  <div class="oneliner">
+    <b>一句話答法</b>Singleflight 把「同一把 key 的 N 次回源」收成 1 次，用等待者的尾延遲交換 origin 安全。它不擋隨機穿透，也不把雪崩的 K 把 key 變成 1。
+  </div>
+</section>
+
+<section id="s6">
+  <div class="sec-head">
+    <span class="sec-num">06</span>
+    <h2>互動 Demo：QPS、TTL 分佈與回源負載</h2>
+  </div>
+  <p class="sec-sub">同一個 origin 容量，切換故障形狀、尖峰 QPS、TTL 抖動與 Singleflight，逐步看回源曲線有沒有越過容量線。</p>
+
+  <div class="demo" id="demo-cfm">
+    <div class="demo-bar">
+      <span class="label">互動 · 失效模式回源負載</span>
+      <span class="label" style="text-transform:none;font-family:var(--sans);font-size:12px;color:var(--text-2)">調 QPS 與防護，按「下一步」看 origin 曲線</span>
+    </div>
+    <div class="demo-body">
+      <p class="cfm-mode-hint" id="cfm-mode-hint">穿透：t=3 起大量隨機空 key。開關 Bloom 才會顯著改變回源；Singleflight 幾乎沒用。</p>
+
+      <div class="seg" role="group" aria-label="故障形狀" id="cfm-seg-sc">
+        <button data-sc="pen" aria-pressed="true">穿透</button>
+        <button data-sc="brk" aria-pressed="false">擊穿</button>
+        <button data-sc="ava" aria-pressed="false">雪崩</button>
+      </div>
+
+      <div class="seg" role="group" aria-label="QPS 尖峰" id="cfm-seg-qps" style="margin-top:8px">
+        <button data-qps="60" aria-pressed="false">低 60</button>
+        <button data-qps="200" aria-pressed="true">中 200</button>
+        <button data-qps="640" aria-pressed="false">尖峰 640</button>
+      </div>
+
+      <div class="seg" role="group" aria-label="TTL 分佈" id="cfm-seg-ttl" style="margin-top:8px">
+        <button data-ttl="aligned" aria-pressed="true">TTL 對齊</button>
+        <button data-ttl="jitter" aria-pressed="false">TTL 抖動</button>
+      </div>
+
+      <div class="seg" role="group" aria-label="回源合併" id="cfm-seg-sf" style="margin-top:8px">
+        <button data-sf="off" aria-pressed="true">各自回源</button>
+        <button data-sf="on" aria-pressed="false">Singleflight</button>
+      </div>
+
+      <div class="seg" role="group" aria-label="打空防護" id="cfm-seg-bloom" style="margin-top:8px">
+        <button data-bloom="off" aria-pressed="true">無 Bloom</button>
+        <button data-bloom="on" aria-pressed="false">Bloom Filter</button>
+      </div>
+
+      <div class="cfm-ctrl">
+        <button class="btn primary" id="cfm-btn-next">下一步</button>
+        <button class="btn" id="cfm-btn-reset">重置</button>
+      </div>
+
+      <div class="cfm-metric">
+        <span>時刻 <strong id="cfm-m-t">0</strong> / 7</span>
+        <span>Inbound <strong id="cfm-m-in">0</strong></span>
+        <span>Origin <strong id="cfm-m-or">0</strong></span>
+        <span>合併省下 <strong id="cfm-m-co">0</strong></span>
+        <span>超容量 <strong id="cfm-m-ov">0</strong></span>
+      </div>
+
+      <div class="legend">
+        <span><i class="dot ns-idle"></i>尚未走到</span>
+        <span><i class="dot ns-ok"></i>回源低於容量</span>
+        <span><i class="dot ns-lock"></i>接近容量</span>
+        <span><i class="dot ns-wait"></i>本步作用中</span>
+        <span><i class="dot ns-bad"></i>origin 過載</span>
+      </div>
+
+      <div class="cfm-actors" id="cfm-actors" aria-live="polite">
+        <div class="cfm-actor" data-role="in">
+          <div class="an">Inbound</div>
+          <div class="al">本刻讀 QPS</div>
+          <div class="av" id="cfm-in-val">—</div>
+          <div class="ah" id="cfm-in-hint">待命</div>
+        </div>
+        <div class="cfm-actor" data-role="cache">
+          <div class="an">Cache</div>
+          <div class="al">命中 / 攔截</div>
+          <div class="av" id="cfm-cache-val">—</div>
+          <div class="ah" id="cfm-cache-hint">待命</div>
+        </div>
+        <div class="cfm-actor" data-role="origin">
+          <div class="an">Origin</div>
+          <div class="al">容量 160 / tick</div>
+          <div class="av" id="cfm-origin-val">—</div>
+          <div class="ah" id="cfm-origin-hint">待命</div>
+        </div>
+      </div>
+
+      <div class="cfm-chart-wrap">
+        <div class="cfm-cap-line" id="cfm-cap-line">
+          <span class="cfm-cap-lab">cap 160</span>
+        </div>
+        <div class="cfm-chart" id="cfm-chart" aria-label="各時刻 origin QPS"></div>
+      </div>
+
+      <div class="cfm-panels">
+        <div class="cfm-panel">
+          <div class="pt">本刻語義</div>
+          <div class="prow"><span class="pk">故障形狀</span><span class="pv" id="cfm-p-sc">—</span></div>
+          <div class="prow"><span class="pk">回源</span><span class="pv" id="cfm-p-or">—</span></div>
+          <div class="prow"><span class="pk">Bloom 攔截</span><span class="pv" id="cfm-p-bl">—</span></div>
+          <div class="prow"><span class="pk">合併省下</span><span class="pv" id="cfm-p-co">—</span></div>
+        </div>
+        <div class="cfm-panel">
+          <div class="pt">累計</div>
+          <div class="prow"><span class="pk">origin 總擊中</span><span class="pv" id="cfm-p-sum">0</span></div>
+          <div class="prow"><span class="pk">過載 tick</span><span class="pv" id="cfm-p-ot">0</span></div>
+          <div class="prow"><span class="pk">峰值 origin</span><span class="pv" id="cfm-p-pk">0</span></div>
+          <div class="prow"><span class="pk">容量利用率（本刻）</span><span class="pv" id="cfm-p-util">—</span></div>
+        </div>
+      </div>
+
+      <div class="status-line" id="cfm-status">選擇故障與防護後按「下一步」。origin 容量固定 160；柱高超過虛線即過載。</div>
+      <div class="cfm-verdict" id="cfm-verdict">判定尚未產生——走完 8 個時刻後會摘要峰值與過載。</div>
+      <div class="cfm-wire" id="cfm-wire" aria-label="事件日誌"></div>
+    </div>
+  </div>
+
+  <div class="oneliner">
+    <b>一句話答法</b>對照三組旋鈕：穿透看 Bloom、擊穿看 Singleflight、雪崩看 TTL 抖動。尖峰 QPS 只是讓過載更容易發生，不是另一種故障。
+  </div>
+</section>
+
+<section id="s7">
+  <div class="sec-head">
+    <span class="sec-num">07</span>
+    <h2>面試折衷與邊界</h2>
+  </div>
+  <p class="sec-sub">先分類 miss 形狀，再報手段與代價；Redis 拆熱 key、CDN 賣 stale-if-error，不要塞進同一段。</p>
+
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>面試常問</th>
+          <th>建議答法骨架</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>穿透、擊穿、雪崩差在哪？</td>
+          <td>打空（key 不存在）／單點熱 key 到期／大批 TTL 對齊。形狀不同，手段不能互換。</td>
+        </tr>
+        <tr>
+          <td>Bloom Filter 的代價？</td>
+          <td>記憶體 <var>m</var>、假陽性仍漏打 origin、集合變更要重建。假陽性不損害正確性；漏插才會。</td>
+        </tr>
+        <tr>
+          <td>熱 key 到期怎麼辦？</td>
+          <td>互斥重建把 origin 收成 1，P99 變差；邏輯過期繼續賣舊值。拆 key、加 replica 是 Redis 題。</td>
+        </tr>
+        <tr>
+          <td>TTL jitter 為什麼有效？</td>
+          <td>把 K 把同時重建攤成一條緩坡。代價是新鮮度窗口變寬，且救不了整池崩潰。</td>
+        </tr>
+        <tr>
+          <td>Singleflight 能不能代替上面全部？</td>
+          <td>不能。它只把同一 key 的 N 收成 1。隨機穿透 N≈1；雪崩仍剩 K 次重建。</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="callout accent">
+    <div class="c-title"><span class="ic">差異化</span>本篇管什麼、不管什麼</div>
+    <p><strong>管</strong>：三種 miss 形狀、空值快取與 Bloom 的誤判／記憶體、互斥鎖持有時間與邏輯過期的 stale、TTL 抖動與預熱、Singleflight 的乘數與範圍。<strong>不管</strong>：Cache-Aside 步驟與 LRU／LFU（<em>快取策略</em>）；<code>maxmemory</code>、大 key／熱 key 拆分、Cluster（<em>Redis 架構與運維</em>）；<code>stale-if-error</code>、Purge、邊緣 TTL（<em>CDN 與邊緣快取</em>）。</p>
+  </div>
+
+  <div class="callout warn">
+    <div class="c-title"><span class="ic">邊界</span>面試別把 Redis 運維答進這題</div>
+    <p>被問雪崩時，不要展開 eviction policy 或 slot 遷移——那是「這台 Redis 怎麼活」的題。先把 miss 分類講對，主動一句「熱 key 拆分與 maxmemory 是下一層」，分數通常更高。</p>
+  </div>
+
+  <div class="oneliner">
+    <b>一句話答法</b>先畫 miss 的形狀再選手段：打空用 Bloom／空值，單點用鎖或邏輯過期，集體到期用 jitter／預熱；Singleflight 只關乘數。
+  </div>
+</section>
+
+</div>
+
+      </div>
+    </main>
+  </div>
+
+  <script>
+    "use strict";
+    document.addEventListener("DOMContentLoaded", function () {
+      /* ===== TOC scrollspy, mobile accordion & desktop collapse ===== */
+      (function () {
+        var links = Array.prototype.slice.call(document.querySelectorAll(".toc-nav a"));
+        var map = {};
+        links.forEach(function (a) {
+          var href = a.getAttribute("href");
+          if (href && href.startsWith("#")) {
+            map[href.slice(1)] = a;
+          }
+        });
+        var secs = links.map(function (a) {
+          var href = a.getAttribute("href");
+          return href && href.startsWith("#") ? document.getElementById(href.slice(1)) : null;
+        }).filter(Boolean);
+
+        if (secs.length > 0 && typeof IntersectionObserver !== "undefined") {
+          var obs = new IntersectionObserver(function (entries) {
+            entries.forEach(function (e) {
+              if (e.isIntersecting) {
+                links.forEach(function (l) { l.classList.remove("active"); });
+                var act = map[e.target.id];
+                if (act) act.classList.add("active");
+              }
+            });
+          }, { rootMargin: "-20% 0px -70% 0px", threshold: 0 });
+          secs.forEach(function (s) { obs.observe(s); });
+        }
+
+        /* mobile：目錄 accordion（≤920px） */
+        var toggle = document.querySelector(".toc-toggle");
+        var nav = document.querySelector(".toc-nav");
+        if (toggle && nav) {
+          toggle.addEventListener("click", function () {
+            var open = nav.classList.toggle("open");
+            toggle.setAttribute("aria-expanded", open ? "true" : "false");
+          });
+          nav.addEventListener("click", function (e) {
+            if (e.target.closest("a") && window.innerWidth <= 920) {
+              nav.classList.remove("open");
+              toggle.setAttribute("aria-expanded", "false");
+            }
+          });
+        }
+
+        /* desktop：收合側欄（預設展開；不持久化） */
+        var collapseBtn = document.querySelector(".toc-collapse");
+        var reopenBtn = document.querySelector(".toc-reopen");
+        function setTocCollapsed(collapsed) {
+          document.body.classList.toggle("toc-collapsed", collapsed);
+          if (collapseBtn) collapseBtn.setAttribute("aria-expanded", collapsed ? "false" : "true");
+          if (reopenBtn) reopenBtn.setAttribute("aria-expanded", collapsed ? "false" : "true");
+          if (collapsed && reopenBtn) reopenBtn.focus();
+          else if (!collapsed && collapseBtn) collapseBtn.focus();
+        }
+        if (collapseBtn) {
+          collapseBtn.addEventListener("click", function () { setTocCollapsed(true); });
+        }
+        if (reopenBtn) {
+          reopenBtn.addEventListener("click", function () { setTocCollapsed(false); });
+        }
+      })();
+    });
+  </script>
+
+  
+<script>
+(function () {
+  "use strict";
+
+  var demo = document.getElementById("demo-cfm");
+  if (!demo) return;
+
+  var TICKS = 8;
+  var CAP = 160;
+  var SCALE = 800;
+  var BAR_MAX = 100;
+  var N_KEYS = 40;
+  var FPR = 0.03;
+
+  var sc = "pen";
+  var qps = 200;
+  var ttl = "aligned";
+  var sf = false;
+  var bloom = false;
+  var step = 0;
+  var series = [];
+
+  var statusEl = document.getElementById("cfm-status");
+  var verdictEl = document.getElementById("cfm-verdict");
+  var wireEl = document.getElementById("cfm-wire");
+  var chartEl = document.getElementById("cfm-chart");
+  var capLine = document.getElementById("cfm-cap-line");
+  var hintEl = document.getElementById("cfm-mode-hint");
+  var btnNext = document.getElementById("cfm-btn-next");
+  var btnReset = document.getElementById("cfm-btn-reset");
+
+  var mT = document.getElementById("cfm-m-t");
+  var mIn = document.getElementById("cfm-m-in");
+  var mOr = document.getElementById("cfm-m-or");
+  var mCo = document.getElementById("cfm-m-co");
+  var mOv = document.getElementById("cfm-m-ov");
+
+  var inVal = document.getElementById("cfm-in-val");
+  var inHint = document.getElementById("cfm-in-hint");
+  var cacheVal = document.getElementById("cfm-cache-val");
+  var cacheHint = document.getElementById("cfm-cache-hint");
+  var originVal = document.getElementById("cfm-origin-val");
+  var originHint = document.getElementById("cfm-origin-hint");
+  var actorIn = demo.querySelector('.cfm-actor[data-role="in"]');
+  var actorCache = demo.querySelector('.cfm-actor[data-role="cache"]');
+  var actorOrigin = demo.querySelector('.cfm-actor[data-role="origin"]');
+
+  var pSc = document.getElementById("cfm-p-sc");
+  var pOr = document.getElementById("cfm-p-or");
+  var pBl = document.getElementById("cfm-p-bl");
+  var pCo = document.getElementById("cfm-p-co");
+  var pSum = document.getElementById("cfm-p-sum");
+  var pOt = document.getElementById("cfm-p-ot");
+  var pPk = document.getElementById("cfm-p-pk");
+  var pUtil = document.getElementById("cfm-p-util");
+
+  var HINTS = {
+    pen: "穿透：t=3 起大量隨機空 key。開關 Bloom 才會顯著改變回源；Singleflight 幾乎沒用。",
+    brk: "擊穿：t=3 熱 key 到期。Singleflight 把 N 次回源收成 1；TTL 抖動對單把 key 幾乎無效。",
+    ava: "雪崩：對齊時 t=3 整批到期。TTL 抖動把 K 攤開；Singleflight 只把每把的 N 收成 1。"
+  };
+  var SC_LABEL = { pen: "穿透 / 打空", brk: "擊穿 / 熱 key", ava: "雪崩 / 集體到期" };
+
+  function bindSeg(id, attr, apply) {
+    var root = document.getElementById(id);
+    if (!root) return;
+    root.addEventListener("click", function (ev) {
+      var btn = ev.target.closest("button");
+      if (!btn || !root.contains(btn)) return;
+      var val = btn.getAttribute(attr);
+      if (val == null) return;
+      apply(val);
+      Array.prototype.forEach.call(root.querySelectorAll("button"), function (b) {
+        b.setAttribute("aria-pressed", b === btn ? "true" : "false");
+      });
+      reset();
+    });
+  }
+
+  bindSeg("cfm-seg-sc", "data-sc", function (v) { sc = v; });
+  bindSeg("cfm-seg-qps", "data-qps", function (v) { qps = parseInt(v, 10); });
+  bindSeg("cfm-seg-ttl", "data-ttl", function (v) { ttl = v; });
+  bindSeg("cfm-seg-sf", "data-sf", function (v) { sf = v === "on"; });
+  bindSeg("cfm-seg-bloom", "data-bloom", function (v) { bloom = v === "on"; });
+
+  function buildSeries() {
+    var ticks = [];
+    var hotCached = true;
+    var coldKeys = 0;
+
+    for (var t = 0; t < TICKS; t++) {
+      var origin = 0;
+      var hits = 0;
+      var coalesced = 0;
+      var bloomReject = 0;
+      var logs = [];
+      var status = "";
+
+      if (sc === "pen") {
+        var fakeRatio = 0.12;
+        if (t >= 3 && t <= 6) fakeRatio = 0.85;
+        if (t === 7) fakeRatio = 0.4;
+        var fake = Math.round(qps * fakeRatio);
+        var real = qps - fake;
+        hits = real;
+        if (bloom) {
+          var fp = fake === 0 ? 0 : Math.max(1, Math.round(fake * FPR));
+          if (fake === 0) fp = 0;
+          if (fp > fake) fp = fake;
+          bloomReject = fake - fp;
+          origin = fp;
+          logs.push({
+            cls: "ok", ar: "BF", tg: "drop",
+            tx: "Bloom 攔截 " + bloomReject + " 個空 key；FPR 放行 " + fp
+          });
+        } else {
+          origin = fake;
+          logs.push({
+            cls: "bad", ar: "C→O", tg: "MISS",
+            tx: fake + " 個不存在的 key 全部回源"
+          });
+        }
+        if (sf) {
+          logs.push({
+            cls: "note", ar: "·", tg: "sf",
+            tx: "Singleflight 無效：空 key 幾乎不重複，乘數 ≈ 1"
+          });
+        }
+        if (ttl === "jitter") {
+          logs.push({
+            cls: "note", ar: "·", tg: "ttl",
+            tx: "TTL 抖動不擋打空——這些 key 從來沒被快取過"
+          });
+        }
+        if (t === 3) {
+          logs.push({
+            cls: "warn", ar: "t", tg: "scan",
+            tx: "掃描開始，打空比例升到 " + Math.round(fakeRatio * 100) + "%"
+          });
+        }
+        status = bloom
+          ? "Bloom 把確定不存在的請求擋在 origin 外。假陽性仍漏打 " + origin + "。"
+          : "穿透進行中：origin 在為不存在的 key 付帳。";
+      } else if (sc === "brk") {
+        var hot = Math.round(qps * 0.72);
+        var other = qps - hot;
+        var otherMiss = Math.round(other * 0.06);
+        var otherHit = other - otherMiss;
+        if (t === 3) hotCached = false;
+
+        if (hotCached) {
+          hits = hot + otherHit;
+          origin = otherMiss;
+          logs.push({ cls: "ok", ar: "C", tg: "HIT", tx: "sku:hot × " + hot + " 命中" });
+          status = "熱 key 命中。origin 只吃背景 miss。";
+        } else if (sf) {
+          origin = 1 + otherMiss;
+          coalesced = Math.max(0, hot - 1);
+          hits = otherHit;
+          logs.push({
+            cls: "warn", ar: "lock", tg: "SF",
+            tx: "1 次重建，" + coalesced + " 個 waiter 合併"
+          });
+          if (origin <= CAP) {
+            hotCached = true;
+            logs.push({ cls: "ok", ar: "O→C", tg: "SET", tx: "重建成功，下一刻恢復命中" });
+            status = "Singleflight 把擊穿收成 1 次回源。waiter 在等，origin 活著。";
+          } else {
+            status = "合併後仍超容量。";
+            logs.push({ cls: "bad", ar: "O", tg: "OVER", tx: "超容量，熱 key 未回填" });
+          }
+        } else {
+          origin = hot + otherMiss;
+          hits = otherHit;
+          logs.push({
+            cls: "bad", ar: "C→O", tg: "HERD",
+            tx: hot + " 個併發 miss 各自回源"
+          });
+          if (origin <= CAP) {
+            hotCached = true;
+            logs.push({
+              cls: "ok", ar: "O→C", tg: "SET",
+              tx: "origin 撐住，但做了多餘的重複查詢"
+            });
+            status = "沒有合併，QPS 仍在容量內。origin 被同一把 key 重複擊中。";
+          } else {
+            logs.push({
+              cls: "bad", ar: "O", tg: "OVER",
+              tx: "超容量 " + (origin - CAP) + "，重建失敗，熱 key 仍空"
+            });
+            status = "Herd 打死 origin。熱 key 沒回填，下一刻繼續打穿。";
+          }
+        }
+        if (ttl === "jitter" && t === 0) {
+          logs.push({
+            cls: "note", ar: "·", tg: "ttl",
+            tx: "TTL 抖動對單把熱 key 的到期尖峰幾乎沒幫助"
+          });
+        }
+        if (bloom && t === 0) {
+          logs.push({
+            cls: "note", ar: "·", tg: "bf",
+            tx: "Bloom 不管擊穿：這把 key 確實存在"
+          });
+        }
+      } else {
+        var scheduled = 0;
+        if (ttl === "jitter") {
+          if (t >= 2 && t <= 6) scheduled = 8;
+        } else if (t === 3) {
+          scheduled = N_KEYS;
+        }
+        var dying = Math.min(N_KEYS, scheduled + coldKeys);
+        var perKey = qps / N_KEYS;
+        var missQps = Math.round(dying * perKey);
+        var otherMiss = Math.round(qps * 0.03);
+        var bgHit = qps - missQps - otherMiss;
+        if (bgHit < 0) bgHit = 0;
+
+        if (dying === 0) {
+          origin = otherMiss;
+          hits = qps - otherMiss;
+          coldKeys = 0;
+          logs.push({ cls: "ok", ar: "C", tg: "HIT", tx: "working set 仍熱，無集體到期" });
+          status = "尚未集體到期。origin 只吃背景 miss。";
+        } else if (sf) {
+          origin = dying + otherMiss;
+          coalesced = Math.max(0, missQps - dying);
+          hits = bgHit;
+          logs.push({
+            cls: "warn", ar: "SF", tg: "K→1",
+            tx: dying + " 把 key 各重建 1 次，合併掉 " + coalesced
+          });
+          if (origin <= CAP) {
+            coldKeys = 0;
+            logs.push({ cls: "ok", ar: "O→C", tg: "FILL", tx: "本刻到期的 key 已回填" });
+            status = "合併把每把 N 收成 1。K=" + dying + " 仍低於容量。";
+          } else {
+            coldKeys = dying;
+            logs.push({
+              cls: "bad", ar: "O", tg: "OVER",
+              tx: "K 次重建仍超容量，這批 key 下一刻仍冷"
+            });
+            status = "Singleflight 救不了「同時死掉的 key 數」。需要 TTL 抖動把 K 攤開。";
+          }
+        } else {
+          origin = missQps + otherMiss;
+          hits = bgHit;
+          logs.push({
+            cls: "bad", ar: "C→O", tg: "MISS",
+            tx: dying + " 把 key × 每把約 " + Math.round(perKey) + " 次 → 回源 " + missQps
+          });
+          if (origin <= CAP) {
+            coldKeys = 0;
+            status = "沒合併，但本刻到期量仍在容量內。";
+          } else {
+            coldKeys = dying;
+            logs.push({
+              cls: "bad", ar: "O", tg: "OVER",
+              tx: "超容量 " + (origin - CAP) + "，冷 key 堆積"
+            });
+            status = "集體 miss 打穿 origin。對齊 TTL 把 working set 同時變冷。";
+          }
+        }
+        if (bloom && t === 0) {
+          logs.push({
+            cls: "note", ar: "·", tg: "bf",
+            tx: "Bloom 不管雪崩：這些 key 都在集合裡"
+          });
+        }
+      }
+
+      var overload = Math.max(0, origin - CAP);
+      ticks.push({
+        t: t,
+        inbound: qps,
+        origin: origin,
+        hits: hits,
+        coalesced: coalesced,
+        bloomReject: bloomReject,
+        overload: overload,
+        util: Math.round((origin / CAP) * 100),
+        logs: logs,
+        status: status
+      });
+    }
+    return ticks;
+  }
+
+  function barClass(origin, reached) {
+    if (!reached) return "future";
+    if (origin > CAP) return "bad";
+    if (origin > CAP * 0.8) return "warn";
+    return "ok";
+  }
+
+  function actorClass(el, name) {
+    el.classList.remove("on", "ok", "dirty", "bad");
+    if (name) el.classList.add(name);
+  }
+
+  function setText(el, text) {
+    if (el) el.textContent = text;
+  }
+
+  function toneUtil(el, origin) {
+    el.classList.remove("good", "warn", "bad");
+    if (origin > CAP) el.classList.add("bad");
+    else if (origin > CAP * 0.8) el.classList.add("warn");
+    else el.classList.add("good");
+  }
+
+  function positionCap() {
+    if (!capLine || !chartEl) return;
+    var px = Math.round((CAP / SCALE) * BAR_MAX);
+    capLine.style.bottom = (8 + 22 + px) + "px";
+  }
+
+  function renderChart() {
+    var html = "";
+    var i;
+    for (i = 0; i < TICKS; i++) {
+      var row = series[i];
+      var reached = i < step;
+      var h = Math.max(3, Math.round((row.origin / SCALE) * BAR_MAX));
+      var n = reached ? String(row.origin) : "";
+      html += '<div class="cfm-col">';
+      html += '<div class="cfm-bar-n">' + n + "</div>";
+      html += '<div class="cfm-bar ' + barClass(row.origin, reached) + '" style="height:' + h + 'px"></div>';
+      html += '<div class="cfm-tick">t' + i + "</div>";
+      html += "</div>";
+    }
+    chartEl.innerHTML = html;
+    positionCap();
+  }
+
+  function appendLogs(logs) {
+    var i;
+    for (i = 0; i < logs.length; i++) {
+      var L = logs[i];
+      var row = document.createElement("div");
+      row.className = "cfm-row " + L.cls;
+      row.innerHTML =
+        '<span class="ar">' + L.ar + "</span>" +
+        '<span class="tg">' + L.tg + "</span>" +
+        '<span class="tx">' + L.tx + "</span>";
+      wireEl.appendChild(row);
+    }
+    wireEl.scrollTop = wireEl.scrollHeight;
+  }
+
+  function totalsTo(n) {
+    var sum = 0;
+    var overTicks = 0;
+    var peak = 0;
+    var i;
+    for (i = 0; i < n; i++) {
+      sum += series[i].origin;
+      if (series[i].overload > 0) overTicks += 1;
+      if (series[i].origin > peak) peak = series[i].origin;
+    }
+    return { sum: sum, overTicks: overTicks, peak: peak };
+  }
+
+  function paintIdle() {
+    setText(mT, "0");
+    setText(mIn, "0");
+    setText(mOr, "0");
+    setText(mCo, "0");
+    setText(mOv, "0");
+    setText(inVal, "—");
+    setText(inHint, "待命");
+    setText(cacheVal, "—");
+    setText(cacheHint, "待命");
+    setText(originVal, "—");
+    setText(originHint, "容量 " + CAP);
+    actorClass(actorIn, "");
+    actorClass(actorCache, "");
+    actorClass(actorOrigin, "");
+    setText(pSc, SC_LABEL[sc]);
+    setText(pOr, "—");
+    setText(pBl, "—");
+    setText(pCo, "—");
+    setText(pSum, "0");
+    setText(pOt, "0");
+    setText(pPk, "0");
+    setText(pUtil, "—");
+    pOr.classList.remove("good", "warn", "bad");
+    pUtil.classList.remove("good", "warn", "bad");
+    pOt.classList.remove("good", "warn", "bad");
+    pPk.classList.remove("good", "warn", "bad");
+    setText(statusEl, "選擇故障與防護後按「下一步」。origin 容量固定 " + CAP + "；柱高超過虛線即過載。");
+    verdictEl.className = "cfm-verdict";
+    setText(verdictEl, "判定尚未產生——走完 8 個時刻後會摘要峰值與過載。");
+    wireEl.innerHTML = "";
+    btnNext.disabled = false;
+  }
+
+  function finishVerdict() {
+    var tot = totalsTo(TICKS);
+    var tone = "ok";
+    var text;
+    if (tot.overTicks > 0) {
+      tone = "bad";
+      text = "判定：峰值 origin " + tot.peak + "，有 " + tot.overTicks +
+        " 個時刻超過容量 " + CAP + "。";
+    } else if (tot.peak > CAP * 0.8) {
+      tone = "lock";
+      text = "判定：勉強撐住。峰值 " + tot.peak + " 已靠近容量 " + CAP + "。";
+    } else {
+      text = "判定：origin 全程低於容量。峰值 " + tot.peak + "。";
+    }
+    if (sc === "pen") {
+      text += bloom
+        ? " Bloom 把打空從「每次回源」變成 FPR 漏打。"
+        : " 未開 Bloom，掃描的空 key 直接變成 origin 帳單。";
+    } else if (sc === "brk") {
+      text += sf
+        ? " Singleflight 把熱 key 的 N 次回源收成 1。"
+        : " 沒有合併時，熱 key 到期 = 尖峰 inbound 打同一條查詢。";
+    } else {
+      text += (ttl === "jitter" ? " TTL 抖動把 K 攤成緩坡。" : " 對齊 TTL 讓 K 把 key 同一刻重建。") +
+        (sf ? " Singleflight 只再把每把的 N 收成 1。" : " 未合併時每把還乘上併發。");
+    }
+    verdictEl.className = "cfm-verdict tone-" + tone;
+    setText(verdictEl, text);
+    btnNext.disabled = true;
+  }
+
+  function paintStep() {
+    var row = series[step - 1];
+    var tot = totalsTo(step);
+    var served = row.hits + row.bloomReject;
+
+    setText(mT, String(row.t));
+    setText(mIn, String(row.inbound));
+    setText(mOr, String(row.origin));
+    setText(mCo, String(row.coalesced));
+    setText(mOv, String(row.overload));
+
+    setText(inVal, String(row.inbound));
+    setText(inHint, "讀 QPS");
+    actorClass(actorIn, "on");
+
+    setText(cacheVal, String(served));
+    setText(cacheHint, row.bloomReject ? ("命中 " + row.hits + " · 攔截 " + row.bloomReject) : ("命中 " + row.hits));
+    actorClass(actorCache, row.bloomReject || row.hits > row.origin ? "ok" : "dirty");
+
+    setText(originVal, row.origin + " / " + CAP);
+    if (row.overload > 0) {
+      setText(originHint, "過載 +" + row.overload);
+      actorClass(actorOrigin, "bad");
+    } else if (row.origin > CAP * 0.8) {
+      setText(originHint, "接近容量");
+      actorClass(actorOrigin, "dirty");
+    } else {
+      setText(originHint, "低於容量");
+      actorClass(actorOrigin, "ok");
+    }
+
+    setText(pSc, SC_LABEL[sc]);
+    setText(pOr, String(row.origin));
+    toneUtil(pOr, row.origin);
+    setText(pBl, String(row.bloomReject));
+    setText(pCo, String(row.coalesced));
+    setText(pSum, String(tot.sum));
+    setText(pOt, String(tot.overTicks));
+    pOt.classList.remove("good", "warn", "bad");
+    pOt.classList.add(tot.overTicks > 0 ? "bad" : "good");
+    setText(pPk, String(tot.peak));
+    toneUtil(pPk, tot.peak);
+    setText(pUtil, row.util + "%");
+    toneUtil(pUtil, row.origin);
+
+    setText(statusEl, "t=" + row.t + " · " + row.status);
+    appendLogs(row.logs);
+    renderChart();
+
+    if (step >= TICKS) finishVerdict();
+  }
+
+  function reset() {
+    series = buildSeries();
+    step = 0;
+    hintEl.textContent = HINTS[sc];
+    paintIdle();
+    renderChart();
+  }
+
+  btnNext.addEventListener("click", function () {
+    if (step >= TICKS) return;
+    step += 1;
+    paintStep();
+  });
+
+  btnReset.addEventListener("click", function () {
+    reset();
+  });
+
+  reset();
+})();
+</script>
+
+
+<!-- FULLSCREEN-FEATURE:START -->
+<style>
+  .fs-toggle {
+    position: fixed;
+    top: 18px;
+    right: 18px;
+    z-index: 1000;
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    font-family: var(--sans, system-ui, -apple-system, "Segoe UI", sans-serif);
+    font-size: 12.5px;
+    line-height: 1;
+    color: var(--text-2, #6b7078);
+    background: var(--bg, #ffffff);
+    border: 1px solid var(--border-strong, #dedcd8);
+    border-radius: 999px;
+    padding: 7px 13px 7px 11px;
+    cursor: pointer;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, .06), 0 4px 12px rgba(0, 0, 0, .04);
+    transition: background .15s, border-color .15s, color .15s;
+  }
+
+  .fs-toggle:hover {
+    background: var(--bg-soft, #fafaf9);
+    color: var(--text, #262a2f);
+    border-color: var(--text-3, #9aa0a8);
+  }
+
+  .fs-toggle:focus-visible {
+    outline: 2px solid var(--accent, #3f6188);
+    outline-offset: 2px;
+  }
+
+  .fs-toggle[aria-pressed="true"] {
+    background: var(--accent, #3f6188);
+    color: #fff;
+    border-color: var(--accent, #3f6188);
+  }
+
+  .fs-toggle .fs-ic {
+    flex: 0 0 auto;
+    display: block;
+  }
+
+  @media print {
+    .fs-toggle { display: none !important; }
+  }
+
+  @media (max-width: 480px) {
+    .fs-toggle { padding: 8px; }
+    .fs-toggle .fs-label { display: none; }
+  }
+</style>
+<button id="fs-toggle-btn" class="fs-toggle" type="button" aria-pressed="false"
+        aria-label="切換全螢幕檢視 (快捷鍵 F)" title="全螢幕檢視 (F)">
+  <svg class="fs-ic fs-ic-expand" viewBox="0 0 24 24" width="15" height="15" fill="none"
+       stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+    <path d="M8 3H5a2 2 0 0 0-2 2v3m18 0V5a2 2 0 0 0-2-2h-3m0 18h3a2 2 0 0 0 2-2v-3M3 16v3a2 2 0 0 0 2 2h3"/>
+  </svg>
+  <svg class="fs-ic fs-ic-compress" viewBox="0 0 24 24" width="15" height="15" fill="none"
+       stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="display:none">
+    <path d="M8 3v3a2 2 0 0 1-2 2H3m18 0h-3a2 2 0 0 1-2-2V3m0 18v-3a2 2 0 0 1 2-2h3M3 16h3a2 2 0 0 1 2 2v3"/>
+  </svg>
+  <span class="fs-label">全螢幕</span>
+</button>
+<script>
+  "use strict";
+  (function () {
+    var btn = document.getElementById("fs-toggle-btn");
+    if (!btn) return;
+    var docEl = document.documentElement;
+    var canFs = !!(docEl.requestFullscreen || docEl.webkitRequestFullscreen);
+    // 不支援 Fullscreen API (如 iPhone Safari) → 隱藏按鈕，避免壞掉的 UI
+    if (!canFs) { btn.style.display = "none"; return; }
+
+    var expandIc = btn.querySelector(".fs-ic-expand");
+    var compressIc = btn.querySelector(".fs-ic-compress");
+    var label = btn.querySelector(".fs-label");
+
+    function isFs() {
+      return !!(document.fullscreenElement || document.webkitFullscreenElement);
+    }
+    function enter() {
+      if (docEl.requestFullscreen) docEl.requestFullscreen();
+      else if (docEl.webkitRequestFullscreen) docEl.webkitRequestFullscreen();
+    }
+    function exit() {
+      if (document.exitFullscreen) document.exitFullscreen();
+      else if (document.webkitExitFullscreen) document.webkitExitFullscreen();
+    }
+    function toggle() { isFs() ? exit() : enter(); }
+    function sync() {
+      var on = isFs();
+      btn.setAttribute("aria-pressed", on ? "true" : "false");
+      if (label) label.textContent = on ? "離開全螢幕" : "全螢幕";
+      if (expandIc) expandIc.style.display = on ? "none" : "block";
+      if (compressIc) compressIc.style.display = on ? "block" : "none";
+    }
+
+    btn.addEventListener("click", toggle);
+    document.addEventListener("fullscreenchange", sync);
+    document.addEventListener("webkitfullscreenchange", sync);
+    document.addEventListener("keydown", function (e) {
+      if (e.key !== "f" && e.key !== "F") return;
+      if (e.metaKey || e.ctrlKey || e.altKey) return;
+      var t = e.target;
+      var tag = t && t.tagName ? t.tagName.toUpperCase() : "";
+      if (tag === "INPUT" || tag === "TEXTAREA" || (t && t.isContentEditable)) return;
+      e.preventDefault();
+      toggle();
+    });
+    sync();
+  })();
+</script>
+<!-- FULLSCREEN-FEATURE:END -->
+</body>
+</html>
