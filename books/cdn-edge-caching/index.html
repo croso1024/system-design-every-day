@@ -1,0 +1,3072 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>CDN 與邊緣快取 | System Design Every Day</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@300;400;500;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+  <script>
+    mermaid.initialize({
+      startOnLoad: true,
+      theme: 'default',
+      securityLevel: 'loose'
+    });
+  </script>
+  <style>
+    :root {
+      --bg: #ffffff;
+      --bg-soft: #fafaf9;
+      --text: #262a2f;
+      --text-2: #6b7078;
+      --text-3: #9aa0a8;
+      --border: #ecebe8;
+      --border-strong: #dedcd8;
+      --code-bg: #f6f5f3;
+      --accent: #3f6188;
+      --accent-soft: #eef2f7;
+      --accent-line: #cdd9e6;
+      --ok: #4d7d68;
+      --ok-soft: #eef4f1;
+      --warn: #a3743e;
+      --warn-soft: #f6f0e7;
+      --bad: #a8554f;
+      --bad-soft: #f6ecea;
+      --radius: 10px;
+      --radius-sm: 7px;
+      --maxw: 760px;
+      --sans: "Noto Sans TC", system-ui, -apple-system, "Segoe UI", sans-serif;
+      --mono: "JetBrains Mono", "SFMono-Regular", Menlo, Consolas, monospace;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    html {
+      scroll-behavior: smooth;
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      html {
+        scroll-behavior: auto;
+      }
+      * {
+        animation-duration: .001ms !important;
+        transition-duration: .001ms !important;
+      }
+    }
+
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font-family: var(--sans);
+      font-weight: 400;
+      font-size: 16px;
+      line-height: 1.78;
+      -webkit-font-smoothing: antialiased;
+      letter-spacing: .005em;
+    }
+
+    ::selection {
+      background: var(--accent-soft);
+    }
+
+    /* ---------- layout ---------- */
+    .wrap {
+      display: flex;
+      max-width: 1180px;
+      margin: 0 auto;
+      gap: 0;
+    }
+
+    .toc {
+      width: 248px;
+      flex: 0 0 248px;
+      position: sticky;
+      top: 0;
+      height: 100vh;
+      padding: 54px 22px 40px 28px;
+      overflow-y: auto;
+      border-right: 1px solid var(--border);
+      transition: width .2s ease, flex-basis .2s ease, padding .2s ease, opacity .15s ease, border-color .15s ease;
+    }
+
+    .toc-kicker {
+      font-family: var(--mono);
+      font-size: 11px;
+      letter-spacing: .14em;
+      text-transform: uppercase;
+      color: var(--text-3);
+      margin-bottom: 20px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+    }
+
+    /* desktop：側欄內收合鈕；mobile 隱藏（沿用既有 .toc-toggle） */
+    .toc-collapse {
+      display: none;
+      flex: 0 0 auto;
+      align-items: center;
+      justify-content: center;
+      width: 28px;
+      height: 28px;
+      padding: 0;
+      border: none;
+      background: none;
+      border-radius: 6px;
+      color: var(--text-2);
+      line-height: 1;
+      cursor: pointer;
+    }
+
+    .toc-collapse:hover {
+      color: var(--text);
+      background: var(--bg-soft);
+    }
+
+    .toc-collapse:focus-visible {
+      outline: 2px solid var(--accent);
+      outline-offset: 2px;
+    }
+
+    .toc-collapse svg {
+      display: block;
+    }
+
+    /* desktop：側欄收合後的展開鈕（預設隱藏） */
+    .toc-reopen {
+      display: none;
+      position: fixed;
+      top: 18px;
+      left: 18px;
+      z-index: 900;
+      align-items: center;
+      gap: 7px;
+      font-size: 12.5px;
+      line-height: 1;
+      color: var(--text-2);
+      background: var(--bg);
+      border: 1px solid var(--border-strong);
+      border-radius: 999px;
+      padding: 7px 13px 7px 11px;
+      box-shadow: 0 1px 3px rgba(0, 0, 0, .06), 0 4px 12px rgba(0, 0, 0, .04);
+      cursor: pointer;
+      transition: background .15s, border-color .15s, color .15s;
+    }
+
+    .toc-reopen:hover {
+      background: var(--bg-soft);
+      color: var(--text);
+      border-color: var(--text-3);
+    }
+
+    .toc-reopen svg {
+      flex: 0 0 auto;
+      display: block;
+    }
+
+    @media (min-width: 921px) {
+      .toc-collapse {
+        display: inline-flex;
+      }
+
+      body.toc-collapsed .toc {
+        width: 0;
+        flex-basis: 0;
+        padding: 0;
+        opacity: 0;
+        overflow: hidden;
+        border-right-color: transparent;
+        pointer-events: none;
+      }
+
+      body.toc-collapsed .toc-reopen {
+        display: inline-flex;
+      }
+    }
+
+    .toc-kicker a {
+      color: var(--text-3);
+      text-decoration: none;
+      border-bottom: none;
+      transition: color .15s;
+    }
+
+    .toc-kicker a:hover {
+      color: var(--text);
+    }
+
+    .toc-title {
+      font-size: 15px;
+      font-weight: 700;
+      line-height: 1.4;
+      margin: 0 0 24px;
+    }
+
+    .toc a {
+      display: flex;
+      gap: 10px;
+      align-items: baseline;
+      text-decoration: none;
+      color: var(--text-2);
+      font-size: 13.5px;
+      padding: 6px 10px;
+      border-radius: 6px;
+      line-height: 1.45;
+      transition: background .15s, color .15s;
+      border-bottom: none;
+    }
+
+    .toc a:hover {
+      background: var(--bg-soft);
+      color: var(--text);
+      border-bottom: none;
+    }
+
+    .toc a.active {
+      color: var(--accent);
+      background: var(--accent-soft);
+      font-weight: 500;
+      border-bottom: none;
+    }
+
+    .toc a .n {
+      font-family: var(--mono);
+      font-size: 11px;
+      color: var(--text-3);
+      flex: 0 0 18px;
+    }
+
+    .toc a.active .n {
+      color: var(--accent);
+    }
+
+    main {
+      flex: 1 1 auto;
+      min-width: 0;
+      padding: 0 40px;
+    }
+
+    .inner {
+      max-width: var(--maxw);
+      margin: 0 auto;
+      padding: 72px 0 140px;
+    }
+
+    /* ---------- hero ---------- */
+    .hero {
+      margin-bottom: 64px;
+    }
+
+    .hero .eyebrow {
+      font-family: var(--mono);
+      font-size: 12px;
+      letter-spacing: .16em;
+      text-transform: uppercase;
+      color: var(--accent);
+      margin-bottom: 18px;
+    }
+
+    .hero h1 {
+      font-size: 40px;
+      line-height: 1.18;
+      font-weight: 700;
+      margin: 0 0 18px;
+      letter-spacing: -.01em;
+    }
+
+    .hero .lede {
+      font-size: 18px;
+      line-height: 1.7;
+      color: var(--text-2);
+      font-weight: 300;
+      margin: 0;
+      max-width: 620px;
+    }
+
+    .hero .meta {
+      margin-top: 28px;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+
+    .tag {
+      font-family: var(--mono);
+      font-size: 12px;
+      color: var(--text-2);
+      border: 1px solid var(--border-strong);
+      padding: 4px 11px;
+      border-radius: 999px;
+      background: var(--bg-soft);
+    }
+
+    /* ---------- sections ---------- */
+    section {
+      padding-top: 30px;
+      scroll-margin-top: 24px;
+    }
+
+    .sec-head {
+      display: flex;
+      align-items: baseline;
+      gap: 14px;
+      margin: 0 0 8px;
+    }
+
+    .sec-num {
+      font-family: var(--mono);
+      font-size: 13px;
+      color: var(--text-3);
+      font-weight: 500;
+      padding-top: 6px;
+      flex: 0 0 auto;
+    }
+
+    h2 {
+      font-size: 27px;
+      font-weight: 700;
+      line-height: 1.3;
+      margin: 0;
+      letter-spacing: -.01em;
+    }
+
+    .sec-sub {
+      color: var(--text-2);
+      font-size: 15px;
+      margin: 2px 0 28px 0;
+      font-weight: 300;
+    }
+
+    h3 {
+      font-size: 18.5px;
+      font-weight: 700;
+      margin: 38px 0 12px;
+      line-height: 1.45;
+    }
+
+    h4 {
+      font-size: 15.5px;
+      font-weight: 700;
+      margin: 26px 0 8px;
+      color: var(--text);
+    }
+
+    p {
+      margin: 0 0 16px;
+    }
+
+    a {
+      color: var(--accent);
+      text-decoration: none;
+      border-bottom: 1px solid var(--accent-line);
+      transition: border-color .15s;
+    }
+
+    a:hover {
+      border-color: var(--accent);
+    }
+
+    strong {
+      font-weight: 700;
+    }
+
+    em {
+      font-style: normal;
+      background: var(--accent-soft);
+      padding: 0 4px;
+      border-radius: 4px;
+      font-weight: 500;
+      color: #2f4d6e;
+    }
+
+    hr.div {
+      border: none;
+      border-top: 1px solid var(--border);
+      margin: 46px 0;
+    }
+
+    ul, ol {
+      margin: 0 0 18px;
+      padding-left: 22px;
+    }
+
+    li {
+      margin: 7px 0;
+      padding-left: 4px;
+    }
+
+    li::marker {
+      color: var(--text-3);
+    }
+
+    code {
+      font-family: var(--mono);
+      font-size: .86em;
+      background: var(--code-bg);
+      padding: 2px 6px;
+      border-radius: 5px;
+      color: #43494f;
+    }
+
+    pre {
+      background: var(--code-bg);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 16px 18px;
+      overflow-x: auto;
+      margin: 0 0 20px;
+      line-height: 1.6;
+    }
+
+    pre code {
+      background: none;
+      padding: 0;
+      font-size: 13px;
+    }
+
+    /* ---------- math notation ---------- */
+    /* 行內數學變數，如 W、R、N。本站不載入 MathJax/KaTeX，請勿使用 $...$ 或 \[...\] LaTeX 分隔符。 */
+    var {
+      font-family: var(--mono);
+      font-style: normal;
+      font-weight: 500;
+      color: var(--accent);
+    }
+
+    /* 區塊數學公式，置中等寬呈現，記得將 > < & 轉義為 &gt; &lt; &amp;。 */
+    .formula {
+      font-family: var(--mono);
+      font-size: 15px;
+      text-align: center;
+      background: var(--bg-soft);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      padding: 14px 18px;
+      margin: 0 0 20px;
+      color: var(--text);
+      letter-spacing: .03em;
+      overflow-x: auto;
+    }
+
+    /* ---------- callouts ---------- */
+    .callout {
+      border: 1px solid var(--border);
+      border-left: 3px solid var(--border-strong);
+      background: var(--bg-soft);
+      border-radius: var(--radius-sm);
+      padding: 15px 18px;
+      margin: 0 0 22px;
+      font-size: 14.5px;
+    }
+
+    .callout .c-title {
+      font-weight: 700;
+      font-size: 13px;
+      letter-spacing: .02em;
+      margin-bottom: 5px;
+      display: flex;
+      gap: 7px;
+      align-items: center;
+    }
+
+    .callout p:last-child {
+      margin-bottom: 0;
+    }
+
+    .callout.accent {
+      border-left-color: var(--accent);
+      background: var(--accent-soft);
+    }
+
+    .callout.accent .c-title {
+      color: #2f4d6e;
+    }
+
+    .callout.warn {
+      border-left-color: var(--warn);
+      background: var(--warn-soft);
+    }
+
+    .callout.warn .c-title {
+      color: var(--warn);
+    }
+
+    .callout .ic {
+      font-family: var(--mono);
+      font-size: 11px;
+      border: 1px solid currentColor;
+      border-radius: 4px;
+      padding: 0 4px;
+      line-height: 1.5;
+      opacity: .8;
+    }
+
+    .oneliner {
+      border: 1px dashed var(--accent-line);
+      border-radius: var(--radius-sm);
+      padding: 13px 16px;
+      margin: 0 0 22px;
+      font-size: 14.5px;
+      background: #fbfcfd;
+    }
+
+    .oneliner b {
+      font-family: var(--mono);
+      font-size: 11px;
+      letter-spacing: .08em;
+      color: var(--accent);
+      display: block;
+      margin-bottom: 4px;
+      text-transform: uppercase;
+    }
+
+    /* ---------- tables ---------- */
+    .tbl-wrap {
+      overflow-x: auto;
+      margin: 0 0 24px;
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+    }
+
+    table {
+      border-collapse: collapse;
+      width: 100%;
+      font-size: 14px;
+      min-width: 520px;
+    }
+
+    th, td {
+      text-align: left;
+      padding: 11px 14px;
+      border-bottom: 1px solid var(--border);
+      vertical-align: top;
+    }
+
+    th {
+      font-weight: 700;
+      background: var(--bg-soft);
+      font-size: 12.5px;
+      letter-spacing: .02em;
+      color: var(--text-2);
+      position: sticky;
+      top: 0;
+    }
+
+    tr:last-child td {
+      border-bottom: none;
+    }
+
+    td.hl {
+      background: var(--accent-soft);
+    }
+
+    .cap {
+      font-size: 12.5px;
+      color: var(--text-3);
+      margin: -12px 0 26px;
+      font-family: var(--mono);
+    }
+
+    /* ---------- interactive shell ---------- */
+    .demo {
+      border: 1px solid var(--border-strong);
+      border-radius: var(--radius);
+      background: var(--bg);
+      margin: 24px 0 26px;
+      overflow: hidden;
+    }
+
+    .demo-bar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      flex-wrap: wrap;
+      padding: 13px 16px;
+      border-bottom: 1px solid var(--border);
+      background: var(--bg-soft);
+    }
+
+    .demo-bar .label {
+      font-family: var(--mono);
+      font-size: 11px;
+      letter-spacing: .1em;
+      text-transform: uppercase;
+      color: var(--text-3);
+    }
+
+    .demo-body {
+      padding: 20px 18px;
+    }
+
+    .seg {
+      display: inline-flex;
+      border: 1px solid var(--border-strong);
+      border-radius: 999px;
+      overflow: hidden;
+      background: var(--bg);
+    }
+
+    .seg button {
+      border: none;
+      background: none;
+      font-family: var(--sans);
+      font-size: 12.5px;
+      color: var(--text-2);
+      padding: 6px 14px;
+      cursor: pointer;
+      transition: background .15s, color .15s;
+    }
+
+    .seg button:hover {
+      color: var(--text);
+    }
+
+    .seg button[aria-pressed="true"] {
+      background: var(--accent);
+      color: #fff;
+    }
+
+    .btn {
+      font-family: var(--sans);
+      font-size: 13px;
+      border: 1px solid var(--border-strong);
+      background: var(--bg);
+      color: var(--text);
+      padding: 7px 16px;
+      border-radius: 7px;
+      cursor: pointer;
+      transition: background .15s, border-color .15s;
+    }
+
+    .btn:hover {
+      background: var(--bg-soft);
+      border-color: var(--text-3);
+    }
+
+    .btn.primary {
+      background: var(--accent);
+      color: #fff;
+      border-color: var(--accent);
+    }
+
+    .btn.primary:hover {
+      background: #365578;
+    }
+
+    .btn:disabled {
+      opacity: .4;
+      cursor: not-allowed;
+    }
+
+    .btn:focus-visible, .seg button:focus-visible, .toc a:focus-visible, a:focus-visible,
+    summary:focus-visible {
+      outline: 2px solid var(--accent);
+      outline-offset: 2px;
+      border-radius: 4px;
+    }
+
+    .status-line {
+      font-size: 13.5px;
+      color: var(--text-2);
+      min-height: 42px;
+      margin-top: 14px;
+      background: var(--bg-soft);
+      border-radius: var(--radius-sm);
+      padding: 10px 13px;
+      border: 1px solid var(--border);
+    }
+
+    .status-line b {
+      color: var(--text);
+    }
+
+    .legend {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 14px;
+      font-size: 11.5px;
+      color: var(--text-2);
+      margin-top: 14px;
+      font-family: var(--mono);
+    }
+
+    .legend span {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .dot {
+      width: 9px;
+      height: 9px;
+      border-radius: 3px;
+      display: inline-block;
+      border: 1px solid rgba(0, 0, 0, .08);
+    }
+
+    /* node states used across diagrams */
+    .nstate-idle {
+      fill: #fff;
+      stroke: var(--border-strong);
+    }
+
+    .ns-idle {
+      background: #fff;
+      border-color: var(--border-strong);
+    }
+
+    .ns-lock {
+      background: var(--warn-soft);
+      border-color: var(--warn);
+    }
+
+    .ns-ok {
+      background: var(--ok-soft);
+      border-color: var(--ok);
+    }
+
+    .ns-bad {
+      background: var(--bad-soft);
+      border-color: var(--bad);
+    }
+
+    .ns-wait {
+      background: var(--accent-soft);
+      border-color: var(--accent);
+    }
+
+    /* spectrum */
+    .spectrum {
+      position: relative;
+      margin: 26px 6px 10px;
+    }
+
+    .spec-track {
+      height: 4px;
+      border-radius: 2px;
+      background: linear-gradient(90deg, #9fb6cf, #e7e5e1 50%, #c9d8c9);
+      position: relative;
+    }
+
+    .spec-ends {
+      display: flex;
+      justify-content: space-between;
+      font-family: var(--mono);
+      font-size: 11px;
+      color: var(--text-2);
+      margin-top: 10px;
+    }
+
+    .spec-mark {
+      position: absolute;
+      top: -12px;
+      transform: translateX(-50%);
+      cursor: pointer;
+      text-align: center;
+      background: none;
+      border: none;
+      padding: 0;
+    }
+
+    .spec-mark .pin {
+      width: 18px;
+      height: 18px;
+      border-radius: 50%;
+      background: #fff;
+      border: 2px solid var(--border-strong);
+      margin: 0 auto;
+      transition: border-color .15s, transform .15s, box-shadow .15s;
+      display: block;
+    }
+
+    .spec-mark .pn {
+      font-family: var(--mono);
+      font-size: 12px;
+      margin-top: 8px;
+      color: var(--text-2);
+      font-weight: 500;
+      white-space: nowrap;
+      display: block;
+    }
+
+    .spec-mark[aria-pressed="true"] .pin {
+      border-color: var(--accent);
+      transform: scale(1.18);
+      box-shadow: 0 0 0 4px var(--accent-soft);
+    }
+
+    .spec-mark[aria-pressed="true"] .pn {
+      color: var(--accent);
+    }
+
+    .spec-panel {
+      margin-top: 34px;
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 18px;
+      background: var(--bg-soft);
+    }
+
+    .spec-panel h4 {
+      margin: 0 0 4px;
+    }
+
+    .spec-panel .pmeta {
+      font-family: var(--mono);
+      font-size: 12px;
+      color: var(--text-3);
+      margin-bottom: 14px;
+    }
+
+    .bars {
+      display: grid;
+      grid-template-columns: 78px 1fr 56px;
+      gap: 9px 12px;
+      align-items: center;
+    }
+
+    .bars .blabel {
+      font-size: 13px;
+      color: var(--text-2);
+    }
+
+    .bars .btrack {
+      height: 8px;
+      background: #e9e7e3;
+      border-radius: 4px;
+      overflow: hidden;
+    }
+
+    .bars .bfill {
+      height: 100%;
+      border-radius: 4px;
+      background: var(--accent);
+      transition: width .4s ease;
+    }
+
+    .bars .bval {
+      font-family: var(--mono);
+      font-size: 11px;
+      color: var(--text-2);
+      text-align: right;
+    }
+
+    /* generic actor diagram */
+    .actors {
+      display: flex;
+      gap: 12px;
+      flex-wrap: wrap;
+    }
+
+    .actor {
+      flex: 1 1 0;
+      min-width: 96px;
+      border: 1.5px solid var(--border-strong);
+      border-radius: var(--radius-sm);
+      padding: 11px 10px;
+      text-align: center;
+      background: #fff;
+      transition: background .25s, border-color .25s;
+    }
+
+    .actor .aname {
+      font-weight: 700;
+      font-size: 13px;
+    }
+
+    .actor .arole {
+      font-family: var(--mono);
+      font-size: 10.5px;
+      color: var(--text-3);
+      margin-top: 2px;
+    }
+
+    .actor .astate {
+      font-size: 11.5px;
+      margin-top: 8px;
+      font-family: var(--mono);
+      color: var(--text-2);
+      min-height: 16px;
+    }
+
+    .coordinator {
+      border-style: dashed;
+    }
+
+    .flowsteps {
+      margin-top: 16px;
+    }
+
+    .stepitem {
+      display: flex;
+      gap: 11px;
+      font-size: 13.5px;
+      padding: 7px 0;
+      color: var(--text-3);
+      border-top: 1px solid var(--border);
+    }
+
+    .stepitem:first-child {
+      border-top: none;
+    }
+
+    .stepitem.done {
+      color: var(--text);
+    }
+
+    .stepitem.cur {
+      color: var(--text);
+      font-weight: 500;
+    }
+
+    .stepitem .sx {
+      font-family: var(--mono);
+      font-size: 11px;
+      flex: 0 0 26px;
+      color: var(--text-3);
+      padding-top: 2px;
+    }
+
+    .stepitem.cur .sx {
+      color: var(--accent);
+    }
+
+    /* timeline lab (TCC) */
+    .tl-scenarios {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      margin-bottom: 6px;
+    }
+
+    .tl-opt {
+      display: flex;
+      gap: 11px;
+      align-items: flex-start;
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      padding: 10px 13px;
+      cursor: pointer;
+      background: #fff;
+      transition: border-color .15s, background .15s;
+    }
+
+    .tl-opt:hover {
+      background: var(--bg-soft);
+    }
+
+    .tl-opt[aria-pressed="true"] {
+      border-color: var(--accent);
+      background: var(--accent-soft);
+    }
+
+    .tl-opt .tlname {
+      font-weight: 700;
+      font-size: 13.5px;
+    }
+
+    .tl-opt .tldesc {
+      font-size: 12.5px;
+      color: var(--text-2);
+      margin-top: 2px;
+    }
+
+    .tl-opt .tlbadge {
+      font-family: var(--mono);
+      font-size: 10px;
+      border: 1px solid var(--border-strong);
+      border-radius: 4px;
+      padding: 1px 5px;
+      color: var(--text-3);
+      flex: 0 0 auto;
+      margin-top: 1px;
+    }
+
+    .tl-result {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
+      margin-top: 16px;
+    }
+
+    @media (max-width: 560px) {
+      .tl-result {
+        grid-template-columns: 1fr;
+      }
+    }
+
+    .tl-card {
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      padding: 13px 14px;
+      font-size: 13px;
+    }
+
+    .tl-card .tch {
+      font-family: var(--mono);
+      font-size: 11px;
+      letter-spacing: .06em;
+      text-transform: uppercase;
+      margin-bottom: 8px;
+      color: var(--text-3);
+    }
+
+    .tl-card.naive {
+      border-left: 3px solid var(--bad);
+    }
+
+    .tl-card.fixed {
+      border-left: 3px solid var(--ok);
+    }
+
+    .tl-card .verdict {
+      font-weight: 700;
+      margin-top: 8px;
+      font-size: 13px;
+    }
+
+    .tl-card.naive .verdict {
+      color: var(--bad);
+    }
+
+    .tl-card.fixed .verdict {
+      color: var(--ok);
+    }
+
+    /* saga chain */
+    .saga-chain {
+      display: flex;
+      flex-direction: column;
+      gap: 0;
+      margin-top: 8px;
+    }
+
+    .saga-step {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .saga-box {
+      flex: 1 1 auto;
+      border: 1.5px solid var(--border-strong);
+      border-radius: var(--radius-sm);
+      padding: 10px 13px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      background: #fff;
+      transition: .25s;
+    }
+
+    .saga-box .sgn {
+      font-weight: 600;
+      font-size: 13.5px;
+    }
+
+    .saga-box .sgs {
+      font-family: var(--mono);
+      font-size: 11px;
+      color: var(--text-3);
+    }
+
+    .saga-arrow {
+      height: 18px;
+      width: 2px;
+      background: var(--border-strong);
+      margin-left: 18px;
+    }
+
+    .saga-pick {
+      font-size: 12.5px;
+      color: var(--text-2);
+      margin: 4px 0 10px;
+    }
+
+    .saga-pick select {
+      font-family: var(--sans);
+      font-size: 13px;
+      padding: 5px 8px;
+      border: 1px solid var(--border-strong);
+      border-radius: 6px;
+      background: #fff;
+      color: var(--text);
+    }
+
+    /* outbox toggle */
+    .ob-stage {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      margin-top: 8px;
+    }
+
+    .ob-row {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      font-size: 13px;
+    }
+
+    .ob-chip {
+      border: 1.5px solid var(--border-strong);
+      border-radius: var(--radius-sm);
+      padding: 9px 12px;
+      background: #fff;
+      font-size: 13px;
+      transition: .25s;
+      flex: 0 0 auto;
+    }
+
+    .ob-chip .obt {
+      font-weight: 600;
+    }
+
+    .ob-chip .obs {
+      font-family: var(--mono);
+      font-size: 10.5px;
+      color: var(--text-3);
+    }
+
+    .ob-flow {
+      font-family: var(--mono);
+      font-size: 11px;
+      color: var(--text-3);
+    }
+
+    /* wizard */
+    .wiz-q {
+      margin-bottom: 16px;
+    }
+
+    .wiz-q .wq {
+      font-size: 14px;
+      font-weight: 600;
+      margin-bottom: 8px;
+    }
+
+    .wiz-opts {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+
+    .wiz-opts button {
+      font-family: var(--sans);
+      font-size: 13px;
+      border: 1px solid var(--border-strong);
+      background: #fff;
+      color: var(--text-2);
+      padding: 7px 14px;
+      border-radius: 7px;
+      cursor: pointer;
+      transition: .15s;
+    }
+
+    .wiz-opts button:hover {
+      border-color: var(--text-3);
+      color: var(--text);
+    }
+
+    .wiz-opts button[aria-pressed="true"] {
+      background: var(--accent);
+      color: #fff;
+      border-color: var(--accent);
+    }
+
+    .wiz-result {
+      margin-top: 18px;
+      border: 1px solid var(--accent-line);
+      border-radius: var(--radius);
+      padding: 16px 18px;
+      background: var(--accent-soft);
+      font-size: 14px;
+      display: none;
+    }
+
+    .wiz-result.show {
+      display: block;
+    }
+
+    .wiz-result .wr-pick {
+      font-size: 17px;
+      font-weight: 700;
+      color: #2f4d6e;
+      margin-bottom: 6px;
+    }
+
+    .wiz-result .wr-why {
+      color: #3a5572;
+    }
+
+    /* FAQ */
+    details.faq {
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      margin-bottom: 10px;
+      background: #fff;
+      overflow: hidden;
+    }
+
+    details.faq summary {
+      cursor: pointer;
+      padding: 14px 16px;
+      font-weight: 600;
+      font-size: 14.5px;
+      list-style: none;
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      align-items: center;
+    }
+
+    details.faq summary::-webkit-details-marker {
+      display: none;
+    }
+
+    details.faq summary .q {
+      font-family: var(--mono);
+      font-size: 11px;
+      color: var(--accent);
+      flex: 0 0 auto;
+    }
+
+    details.faq summary .chev {
+      transition: transform .2s;
+      color: var(--text-3);
+      flex: 0 0 auto;
+      font-size: 13px;
+    }
+
+    details.faq[open] summary .chev {
+      transform: rotate(90deg);
+    }
+
+    details.faq .ans {
+      padding: 0 16px 16px;
+      font-size: 14px;
+      color: var(--text-2);
+    }
+
+    details.faq .ans p {
+      margin: 0 0 10px;
+    }
+
+    details.faq .ans p:last-child {
+      margin: 0;
+    }
+
+    .trap {
+      display: flex;
+      gap: 10px;
+      font-size: 14px;
+      margin: 9px 0;
+    }
+
+    .trap .tn {
+      font-family: var(--mono);
+      font-size: 11px;
+      color: var(--bad);
+      flex: 0 0 auto;
+      border: 1px solid var(--bad-soft);
+      background: var(--bad-soft);
+      border-radius: 4px;
+      padding: 1px 6px;
+      height: fit-content;
+      margin-top: 2px;
+    }
+
+    /* mobile responsive */
+    .toc-toggle {
+      display: none;
+    }
+
+    @media (max-width: 920px) {
+      .wrap {
+        flex-direction: column;
+      }
+      .toc {
+        position: static;
+        width: auto;
+        height: auto;
+        border-right: none;
+        border-bottom: 1px solid var(--border);
+        padding: 18px 22px;
+        transition: none;
+      }
+      .toc-title {
+        margin-bottom: 0;
+      }
+      .toc-kicker {
+        margin-bottom: 10px;
+      }
+      .toc-nav {
+        display: none;
+        margin-top: 16px;
+      }
+      .toc-nav.open {
+        display: block;
+      }
+      .toc-toggle {
+        display: inline-block;
+        margin-top: 10px;
+      }
+      .toc-collapse,
+      .toc-reopen {
+        display: none !important;
+      }
+      main {
+        padding: 0 22px;
+      }
+      .inner {
+        padding: 40px 0 100px;
+      }
+      .hero h1 {
+        font-size: 31px;
+      }
+    }
+
+    @media print {
+      .toc-reopen { display: none !important; }
+    }
+
+    @media (max-width: 480px) {
+      body {
+        font-size: 15px;
+      }
+      .hero h1 {
+        font-size: 27px;
+      }
+      h2 {
+        font-size: 23px;
+      }
+      .demo-body {
+        padding: 16px 13px;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <!-- ===================== TOC SIDEBAR ===================== -->
+    <nav class="toc" id="toc-panel" aria-label="目錄">
+      <div class="toc-kicker">
+        <a href="../index.html">← 返回目錄</a>
+        <button class="toc-collapse" type="button" aria-expanded="true" aria-controls="toc-panel"
+                aria-label="收合目錄" title="收合目錄">
+          <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor"
+               stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M15 18l-6-6 6-6"/>
+          </svg>
+        </button>
+      </div>
+      <div class="toc-title">CDN 與邊緣快取</div>
+      <button class="btn toc-toggle" type="button" aria-expanded="false" aria-controls="toc-nav">目錄 ▾</button>
+      <div class="toc-nav" id="toc-nav">
+        <a href="#s1"><span class="n">01</span>總覽與定位</a>
+        <a href="#s2"><span class="n">02</span>Cache Key 正規化與 Vary 的代價</a>
+        <a href="#s3"><span class="n">03</span>命中、未命中與回源</a>
+        <a href="#s4"><span class="n">04</span>TTL 與 stale-while-revalidate／stale-if-error</a>
+        <a href="#s5"><span class="n">05</span>Cache-Control 與條件式重新驗證</a>
+        <a href="#s6"><span class="n">06</span>主動 Purge、版本化 URL 與 Origin Shield</a>
+        <a href="#s7"><span class="n">07</span>互動 Demo：Cache Key 碎片與 SWR 時間軸</a>
+        <a href="#s8"><span class="n">08</span>邊緣運算邊界與面試折衷</a>
+      </div>
+    </nav>
+    <button class="btn toc-reopen" type="button" aria-expanded="true" aria-controls="toc-panel"
+            aria-label="展開目錄" title="展開目錄">
+      <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor"
+           stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M9 18l6-6-6-6"/>
+      </svg>
+      <span>目錄</span>
+    </button>
+
+    <!-- ===================== MAIN CONTENT ===================== -->
+    <main>
+      <div class="inner">
+        <style>
+  /* 本篇專屬：cec-* 命名空間，不覆蓋全站 base 類別 */
+  #cec-root {
+    --cec-c: #3f6188; --cec-c-soft: #eef2f7;
+    --cec-s: #4d7d68; --cec-s-soft: #eef4f1;
+    --cec-w: #a3743e; --cec-w-soft: #f6f0e7;
+    --cec-bad: #a8554f; --cec-bad-soft: #f6ecea;
+    --cec-alt: #6b6f9a; --cec-alt-soft: #eef0f6;
+  }
+  .cec-sub { font-weight: 700; font-size: 14px; margin: 20px 0 6px; padding-left: 10px; border-left: 3px solid var(--accent); color: var(--text); }
+
+  .cec-cards { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin: 12px 0 6px; }
+  @media (max-width: 900px) { .cec-cards { grid-template-columns: 1fr 1fr; } }
+  @media (max-width: 520px) { .cec-cards { grid-template-columns: 1fr; } }
+  .cec-card { border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 12px 14px; background: #fff; border-left-width: 4px; }
+  .cec-card.k { border-left-color: var(--cec-c); background: var(--cec-c-soft); }
+  .cec-card.h { border-left-color: var(--cec-s); background: var(--cec-s-soft); }
+  .cec-card.t { border-left-color: var(--cec-w); background: var(--cec-w-soft); }
+  .cec-card.o { border-left-color: var(--cec-alt); background: var(--cec-alt-soft); }
+  .cec-card .ct { font-weight: 700; font-size: 13.5px; margin-bottom: 3px; }
+  .cec-card .cl { font-family: var(--mono); font-size: 11px; color: var(--text-3); margin-bottom: 6px; letter-spacing: .04em; }
+  .cec-card .cs { font-size: 12.5px; color: var(--text-2); line-height: 1.55; }
+
+  .cec-flow { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin: 10px 0 4px; font-family: var(--mono); font-size: 12px; }
+  .cec-chip { border: 1px solid var(--border-strong); border-radius: 6px; padding: 6px 10px; background: #fff; font-weight: 600; color: var(--text); }
+  .cec-chip.cli { background: var(--cec-c-soft); border-color: var(--cec-c); color: var(--cec-c); }
+  .cec-chip.edge { background: var(--cec-alt-soft); border-color: var(--cec-alt); color: var(--cec-alt); }
+  .cec-chip.origin { background: var(--cec-s-soft); border-color: var(--cec-s); color: var(--cec-s); }
+  .cec-chip.op { background: var(--bg-soft); color: var(--text-3); border-style: dashed; font-weight: 500; }
+  .cec-chip.bad { background: var(--cec-bad-soft); border-color: var(--cec-bad); color: var(--cec-bad); }
+  .cec-chip.warn { background: var(--cec-w-soft); border-color: var(--cec-w); color: var(--cec-w); }
+
+  .cec-split { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin: 12px 0; }
+  @media (max-width: 640px) { .cec-split { grid-template-columns: 1fr; } }
+  .cec-pane {
+    border: 1px solid var(--border); border-radius: var(--radius-sm);
+    background: #fff; padding: 14px; border-top: 3px solid var(--border-strong);
+  }
+  .cec-pane.ok { border-top-color: var(--cec-s); }
+  .cec-pane.warn { border-top-color: var(--cec-w); }
+  .cec-pane.bad { border-top-color: var(--cec-bad); }
+  .cec-pane.read { border-top-color: var(--cec-c); }
+  .cec-pane.alt { border-top-color: var(--cec-alt); }
+  .cec-pane .st { font-weight: 700; font-size: 14px; margin-bottom: 2px; }
+  .cec-pane .ss { font-family: var(--mono); font-size: 11px; color: var(--text-3); margin-bottom: 8px; letter-spacing: .04em; }
+  .cec-pane ul { margin: 0; padding-left: 1.15em; font-size: 13px; color: var(--text-2); line-height: 1.65; }
+
+  .cec-ctrl { display: flex; flex-wrap: wrap; gap: 10px; margin: 10px 0 8px; align-items: center; }
+  .cec-metric { display: flex; flex-wrap: wrap; gap: 14px; margin: 8px 0 4px; font-size: 13px; color: var(--text-2); }
+  .cec-metric strong { color: var(--text); font-family: var(--mono); font-size: 12.5px; }
+
+  .cec-actors { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin: 12px 0 6px; }
+  @media (max-width: 640px) { .cec-actors { grid-template-columns: 1fr; } }
+  .cec-actor {
+    border: 1.5px solid var(--border-strong); border-radius: var(--radius-sm);
+    padding: 12px 12px 10px; background: #fff; text-align: center;
+    transition: background .18s, border-color .18s, box-shadow .18s;
+  }
+  .cec-actor .an { font-weight: 700; font-size: 13px; letter-spacing: .03em; }
+  .cec-actor .al { font-family: var(--mono); font-size: 10.5px; color: var(--text-3); margin-top: 2px; }
+  .cec-actor .av { font-family: var(--mono); font-size: 15px; font-weight: 700; margin-top: 8px; color: var(--text); word-break: break-all; }
+  .cec-actor .ah { font-size: 11.5px; color: var(--text-2); margin-top: 4px; min-height: 1.4em; }
+  .cec-actor.on { background: var(--accent-soft); border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+  .cec-actor.on .an { color: var(--accent); }
+  .cec-actor.ok { background: var(--ok-soft); border-color: var(--ok); }
+  .cec-actor.ok .an { color: var(--ok); }
+  .cec-actor.dirty { background: var(--warn-soft); border-color: var(--warn); }
+  .cec-actor.dirty .an { color: var(--warn); }
+  .cec-actor.bad { background: var(--bad-soft); border-color: var(--bad); }
+  .cec-actor.bad .an { color: var(--bad); }
+
+  .cec-keybox {
+    border: 1px solid var(--border); border-radius: var(--radius-sm);
+    background: var(--code-bg); padding: 10px 12px; margin: 8px 0 6px;
+    font-family: var(--mono); font-size: 12px; color: var(--text); line-height: 1.55;
+    word-break: break-all;
+  }
+  .cec-keybox .kk { color: var(--text-3); margin-right: 8px; }
+
+  .cec-slots {
+    display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0 4px; min-height: 36px;
+  }
+  .cec-slot {
+    font-family: var(--mono); font-size: 11px; padding: 5px 8px;
+    border: 1px solid var(--border-strong); border-radius: 6px; background: #fff; color: var(--text-2);
+  }
+  .cec-slot.hit { background: var(--cec-s-soft); border-color: var(--cec-s); color: var(--cec-s); }
+  .cec-slot.miss { background: var(--cec-c-soft); border-color: var(--cec-c); color: var(--cec-c); }
+  .cec-slot.empty { color: var(--text-3); border-style: dashed; }
+
+  .cec-ticks { display: flex; gap: 4px; margin: 10px 0 6px; }
+  .cec-ticks[hidden] { display: none; }
+  .cec-tick {
+    flex: 1; text-align: center; border: 1.5px solid var(--border-strong);
+    border-radius: 6px; padding: 8px 4px; background: #fff;
+    font-family: var(--mono); font-size: 11px; color: var(--text-3);
+    transition: background .18s, border-color .18s, color .18s;
+  }
+  .cec-tick .tn { font-weight: 700; font-size: 12px; color: var(--text); display: block; margin-bottom: 2px; }
+  .cec-tick.future { background: var(--bg-soft); border-style: dashed; }
+  .cec-tick.fresh { background: var(--ok-soft); border-color: var(--ok); color: var(--ok); }
+  .cec-tick.fresh .tn { color: var(--ok); }
+  .cec-tick.swr { background: var(--warn-soft); border-color: var(--warn); color: var(--warn); }
+  .cec-tick.swr .tn { color: var(--warn); }
+  .cec-tick.sie { background: var(--cec-alt-soft); border-color: var(--cec-alt); color: var(--cec-alt); }
+  .cec-tick.sie .tn { color: var(--cec-alt); }
+  .cec-tick.dead { background: var(--bad-soft); border-color: var(--bad); color: var(--bad); }
+  .cec-tick.dead .tn { color: var(--bad); }
+  .cec-tick.now { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+  .cec-tick.now .tn { color: var(--accent); }
+
+  .cec-panels { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 12px; }
+  @media (max-width: 640px) { .cec-panels { grid-template-columns: 1fr; } }
+  .cec-panel { border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 12px; background: #fff; }
+  .cec-panel .pt {
+    font-size: 11px; color: var(--text-3); letter-spacing: .06em; text-transform: uppercase;
+    font-family: var(--mono); margin-bottom: 8px;
+  }
+  .cec-panel .prow {
+    display: flex; justify-content: space-between; gap: 8px;
+    font-family: var(--mono); font-size: 12px; padding: 4px 0;
+    border-bottom: 1px dashed var(--border);
+  }
+  .cec-panel .prow:last-child { border-bottom: none; }
+  .cec-panel .pk { color: var(--text-3); white-space: nowrap; }
+  .cec-panel .pv { color: var(--text); font-weight: 600; text-align: right; word-break: break-all; }
+  .cec-panel .pv.good { color: var(--ok); }
+  .cec-panel .pv.bad { color: var(--bad); }
+  .cec-panel .pv.warn { color: var(--warn); }
+
+  .cec-wire {
+    border: 1px solid var(--border); border-radius: var(--radius-sm);
+    background: #fff; padding: 8px 10px; margin-top: 10px; max-height: 260px; overflow-y: auto;
+  }
+  .cec-row {
+    display: flex; align-items: baseline; gap: 8px;
+    font-family: var(--mono); font-size: 11.5px; padding: 4px 0;
+    border-bottom: 1px dashed var(--border);
+  }
+  .cec-row:last-child { border-bottom: none; }
+  .cec-row .ar { width: 42px; flex: none; text-align: center; color: var(--text-3); font-weight: 700; }
+  .cec-row .tg {
+    flex: none; border-radius: 4px; padding: 2px 6px; font-size: 10.5px; font-weight: 700;
+    border: 1px solid var(--border-strong); background: var(--bg-soft); color: var(--text-3);
+  }
+  .cec-row .tx { color: var(--text-2); line-height: 1.5; }
+  .cec-row.read .tg { background: var(--cec-c-soft); border-color: var(--cec-c); color: var(--cec-c); }
+  .cec-row.ok .tg { background: var(--cec-s-soft); border-color: var(--cec-s); color: var(--cec-s); }
+  .cec-row.warn .tg { background: var(--cec-w-soft); border-color: var(--cec-w); color: var(--cec-w); }
+  .cec-row.bad .tg { background: var(--cec-bad-soft); border-color: var(--cec-bad); color: var(--cec-bad); }
+  .cec-row.bad .tx { color: var(--bad); }
+  .cec-row.note { background: var(--bg-soft); border-radius: 4px; }
+  .cec-row.note .tx { color: var(--text-3); }
+
+  .cec-verdict {
+    margin-top: 10px; padding: 10px 12px; border-radius: var(--radius-sm);
+    border: 1px solid var(--border); background: var(--bg-soft);
+    font-size: 13px; color: var(--text-2); line-height: 1.55;
+  }
+  .cec-verdict.tone-ok { border-left: 3px solid var(--ok); background: var(--ok-soft); color: var(--text); }
+  .cec-verdict.tone-lock { border-left: 3px solid var(--warn); background: var(--warn-soft); color: var(--text); }
+  .cec-verdict.tone-bad { border-left: 3px solid var(--bad); background: var(--bad-soft); color: var(--text); }
+
+  .cec-mode-hint { font-size: 12.5px; color: var(--text-2); margin: 8px 0 4px; line-height: 1.55; }
+
+  /* display 覆寫 UA hidden；切換面板必須成對寫 display:none */
+  .cec-view { display: block; }
+  .cec-view[hidden] { display: none; }
+</style>
+
+<div id="cec-root">
+
+<section id="s1">
+  <div class="sec-head">
+    <span class="sec-num">01</span>
+    <h2>總覽與定位</h2>
+  </div>
+  <p class="sec-sub">CDN 是一群地理分散的共用 HTTP 快取。本篇用「一個請求在邊緣節點上發生的事」貫穿：先算 Cache Key，再決定 HIT／MISS／回源，最後才談過期、失效與誰去打 origin。</p>
+
+  <p>應用層快取（Redis、本地 LRU）服務的是<strong>你自己的服務</strong>：key 是你定的，失效是你 DEL 的。CDN 服務的是<strong>HTTP 表徵</strong>：它站在瀏覽器與 origin 之間，讀 <code>Cache-Control</code>、算一把從 URL 與選定標頭組出來的 key，把同一份回應賣給同一個 PoP 上的下一個陌生人。兩者都能降延遲、都能打穿 origin，但契約完全不同。</p>
+
+  <p>一個 GET 落到邊緣之後，生命週期幾乎總是這四步。後面每一章對應其中一步，不跳著講產品功能清單。</p>
+
+  <div class="cec-cards">
+    <div class="cec-card k">
+      <div class="ct">1 · 算出 Cache Key</div>
+      <div class="cl">Normalize</div>
+      <div class="cs">哪些 query、Header、Cookie 進 key。進多了碎片化，進少了串資料。Vary 是這一步的帳單。</div>
+    </div>
+    <div class="cec-card h">
+      <div class="ct">2 · 查這把 key</div>
+      <div class="cl">HIT / MISS / Collapsed</div>
+      <div class="cs">命中就回；未命中才回源。同一 PoP 上的併發 miss，邊緣可以合併成一趟 origin GET。</div>
+    </div>
+    <div class="cec-card t">
+      <div class="ct">3 · 判斷能不能賣</div>
+      <div class="cl">Fresh / Stale / Revalidate</div>
+      <div class="cs">TTL 內直接賣。過期後可 stale-while-revalidate 先賣再更新，或 stale-if-error 在 origin 掛掉時繼續賣。</div>
+    </div>
+    <div class="cec-card o">
+      <div class="ct">4 · 誰去打 origin</div>
+      <div class="cl">PoP → Shield → Origin</div>
+      <div class="cs">未命中不一定直打應用。Origin Shield 與分層快取把全球 miss 收斂成靠近 origin 的少數幾次。</div>
+    </div>
+  </div>
+
+  <div class="cec-flow">
+    <span class="cec-chip cli">Client GET</span>
+    <span class="cec-chip op">→ 就近 PoP</span>
+    <span class="cec-chip edge">算 key · 查快取</span>
+    <span class="cec-chip op">HIT？</span>
+    <span class="cec-chip origin">回源 / Shield</span>
+    <span class="cec-chip op">→</span>
+    <span class="cec-chip cli">把表徵賣回去</span>
+  </div>
+
+  <div class="callout accent">
+    <div class="c-title"><span class="ic">座標</span>協定、DNS、應用快取都不在這篇重講</div>
+    <p><em>HTTP/1.1 與 HTTP/2</em> 已經講過訊息語義、狀態碼、連線多路復用，以及 freshness／validation 這對詞的定義——本篇只談<strong>共用快取怎麼執行這些指令</strong>。<br>
+    使用者如何被導到某一個 PoP，只講它如何把快取切成地理分片；DNS 解析、CNAME、TTL 交給 <em>DNS 深入解析</em>。<br>
+    Cache-Aside、Write-Through、LRU／LFU 是 <em>快取策略</em> 的題。Origin 被隨機空 key、熱 key 到期、TTL 對齊打死，是 <em>快取失效模式與雪崩防護</em> 的題——本篇只談<strong>邊緣側</strong>對應的 collapsing、stale 售賣與 Shield。</p>
+  </div>
+
+  <div class="oneliner">
+    <b>一句話答法</b>CDN 是地理分散的共用 HTTP 快取。請求在邊緣先正規化成 Cache Key，再走 HIT／MISS／回源；過期策略與誰去打 origin，都是這條生命週期上的旋鈕，不是另一套產品。
+  </div>
+</section>
+
+<section id="s2">
+  <div class="sec-head">
+    <span class="sec-num">02</span>
+    <h2>Cache Key 正規化與 Vary 的代價</h2>
+  </div>
+  <p class="sec-sub">命中率幾乎總是先被 key 設計殺死，而不是被 TTL 殺死。進 key 的每一個位元組，都在複製一份快取物件。</p>
+
+  <p>邊緣看到的不是「<code>/hero.jpg</code> 這張圖」，而是一把由 URL 與選定請求欄位組出來的字串。同一張圖，十種 query 排列就可能變成十份物件——每一份都 miss 一次、佔一份記憶體、過期一次。</p>
+
+  <div class="formula">cache_key = host + path + selected_query + vary_headers + optional_cookie_subset</div>
+  <p>正規化的工作是<strong>刪掉不改變表徵的維度，留下真正會讓回應不同的維度</strong>。排序 query、去掉空值、主機名小寫，是免費的；難的是決定哪些欄位「算內容」。 </p>
+
+  <p class="cec-sub">1 · Query 參數：內容 vs 追蹤</p>
+  <div class="cec-split">
+    <div class="cec-pane ok">
+      <div class="st">該進 key</div>
+      <div class="ss">會改變 bytes 的參數</div>
+      <ul>
+        <li><code>v</code>／<code>hash</code>：資產版本。進 key 才能讓 <code>app.js?v=7</code> 與 <code>v=8</code> 分成兩份，這正是版本化 URL 要的</li>
+        <li><code>w</code>／<code>h</code>／<code>format</code>：圖片衍生尺寸。不同像素就是不同物件</li>
+        <li><code>locale</code>／<code>currency</code>：同一路徑下的不同表徵</li>
+      </ul>
+    </div>
+    <div class="cec-pane bad">
+      <div class="st">不該進 key</div>
+      <div class="ss">不改變 bytes 的噪聲</div>
+      <ul>
+        <li><code>utm_*</code>、<code>gclid</code>、<code>fbclid</code>：廣告歸因。進 key 等於幫每次行銷活動複製一份快取</li>
+        <li>隨機 <code>_</code>／cache-buster：客戶端自己在殺命中率</li>
+        <li>排序不同、值相同：<code>?a=1&amp;b=2</code> 與 <code>?b=2&amp;a=1</code> 必須正規化成同一把</li>
+      </ul>
+    </div>
+  </div>
+
+  <p class="cec-sub">2 · Header 與 Cookie</p>
+  <p>共用快取預設<strong>不該</strong>把 Cookie 放進 key。Session cookie 幾乎每人一把，key 基數 ≈ 活躍用戶數，命中率趨近於 0，還有把 A 的私人頁面賣給 B 的風險——後者該用 <code>Cache-Control: private</code>／<code>no-store</code> 直接禁止共用，而不是「用 cookie 當 key 假裝隔離」。</p>
+  <p>若產品真的需要「登入／未登入兩份 HTML」，正確做法是把身分<strong>正規化成一個低基數維度</strong>（例如 <code>logged_in=0|1</code>），而不是整段 <code>Cookie</code> 原樣進 key。</p>
+
+  <p class="cec-sub">3 · <code>Vary</code> 的帳單</p>
+  <p><code>Vary</code> 告訴共用快取：「這份回應還依哪些請求標頭而變」。它不是註解，是 key 的乘法器。</p>
+
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>Vary</th>
+          <th>物件倍數</th>
+          <th>實務</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><code>Accept-Encoding</code></td>
+          <td>gzip／br／identity…</td>
+          <td>幾乎每個 CDN 都會自己談壓縮並正規化；不要再手動加出第三種編碼</td>
+        </tr>
+        <tr>
+          <td><code>Accept-Language</code></td>
+          <td class="hl">語言數 × 品質值變體</td>
+          <td>瀏覽器送的字串很髒（<code>en-US,en;q=0.9</code>）。不正規化就爆炸。能改用 <code>?locale=</code> 就不要 Vary 語言</td>
+        </tr>
+        <tr>
+          <td><code>Cookie</code></td>
+          <td class="hl">≈ 用戶數</td>
+          <td>等價於這條 URL 在共用快取上不可快取</td>
+        </tr>
+        <tr>
+          <td><code>User-Agent</code></td>
+          <td>裝置／瀏覽器長尾</td>
+          <td>經典碎片化。要分桌面／手機，用正規化後的裝置類別，不要原串</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="cap">Vary 每加一個高基數標頭，命中率就按那個基數相除。面試被問「為什麼上了 CDN 命中率只有 20%」，先把 Cache Key 攤開，十次有八次答案在這裡。</p>
+
+  <div class="callout warn">
+    <div class="c-title"><span class="ic">陷阱</span>正規化不足與正規化過度是兩種相反的事故</div>
+    <p>不足：追蹤參數進 key，快取被廣告活動切成碎片，origin 流量看起來「怎麼清不掉」。過度：把 <code>locale</code> 從 key 拿掉，英文快取賣給中文用戶——這是正確性 bug，比 miss 更貴。規則是：<strong>會改變表徵的留下，只改變觀測的丟掉</strong>。</p>
+  </div>
+
+  <div class="oneliner">
+    <b>一句話答法</b>Cache Key 只收會改變 bytes 的維度：內容型 query 進、utm／session cookie 不進。Vary 是乘法器；Vary Cookie 或 User-Agent 幾乎等於這條 URL 不要走共用快取。
+  </div>
+</section>
+
+<section id="s3">
+  <div class="sec-head">
+    <span class="sec-num">03</span>
+    <h2>命中、未命中與回源</h2>
+  </div>
+  <p class="sec-sub">key 算完之後，邊緣只有三種工作：把已有的表徵賣掉、去 origin 取一份，或掛在別人正在取的那一趟上。</p>
+
+  <p>使用者被導到哪個 PoP，只在這一步有意義：快取是<strong>地理分片</strong>的。東京 HIT 幫不到倫敦 MISS。Anycast 或 Geo-DNS 把請求送到「近」的節點，於是熱門物件在每個 PoP 各自暖機一份；冷門物件則在很多 PoP 上永遠是 miss。解析過程本身交給 DNS 篇，這裡只留下這個後果：<strong>全球命中率 ≠ 單一 PoP 命中率</strong>，purge 也必須扇出到所有分片。</p>
+
+  <div class="cec-flow">
+    <span class="cec-chip cli">同一 URL</span>
+    <span class="cec-chip op">→</span>
+    <span class="cec-chip edge">TPE PoP HIT</span>
+    <span class="cec-chip op">≠</span>
+    <span class="cec-chip warn">LHR PoP MISS</span>
+    <span class="cec-chip op">→</span>
+    <span class="cec-chip origin">LHR 仍回源</span>
+  </div>
+
+  <p class="cec-sub">HIT / MISS / 回源</p>
+  <ul>
+    <li><strong>HIT（fresh）</strong>：物件在、且仍在 TTL 內。邊緣直接回 200，origin 完全不知道這次請求。</li>
+    <li><strong>MISS</strong>：這把 key 在這個 PoP 上沒有。邊緣成為 origin 的 HTTP 客戶端，取回後寫入自己的 store，再回給使用者。</li>
+    <li><strong>Expired + revalidate</strong>：物件在，但過期了。邊緣帶 <code>If-None-Match</code> 問 origin；304 則刷新新鮮度、body 沿用，200 則換新表徵。</li>
+  </ul>
+
+  <p class="cec-sub">邊緣側的請求合併（Request Collapsing）</p>
+  <p>同一 PoP、同一把 key、同一瞬間的一群 miss，不必每人打一趟 origin。第一個成為 in-flight 的請求去回源，後來者掛在同一趟結果上。這是邊緣版的 Singleflight：範圍是<strong>這一台邊緣節點（或這一個 PoP）</strong>，不是全球。</p>
+
+  <div class="cec-split">
+    <div class="cec-pane read">
+      <div class="st">它擋什麼</div>
+      <div class="ss">單一 PoP 上的 herd 乘數</div>
+      <ul>
+        <li>熱資產剛過期、或剛部署的新 hash 檔名，一個 PoP 可能同時湧入幾千個 miss</li>
+        <li>合併把這個 PoP 的 origin GET 從 N 收成 1</li>
+        <li>使用者仍付那一趟回源的延遲（尾部被對齊）</li>
+      </ul>
+    </div>
+    <div class="cec-pane warn">
+      <div class="st">它不擋什麼</div>
+      <div class="ss">跨 PoP · 不同 key · origin 自己的災害</div>
+      <ul>
+        <li>200 個 PoP 同時 miss，origin 仍可能看到 200 次回源——那是 Shield 的題</li>
+        <li>Cache Key 碎片化後，每把 key 各合併各的，總回源次數不會下降</li>
+        <li>origin 被隨機空 URL 打穿、被應用層熱 key 打死，是 <em>快取失效模式</em> 的題；邊緣 collapsing 救不了「每把 key 只出現一次」</li>
+      </ul>
+    </div>
+  </div>
+
+  <div class="callout accent">
+    <div class="c-title"><span class="ic">關鍵</span>負快取在邊緣同樣存在，但契約是 HTTP</div>
+    <p>404／301 也可以被快取，指令仍是 <code>Cache-Control</code>（或 CDN 的預設 negative TTL）。這能擋住「已下線的舊資產被爬蟲反覆打 origin」，代價是上線後的短暫假陰性——跟應用層空值快取同一類窗口，只是旋鈕在 HTTP 標頭，不在 Redis SET nil。Bloom Filter、互斥重建鎖不要答進這段。</p>
+  </div>
+
+  <div class="oneliner">
+    <b>一句話答法</b>HIT 停在 PoP，MISS 才回源；同一 PoP 的併發 miss 用 collapsing 收成 1 次。跨 PoP 的 herd 要靠 Shield，key 碎片化則合併也救不了。
+  </div>
+</section>
+
+<section id="s4">
+  <div class="sec-head">
+    <span class="sec-num">04</span>
+    <h2>TTL 與 stale-while-revalidate／stale-if-error</h2>
+  </div>
+  <p class="sec-sub">過期不是一扇關上門。邊緣可以在「新鮮」「過期但仍可賣」「origin 掛了仍可賣」三個窗口裡做不同的事。</p>
+
+  <p>共用快取看的新鮮度，主要來自回應上的 <code>s-maxage</code>（沒有才退到 <code>max-age</code>）與物件進入快取後累計的 <code>Age</code>。當 <var>Age</var> &lt; TTL，物件是 fresh，請求連 origin 的門都不敲。TTL 到期之後，預設行為是<strong>先驗證再賣</strong>——使用者付一次 RTT。兩個擴充指令把這扇門打開一條縫。</p>
+
+  <div class="formula">fresh = Age &lt; TTL；SWR 窗口 = TTL ≤ Age &lt; TTL + swr；SIE 在 origin 失敗時允許 Age &lt; TTL + sie</div>
+
+  <p class="cec-sub">stale-while-revalidate：先賣舊的，背景更新</p>
+  <p>物件剛過期、但仍在 SWR 秒數內：邊緣立刻把舊表徵回給使用者（狀態仍是 200），同時對 origin 發一趟條件式 GET。更新成功就換新物件，失敗就繼續持有舊的直到窗口結束。</p>
+  <p>使用者看到的內容，與背景正在抓的內容，在這一秒內是故意分叉的。這就是 Demo 時間軸要對的帳：<strong>讀路徑的延遲被壓成 HIT，新鮮度落後最多一個 SWR 窗口</strong>。</p>
+
+  <div class="cec-split">
+    <div class="cec-pane ok">
+      <div class="st">適用</div>
+      <div class="ss">可容忍短暫舊頁的讀多寫少</div>
+      <ul>
+        <li>行銷頁、商品列表、靜態組態、公開 JSON</li>
+        <li>把「TTL 到期瞬間的 herd」從使用者路徑拿掉：到期後第一個請求不再擋住所有人</li>
+        <li>與邊緣 collapsing 疊加：背景更新本身也可以合併</li>
+      </ul>
+    </div>
+    <div class="cec-pane warn">
+      <div class="st">代價</div>
+      <div class="ss">明確的 stale 預算</div>
+      <ul>
+        <li>產品必須說得出「最多舊 N 秒可以接受」。庫存、價格、權限決策通常不行</li>
+        <li>窗口內 origin 一直失敗，使用者會一直看到同一份舊頁——這是功能，不是 bug，但要有告警</li>
+        <li>它不是應用層的邏輯過期：契約在 HTTP 標頭，任何遵守 RFC 5861 的共用快取都該懂</li>
+      </ul>
+    </div>
+  </div>
+
+  <p class="cec-sub">stale-if-error：origin 掛了仍賣舊的</p>
+  <p>SWR 處理的是「過期但 origin 還活著」。SIE 處理的是「origin 5xx／連不上」。在 SIE 窗口內，邊緣可以在驗證失敗時繼續回舊表徵，而不是把 origin 的 502 轉發給全世界。</p>
+  <p>這是邊緣對 origin 故障的降級，不是應用層雪崩防護的替代品。雪崩篇用 TTL 抖動與 Singleflight 保護 origin <em>自己</em>；這裡是 origin 已經倒了，邊緣決定還要不要把最後一份已知良好的 bytes 賣出去。</p>
+
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>窗口</th>
+          <th>使用者拿到</th>
+          <th>origin 參與</th>
+          <th>典型標頭</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>Fresh</td>
+          <td>快取中的表徵</td>
+          <td>不參與</td>
+          <td><code>s-maxage=N</code></td>
+        </tr>
+        <tr>
+          <td>SWR</td>
+          <td class="hl">立刻拿到舊的</td>
+          <td>背景條件式 GET</td>
+          <td><code>stale-while-revalidate=M</code></td>
+        </tr>
+        <tr>
+          <td>SIE（origin 失敗）</td>
+          <td class="hl">繼續拿舊的</td>
+          <td>失敗被吞掉</td>
+          <td><code>stale-if-error=K</code></td>
+        </tr>
+        <tr>
+          <td>窗口外 + origin 失敗</td>
+          <td>錯誤頁</td>
+          <td>失敗上浮</td>
+          <td>沒有 SIE、或 SIE 已過</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="cap">三個數字要一起設：TTL 決定平常多久打一次 origin，SWR 決定過期瞬間還能不能零延遲賣，SIE 決定 origin 事故時還能撐多久。</p>
+
+  <div class="callout warn">
+    <div class="c-title"><span class="ic">陷阱</span>SWR 不是「TTL 設超長」的替代寫法</div>
+    <p>把 <code>s-maxage</code> 設成一天，命中率確實高，但你失去了「過期後主動去看一眼」的節奏。SWR 的意義是<strong>短 TTL + 過期仍可賣</strong>：平常保持相對新，尖峰與故障時不把使用者推去排隊打 origin。兩者都設很長，等於承認這份物件可以舊很久——那就直接把 TTL 寫清楚，不要用 SWR 掩飾。</p>
+  </div>
+
+  <div class="oneliner">
+    <b>一句話答法</b>TTL 內直接賣；剛過期用 SWR 先賣舊的再背景更新；origin 失敗用 SIE 繼續賣舊的。換到的是讀路徑延遲與故障存活，付出去的是明確的 stale 預算。
+  </div>
+</section>
+
+<section id="s5">
+  <div class="sec-head">
+    <span class="sec-num">05</span>
+    <h2>Cache-Control 與條件式重新驗證</h2>
+  </div>
+  <p class="sec-sub">邊緣是共用快取，也是 origin 的客戶端。標頭同時管「能不能存」與「過期後怎麼問」。</p>
+
+  <p>HTTP 篇已經區分過新鮮度（不發請求）與驗證（發請求但省 body）。這裡只補共用快取會踩到的差異：瀏覽器看到的 <code>max-age</code>，跟 CDN 看到的 <code>s-maxage</code>，常常不是同一個數字；邊緣拿著 ETag 去問 origin，跟瀏覽器拿著 ETag 去問 CDN，是兩段獨立的驗證。</p>
+
+  <p class="cec-sub">共用快取真正會看的指令</p>
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>指令</th>
+          <th>對 CDN 的意思</th>
+          <th>面試易混</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><code>public</code></td>
+          <td>允許共用快取存。有 Cookie 的回應預設常被當成 private，要明確 public 才進 CDN</td>
+          <td>不是「誰都能看這個 URL」的授權語意</td>
+        </tr>
+        <tr>
+          <td><code>private</code>／<code>no-store</code></td>
+          <td class="hl">CDN 不准存。private 仍允許瀏覽器自己的快取；no-store 連瀏覽器都不該留</td>
+          <td>登入後 HTML 用 private，金融／個資用 no-store</td>
+        </tr>
+        <tr>
+          <td><code>s-maxage=N</code></td>
+          <td class="hl">覆蓋 max-age，只對共用快取生效</td>
+          <td>「CDN 一小時、瀏覽器一分鐘」靠它，不是靠兩份檔案</td>
+        </tr>
+        <tr>
+          <td><code>no-cache</code></td>
+          <td>可以存，但每次賣之前必須再驗證</td>
+          <td>名字不像「不要快取」。要禁止儲存用 no-store</td>
+        </tr>
+        <tr>
+          <td><code>must-revalidate</code>／<code>proxy-revalidate</code></td>
+          <td>過期後不准未驗證就賣。後者只綁共用快取</td>
+          <td>與 SWR 互斥：開了 SWR 就是在允許未驗證先賣</td>
+        </tr>
+        <tr>
+          <td><code>immutable</code></td>
+          <td>這份表徵不會在這個 URL 上變。搭配長 TTL 的雜湊檔名</td>
+          <td>用在 <code>/app.a1b2.js</code>，不要用在 <code>/index.html</code></td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="cap">一條經驗：HTML 入口短 TTL 或 no-cache；雜湊資產 <code>s-maxage</code> 一年 + <code>immutable</code>；帶身分的回應不要進 CDN。</p>
+
+  <p class="cec-sub">ETag 在邊緣是「origin 的驗證器」</p>
+  <p>物件過期後，邊緣向 origin 送：</p>
+  <div class="cec-flow">
+    <span class="cec-chip edge">If-None-Match: "v7"</span>
+    <span class="cec-chip op">→ origin</span>
+    <span class="cec-chip origin">304 無 body</span>
+    <span class="cec-chip op">或</span>
+    <span class="cec-chip warn">200 新表徵 + 新 ETag</span>
+  </div>
+  <p>304 的意義是<strong>省 origin 出口頻寬與產生成本，不省 RTT</strong>。邊緣到 origin 往往已經在骨幹上，RTT 不是零；所以能靠 SWR 讓使用者不排隊的，就不要讓使用者路徑去等 304。304 適合「必須確認新舊、但內容十次有九次沒變」的 API 與 HTML。</p>
+  <p>瀏覽器對 CDN 也可以再做一次同樣的對話。那是另一跳：CDN HIT 時，瀏覽器的 <code>If-None-Match</code> 由邊緣回答 304，origin 仍不參與。兩段驗證不要畫成一條。</p>
+
+  <div class="callout accent">
+    <div class="c-title"><span class="ic">關鍵</span>CDN 終止 TLS 才能讀這些標頭</div>
+    <p>HTTP 篇提過：passthrough 的 L4 轉發看不到 URL 與 <code>Cache-Control</code>，邊緣快取無從開始。本篇假設 TLS 在 CDN 終止，origin 與 CDN 之間是另一段 TLS。這不是安全細節複誦，是快取能成立的前提。</p>
+  </div>
+
+  <div class="oneliner">
+    <b>一句話答法</b>用 s-maxage／public／private 決定 CDN 能不能存、存多久；過期後邊緣拿 ETag 問 origin，304 只省 body。no-cache 是用前必驗，no-store 才是不准存。
+  </div>
+</section>
+
+<section id="s6">
+  <div class="sec-head">
+    <span class="sec-num">06</span>
+    <h2>主動 Purge、版本化 URL 與 Origin Shield</h2>
+  </div>
+  <p class="sec-sub">改了內容之後，要嘛換 URL 讓舊物件自己過期，要嘛去每個 PoP 把舊物件殺掉。回源路徑上再加一層父快取，用來收斂全球 miss。</p>
+
+  <p class="cec-sub">1 · 版本化 URL（不可變資產）</p>
+  <p>建置時把內容雜湊寫進檔名：<code>app.a1b2c3.js</code>。這把 URL 永遠對應那一串 bytes，於是可以：</p>
+  <ul>
+    <li><code>Cache-Control: public, s-maxage=31536000, immutable</code></li>
+    <li>不需要 Purge。舊檔名沒人再請求，自然從 LRU 裡掉下去</li>
+    <li>發布 = 上傳新檔 + 改 HTML 裡的引用。HTML 本身必須短 TTL 或 no-cache，否則使用者會拿到「舊 HTML 指向舊 hash」——這是版本化能成立的那一條繩</li>
+  </ul>
+
+  <p class="cec-sub">2 · 主動 Purge</p>
+  <p>URL 不能改時（CMS 文章、頭圖、功能開關 JSON），只能叫 CDN 把物件作廢。實作上是對 PoP 扇出的失效訊息，不是單一原子操作。</p>
+
+  <div class="cec-split">
+    <div class="cec-pane ok">
+      <div class="st">何時非 Purge 不可</div>
+      <div class="ss">同一 URL 的表徵必須立刻變</div>
+      <ul>
+        <li>緊急下架、錯誤內容、金鑰輪替後的公開設定</li>
+        <li>Surrogate Key／Cache Tag 讓你一次殺「這個商品的所有衍生圖」，不必枚舉 URL</li>
+        <li>Purge 後下一擊是 miss：搭配 Shield，避免全球 PoP 同時打 origin</li>
+      </ul>
+    </div>
+    <div class="cec-pane warn">
+      <div class="st">代價</div>
+      <div class="ss">最終一致 + 扇出風暴</div>
+      <ul>
+        <li>各 PoP 收到 purge 的時間不同，存在短暫的新舊並存</li>
+        <li>對通配符或熱 prefix 的 purge，等於人為製造一次跨 PoP 雪崩</li>
+        <li>API 限流、重試、冪等都要設計；purge 失敗比沒 purge 更難查</li>
+      </ul>
+    </div>
+  </div>
+
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th></th>
+          <th>版本化 URL</th>
+          <th>主動 Purge</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>正確性</td>
+          <td class="hl">舊 URL 永遠舊、新 URL 永遠新</td>
+          <td>扇出期間新舊並存</td>
+        </tr>
+        <tr>
+          <td>命中率</td>
+          <td>新發布當下新檔名是冷的；舊檔名仍可命中直到沒人用</td>
+          <td>purge 當下該 key 全冷，下一波全是 miss</td>
+        </tr>
+        <tr>
+          <td>適用</td>
+          <td>JS／CSS／圖片等可改檔名的資產</td>
+          <td>CMS、HTML、必須穩定的 API URL</td>
+        </tr>
+        <tr>
+          <td>前置</td>
+          <td>建置管線產生 hash；HTML 入口不能長 TTL</td>
+          <td>tag 模型、扇出 SLA、與 Shield 搭配</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="cap">預設選版本化。Purge 留給「URL 就是契約」的那類物件，且把 blast radius 限制在 tag，而不是 <code>/*</code>。</p>
+
+  <p class="cec-sub">3 · Origin Shield 與分層快取</p>
+  <p>每個 PoP 都是獨立的葉子快取。一個新資產、一次全球 purge、一個短 TTL 的熱 JSON，會讓<strong>每個未命中的 PoP 各打 origin 一次</strong>。Origin Shield 是靠近 origin 的父快取：葉子 miss 先問 Shield，Shield HIT 就結束，Shield MISS 才真正進 origin。</p>
+
+  <div class="cec-flow">
+    <span class="cec-chip cli">全球 PoPs</span>
+    <span class="cec-chip op">MISS</span>
+    <span class="cec-chip edge">Origin Shield</span>
+    <span class="cec-chip op">HIT？結束</span>
+    <span class="cec-chip origin">Shield MISS → Origin × 1</span>
+  </div>
+
+  <p>這是跨 PoP 的 collapsing。單一 PoP 內的 in-flight 合併處理「這一棟樓的電梯」；Shield 處理「整座城市只派一輛卡車去倉庫」。多一跳的代價發生在 miss 路徑上：HIT 仍由葉子直接回，不經過 Shield。</p>
+
+  <div class="callout warn">
+    <div class="c-title"><span class="ic">陷阱</span>Shield 區域掛了，miss 路徑就只剩直打或失敗</div>
+    <p>Shield 是 miss 的單點。生產上要決定 fail-open（葉子暫時直打 origin，origin 可能被瞬間打滿）還是 fail-closed（miss 變錯誤，HIT 使用者不受影響）。沒有第三種「又保護 origin 又在 Shield 死時零代價」的選項。把 Shield 放在 origin 同區域，是為了讓那唯一一跳夠短，不是為了多一個任意的快取層。</p>
+  </div>
+
+  <div class="oneliner">
+    <b>一句話答法</b>能改檔名就版本化 + 長 TTL + immutable；URL 不能改才 Purge，並用 tag 限制範圍。跨 PoP 的 miss 收斂靠 Origin Shield，它保護 origin、把故障集中在 miss 路徑。
+  </div>
+</section>
+
+<section id="s7">
+  <div class="sec-head">
+    <span class="sec-num">07</span>
+    <h2>互動 Demo：Cache Key 碎片與 SWR 時間軸</h2>
+  </div>
+  <p class="sec-sub">兩種實驗共用一個邊緣節點。Key 實驗室看哪些欄位會把同一張圖拆成多份物件；時間軸看使用者拿到的版本與背景更新如何分叉。</p>
+
+  <div class="demo" id="demo-cec">
+    <div class="demo-bar">
+      <span class="label">互動 · 邊緣請求生命週期</span>
+      <span class="label" style="text-transform:none;font-family:var(--sans);font-size:12px;color:var(--text-2)">切模式後按「下一步」逐步重放</span>
+    </div>
+    <div class="demo-body">
+      <p class="cec-mode-hint" id="cec-mode-hint">Cache Key：同一批 8 個請求，改「utm／Cookie／Vary」組成，看唯一 key 數與命中率。</p>
+
+      <div class="seg" role="group" aria-label="實驗模式" id="cec-seg-mode">
+        <button data-mode="key" aria-pressed="true">Cache Key 實驗室</button>
+        <button data-mode="swr" aria-pressed="false">SWR 時間軸</button>
+      </div>
+
+      <div id="cec-key-view" class="cec-view">
+        <div class="seg" role="group" aria-label="追蹤參數" id="cec-seg-utm" style="margin-top:8px">
+          <button data-utm="drop" aria-pressed="true">utm_* 忽略</button>
+          <button data-utm="keep" aria-pressed="false">utm_* 進 key</button>
+        </div>
+        <div class="seg" role="group" aria-label="Cookie" id="cec-seg-cookie" style="margin-top:8px">
+          <button data-cookie="drop" aria-pressed="true">Cookie 不進 key</button>
+          <button data-cookie="keep" aria-pressed="false">Cookie 進 key</button>
+        </div>
+        <div class="seg" role="group" aria-label="Vary Accept-Language" id="cec-seg-vary" style="margin-top:8px">
+          <button data-vary="off" aria-pressed="true">不 Vary 語言</button>
+          <button data-vary="on" aria-pressed="false">Vary: Accept-Language</button>
+        </div>
+      </div>
+
+      <div id="cec-swr-view" class="cec-view" hidden>
+        <div class="seg" role="group" aria-label="Origin 狀態" id="cec-seg-origin" style="margin-top:8px">
+          <button data-origin="up" aria-pressed="true">Origin 正常</button>
+          <button data-origin="down" aria-pressed="false">Origin 故障</button>
+        </div>
+        <p class="cec-mode-hint" style="margin-top:8px">物件標頭固定為 <code>s-maxage=3, stale-while-revalidate=2, stale-if-error=4</code>。t=0 冷 miss 填入 v1。可在走完 fresh 窗口後改切 Origin 故障，不必重置，即可看到 SIE。</p>
+      </div>
+
+      <div class="cec-ctrl">
+        <button class="btn primary" id="cec-btn-next">下一步</button>
+        <button class="btn" id="cec-btn-reset">重置</button>
+      </div>
+
+      <div class="cec-metric">
+        <span>步 <strong id="cec-m-step">0</strong> / <span id="cec-m-total">8</span></span>
+        <span>HIT <strong id="cec-m-hits">0</strong></span>
+        <span>MISS <strong id="cec-m-miss">0</strong></span>
+        <span>回源 <strong id="cec-m-origin">0</strong></span>
+        <span>唯一 key <strong id="cec-m-keys">0</strong></span>
+      </div>
+
+      <div class="legend">
+        <span><i class="dot ns-idle"></i>待命／未走到</span>
+        <span><i class="dot ns-wait"></i>本步作用中</span>
+        <span><i class="dot ns-ok"></i>HIT／新鮮</span>
+        <span><i class="dot ns-lock"></i>SWR 賣舊</span>
+        <span><i class="dot ns-bad"></i>MISS／錯誤</span>
+      </div>
+
+      <div class="cec-actors" id="cec-actors" aria-live="polite">
+        <div class="cec-actor" data-role="cli">
+          <div class="an">Client</div>
+          <div class="al" id="cec-cli-al">本步請求</div>
+          <div class="av" id="cec-cli-val">—</div>
+          <div class="ah" id="cec-cli-hint">待命</div>
+        </div>
+        <div class="cec-actor" data-role="edge">
+          <div class="an">Edge PoP</div>
+          <div class="al" id="cec-edge-al">Cache Key / 狀態</div>
+          <div class="av" id="cec-edge-val">—</div>
+          <div class="ah" id="cec-edge-hint">待命</div>
+        </div>
+        <div class="cec-actor" data-role="origin">
+          <div class="an">Origin</div>
+          <div class="al" id="cec-ori-al">回源</div>
+          <div class="av" id="cec-ori-val">—</div>
+          <div class="ah" id="cec-ori-hint">待命</div>
+        </div>
+      </div>
+
+      <div class="cec-keybox" id="cec-keybox"><span class="kk">key</span>—</div>
+
+      <div id="cec-slots" class="cec-slots" aria-label="邊緣快取物件"></div>
+      <div id="cec-ticks" class="cec-ticks" hidden></div>
+
+      <div class="cec-panels">
+        <div class="cec-panel">
+          <div class="pt">本步語義</div>
+          <div class="prow"><span class="pk">判定</span><span class="pv" id="cec-p-verdict">—</span></div>
+          <div class="prow"><span class="pk">使用者看到</span><span class="pv" id="cec-p-see">—</span></div>
+          <div class="prow"><span class="pk">背景更新</span><span class="pv" id="cec-p-bg">—</span></div>
+          <div class="prow"><span class="pk">Cache Key</span><span class="pv" id="cec-p-key">—</span></div>
+        </div>
+        <div class="cec-panel">
+          <div class="pt">累計</div>
+          <div class="prow"><span class="pk">命中率</span><span class="pv" id="cec-p-hr">—</span></div>
+          <div class="prow"><span class="pk">唯一物件</span><span class="pv" id="cec-p-uniq">0</span></div>
+          <div class="prow"><span class="pk">origin 次數</span><span class="pv" id="cec-p-oc">0</span></div>
+          <div class="prow"><span class="pk">備註</span><span class="pv" id="cec-p-note">—</span></div>
+        </div>
+      </div>
+
+      <div class="status-line" id="cec-status">選擇模式與旋鈕後按「下一步」。Key 實驗室重放 8 個請求；時間軸走 8 個時刻。</div>
+      <div class="cec-verdict" id="cec-verdict">判定尚未產生——走完一輪後會摘要命中率或 stale 窗口。</div>
+      <div class="cec-wire" id="cec-wire" aria-label="事件日誌"></div>
+    </div>
+  </div>
+
+  <div class="oneliner">
+    <b>一句話答法</b>utm 與 Cookie 進 key 會把命中率打掉；Vary 語言再乘一次。SWR 讓過期當下使用者仍拿舊版，origin 故障時改看 SIE 窗口還在不在。
+  </div>
+</section>
+
+<section id="s8">
+  <div class="sec-head">
+    <span class="sec-num">08</span>
+    <h2>邊緣運算邊界與面試折衷</h2>
+  </div>
+  <p class="sec-sub">Edge Compute 接在「算 key 之前或 HIT 之後」的那一層。它能改請求、能改回應，但一改錯，上一章的快取全部失效。</p>
+
+  <p>邊緣運算（Workers／Functions at the edge）讓你在 PoP 上跑一小段請求／回應邏輯：驗 JWT、補地理標頭、依 Cookie 做 A/B、改圖片尺寸、擋 bot。它<strong>不是</strong>把 origin 應用搬去 300 個城市。</p>
+
+  <div class="cec-split">
+    <div class="cec-pane ok">
+      <div class="st">該放在邊緣</div>
+      <div class="ss">短、無狀態、不改變權威</div>
+      <ul>
+        <li>讀 token、拒絕明顯非法的請求，讓 miss 不必進 origin</li>
+        <li>把高基數標頭正規化成低基數 Cache Key（裝置類別、登入 0/1）</li>
+        <li>對已 HIT 的表徵做便宜的變換：header、HTML 注入、圖片衍生（衍生結果本身要能被快取）</li>
+      </ul>
+    </div>
+    <div class="cec-pane bad">
+      <div class="st">不該放在邊緣</div>
+      <div class="ss">權威、長任務、每人一份狀態</div>
+      <ul>
+        <li>下單、扣庫存、寫主資料庫——300 個 PoP 沒有同一套事務</li>
+        <li>用邊緣當 Redis 替代品存 session：沒有單一一致的記憶體，節點間不共享</li>
+        <li>依完整 Cookie 客製 HTML 卻忘了把回應標成 private：快取會把 A 的頁賣給 B</li>
+      </ul>
+    </div>
+  </div>
+
+  <div class="callout accent">
+    <div class="c-title"><span class="ic">關鍵</span>Compute 與 Cache 搶的是同一條命中率</div>
+    <p>在 miss 路徑上跑重計算，等於把 TTFB 加回使用者身上，CDN 白開。在 HIT 路徑上若依 Cookie 分叉回應，又沒把分叉寫進 key 或標 private，正確性先壞。設計順序是：<strong>先讓物件可快取，再用最小的 compute 去正規化 key 或做便宜變換</strong>。需要強一致讀寫的，回到 origin 與應用層快取。</p>
+  </div>
+
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>面試常問</th>
+          <th>建議答法骨架</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>CDN 命中率上不去？</td>
+          <td>先攤 Cache Key：utm、未排序 query、Vary Cookie／UA。不是先把 TTL 加長。</td>
+        </tr>
+        <tr>
+          <td>TTL 到期會不會打死 origin？</td>
+          <td>單一 PoP 靠 collapsing；跨 PoP 靠 Shield。使用者路徑再用 SWR 避開排隊。應用層雪崩手段是另一層。</td>
+        </tr>
+        <tr>
+          <td>更新內容怎麼讓用戶立刻看到？</td>
+          <td>資產走版本化 URL；HTML／CMS 走短 TTL 或 Purge + tag。不要對雜湊檔名 purge。</td>
+        </tr>
+        <tr>
+          <td>s-maxage 跟 max-age 差在哪？</td>
+          <td>前者只綁共用快取。CDN 一小時、瀏覽器一分鐘，靠 s-maxage 覆蓋，不是兩份檔。</td>
+        </tr>
+        <tr>
+          <td>origin 掛了 CDN 還能撐嗎？</td>
+          <td>SIE 窗口內可以繼續賣舊表徵；窗口外變錯誤。這是降級，不是永久備份。</td>
+        </tr>
+        <tr>
+          <td>邏輯要不要放到 Edge Worker？</td>
+          <td>只放正規化、門禁、便宜變換。權威寫入與 session 留 origin。Compute 若破壞 cacheability，先不要加。</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="callout accent">
+    <div class="c-title"><span class="ic">差異化</span>本篇管什麼、不管什麼</div>
+    <p><strong>管</strong>：請求在邊緣的生命週期、Cache Key 正規化與 Vary 碎片化、HIT／MISS／PoP collapsing、SWR／SIE 的 stale 預算、共用快取視角的 Cache-Control 與 ETag 回源驗證、Purge vs 版本化 URL、Origin Shield、Edge Compute 與快取的衝突。<strong>不管</strong>：HTTP 方法／狀態碼／多路復用（<em>HTTP/1.1 與 HTTP/2</em>）；DNS 解析與 CNAME 細節（<em>DNS 深入解析</em>）；Cache-Aside 與 LRU／LFU（<em>快取策略</em>）；穿透／擊穿／雪崩與 Bloom、互斥鎖（<em>快取失效模式與雪崩防護</em>）。流量導引只保留「快取因此變成地理分片」這一句。</p>
+  </div>
+
+  <div class="callout warn">
+    <div class="c-title"><span class="ic">邊界</span>面試別把 Redis 失效模式答成 CDN 題</div>
+    <p>被問「CDN 如何保護 origin」時，先講 key、collapsing、SWR、Shield。Bloom Filter 與邏輯過期是應用層快取的語言；硬搬過來會讓面試官覺得你沒分清共用 HTTP 快取與自己的 Redis。</p>
+  </div>
+
+  <div class="oneliner">
+    <b>一句話答法</b>先設計 Cache Key 與失效策略讓物件可快取，再用 SWR／SIE／Shield 保護讀路徑與 origin；Edge Compute 只做正規化與門禁，不要把權威邏輯搬去 PoP。
+  </div>
+</section>
+
+</div>
+
+      </div>
+    </main>
+  </div>
+
+  <script>
+    "use strict";
+    document.addEventListener("DOMContentLoaded", function () {
+      /* ===== TOC scrollspy, mobile accordion & desktop collapse ===== */
+      (function () {
+        var links = Array.prototype.slice.call(document.querySelectorAll(".toc-nav a"));
+        var map = {};
+        links.forEach(function (a) {
+          var href = a.getAttribute("href");
+          if (href && href.startsWith("#")) {
+            map[href.slice(1)] = a;
+          }
+        });
+        var secs = links.map(function (a) {
+          var href = a.getAttribute("href");
+          return href && href.startsWith("#") ? document.getElementById(href.slice(1)) : null;
+        }).filter(Boolean);
+
+        if (secs.length > 0 && typeof IntersectionObserver !== "undefined") {
+          var obs = new IntersectionObserver(function (entries) {
+            entries.forEach(function (e) {
+              if (e.isIntersecting) {
+                links.forEach(function (l) { l.classList.remove("active"); });
+                var act = map[e.target.id];
+                if (act) act.classList.add("active");
+              }
+            });
+          }, { rootMargin: "-20% 0px -70% 0px", threshold: 0 });
+          secs.forEach(function (s) { obs.observe(s); });
+        }
+
+        /* mobile：目錄 accordion（≤920px） */
+        var toggle = document.querySelector(".toc-toggle");
+        var nav = document.querySelector(".toc-nav");
+        if (toggle && nav) {
+          toggle.addEventListener("click", function () {
+            var open = nav.classList.toggle("open");
+            toggle.setAttribute("aria-expanded", open ? "true" : "false");
+          });
+          nav.addEventListener("click", function (e) {
+            if (e.target.closest("a") && window.innerWidth <= 920) {
+              nav.classList.remove("open");
+              toggle.setAttribute("aria-expanded", "false");
+            }
+          });
+        }
+
+        /* desktop：收合側欄（預設展開；不持久化） */
+        var collapseBtn = document.querySelector(".toc-collapse");
+        var reopenBtn = document.querySelector(".toc-reopen");
+        function setTocCollapsed(collapsed) {
+          document.body.classList.toggle("toc-collapsed", collapsed);
+          if (collapseBtn) collapseBtn.setAttribute("aria-expanded", collapsed ? "false" : "true");
+          if (reopenBtn) reopenBtn.setAttribute("aria-expanded", collapsed ? "false" : "true");
+          if (collapsed && reopenBtn) reopenBtn.focus();
+          else if (!collapsed && collapseBtn) collapseBtn.focus();
+        }
+        if (collapseBtn) {
+          collapseBtn.addEventListener("click", function () { setTocCollapsed(true); });
+        }
+        if (reopenBtn) {
+          reopenBtn.addEventListener("click", function () { setTocCollapsed(false); });
+        }
+      })();
+    });
+  </script>
+
+  
+<script>
+(function () {
+  "use strict";
+
+  var demo = document.getElementById("demo-cec");
+  if (!demo) return;
+
+  var mode = "key";
+  var utm = "drop";
+  var cookieInKey = "drop";
+  var varyLang = "off";
+  var originUp = true;
+  var step = 0;
+
+  var statusEl = document.getElementById("cec-status");
+  var verdictEl = document.getElementById("cec-verdict");
+  var wireEl = document.getElementById("cec-wire");
+  var btnNext = document.getElementById("cec-btn-next");
+  var btnReset = document.getElementById("cec-btn-reset");
+  var hintEl = document.getElementById("cec-mode-hint");
+  var keyView = document.getElementById("cec-key-view");
+  var swrView = document.getElementById("cec-swr-view");
+  var slotsEl = document.getElementById("cec-slots");
+  var ticksEl = document.getElementById("cec-ticks");
+  var keybox = document.getElementById("cec-keybox");
+
+  var mStep = document.getElementById("cec-m-step");
+  var mTotal = document.getElementById("cec-m-total");
+  var mHits = document.getElementById("cec-m-hits");
+  var mMiss = document.getElementById("cec-m-miss");
+  var mOrigin = document.getElementById("cec-m-origin");
+  var mKeys = document.getElementById("cec-m-keys");
+
+  var cliVal = document.getElementById("cec-cli-val");
+  var cliHint = document.getElementById("cec-cli-hint");
+  var cliAl = document.getElementById("cec-cli-al");
+  var edgeVal = document.getElementById("cec-edge-val");
+  var edgeHint = document.getElementById("cec-edge-hint");
+  var edgeAl = document.getElementById("cec-edge-al");
+  var oriVal = document.getElementById("cec-ori-val");
+  var oriHint = document.getElementById("cec-ori-hint");
+  var oriAl = document.getElementById("cec-ori-al");
+  var actorCli = demo.querySelector('.cec-actor[data-role="cli"]');
+  var actorEdge = demo.querySelector('.cec-actor[data-role="edge"]');
+  var actorOri = demo.querySelector('.cec-actor[data-role="origin"]');
+
+  var pVerdict = document.getElementById("cec-p-verdict");
+  var pSee = document.getElementById("cec-p-see");
+  var pBg = document.getElementById("cec-p-bg");
+  var pKey = document.getElementById("cec-p-key");
+  var pHr = document.getElementById("cec-p-hr");
+  var pUniq = document.getElementById("cec-p-uniq");
+  var pOc = document.getElementById("cec-p-oc");
+  var pNote = document.getElementById("cec-p-note");
+
+  var MAX_AGE = 3;
+  var SWR = 2;
+  var SIE = 4;
+  var TICKS = 8;
+
+  var KEY_REQS = [
+    { path: "/app.js", query: { v: "7" }, cookie: "", lang: "en", label: "app.js?v=7" },
+    { path: "/app.js", query: { v: "7" }, cookie: "", lang: "en", label: "app.js?v=7 再打" },
+    { path: "/app.js", query: { v: "7", utm_source: "ad" }, cookie: "", lang: "en", label: "app.js?v=7&utm=ad" },
+    { path: "/app.js", query: { v: "7" }, cookie: "", lang: "zh", label: "app.js?v=7 lang=zh" },
+    { path: "/hero.jpg", query: {}, cookie: "sid=A", lang: "en", label: "hero.jpg cookie=A" },
+    { path: "/hero.jpg", query: {}, cookie: "sid=B", lang: "en", label: "hero.jpg cookie=B" },
+    { path: "/feed", query: { locale: "en" }, cookie: "", lang: "en", label: "feed?locale=en" },
+    { path: "/feed", query: { locale: "en", utm_source: "x" }, cookie: "", lang: "en", label: "feed?locale=en&utm=x" }
+  ];
+
+  var HINTS = {
+    key: "Cache Key：同一批 8 個請求，改「utm／Cookie／Vary」組成，看唯一 key 數與命中率。",
+    swr: "時間軸：s-maxage=3、SWR=2、SIE=4。過期後先賣舊的；origin 故障時看 SIE 窗口。"
+  };
+
+  var store = {};
+  var hits = 0;
+  var misses = 0;
+  var originCount = 0;
+  var lastKey = "";
+  var obj = null;
+  var logs = [];
+  var tickHist = [];
+
+  function bindSeg(id, attr, apply) {
+    var root = document.getElementById(id);
+    if (!root) return;
+    root.addEventListener("click", function (ev) {
+      var btn = ev.target.closest("button");
+      if (!btn || !root.contains(btn)) return;
+      var val = btn.getAttribute(attr);
+      if (val == null) return;
+      apply(val);
+      Array.prototype.forEach.call(root.querySelectorAll("button"), function (b) {
+        b.setAttribute("aria-pressed", b === btn ? "true" : "false");
+      });
+      reset();
+    });
+  }
+
+  bindSeg("cec-seg-mode", "data-mode", function (v) { mode = v; });
+  bindSeg("cec-seg-utm", "data-utm", function (v) { utm = v; });
+  bindSeg("cec-seg-cookie", "data-cookie", function (v) { cookieInKey = v; });
+  bindSeg("cec-seg-vary", "data-vary", function (v) { varyLang = v; });
+  (function bindOrigin() {
+    var root = document.getElementById("cec-seg-origin");
+    if (!root) return;
+    root.addEventListener("click", function (ev) {
+      var btn = ev.target.closest("button");
+      if (!btn || !root.contains(btn)) return;
+      var val = btn.getAttribute("data-origin");
+      if (val == null) return;
+      originUp = val === "up";
+      Array.prototype.forEach.call(root.querySelectorAll("button"), function (b) {
+        b.setAttribute("aria-pressed", b === btn ? "true" : "false");
+      });
+      oriAl.textContent = originUp ? "Origin 正常" : "Origin 故障";
+    });
+  })();
+
+  function setActor(el, cls) {
+    el.className = "cec-actor" + (cls ? " " + cls : "");
+  }
+
+  function qs(query) {
+    var keys = Object.keys(query).sort();
+    var out = [];
+    var i;
+    for (i = 0; i < keys.length; i++) {
+      var k = keys[i];
+      if (utm === "drop" && k.indexOf("utm_") === 0) continue;
+      out.push(k + "=" + query[k]);
+    }
+    return out.join("&");
+  }
+
+  function cacheKey(req) {
+    var parts = [req.path];
+    var q = qs(req.query);
+    if (q) parts.push("?" + q);
+    if (cookieInKey === "keep" && req.cookie) parts.push("|ck=" + req.cookie);
+    if (varyLang === "on") parts.push("|lang=" + req.lang);
+    return parts.join("");
+  }
+
+  function uniqueCount() {
+    return Object.keys(store).length;
+  }
+
+  function renderSlots(activeKey) {
+    var keys = Object.keys(store);
+    if (!keys.length) {
+      slotsEl.innerHTML = '<span class="cec-slot empty">邊緣 store 為空</span>';
+      return;
+    }
+    slotsEl.innerHTML = keys.map(function (k) {
+      var cls = k === activeKey ? " hit" : "";
+      return '<span class="cec-slot' + cls + '">' + escapeHtml(k) + "</span>";
+    }).join("");
+  }
+
+  function escapeHtml(s) {
+    return String(s)
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;");
+  }
+
+  function windowForAge(age) {
+    if (age < MAX_AGE) return "fresh";
+    if (age < MAX_AGE + SWR) return "swr";
+    if (age < MAX_AGE + SIE) return "sie";
+    return "dead";
+  }
+
+  function ageAt(t) {
+    if (!obj) return t;
+    return t - obj.filledAt;
+  }
+
+  function renderTicks(now) {
+    var html = "";
+    var t;
+    for (t = 0; t < TICKS; t++) {
+      var w;
+      if (t < tickHist.length) w = tickHist[t];
+      else w = windowForAge(obj ? Math.max(0, t - obj.filledAt) : t);
+      var cls = "cec-tick " + w;
+      if (t === now) cls += " now";
+      else if (t > now) cls += " future";
+      var lab = w === "fresh" ? "fresh" : w === "swr" ? "SWR" : w === "sie" ? "SIE" : "過期";
+      html += '<div class="' + cls + '"><span class="tn">t=' + t + "</span>" + lab + "</div>";
+    }
+    ticksEl.innerHTML = html;
+  }
+
+  function pushLog(cls, ar, tg, tx) {
+    logs.push({ cls: cls, ar: ar, tg: tg, tx: tx });
+    var html = logs.map(function (row) {
+      return '<div class="cec-row ' + row.cls + '"><span class="ar">' + escapeHtml(row.ar) +
+        '</span><span class="tg">' + escapeHtml(row.tg) + '</span><span class="tx">' +
+        escapeHtml(row.tx) + "</span></div>";
+    }).join("");
+    wireEl.innerHTML = html;
+    wireEl.scrollTop = wireEl.scrollHeight;
+  }
+
+  function setVerdict(tone, text) {
+    verdictEl.className = "cec-verdict" + (tone ? " tone-" + tone : "");
+    verdictEl.textContent = text;
+  }
+
+  function hrText() {
+    var n = hits + misses;
+    if (!n) return "—";
+    return Math.round((hits / n) * 100) + "% (" + hits + "/" + n + ")";
+  }
+
+  function finishKey() {
+    var uniq = uniqueCount();
+    var tone = "ok";
+    var msg = "8 個請求結束。命中率 " + hrText() + "，唯一物件 " + uniq + "，回源 " + originCount + " 次。";
+    if (cookieInKey === "keep") {
+      tone = "bad";
+      msg += " Cookie 進 key，hero.jpg 被拆成每人一份。";
+    } else if (utm === "keep" || varyLang === "on") {
+      tone = "lock";
+      if (utm === "keep") msg += " utm 進 key，帶追蹤參數的請求各自 miss。";
+      if (varyLang === "on") msg += " Vary 語言讓 en／zh 變成兩份 app.js。";
+    } else {
+      msg += " 忽略 utm、Cookie 不進 key、不 Vary 語言——這是這批流量該有的組成。";
+    }
+    setVerdict(tone, msg);
+    btnNext.disabled = true;
+  }
+
+  function finishSwr() {
+    var tone = originUp ? "ok" : "lock";
+    var msg;
+    if (originUp) {
+      msg = "Origin 正常：fresh 窗口直接賣，t=3 起 SWR 先賣舊的再換成 v2。使用者路徑沒有排隊打 origin。";
+    } else {
+      msg = "Origin 故障：SWR 與 SIE 窗口內仍賣 v1；t≥7 窗口外，請求變成錯誤。SIE 是降級不是備份。";
+      tone = "bad";
+    }
+    setVerdict(tone, msg);
+    btnNext.disabled = true;
+  }
+
+  function playKey() {
+    var req = KEY_REQS[step];
+    var key = cacheKey(req);
+    lastKey = key;
+    var hit = Object.prototype.hasOwnProperty.call(store, key);
+    var decision;
+    var see;
+    var bg = "無";
+    var note;
+    var originThis = false;
+
+    if (hit) {
+      hits += 1;
+      decision = "HIT";
+      see = "快取表徵";
+      note = "同一把 key 已在本 PoP";
+      setActor(actorCli, "ok");
+      setActor(actorEdge, "ok");
+      setActor(actorOri, "");
+      cliVal.textContent = req.label;
+      cliHint.textContent = "命中";
+      edgeVal.textContent = "HIT";
+      edgeHint.textContent = key;
+      oriVal.textContent = "—";
+      oriHint.textContent = "不參與";
+      pushLog("ok", "C→E", "HIT", req.label + " → " + key);
+    } else {
+      misses += 1;
+      originCount += 1;
+      originThis = true;
+      store[key] = { v: "v1" };
+      decision = "MISS";
+      see = "origin 200";
+      note = "新 key，本 PoP 回源一次後寫入";
+      setActor(actorCli, "on");
+      setActor(actorEdge, "on");
+      setActor(actorOri, "ok");
+      cliVal.textContent = req.label;
+      cliHint.textContent = "等待 origin";
+      edgeVal.textContent = "MISS";
+      edgeHint.textContent = key;
+      oriVal.textContent = "200";
+      oriHint.textContent = "填入 " + key;
+      pushLog("read", "C→E", "MISS", req.label + " → " + key);
+      pushLog("ok", "E→O", "GET", "回源寫入 " + key);
+    }
+
+    mStep.textContent = String(step + 1);
+    mHits.textContent = String(hits);
+    mMiss.textContent = String(misses);
+    mOrigin.textContent = String(originCount);
+    mKeys.textContent = String(uniqueCount());
+    keybox.innerHTML = '<span class="kk">key</span>' + escapeHtml(key);
+    renderSlots(key);
+
+    pVerdict.textContent = decision;
+    pVerdict.className = "pv " + (hit ? "good" : "bad");
+    pSee.textContent = see;
+    pBg.textContent = bg;
+    pKey.textContent = key;
+    pHr.textContent = hrText();
+    pUniq.textContent = String(uniqueCount());
+    pOc.textContent = String(originCount);
+    pNote.textContent = note;
+
+    statusEl.textContent = (hit ? "HIT：" : "MISS：") + req.label + "。key = " + key +
+      (originThis ? "。本步打了 origin。" : "。origin 沒動。");
+
+    if (step + 1 >= KEY_REQS.length) finishKey();
+  }
+
+  function playSwr() {
+    var t = step;
+    var ageBefore = ageAt(t);
+    var w = windowForAge(ageBefore);
+    var decision;
+    var see;
+    var bg = "無";
+    var note;
+    var key = "/feed.json";
+    lastKey = key;
+
+    if (t === 0) {
+      if (!originUp) {
+        misses += 1;
+        decision = "MISS · origin 失敗";
+        see = "錯誤";
+        note = "冷快取且 origin 掛了，沒有舊物件可賣";
+        obj = null;
+        setActor(actorCli, "bad");
+        setActor(actorEdge, "bad");
+        setActor(actorOri, "bad");
+        cliVal.textContent = "GET " + key;
+        cliHint.textContent = "失敗";
+        edgeVal.textContent = "empty";
+        edgeHint.textContent = "無可賣物件";
+        oriVal.textContent = "DOWN";
+        oriHint.textContent = "5xx / timeout";
+        pushLog("bad", "C→E", "MISS", "t=" + t + " 冷 miss，origin 不可達");
+      } else {
+        misses += 1;
+        originCount += 1;
+        obj = { v: 1, filledAt: 0 };
+        store[key] = obj;
+        decision = "MISS · 填入 v1";
+        see = "v1";
+        note = "Age=0，進入 fresh 窗口";
+        setActor(actorCli, "on");
+        setActor(actorEdge, "on");
+        setActor(actorOri, "ok");
+        cliVal.textContent = "GET " + key;
+        cliHint.textContent = "拿到 v1";
+        edgeVal.textContent = "v1 · fresh";
+        edgeHint.textContent = "Age 0 / TTL 3";
+        oriVal.textContent = "200 v1";
+        oriHint.textContent = "寫入邊緣";
+        pushLog("read", "C→E", "MISS", "t=" + t + " 冷 miss");
+        pushLog("ok", "E→O", "200", "origin 回 v1，Age=0");
+      }
+    } else if (!obj) {
+      misses += 1;
+      decision = "仍無物件";
+      see = originUp ? "本應可回源" : "錯誤";
+      note = "t=0 沒填成功，後續沒有 stale 可賣";
+      if (originUp) {
+        originCount += 1;
+        obj = { v: 1, filledAt: t };
+        store[key] = obj;
+        see = "v1";
+        decision = "晚到的填入";
+        setActor(actorCli, "on");
+        setActor(actorEdge, "on");
+        setActor(actorOri, "ok");
+        cliVal.textContent = "GET " + key;
+        cliHint.textContent = "拿到 v1";
+        edgeVal.textContent = "v1";
+        edgeHint.textContent = "本步才寫入";
+        oriVal.textContent = "200 v1";
+        oriHint.textContent = "補填";
+        pushLog("ok", "E→O", "200", "t=" + t + " 補填 v1");
+      } else {
+        setActor(actorCli, "bad");
+        setActor(actorEdge, "bad");
+        setActor(actorOri, "bad");
+        cliVal.textContent = "GET " + key;
+        cliHint.textContent = "失敗";
+        edgeVal.textContent = "empty";
+        edgeHint.textContent = "仍空";
+        oriVal.textContent = "DOWN";
+        oriHint.textContent = "不可達";
+        pushLog("bad", "C→E", "ERR", "t=" + t + " 仍無快取、origin 故障");
+      }
+    } else if (w === "fresh") {
+      hits += 1;
+      decision = "HIT · fresh";
+      see = "v" + obj.v;
+      note = "Age=" + t + " < s-maxage=3，origin 不參與";
+      setActor(actorCli, "ok");
+      setActor(actorEdge, "ok");
+      setActor(actorOri, "");
+      cliVal.textContent = "看到 v" + obj.v;
+      cliHint.textContent = "零回源";
+      edgeVal.textContent = "v" + obj.v + " · fresh";
+      edgeHint.textContent = "Age " + t;
+      oriVal.textContent = "—";
+      oriHint.textContent = "不參與";
+      pushLog("ok", "C→E", "HIT", "t=" + t + " fresh，賣 v" + obj.v);
+    } else if (w === "swr") {
+      hits += 1;
+      decision = "SWR · 先賣舊的";
+      see = "v" + obj.v + "（stale）";
+      if (originUp) {
+        originCount += 1;
+        obj.v += 1;
+        obj.filledAt = t;
+        bg = "條件式 GET → 200 v" + obj.v;
+        note = "使用者已拿到舊版；背景換成 v" + obj.v;
+        setActor(actorCli, "ok");
+        setActor(actorEdge, "dirty");
+        setActor(actorOri, "ok");
+        cliVal.textContent = "先看到 v" + (obj.v - 1);
+        cliHint.textContent = "不等待 origin";
+        edgeVal.textContent = "賣舊 → 寫 v" + obj.v;
+        edgeHint.textContent = "SWR 窗口 Age " + t;
+        oriVal.textContent = "200 v" + obj.v;
+        oriHint.textContent = "背景更新";
+        pushLog("warn", "C→E", "SWR", "t=" + t + " 立刻賣 v" + (obj.v - 1));
+        pushLog("ok", "E→O", "BG", "背景更新成功，store = v" + obj.v);
+      } else {
+        bg = "背景更新失敗，保留 v" + obj.v;
+        note = "仍在 SWR 窗口，origin 失敗不影響這次回應";
+        setActor(actorCli, "ok");
+        setActor(actorEdge, "dirty");
+        setActor(actorOri, "bad");
+        cliVal.textContent = "看到 v" + obj.v;
+        cliHint.textContent = "舊的但成功";
+        edgeVal.textContent = "v" + obj.v + " · stale";
+        edgeHint.textContent = "SWR，origin 失敗被吞";
+        oriVal.textContent = "DOWN";
+        oriHint.textContent = "背景失敗";
+        pushLog("warn", "C→E", "SWR", "t=" + t + " 賣 v" + obj.v + "（stale）");
+        pushLog("bad", "E→O", "BG", "背景更新失敗，繼續持有舊物件");
+      }
+    } else if (w === "sie") {
+      if (originUp) {
+        misses += 1;
+        originCount += 1;
+        obj.v += 1;
+        obj.filledAt = t;
+        decision = "已過 SWR · 驗證後賣新";
+        see = "v" + obj.v;
+        bg = "使用者路徑上的條件式 GET";
+        note = "SWR 結束，必須驗證；origin 正常所以換成新版";
+        setActor(actorCli, "on");
+        setActor(actorEdge, "on");
+        setActor(actorOri, "ok");
+        cliVal.textContent = "等到 v" + obj.v;
+        cliHint.textContent = "付了一次 RTT";
+        edgeVal.textContent = "revalidate";
+        edgeHint.textContent = "Age " + t + " 已出 SWR";
+        oriVal.textContent = "200 v" + obj.v;
+        oriHint.textContent = "同步更新";
+        pushLog("read", "C→E", "REVAL", "t=" + t + " SWR 結束，同步問 origin");
+        pushLog("ok", "E→O", "200", "換成 v" + obj.v);
+      } else {
+        hits += 1;
+        decision = "SIE · origin 失敗仍賣舊";
+        see = "v" + obj.v + "（stale）";
+        bg = "驗證失敗，SIE 允許繼續賣";
+        note = "Age=" + t + " < TTL+SIE=7，錯誤被降級成舊表徵";
+        setActor(actorCli, "ok");
+        setActor(actorEdge, "dirty");
+        setActor(actorOri, "bad");
+        cliVal.textContent = "看到 v" + obj.v;
+        cliHint.textContent = "降級成功";
+        edgeVal.textContent = "v" + obj.v + " · SIE";
+        edgeHint.textContent = "origin 5xx 被吞";
+        oriVal.textContent = "DOWN";
+        oriHint.textContent = "失敗不上浮";
+        pushLog("warn", "C→E", "SIE", "t=" + t + " origin 故障，仍賣 v" + obj.v);
+      }
+    } else {
+      if (originUp) {
+        misses += 1;
+        originCount += 1;
+        obj.v += 1;
+        obj.filledAt = t;
+        decision = "窗口外 · 必須回源";
+        see = "v" + obj.v;
+        note = "SWR 與 SIE 都過了，沒有合法 stale";
+        setActor(actorCli, "on");
+        setActor(actorEdge, "on");
+        setActor(actorOri, "ok");
+        cliVal.textContent = "等到 v" + obj.v;
+        cliHint.textContent = "同步回源";
+        edgeVal.textContent = "expired";
+        edgeHint.textContent = "Age " + t;
+        oriVal.textContent = "200 v" + obj.v;
+        oriHint.textContent = "強制更新";
+        pushLog("read", "C→E", "EXP", "t=" + t + " 窗口外，同步回源");
+      } else {
+        misses += 1;
+        decision = "窗口外 · 錯誤上浮";
+        see = "錯誤";
+        bg = "無舊可賣";
+        note = "SIE 已過（TTL+SIE=7），不能再賣 v" + obj.v;
+        setActor(actorCli, "bad");
+        setActor(actorEdge, "bad");
+        setActor(actorOri, "bad");
+        cliVal.textContent = "錯誤頁";
+        cliHint.textContent = "降級結束";
+        edgeVal.textContent = "expired";
+        edgeHint.textContent = "不准賣 stale";
+        oriVal.textContent = "DOWN";
+        oriHint.textContent = "5xx 上浮";
+        pushLog("bad", "C→E", "ERR", "t=" + t + " SIE 窗口外，origin 故障上浮");
+      }
+    }
+
+    mStep.textContent = String(t + 1);
+    mHits.textContent = String(hits);
+    mMiss.textContent = String(misses);
+    mOrigin.textContent = String(originCount);
+    mKeys.textContent = obj ? "1" : "0";
+    keybox.innerHTML = '<span class="kk">object</span>' + (obj ? ("v" + obj.v + " · Age " + ageBefore + " → window " + w) : "empty");
+    tickHist[t] = see === "錯誤" ? "dead" : w;
+    renderTicks(t);
+    renderSlots(obj ? key : "");
+
+    pVerdict.textContent = decision;
+    pVerdict.className = "pv " + (see === "錯誤" ? "bad" : (w === "swr" || w === "sie" ? "warn" : "good"));
+    pSee.textContent = see;
+    pBg.textContent = bg;
+    pKey.textContent = key;
+    pHr.textContent = hrText();
+    pUniq.textContent = obj ? "1" : "0";
+    pOc.textContent = String(originCount);
+    pNote.textContent = note;
+
+    statusEl.textContent = "t=" + t + " · " + decision + " · 使用者看到 " + see + "。";
+
+    if (t + 1 >= TICKS) finishSwr();
+  }
+
+  function applyChrome() {
+    var isKey = mode === "key";
+    keyView.hidden = !isKey;
+    swrView.hidden = isKey;
+    ticksEl.hidden = isKey;
+    slotsEl.hidden = false;
+    hintEl.textContent = HINTS[mode];
+    mTotal.textContent = isKey ? String(KEY_REQS.length) : String(TICKS);
+    cliAl.textContent = isKey ? "本步請求" : "使用者看到";
+    edgeAl.textContent = isKey ? "Cache Key / 狀態" : "新鮮度窗口";
+    oriAl.textContent = isKey ? "回源" : (originUp ? "Origin 正常" : "Origin 故障");
+  }
+
+  function idleActors() {
+    setActor(actorCli, "");
+    setActor(actorEdge, "");
+    setActor(actorOri, "");
+    cliVal.textContent = "—";
+    cliHint.textContent = "待命";
+    edgeVal.textContent = "—";
+    edgeHint.textContent = "待命";
+    oriVal.textContent = "—";
+    oriHint.textContent = "待命";
+  }
+
+  function reset() {
+    step = 0;
+    store = {};
+    hits = 0;
+    misses = 0;
+    originCount = 0;
+    lastKey = "";
+    obj = null;
+    logs = [];
+    tickHist = [];
+    btnNext.disabled = false;
+    applyChrome();
+    idleActors();
+    mStep.textContent = "0";
+    mHits.textContent = "0";
+    mMiss.textContent = "0";
+    mOrigin.textContent = "0";
+    mKeys.textContent = "0";
+    pVerdict.textContent = "—";
+    pVerdict.className = "pv";
+    pSee.textContent = "—";
+    pBg.textContent = "—";
+    pKey.textContent = "—";
+    pHr.textContent = "—";
+    pUniq.textContent = "0";
+    pOc.textContent = "0";
+    pNote.textContent = "—";
+    keybox.innerHTML = '<span class="kk">key</span>—';
+    wireEl.innerHTML = "";
+    if (mode === "key") {
+      ticksEl.innerHTML = "";
+      renderSlots("");
+      statusEl.textContent = "Cache Key 實驗室：按「下一步」重放請求。改旋鈕會重置。";
+      setVerdict("", "判定尚未產生——走完 8 個請求後會摘要命中率與唯一物件數。");
+    } else {
+      renderTicks(-1);
+      renderSlots("");
+      statusEl.textContent = "SWR 時間軸：按「下一步」從 t=0 冷 miss 開始。可中途改 Origin 狀態（會重置）。";
+      setVerdict("", "判定尚未產生——走完 8 個時刻後會摘要 fresh／SWR／SIE。");
+    }
+  }
+
+  btnNext.addEventListener("click", function () {
+    if (mode === "key") {
+      if (step >= KEY_REQS.length) return;
+      playKey();
+      step += 1;
+    } else {
+      if (step >= TICKS) return;
+      playSwr();
+      step += 1;
+    }
+  });
+
+  btnReset.addEventListener("click", reset);
+
+  reset();
+})();
+</script>
+
+
+<!-- FULLSCREEN-FEATURE:START -->
+<style>
+  .fs-toggle {
+    position: fixed;
+    top: 18px;
+    right: 18px;
+    z-index: 1000;
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    font-family: var(--sans, system-ui, -apple-system, "Segoe UI", sans-serif);
+    font-size: 12.5px;
+    line-height: 1;
+    color: var(--text-2, #6b7078);
+    background: var(--bg, #ffffff);
+    border: 1px solid var(--border-strong, #dedcd8);
+    border-radius: 999px;
+    padding: 7px 13px 7px 11px;
+    cursor: pointer;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, .06), 0 4px 12px rgba(0, 0, 0, .04);
+    transition: background .15s, border-color .15s, color .15s;
+  }
+
+  .fs-toggle:hover {
+    background: var(--bg-soft, #fafaf9);
+    color: var(--text, #262a2f);
+    border-color: var(--text-3, #9aa0a8);
+  }
+
+  .fs-toggle:focus-visible {
+    outline: 2px solid var(--accent, #3f6188);
+    outline-offset: 2px;
+  }
+
+  .fs-toggle[aria-pressed="true"] {
+    background: var(--accent, #3f6188);
+    color: #fff;
+    border-color: var(--accent, #3f6188);
+  }
+
+  .fs-toggle .fs-ic {
+    flex: 0 0 auto;
+    display: block;
+  }
+
+  @media print {
+    .fs-toggle { display: none !important; }
+  }
+
+  @media (max-width: 480px) {
+    .fs-toggle { padding: 8px; }
+    .fs-toggle .fs-label { display: none; }
+  }
+</style>
+<button id="fs-toggle-btn" class="fs-toggle" type="button" aria-pressed="false"
+        aria-label="切換全螢幕檢視 (快捷鍵 F)" title="全螢幕檢視 (F)">
+  <svg class="fs-ic fs-ic-expand" viewBox="0 0 24 24" width="15" height="15" fill="none"
+       stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+    <path d="M8 3H5a2 2 0 0 0-2 2v3m18 0V5a2 2 0 0 0-2-2h-3m0 18h3a2 2 0 0 0 2-2v-3M3 16v3a2 2 0 0 0 2 2h3"/>
+  </svg>
+  <svg class="fs-ic fs-ic-compress" viewBox="0 0 24 24" width="15" height="15" fill="none"
+       stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="display:none">
+    <path d="M8 3v3a2 2 0 0 1-2 2H3m18 0h-3a2 2 0 0 1-2-2V3m0 18v-3a2 2 0 0 1 2-2h3M3 16h3a2 2 0 0 1 2 2v3"/>
+  </svg>
+  <span class="fs-label">全螢幕</span>
+</button>
+<script>
+  "use strict";
+  (function () {
+    var btn = document.getElementById("fs-toggle-btn");
+    if (!btn) return;
+    var docEl = document.documentElement;
+    var canFs = !!(docEl.requestFullscreen || docEl.webkitRequestFullscreen);
+    // 不支援 Fullscreen API (如 iPhone Safari) → 隱藏按鈕，避免壞掉的 UI
+    if (!canFs) { btn.style.display = "none"; return; }
+
+    var expandIc = btn.querySelector(".fs-ic-expand");
+    var compressIc = btn.querySelector(".fs-ic-compress");
+    var label = btn.querySelector(".fs-label");
+
+    function isFs() {
+      return !!(document.fullscreenElement || document.webkitFullscreenElement);
+    }
+    function enter() {
+      if (docEl.requestFullscreen) docEl.requestFullscreen();
+      else if (docEl.webkitRequestFullscreen) docEl.webkitRequestFullscreen();
+    }
+    function exit() {
+      if (document.exitFullscreen) document.exitFullscreen();
+      else if (document.webkitExitFullscreen) document.webkitExitFullscreen();
+    }
+    function toggle() { isFs() ? exit() : enter(); }
+    function sync() {
+      var on = isFs();
+      btn.setAttribute("aria-pressed", on ? "true" : "false");
+      if (label) label.textContent = on ? "離開全螢幕" : "全螢幕";
+      if (expandIc) expandIc.style.display = on ? "none" : "block";
+      if (compressIc) compressIc.style.display = on ? "block" : "none";
+    }
+
+    btn.addEventListener("click", toggle);
+    document.addEventListener("fullscreenchange", sync);
+    document.addEventListener("webkitfullscreenchange", sync);
+    document.addEventListener("keydown", function (e) {
+      if (e.key !== "f" && e.key !== "F") return;
+      if (e.metaKey || e.ctrlKey || e.altKey) return;
+      var t = e.target;
+      var tag = t && t.tagName ? t.tagName.toUpperCase() : "";
+      if (tag === "INPUT" || tag === "TEXTAREA" || (t && t.isContentEditable)) return;
+      e.preventDefault();
+      toggle();
+    });
+    sync();
+  })();
+</script>
+<!-- FULLSCREEN-FEATURE:END -->
+</body>
+</html>
