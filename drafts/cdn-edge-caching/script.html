@@ -1,0 +1,639 @@
+<script>
+(function () {
+  "use strict";
+
+  var demo = document.getElementById("demo-cec");
+  if (!demo) return;
+
+  var mode = "key";
+  var utm = "drop";
+  var cookieInKey = "drop";
+  var varyLang = "off";
+  var originUp = true;
+  var step = 0;
+
+  var statusEl = document.getElementById("cec-status");
+  var verdictEl = document.getElementById("cec-verdict");
+  var wireEl = document.getElementById("cec-wire");
+  var btnNext = document.getElementById("cec-btn-next");
+  var btnReset = document.getElementById("cec-btn-reset");
+  var hintEl = document.getElementById("cec-mode-hint");
+  var keyView = document.getElementById("cec-key-view");
+  var swrView = document.getElementById("cec-swr-view");
+  var slotsEl = document.getElementById("cec-slots");
+  var ticksEl = document.getElementById("cec-ticks");
+  var keybox = document.getElementById("cec-keybox");
+
+  var mStep = document.getElementById("cec-m-step");
+  var mTotal = document.getElementById("cec-m-total");
+  var mHits = document.getElementById("cec-m-hits");
+  var mMiss = document.getElementById("cec-m-miss");
+  var mOrigin = document.getElementById("cec-m-origin");
+  var mKeys = document.getElementById("cec-m-keys");
+
+  var cliVal = document.getElementById("cec-cli-val");
+  var cliHint = document.getElementById("cec-cli-hint");
+  var cliAl = document.getElementById("cec-cli-al");
+  var edgeVal = document.getElementById("cec-edge-val");
+  var edgeHint = document.getElementById("cec-edge-hint");
+  var edgeAl = document.getElementById("cec-edge-al");
+  var oriVal = document.getElementById("cec-ori-val");
+  var oriHint = document.getElementById("cec-ori-hint");
+  var oriAl = document.getElementById("cec-ori-al");
+  var actorCli = demo.querySelector('.cec-actor[data-role="cli"]');
+  var actorEdge = demo.querySelector('.cec-actor[data-role="edge"]');
+  var actorOri = demo.querySelector('.cec-actor[data-role="origin"]');
+
+  var pVerdict = document.getElementById("cec-p-verdict");
+  var pSee = document.getElementById("cec-p-see");
+  var pBg = document.getElementById("cec-p-bg");
+  var pKey = document.getElementById("cec-p-key");
+  var pHr = document.getElementById("cec-p-hr");
+  var pUniq = document.getElementById("cec-p-uniq");
+  var pOc = document.getElementById("cec-p-oc");
+  var pNote = document.getElementById("cec-p-note");
+
+  var MAX_AGE = 3;
+  var SWR = 2;
+  var SIE = 4;
+  var TICKS = 8;
+
+  var KEY_REQS = [
+    { path: "/app.js", query: { v: "7" }, cookie: "", lang: "en", label: "app.js?v=7" },
+    { path: "/app.js", query: { v: "7" }, cookie: "", lang: "en", label: "app.js?v=7 再打" },
+    { path: "/app.js", query: { v: "7", utm_source: "ad" }, cookie: "", lang: "en", label: "app.js?v=7&utm=ad" },
+    { path: "/app.js", query: { v: "7" }, cookie: "", lang: "zh", label: "app.js?v=7 lang=zh" },
+    { path: "/hero.jpg", query: {}, cookie: "sid=A", lang: "en", label: "hero.jpg cookie=A" },
+    { path: "/hero.jpg", query: {}, cookie: "sid=B", lang: "en", label: "hero.jpg cookie=B" },
+    { path: "/feed", query: { locale: "en" }, cookie: "", lang: "en", label: "feed?locale=en" },
+    { path: "/feed", query: { locale: "en", utm_source: "x" }, cookie: "", lang: "en", label: "feed?locale=en&utm=x" }
+  ];
+
+  var HINTS = {
+    key: "Cache Key：同一批 8 個請求，改「utm／Cookie／Vary」組成，看唯一 key 數與命中率。",
+    swr: "時間軸：s-maxage=3、SWR=2、SIE=4。過期後先賣舊的；origin 故障時看 SIE 窗口。"
+  };
+
+  var store = {};
+  var hits = 0;
+  var misses = 0;
+  var originCount = 0;
+  var lastKey = "";
+  var obj = null;
+  var logs = [];
+  var tickHist = [];
+
+  function bindSeg(id, attr, apply) {
+    var root = document.getElementById(id);
+    if (!root) return;
+    root.addEventListener("click", function (ev) {
+      var btn = ev.target.closest("button");
+      if (!btn || !root.contains(btn)) return;
+      var val = btn.getAttribute(attr);
+      if (val == null) return;
+      apply(val);
+      Array.prototype.forEach.call(root.querySelectorAll("button"), function (b) {
+        b.setAttribute("aria-pressed", b === btn ? "true" : "false");
+      });
+      reset();
+    });
+  }
+
+  bindSeg("cec-seg-mode", "data-mode", function (v) { mode = v; });
+  bindSeg("cec-seg-utm", "data-utm", function (v) { utm = v; });
+  bindSeg("cec-seg-cookie", "data-cookie", function (v) { cookieInKey = v; });
+  bindSeg("cec-seg-vary", "data-vary", function (v) { varyLang = v; });
+  (function bindOrigin() {
+    var root = document.getElementById("cec-seg-origin");
+    if (!root) return;
+    root.addEventListener("click", function (ev) {
+      var btn = ev.target.closest("button");
+      if (!btn || !root.contains(btn)) return;
+      var val = btn.getAttribute("data-origin");
+      if (val == null) return;
+      originUp = val === "up";
+      Array.prototype.forEach.call(root.querySelectorAll("button"), function (b) {
+        b.setAttribute("aria-pressed", b === btn ? "true" : "false");
+      });
+      oriAl.textContent = originUp ? "Origin 正常" : "Origin 故障";
+    });
+  })();
+
+  function setActor(el, cls) {
+    el.className = "cec-actor" + (cls ? " " + cls : "");
+  }
+
+  function qs(query) {
+    var keys = Object.keys(query).sort();
+    var out = [];
+    var i;
+    for (i = 0; i < keys.length; i++) {
+      var k = keys[i];
+      if (utm === "drop" && k.indexOf("utm_") === 0) continue;
+      out.push(k + "=" + query[k]);
+    }
+    return out.join("&");
+  }
+
+  function cacheKey(req) {
+    var parts = [req.path];
+    var q = qs(req.query);
+    if (q) parts.push("?" + q);
+    if (cookieInKey === "keep" && req.cookie) parts.push("|ck=" + req.cookie);
+    if (varyLang === "on") parts.push("|lang=" + req.lang);
+    return parts.join("");
+  }
+
+  function uniqueCount() {
+    return Object.keys(store).length;
+  }
+
+  function renderSlots(activeKey) {
+    var keys = Object.keys(store);
+    if (!keys.length) {
+      slotsEl.innerHTML = '<span class="cec-slot empty">邊緣 store 為空</span>';
+      return;
+    }
+    slotsEl.innerHTML = keys.map(function (k) {
+      var cls = k === activeKey ? " hit" : "";
+      return '<span class="cec-slot' + cls + '">' + escapeHtml(k) + "</span>";
+    }).join("");
+  }
+
+  function escapeHtml(s) {
+    return String(s)
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;");
+  }
+
+  function windowForAge(age) {
+    if (age < MAX_AGE) return "fresh";
+    if (age < MAX_AGE + SWR) return "swr";
+    if (age < MAX_AGE + SIE) return "sie";
+    return "dead";
+  }
+
+  function ageAt(t) {
+    if (!obj) return t;
+    return t - obj.filledAt;
+  }
+
+  function renderTicks(now) {
+    var html = "";
+    var t;
+    for (t = 0; t < TICKS; t++) {
+      var w;
+      if (t < tickHist.length) w = tickHist[t];
+      else w = windowForAge(obj ? Math.max(0, t - obj.filledAt) : t);
+      var cls = "cec-tick " + w;
+      if (t === now) cls += " now";
+      else if (t > now) cls += " future";
+      var lab = w === "fresh" ? "fresh" : w === "swr" ? "SWR" : w === "sie" ? "SIE" : "過期";
+      html += '<div class="' + cls + '"><span class="tn">t=' + t + "</span>" + lab + "</div>";
+    }
+    ticksEl.innerHTML = html;
+  }
+
+  function pushLog(cls, ar, tg, tx) {
+    logs.push({ cls: cls, ar: ar, tg: tg, tx: tx });
+    var html = logs.map(function (row) {
+      return '<div class="cec-row ' + row.cls + '"><span class="ar">' + escapeHtml(row.ar) +
+        '</span><span class="tg">' + escapeHtml(row.tg) + '</span><span class="tx">' +
+        escapeHtml(row.tx) + "</span></div>";
+    }).join("");
+    wireEl.innerHTML = html;
+    wireEl.scrollTop = wireEl.scrollHeight;
+  }
+
+  function setVerdict(tone, text) {
+    verdictEl.className = "cec-verdict" + (tone ? " tone-" + tone : "");
+    verdictEl.textContent = text;
+  }
+
+  function hrText() {
+    var n = hits + misses;
+    if (!n) return "—";
+    return Math.round((hits / n) * 100) + "% (" + hits + "/" + n + ")";
+  }
+
+  function finishKey() {
+    var uniq = uniqueCount();
+    var tone = "ok";
+    var msg = "8 個請求結束。命中率 " + hrText() + "，唯一物件 " + uniq + "，回源 " + originCount + " 次。";
+    if (cookieInKey === "keep") {
+      tone = "bad";
+      msg += " Cookie 進 key，hero.jpg 被拆成每人一份。";
+    } else if (utm === "keep" || varyLang === "on") {
+      tone = "lock";
+      if (utm === "keep") msg += " utm 進 key，帶追蹤參數的請求各自 miss。";
+      if (varyLang === "on") msg += " Vary 語言讓 en／zh 變成兩份 app.js。";
+    } else {
+      msg += " 忽略 utm、Cookie 不進 key、不 Vary 語言——這是這批流量該有的組成。";
+    }
+    setVerdict(tone, msg);
+    btnNext.disabled = true;
+  }
+
+  function finishSwr() {
+    var tone = originUp ? "ok" : "lock";
+    var msg;
+    if (originUp) {
+      msg = "Origin 正常：fresh 窗口直接賣，t=3 起 SWR 先賣舊的再換成 v2。使用者路徑沒有排隊打 origin。";
+    } else {
+      msg = "Origin 故障：SWR 與 SIE 窗口內仍賣 v1；t≥7 窗口外，請求變成錯誤。SIE 是降級不是備份。";
+      tone = "bad";
+    }
+    setVerdict(tone, msg);
+    btnNext.disabled = true;
+  }
+
+  function playKey() {
+    var req = KEY_REQS[step];
+    var key = cacheKey(req);
+    lastKey = key;
+    var hit = Object.prototype.hasOwnProperty.call(store, key);
+    var decision;
+    var see;
+    var bg = "無";
+    var note;
+    var originThis = false;
+
+    if (hit) {
+      hits += 1;
+      decision = "HIT";
+      see = "快取表徵";
+      note = "同一把 key 已在本 PoP";
+      setActor(actorCli, "ok");
+      setActor(actorEdge, "ok");
+      setActor(actorOri, "");
+      cliVal.textContent = req.label;
+      cliHint.textContent = "命中";
+      edgeVal.textContent = "HIT";
+      edgeHint.textContent = key;
+      oriVal.textContent = "—";
+      oriHint.textContent = "不參與";
+      pushLog("ok", "C→E", "HIT", req.label + " → " + key);
+    } else {
+      misses += 1;
+      originCount += 1;
+      originThis = true;
+      store[key] = { v: "v1" };
+      decision = "MISS";
+      see = "origin 200";
+      note = "新 key，本 PoP 回源一次後寫入";
+      setActor(actorCli, "on");
+      setActor(actorEdge, "on");
+      setActor(actorOri, "ok");
+      cliVal.textContent = req.label;
+      cliHint.textContent = "等待 origin";
+      edgeVal.textContent = "MISS";
+      edgeHint.textContent = key;
+      oriVal.textContent = "200";
+      oriHint.textContent = "填入 " + key;
+      pushLog("read", "C→E", "MISS", req.label + " → " + key);
+      pushLog("ok", "E→O", "GET", "回源寫入 " + key);
+    }
+
+    mStep.textContent = String(step + 1);
+    mHits.textContent = String(hits);
+    mMiss.textContent = String(misses);
+    mOrigin.textContent = String(originCount);
+    mKeys.textContent = String(uniqueCount());
+    keybox.innerHTML = '<span class="kk">key</span>' + escapeHtml(key);
+    renderSlots(key);
+
+    pVerdict.textContent = decision;
+    pVerdict.className = "pv " + (hit ? "good" : "bad");
+    pSee.textContent = see;
+    pBg.textContent = bg;
+    pKey.textContent = key;
+    pHr.textContent = hrText();
+    pUniq.textContent = String(uniqueCount());
+    pOc.textContent = String(originCount);
+    pNote.textContent = note;
+
+    statusEl.textContent = (hit ? "HIT：" : "MISS：") + req.label + "。key = " + key +
+      (originThis ? "。本步打了 origin。" : "。origin 沒動。");
+
+    if (step + 1 >= KEY_REQS.length) finishKey();
+  }
+
+  function playSwr() {
+    var t = step;
+    var ageBefore = ageAt(t);
+    var w = windowForAge(ageBefore);
+    var decision;
+    var see;
+    var bg = "無";
+    var note;
+    var key = "/feed.json";
+    lastKey = key;
+
+    if (t === 0) {
+      if (!originUp) {
+        misses += 1;
+        decision = "MISS · origin 失敗";
+        see = "錯誤";
+        note = "冷快取且 origin 掛了，沒有舊物件可賣";
+        obj = null;
+        setActor(actorCli, "bad");
+        setActor(actorEdge, "bad");
+        setActor(actorOri, "bad");
+        cliVal.textContent = "GET " + key;
+        cliHint.textContent = "失敗";
+        edgeVal.textContent = "empty";
+        edgeHint.textContent = "無可賣物件";
+        oriVal.textContent = "DOWN";
+        oriHint.textContent = "5xx / timeout";
+        pushLog("bad", "C→E", "MISS", "t=" + t + " 冷 miss，origin 不可達");
+      } else {
+        misses += 1;
+        originCount += 1;
+        obj = { v: 1, filledAt: 0 };
+        store[key] = obj;
+        decision = "MISS · 填入 v1";
+        see = "v1";
+        note = "Age=0，進入 fresh 窗口";
+        setActor(actorCli, "on");
+        setActor(actorEdge, "on");
+        setActor(actorOri, "ok");
+        cliVal.textContent = "GET " + key;
+        cliHint.textContent = "拿到 v1";
+        edgeVal.textContent = "v1 · fresh";
+        edgeHint.textContent = "Age 0 / TTL 3";
+        oriVal.textContent = "200 v1";
+        oriHint.textContent = "寫入邊緣";
+        pushLog("read", "C→E", "MISS", "t=" + t + " 冷 miss");
+        pushLog("ok", "E→O", "200", "origin 回 v1，Age=0");
+      }
+    } else if (!obj) {
+      misses += 1;
+      decision = "仍無物件";
+      see = originUp ? "本應可回源" : "錯誤";
+      note = "t=0 沒填成功，後續沒有 stale 可賣";
+      if (originUp) {
+        originCount += 1;
+        obj = { v: 1, filledAt: t };
+        store[key] = obj;
+        see = "v1";
+        decision = "晚到的填入";
+        setActor(actorCli, "on");
+        setActor(actorEdge, "on");
+        setActor(actorOri, "ok");
+        cliVal.textContent = "GET " + key;
+        cliHint.textContent = "拿到 v1";
+        edgeVal.textContent = "v1";
+        edgeHint.textContent = "本步才寫入";
+        oriVal.textContent = "200 v1";
+        oriHint.textContent = "補填";
+        pushLog("ok", "E→O", "200", "t=" + t + " 補填 v1");
+      } else {
+        setActor(actorCli, "bad");
+        setActor(actorEdge, "bad");
+        setActor(actorOri, "bad");
+        cliVal.textContent = "GET " + key;
+        cliHint.textContent = "失敗";
+        edgeVal.textContent = "empty";
+        edgeHint.textContent = "仍空";
+        oriVal.textContent = "DOWN";
+        oriHint.textContent = "不可達";
+        pushLog("bad", "C→E", "ERR", "t=" + t + " 仍無快取、origin 故障");
+      }
+    } else if (w === "fresh") {
+      hits += 1;
+      decision = "HIT · fresh";
+      see = "v" + obj.v;
+      note = "Age=" + t + " < s-maxage=3，origin 不參與";
+      setActor(actorCli, "ok");
+      setActor(actorEdge, "ok");
+      setActor(actorOri, "");
+      cliVal.textContent = "看到 v" + obj.v;
+      cliHint.textContent = "零回源";
+      edgeVal.textContent = "v" + obj.v + " · fresh";
+      edgeHint.textContent = "Age " + t;
+      oriVal.textContent = "—";
+      oriHint.textContent = "不參與";
+      pushLog("ok", "C→E", "HIT", "t=" + t + " fresh，賣 v" + obj.v);
+    } else if (w === "swr") {
+      hits += 1;
+      decision = "SWR · 先賣舊的";
+      see = "v" + obj.v + "（stale）";
+      if (originUp) {
+        originCount += 1;
+        obj.v += 1;
+        obj.filledAt = t;
+        bg = "條件式 GET → 200 v" + obj.v;
+        note = "使用者已拿到舊版；背景換成 v" + obj.v;
+        setActor(actorCli, "ok");
+        setActor(actorEdge, "dirty");
+        setActor(actorOri, "ok");
+        cliVal.textContent = "先看到 v" + (obj.v - 1);
+        cliHint.textContent = "不等待 origin";
+        edgeVal.textContent = "賣舊 → 寫 v" + obj.v;
+        edgeHint.textContent = "SWR 窗口 Age " + t;
+        oriVal.textContent = "200 v" + obj.v;
+        oriHint.textContent = "背景更新";
+        pushLog("warn", "C→E", "SWR", "t=" + t + " 立刻賣 v" + (obj.v - 1));
+        pushLog("ok", "E→O", "BG", "背景更新成功，store = v" + obj.v);
+      } else {
+        bg = "背景更新失敗，保留 v" + obj.v;
+        note = "仍在 SWR 窗口，origin 失敗不影響這次回應";
+        setActor(actorCli, "ok");
+        setActor(actorEdge, "dirty");
+        setActor(actorOri, "bad");
+        cliVal.textContent = "看到 v" + obj.v;
+        cliHint.textContent = "舊的但成功";
+        edgeVal.textContent = "v" + obj.v + " · stale";
+        edgeHint.textContent = "SWR，origin 失敗被吞";
+        oriVal.textContent = "DOWN";
+        oriHint.textContent = "背景失敗";
+        pushLog("warn", "C→E", "SWR", "t=" + t + " 賣 v" + obj.v + "（stale）");
+        pushLog("bad", "E→O", "BG", "背景更新失敗，繼續持有舊物件");
+      }
+    } else if (w === "sie") {
+      if (originUp) {
+        misses += 1;
+        originCount += 1;
+        obj.v += 1;
+        obj.filledAt = t;
+        decision = "已過 SWR · 驗證後賣新";
+        see = "v" + obj.v;
+        bg = "使用者路徑上的條件式 GET";
+        note = "SWR 結束，必須驗證；origin 正常所以換成新版";
+        setActor(actorCli, "on");
+        setActor(actorEdge, "on");
+        setActor(actorOri, "ok");
+        cliVal.textContent = "等到 v" + obj.v;
+        cliHint.textContent = "付了一次 RTT";
+        edgeVal.textContent = "revalidate";
+        edgeHint.textContent = "Age " + t + " 已出 SWR";
+        oriVal.textContent = "200 v" + obj.v;
+        oriHint.textContent = "同步更新";
+        pushLog("read", "C→E", "REVAL", "t=" + t + " SWR 結束，同步問 origin");
+        pushLog("ok", "E→O", "200", "換成 v" + obj.v);
+      } else {
+        hits += 1;
+        decision = "SIE · origin 失敗仍賣舊";
+        see = "v" + obj.v + "（stale）";
+        bg = "驗證失敗，SIE 允許繼續賣";
+        note = "Age=" + t + " < TTL+SIE=7，錯誤被降級成舊表徵";
+        setActor(actorCli, "ok");
+        setActor(actorEdge, "dirty");
+        setActor(actorOri, "bad");
+        cliVal.textContent = "看到 v" + obj.v;
+        cliHint.textContent = "降級成功";
+        edgeVal.textContent = "v" + obj.v + " · SIE";
+        edgeHint.textContent = "origin 5xx 被吞";
+        oriVal.textContent = "DOWN";
+        oriHint.textContent = "失敗不上浮";
+        pushLog("warn", "C→E", "SIE", "t=" + t + " origin 故障，仍賣 v" + obj.v);
+      }
+    } else {
+      if (originUp) {
+        misses += 1;
+        originCount += 1;
+        obj.v += 1;
+        obj.filledAt = t;
+        decision = "窗口外 · 必須回源";
+        see = "v" + obj.v;
+        note = "SWR 與 SIE 都過了，沒有合法 stale";
+        setActor(actorCli, "on");
+        setActor(actorEdge, "on");
+        setActor(actorOri, "ok");
+        cliVal.textContent = "等到 v" + obj.v;
+        cliHint.textContent = "同步回源";
+        edgeVal.textContent = "expired";
+        edgeHint.textContent = "Age " + t;
+        oriVal.textContent = "200 v" + obj.v;
+        oriHint.textContent = "強制更新";
+        pushLog("read", "C→E", "EXP", "t=" + t + " 窗口外，同步回源");
+      } else {
+        misses += 1;
+        decision = "窗口外 · 錯誤上浮";
+        see = "錯誤";
+        bg = "無舊可賣";
+        note = "SIE 已過（TTL+SIE=7），不能再賣 v" + obj.v;
+        setActor(actorCli, "bad");
+        setActor(actorEdge, "bad");
+        setActor(actorOri, "bad");
+        cliVal.textContent = "錯誤頁";
+        cliHint.textContent = "降級結束";
+        edgeVal.textContent = "expired";
+        edgeHint.textContent = "不准賣 stale";
+        oriVal.textContent = "DOWN";
+        oriHint.textContent = "5xx 上浮";
+        pushLog("bad", "C→E", "ERR", "t=" + t + " SIE 窗口外，origin 故障上浮");
+      }
+    }
+
+    mStep.textContent = String(t + 1);
+    mHits.textContent = String(hits);
+    mMiss.textContent = String(misses);
+    mOrigin.textContent = String(originCount);
+    mKeys.textContent = obj ? "1" : "0";
+    keybox.innerHTML = '<span class="kk">object</span>' + (obj ? ("v" + obj.v + " · Age " + ageBefore + " → window " + w) : "empty");
+    tickHist[t] = see === "錯誤" ? "dead" : w;
+    renderTicks(t);
+    renderSlots(obj ? key : "");
+
+    pVerdict.textContent = decision;
+    pVerdict.className = "pv " + (see === "錯誤" ? "bad" : (w === "swr" || w === "sie" ? "warn" : "good"));
+    pSee.textContent = see;
+    pBg.textContent = bg;
+    pKey.textContent = key;
+    pHr.textContent = hrText();
+    pUniq.textContent = obj ? "1" : "0";
+    pOc.textContent = String(originCount);
+    pNote.textContent = note;
+
+    statusEl.textContent = "t=" + t + " · " + decision + " · 使用者看到 " + see + "。";
+
+    if (t + 1 >= TICKS) finishSwr();
+  }
+
+  function applyChrome() {
+    var isKey = mode === "key";
+    keyView.hidden = !isKey;
+    swrView.hidden = isKey;
+    ticksEl.hidden = isKey;
+    slotsEl.hidden = false;
+    hintEl.textContent = HINTS[mode];
+    mTotal.textContent = isKey ? String(KEY_REQS.length) : String(TICKS);
+    cliAl.textContent = isKey ? "本步請求" : "使用者看到";
+    edgeAl.textContent = isKey ? "Cache Key / 狀態" : "新鮮度窗口";
+    oriAl.textContent = isKey ? "回源" : (originUp ? "Origin 正常" : "Origin 故障");
+  }
+
+  function idleActors() {
+    setActor(actorCli, "");
+    setActor(actorEdge, "");
+    setActor(actorOri, "");
+    cliVal.textContent = "—";
+    cliHint.textContent = "待命";
+    edgeVal.textContent = "—";
+    edgeHint.textContent = "待命";
+    oriVal.textContent = "—";
+    oriHint.textContent = "待命";
+  }
+
+  function reset() {
+    step = 0;
+    store = {};
+    hits = 0;
+    misses = 0;
+    originCount = 0;
+    lastKey = "";
+    obj = null;
+    logs = [];
+    tickHist = [];
+    btnNext.disabled = false;
+    applyChrome();
+    idleActors();
+    mStep.textContent = "0";
+    mHits.textContent = "0";
+    mMiss.textContent = "0";
+    mOrigin.textContent = "0";
+    mKeys.textContent = "0";
+    pVerdict.textContent = "—";
+    pVerdict.className = "pv";
+    pSee.textContent = "—";
+    pBg.textContent = "—";
+    pKey.textContent = "—";
+    pHr.textContent = "—";
+    pUniq.textContent = "0";
+    pOc.textContent = "0";
+    pNote.textContent = "—";
+    keybox.innerHTML = '<span class="kk">key</span>—';
+    wireEl.innerHTML = "";
+    if (mode === "key") {
+      ticksEl.innerHTML = "";
+      renderSlots("");
+      statusEl.textContent = "Cache Key 實驗室：按「下一步」重放請求。改旋鈕會重置。";
+      setVerdict("", "判定尚未產生——走完 8 個請求後會摘要命中率與唯一物件數。");
+    } else {
+      renderTicks(-1);
+      renderSlots("");
+      statusEl.textContent = "SWR 時間軸：按「下一步」從 t=0 冷 miss 開始。可中途改 Origin 狀態（會重置）。";
+      setVerdict("", "判定尚未產生——走完 8 個時刻後會摘要 fresh／SWR／SIE。");
+    }
+  }
+
+  btnNext.addEventListener("click", function () {
+    if (mode === "key") {
+      if (step >= KEY_REQS.length) return;
+      playKey();
+      step += 1;
+    } else {
+      if (step >= TICKS) return;
+      playSwr();
+      step += 1;
+    }
+  });
+
+  btnReset.addEventListener("click", reset);
+
+  reset();
+})();
+</script>
