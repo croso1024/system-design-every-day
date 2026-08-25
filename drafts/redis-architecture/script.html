@@ -1,0 +1,751 @@
+<script>
+(function () {
+  "use strict";
+
+  var demo = document.getElementById("demo-ra");
+  if (!demo) return;
+
+  var SLOT_COUNT = 16;
+  var MAXMEM = 6;
+
+  var KEY_META = {
+    "user:alice": { slot: 3, start: "n1" },
+    "cart:42": { slot: 7, start: "n1" },
+    "sess:9": { slot: 9, start: "n2" },
+    "order:14": { slot: 14, start: "n3" }
+  };
+
+  var EVICT_STEPS = [
+    { op: "SET", key: "H1", ttl: null },
+    { op: "GET", key: "H1" },
+    { op: "GET", key: "H1" },
+    { op: "SET", key: "H2", ttl: null },
+    { op: "GET", key: "H2" },
+    { op: "GET", key: "H2" },
+    { op: "SET", key: "H3", ttl: null },
+    { op: "SET", key: "C1", ttl: 2 },
+    { op: "SET", key: "C2", ttl: 9 },
+    { op: "SET", key: "C3", ttl: 4 },
+    { op: "SET", key: "C4", ttl: 1 },
+    { op: "GET", key: "H3" }
+  ];
+
+  var HINTS = {
+    slot: "Slot 遷移：16 格代表 16384 slot。客戶端先打快取中的節點，觀察 ASK（暫借）與 MOVED（改表）。",
+    evict: "maxmemory = 6。H1／H2 先被連續 GET 加溫，H3 只寫一次。C 鍵帶 TTL。第 11 步 SET C4 才撞牆。"
+  };
+
+  var mode = "slot";
+  var policy = "noeviction";
+  var step = 0;
+  var okCount = 0;
+  var askCount = 0;
+  var movedCount = 0;
+  var evictCount = 0;
+  var oomCount = 0;
+
+  /* cluster state */
+  var slotOwner = [];
+  var migrating = null; /* { slot, from, to } */
+  var keyHome = {};
+  var clientMap = {};
+  var lastHitSlot = null;
+  var lastTarget = null;
+
+  /* eviction store: { key: { ttl, last, freq, born } } */
+  var store = {};
+  var clock = 0;
+  var lastVictim = "—";
+  var lastOpOk = true;
+
+  var statusEl = document.getElementById("ra-status");
+  var verdictEl = document.getElementById("ra-verdict");
+  var wireEl = document.getElementById("ra-wire");
+  var btnNext = document.getElementById("ra-btn-next");
+  var btnReset = document.getElementById("ra-btn-reset");
+  var hintEl = document.getElementById("ra-mode-hint");
+  var slotView = document.getElementById("ra-slot-view");
+  var evictView = document.getElementById("ra-evict-view");
+  var slotsEl = document.getElementById("ra-slots");
+  var keysEl = document.getElementById("ra-keys");
+
+  var mStep = document.getElementById("ra-m-step");
+  var mTotal = document.getElementById("ra-m-total");
+  var mOk = document.getElementById("ra-m-ok");
+  var mAsk = document.getElementById("ra-m-ask");
+  var mMoved = document.getElementById("ra-m-moved");
+  var mEvict = document.getElementById("ra-m-evict");
+
+  var actors = {
+    cli: demo.querySelector('.ra-actor[data-role="cli"]'),
+    n1: demo.querySelector('.ra-actor[data-role="n1"]'),
+    n2: demo.querySelector('.ra-actor[data-role="n2"]'),
+    n3: demo.querySelector('.ra-actor[data-role="n3"]')
+  };
+  var actorVal = {
+    cli: document.getElementById("ra-cli-val"),
+    n1: document.getElementById("ra-n1-val"),
+    n2: document.getElementById("ra-n2-val"),
+    n3: document.getElementById("ra-n3-val")
+  };
+  var actorHint = {
+    cli: document.getElementById("ra-cli-hint"),
+    n1: document.getElementById("ra-n1-hint"),
+    n2: document.getElementById("ra-n2-hint"),
+    n3: document.getElementById("ra-n3-hint")
+  };
+  var actorAl = {
+    cli: document.getElementById("ra-cli-al"),
+    n1: document.getElementById("ra-n1-al"),
+    n2: document.getElementById("ra-n2-al"),
+    n3: document.getElementById("ra-n3-al")
+  };
+
+  var pOp = document.getElementById("ra-p-op");
+  var pResp = document.getElementById("ra-p-resp");
+  var pMap = document.getElementById("ra-p-map");
+  var pVictim = document.getElementById("ra-p-victim");
+  var pOk = document.getElementById("ra-p-ok");
+  var pRedir = document.getElementById("ra-p-redir");
+  var pEv = document.getElementById("ra-p-ev");
+  var pNote = document.getElementById("ra-p-note");
+
+  function ownerOfSlot(s) {
+    if (s <= 7) return "n1";
+    if (s <= 11) return "n2";
+    return "n3";
+  }
+
+  function nodeLabel(id) {
+    if (id === "n1") return "N1";
+    if (id === "n2") return "N2";
+    if (id === "n3") return "N3";
+    return id;
+  }
+
+  function mapSummary() {
+    var s7 = clientMap[7] || "?";
+    return "slot7→" + nodeLabel(s7);
+  }
+
+  function resetCluster() {
+    slotOwner = [];
+    var i;
+    for (i = 0; i < SLOT_COUNT; i += 1) slotOwner[i] = ownerOfSlot(i);
+    migrating = null;
+    keyHome = {
+      "user:alice": "n1",
+      "cart:42": "n1",
+      "sess:9": "n2",
+      "order:14": "n3"
+    };
+    clientMap = {};
+    for (i = 0; i < SLOT_COUNT; i += 1) clientMap[i] = slotOwner[i];
+    lastHitSlot = null;
+    lastTarget = null;
+  }
+
+  function resetEvict() {
+    store = {};
+    clock = 0;
+    lastVictim = "—";
+    lastOpOk = true;
+  }
+
+  function resetCounts() {
+    step = 0;
+    okCount = 0;
+    askCount = 0;
+    movedCount = 0;
+    evictCount = 0;
+    oomCount = 0;
+  }
+
+  function totalSteps() {
+    return mode === "slot" ? 8 : EVICT_STEPS.length;
+  }
+
+  function logRow(kind, tag, text) {
+    var row = document.createElement("div");
+    row.className = "ra-row " + kind;
+    var ar = document.createElement("span");
+    ar.className = "ar";
+    ar.textContent = String(step);
+    var tg = document.createElement("span");
+    tg.className = "tg";
+    tg.textContent = tag;
+    var tx = document.createElement("span");
+    tx.className = "tx";
+    tx.textContent = text;
+    row.appendChild(ar);
+    row.appendChild(tg);
+    row.appendChild(tx);
+    wireEl.insertBefore(row, wireEl.firstChild);
+  }
+
+  function clearLog() {
+    wireEl.innerHTML = "";
+  }
+
+  function setActor(id, cls, val, hint) {
+    var el = actors[id];
+    if (!el) return;
+    el.classList.remove("on", "ok", "dirty", "bad");
+    if (cls) el.classList.add(cls);
+    if (val !== undefined) actorVal[id].textContent = val;
+    if (hint !== undefined) actorHint[id].textContent = hint;
+  }
+
+  function clearActors() {
+    ["cli", "n1", "n2", "n3"].forEach(function (id) {
+      setActor(id, "", "—", "待命");
+    });
+  }
+
+  function renderSlots() {
+    slotsEl.innerHTML = "";
+    var i;
+    for (i = 0; i < SLOT_COUNT; i += 1) {
+      var cell = document.createElement("div");
+      var owner = slotOwner[i];
+      var cls = "ra-slot " + owner;
+      if (migrating && migrating.slot === i) cls += " mig";
+      if (lastHitSlot === i) cls += " hit";
+      cell.className = cls;
+      var sn = document.createElement("span");
+      sn.className = "sn";
+      sn.textContent = String(i);
+      cell.appendChild(sn);
+      cell.appendChild(document.createTextNode(nodeLabel(owner)));
+      slotsEl.appendChild(cell);
+    }
+  }
+
+  function renderSlotKeys(activeKey) {
+    keysEl.innerHTML = "";
+    Object.keys(KEY_META).forEach(function (k) {
+      var el = document.createElement("span");
+      el.className = "ra-key" + (k === activeKey ? " now" : "");
+      el.innerHTML = "<b>" + k + "</b>slot " + KEY_META[k].slot + " @ " + nodeLabel(keyHome[k]);
+      keysEl.appendChild(el);
+    });
+  }
+
+  function renderEvictKeys(activeKey, victimKey, oomKey) {
+    keysEl.innerHTML = "";
+    var names = ["H1", "H2", "H3", "C1", "C2", "C3", "C4"];
+    names.forEach(function (k) {
+      var obj = store[k];
+      if (!obj && k !== activeKey && k !== oomKey && k !== victimKey) return;
+      var el = document.createElement("span");
+      var cls = "ra-key";
+      if (!obj) {
+        cls += k === oomKey ? " oom" : " gone";
+        el.className = cls + (k === activeKey ? " now" : "");
+        el.innerHTML = "<b>" + k + "</b>" + (k === oomKey ? "OOM 未寫入" : "已驅逐");
+        keysEl.appendChild(el);
+        return;
+      }
+      if (k.charAt(0) === "H") cls += " hot";
+      else cls += " cold";
+      if (k === victimKey) cls += " gone";
+      if (k === activeKey) cls += " now";
+      el.className = cls;
+      var ttlTxt = obj.ttl === null ? "persist" : "ttl=" + obj.ttl;
+      el.innerHTML = "<b>" + k + "</b>" + ttlTxt + " f=" + obj.freq + " t=" + obj.last;
+      keysEl.appendChild(el);
+    });
+  }
+
+  function setTone(el, tone) {
+    el.classList.remove("tone-ok", "tone-lock", "tone-bad");
+    if (tone) el.classList.add("tone-" + tone);
+  }
+
+  function updateMetrics() {
+    mStep.textContent = String(step);
+    mTotal.textContent = String(totalSteps());
+    mOk.textContent = String(okCount);
+    mAsk.textContent = String(askCount);
+    mMoved.textContent = String(movedCount);
+    mEvict.textContent = String(evictCount + oomCount);
+    pOk.textContent = String(okCount);
+    pRedir.textContent = "ASK " + askCount + " · MOVED " + movedCount;
+    pEv.textContent = String(evictCount + oomCount);
+  }
+
+  function clusterGet(key) {
+    var meta = KEY_META[key];
+    var slot = meta.slot;
+    lastHitSlot = slot;
+    var cached = clientMap[slot];
+    var actualOwner = slotOwner[slot];
+    var home = keyHome[key];
+
+    setActor("cli", "on", key, "表 " + mapSummary());
+    actorAl.cli.textContent = "GET " + key;
+
+    /* Client sends to cached node first. */
+    if (cached !== actualOwner && !(migrating && migrating.slot === slot)) {
+      /* Stale map after ownership changed → MOVED */
+      movedCount += 1;
+      clientMap[slot] = actualOwner;
+      setActor(cached, "bad", "MOVED " + nodeLabel(actualOwner), "slot " + slot + " 已不在這");
+      setActor(actualOwner, "ok", key + " = OK", "對照表已更新");
+      okCount += 1;
+      lastTarget = actualOwner;
+      return {
+        resp: "MOVED " + nodeLabel(actualOwner) + " → OK",
+        note: "歸屬已切。客戶端改表後重打 " + nodeLabel(actualOwner) + "。",
+        tone: "bad",
+        tag: "MOVED"
+      };
+    }
+
+    if (migrating && migrating.slot === slot) {
+      if (home === migrating.from) {
+        /* source still has the key */
+        setActor(migrating.from, "dirty", key + " 仍在來源", "MIGRATING 且 key 未搬");
+        setActor(migrating.to, "on", "IMPORTING", "尚未接到這把 key");
+        okCount += 1;
+        lastTarget = migrating.from;
+        return {
+          resp: "OK（來源仍服務）",
+          note: "MIGRATING 期間，key 還在來源就由來源回答。對照表不改。",
+          tone: "lock",
+          tag: "HIT"
+        };
+      }
+      /* key already on target → ASK */
+      askCount += 1;
+      okCount += 1;
+      setActor(migrating.from, "dirty", "ASK " + nodeLabel(migrating.to), "來源已無此 key");
+      setActor(migrating.to, "ok", "ASKING + GET OK", "暫借；表仍指向 " + nodeLabel(cached));
+      lastTarget = migrating.to;
+      return {
+        resp: "ASK " + nodeLabel(migrating.to) + " → OK",
+        note: "只重試這一次，對照表仍是 slot7→" + nodeLabel(clientMap[slot]) + "。",
+        tone: "lock",
+        tag: "ASK"
+      };
+    }
+
+    /* Steady state, map is correct */
+    setActor(actualOwner, "ok", key + " = OK", "直打 " + nodeLabel(actualOwner));
+    okCount += 1;
+    lastTarget = actualOwner;
+    return {
+      resp: "OK",
+      note: "對照表命中，無重定向。",
+      tone: "ok",
+      tag: "OK"
+    };
+  }
+
+  function runSlotStep() {
+    var result;
+    var activeKey = "";
+    lastHitSlot = null;
+
+    if (step === 1) {
+      activeKey = "user:alice";
+      result = clusterGet(activeKey);
+      pOp.textContent = "GET user:alice  (slot 3)";
+    } else if (step === 2) {
+      migrating = { slot: 7, from: "n1", to: "n3" };
+      setActor("cli", "", mapSummary(), "對照表尚未過時");
+      setActor("n1", "dirty", "MIGRATING 7", "開始把 slot 7 交給 N3");
+      setActor("n3", "on", "IMPORTING 7", "接收中");
+      pOp.textContent = "CLUSTER SETSLOT 7 MIGRATING / IMPORTING";
+      result = {
+        resp: "遷移開始",
+        note: "槽 7 雙邊標記。key 尚未搬，客戶端表仍是 slot7→N1。",
+        tone: "lock",
+        tag: "MIG"
+      };
+    } else if (step === 3) {
+      activeKey = "cart:42";
+      result = clusterGet(activeKey);
+      pOp.textContent = "GET cart:42  (slot 7，key 仍在 N1)";
+    } else if (step === 4) {
+      keyHome["cart:42"] = "n3";
+      setActor("n1", "dirty", "MIGRATE cart:42", "DUMP → RESTORE → DEL");
+      setActor("n3", "ok", "cart:42 已在", "IMPORTING 收到這把 key");
+      setActor("cli", "", mapSummary(), "表仍 slot7→N1");
+      lastHitSlot = 7;
+      pOp.textContent = "MIGRATE cart:42  N1 → N3";
+      result = {
+        resp: "key 已到 N3，槽尚未切歸屬",
+        note: "同一槽裡這把 key 在目標，其他 key 可能還在來源。",
+        tone: "lock",
+        tag: "MOVE"
+      };
+    } else if (step === 5) {
+      activeKey = "cart:42";
+      result = clusterGet(activeKey);
+      pOp.textContent = "GET cart:42  (來源已無 key)";
+    } else if (step === 6) {
+      slotOwner[7] = "n3";
+      migrating = null;
+      setActor("n1", "bad", "不再擁有 7", "SETSLOT 7 NODE N3");
+      setActor("n3", "ok", "擁有 slot 7", "歸屬已切");
+      setActor("cli", "on", mapSummary(), "表還沒改，下一打會 MOVED");
+      lastHitSlot = 7;
+      pOp.textContent = "CLUSTER SETSLOT 7 NODE N3";
+      result = {
+        resp: "歸屬切到 N3",
+        note: "客戶端對照表仍過時。下一筆 GET 會拿到 MOVED。",
+        tone: "lock",
+        tag: "OWNER"
+      };
+    } else if (step === 7) {
+      activeKey = "cart:42";
+      result = clusterGet(activeKey);
+      pOp.textContent = "GET cart:42  (歸屬已切，表過時)";
+    } else if (step === 8) {
+      activeKey = "cart:42";
+      result = clusterGet(activeKey);
+      pOp.textContent = "GET cart:42  (表已更新)";
+    }
+
+    renderSlots();
+    renderSlotKeys(activeKey);
+    pResp.textContent = result.resp;
+    pMap.textContent = mapSummary();
+    pVictim.textContent = "—";
+    pNote.textContent = result.note;
+    actorAl.n1.textContent = slotOwner[7] === "n1" || (migrating && migrating.from === "n1") ? "slot 0–7" : "slot 0–6";
+    actorAl.n3.textContent = slotOwner[7] === "n3" ? "slot 7, 12–15" : "slot 12–15";
+    statusEl.innerHTML = "<b>" + result.tag + "</b>　" + result.note;
+    logRow(result.tone === "ok" ? "ok" : result.tone === "bad" ? "bad" : "warn", result.tag, pOp.textContent + " → " + result.resp);
+
+    if (step >= 8) {
+      var txt = "ASK " + askCount + " 次（不改表）、MOVED " + movedCount + " 次（改表）。之後同一槽直打 N3。";
+      verdictEl.textContent = txt;
+      setTone(verdictEl, movedCount ? "ok" : "lock");
+    }
+  }
+
+  function candidatesFor(pol) {
+    var keys = Object.keys(store);
+    if (pol.indexOf("volatile") === 0) {
+      return keys.filter(function (k) { return store[k].ttl !== null; });
+    }
+    return keys;
+  }
+
+  function pickVictim(pol) {
+    var cand = candidatesFor(pol);
+    if (!cand.length) return null;
+    var i;
+    var best = cand[0];
+    if (pol === "allkeys-lru" || pol === "volatile-lru") {
+      for (i = 1; i < cand.length; i += 1) {
+        if (store[cand[i]].last < store[best].last) best = cand[i];
+        else if (store[cand[i]].last === store[best].last && store[cand[i]].born < store[best].born) best = cand[i];
+      }
+      return best;
+    }
+    if (pol === "allkeys-lfu" || pol === "volatile-lfu") {
+      for (i = 1; i < cand.length; i += 1) {
+        if (store[cand[i]].freq < store[best].freq) best = cand[i];
+        else if (store[cand[i]].freq === store[best].freq && store[cand[i]].last < store[best].last) best = cand[i];
+      }
+      return best;
+    }
+    if (pol === "volatile-ttl") {
+      for (i = 1; i < cand.length; i += 1) {
+        var a = store[cand[i]].ttl;
+        var b = store[best].ttl;
+        if (a !== null && (b === null || a < b)) best = cand[i];
+      }
+      return best;
+    }
+    return null;
+  }
+
+  function evictOne() {
+    if (policy === "noeviction") return null;
+    var v = pickVictim(policy);
+    if (!v) return null;
+    delete store[v];
+    evictCount += 1;
+    lastVictim = v;
+    return v;
+  }
+
+  function ensureSpace() {
+    if (Object.keys(store).length < MAXMEM) return { ok: true, victim: null, oom: false };
+    if (policy === "noeviction") return { ok: false, victim: null, oom: true };
+    var v = evictOne();
+    if (!v) return { ok: false, victim: null, oom: true };
+    return { ok: true, victim: v, oom: false };
+  }
+
+  function runEvictStep() {
+    var spec = EVICT_STEPS[step - 1];
+    clock += 1;
+    var victim = null;
+    var oomKey = null;
+    lastOpOk = true;
+    lastVictim = "—";
+    lastHitSlot = null;
+    pResp.className = "pv";
+
+    ["n1", "n2", "n3"].forEach(function (id) {
+      setActor(id, "", "max=" + MAXMEM, Object.keys(store).length + " keys");
+    });
+
+    if (spec.op === "GET") {
+      var g = store[spec.key];
+      actorAl.cli.textContent = "GET " + spec.key;
+      if (!g) {
+        lastOpOk = false;
+        setActor("cli", "bad", spec.key + " MISS", "已被驅逐或不存在");
+        setActor("n1", "bad", "nil", policy);
+        pOp.textContent = "GET " + spec.key;
+        pResp.textContent = "(nil)";
+        pNote.textContent = spec.key + " 不在 maxmemory 集合裡。";
+        statusEl.innerHTML = "<b>MISS</b>　" + spec.key + " 已被踢或不曾寫入。";
+        logRow("bad", "MISS", "GET " + spec.key + " → (nil)");
+        pMap.textContent = policy;
+        pVictim.textContent = lastVictim;
+        renderSlotsEmpty();
+        renderEvictKeys(spec.key, null, null);
+        maybeEvictVerdict();
+        return;
+      }
+      g.last = clock;
+      g.freq += 1;
+      okCount += 1;
+      setActor("cli", "on", "GET " + spec.key, "freq=" + g.freq);
+      setActor("n1", "ok", spec.key + " HIT", "last=" + g.last);
+      pOp.textContent = "GET " + spec.key;
+      pResp.textContent = "OK  freq=" + g.freq;
+      pNote.textContent = "命中會更新 LRU 時間戳與 LFU 計數。";
+      statusEl.innerHTML = "<b>HIT</b>　" + spec.key + " last=" + g.last + " freq=" + g.freq + "。";
+      logRow("ok", "HIT", "GET " + spec.key + " → OK f=" + g.freq);
+      pMap.textContent = policy;
+      pVictim.textContent = "—";
+      renderSlotsEmpty();
+      renderEvictKeys(spec.key, null, null);
+      maybeEvictVerdict();
+      return;
+    }
+
+    /* SET */
+    actorAl.cli.textContent = "SET " + spec.key;
+    var existing = store[spec.key];
+    if (existing) {
+      existing.last = clock;
+      existing.freq += 1;
+      existing.ttl = spec.ttl;
+      okCount += 1;
+      setActor("cli", "ok", "覆寫 " + spec.key, "仍佔 1 格");
+      setActor("n1", "ok", Object.keys(store).length + "/" + MAXMEM, policy);
+      pOp.textContent = "SET " + spec.key + (spec.ttl === null ? " persist" : " EX " + spec.ttl);
+      pResp.textContent = "OK（覆寫）";
+      pNote.textContent = "已存在的 key 不增加記憶體。";
+      logRow("ok", "SET", "SET " + spec.key + " 覆寫");
+      pMap.textContent = policy;
+      pVictim.textContent = "—";
+      renderSlotsEmpty();
+      renderEvictKeys(spec.key, null, null);
+      maybeEvictVerdict();
+      return;
+    }
+
+    var space = ensureSpace();
+    if (!space.ok) {
+      oomCount += 1;
+      lastOpOk = false;
+      oomKey = spec.key;
+      setActor("cli", "bad", "OOM", spec.key + " 未寫入");
+      setActor("n1", "bad", Object.keys(store).length + "/" + MAXMEM, "noeviction 或無可踢者");
+      pOp.textContent = "SET " + spec.key + (spec.ttl === null ? " persist" : " EX " + spec.ttl);
+      pResp.textContent = "OOM command not allowed";
+      pNote.textContent = policy === "noeviction"
+        ? "noeviction：滿了就拒寫，既有 key 原封不動。"
+        : "候選集合是空的（volatile 政策下沒有帶 TTL 的 key）。";
+      statusEl.innerHTML = "<b>OOM</b>　" + spec.key + " 寫入被拒。讀仍可。";
+      logRow("bad", "OOM", "SET " + spec.key + " 被拒");
+      pMap.textContent = policy;
+      pVictim.textContent = "—";
+      renderSlotsEmpty();
+      renderEvictKeys(spec.key, null, oomKey);
+      maybeEvictVerdict();
+      return;
+    }
+
+    victim = space.victim;
+    store[spec.key] = {
+      ttl: spec.ttl,
+      last: clock,
+      freq: 1,
+      born: clock
+    };
+    okCount += 1;
+    setActor("cli", victim ? "dirty" : "on", "SET " + spec.key, victim ? "騰出 " + victim : "尚未滿");
+    setActor("n1", victim ? "dirty" : "ok", Object.keys(store).length + "/" + MAXMEM, victim ? "evict " + victim : policy);
+    pOp.textContent = "SET " + spec.key + (spec.ttl === null ? " persist" : " EX " + spec.ttl);
+    pResp.textContent = victim ? "evict " + victim + " → OK" : "OK";
+    pNote.textContent = victim
+      ? (policy.indexOf("lru") !== -1
+        ? "LRU 踢最久未碰的。"
+        : policy.indexOf("lfu") !== -1
+          ? "LFU 踢最低頻（同分再比 LRU）。"
+          : "volatile-ttl 在有過期的集合裡踢 TTL 最短的。")
+      : "容量未滿，直接寫入。";
+    statusEl.innerHTML = victim
+      ? "<b>EVICT</b>　踢掉 " + victim + "，寫入 " + spec.key + "。"
+      : "<b>SET</b>　" + spec.key + " 寫入，現在 " + Object.keys(store).length + "/" + MAXMEM + "。";
+    logRow(victim ? "warn" : "ok", victim ? "EVICT" : "SET",
+      "SET " + spec.key + (victim ? " 踢 " + victim : " OK"));
+    pMap.textContent = policy;
+    pVictim.textContent = victim || "—";
+    pResp.className = "pv" + (victim ? " warn" : " good");
+    renderSlotsEmpty();
+    renderEvictKeys(spec.key, victim, null);
+    maybeEvictVerdict();
+  }
+
+  function renderSlotsEmpty() {
+    slotsEl.innerHTML = "";
+    var i;
+    var names = Object.keys(store);
+    for (i = 0; i < MAXMEM; i += 1) {
+      var cell = document.createElement("div");
+      if (i < names.length) {
+        var k = names[i];
+        var obj = store[k];
+        cell.className = "ra-slot " + (obj.ttl === null ? "n1" : "mig");
+        var sn = document.createElement("span");
+        sn.className = "sn";
+        sn.textContent = k;
+        cell.appendChild(sn);
+        cell.appendChild(document.createTextNode(obj.ttl === null ? "persist" : "ttl " + obj.ttl));
+      } else {
+        cell.className = "ra-slot empty";
+        var sn2 = document.createElement("span");
+        sn2.className = "sn";
+        sn2.textContent = "·";
+        cell.appendChild(sn2);
+        cell.appendChild(document.createTextNode("空"));
+      }
+      slotsEl.appendChild(cell);
+    }
+  }
+
+  function maybeEvictVerdict() {
+    if (step < EVICT_STEPS.length) return;
+    var living = Object.keys(store).sort().join(", ") || "（空）";
+    var txt = policy + " 結束：仍在的 key = " + living +
+      "。驅逐 " + evictCount + "、OOM " + oomCount + "。";
+    if (policy === "noeviction") {
+      txt += " 既有六把都還在，C4 沒寫進去。";
+      setTone(verdictEl, "bad");
+    } else if (policy === "volatile-ttl") {
+      txt += " H1–H3 因無 TTL 未被踢；TTL 最短的 C1 先走，最後 GET H3 仍命中。";
+      setTone(verdictEl, "lock");
+    } else if (policy === "allkeys-lru") {
+      txt += " LRU 踢最久沒碰的 H1（頻率高但 recency 舊）。最後 GET H3 仍命中。";
+      setTone(verdictEl, "ok");
+    } else {
+      txt += " LFU 踢最低頻的 H3。最後 GET H3 會 miss——這就是與 LRU 的差別。";
+      setTone(verdictEl, "ok");
+    }
+    verdictEl.textContent = txt;
+  }
+
+  function syncSeg(root, attr, value) {
+    if (!root) return;
+    var buttons = root.querySelectorAll("button");
+    var i;
+    for (i = 0; i < buttons.length; i += 1) {
+      var on = buttons[i].getAttribute(attr) === value;
+      buttons[i].setAttribute("aria-pressed", on ? "true" : "false");
+    }
+  }
+
+  function applyModeChrome() {
+    hintEl.textContent = HINTS[mode];
+    slotView.hidden = mode !== "slot";
+    evictView.hidden = mode !== "evict";
+    syncSeg(document.getElementById("ra-seg-mode"), "data-mode", mode);
+    syncSeg(document.getElementById("ra-seg-policy"), "data-policy", policy);
+    if (mode === "slot") {
+      actorAl.cli.textContent = "對照表";
+      actorAl.n1.textContent = "slot 0–7";
+      actorAl.n2.textContent = "slot 8–11";
+      actorAl.n3.textContent = "slot 12–15";
+      actorVal.n2.textContent = "—";
+      actors.n2.style.opacity = "1";
+      actors.n3.style.opacity = "1";
+    } else {
+      actorAl.cli.textContent = "命令";
+      actorAl.n1.textContent = "maxmemory=6";
+      actorAl.n2.textContent = "政策";
+      actorAl.n3.textContent = "候選";
+      setActor("n2", "", policy, "allkeys 對全集；volatile 只看 TTL");
+      setActor("n3", "", "H persist / C ttl", "H 無過期、C 有過期");
+    }
+  }
+
+  function hardReset(keepMode) {
+    resetCounts();
+    resetCluster();
+    resetEvict();
+    clearLog();
+    clearActors();
+    pOp.textContent = "—";
+    pResp.textContent = "—";
+    pResp.className = "pv";
+    pMap.textContent = mode === "slot" ? mapSummary() : policy;
+    pVictim.textContent = "—";
+    pNote.textContent = "—";
+    verdictEl.textContent = "判定尚未產生——走完一輪後會摘要 ASK／MOVED 或各政策踢了誰。";
+    setTone(verdictEl, "");
+    applyModeChrome();
+    if (mode === "slot") {
+      renderSlots();
+      renderSlotKeys("");
+      statusEl.textContent = "按「下一步」開始：先打 user:alice 確認對照表，再遷移 slot 7。";
+    } else {
+      renderSlotsEmpty();
+      renderEvictKeys("", null, null);
+      statusEl.textContent = "按「下一步」寫入 H1。滿 6 格之後的 SET 才會觸發淘汰或 OOM。";
+    }
+    updateMetrics();
+    btnNext.disabled = false;
+    void keepMode;
+  }
+
+  function onNext() {
+    if (step >= totalSteps()) return;
+    step += 1;
+    if (mode === "slot") runSlotStep();
+    else runEvictStep();
+    updateMetrics();
+    if (step >= totalSteps()) btnNext.disabled = true;
+  }
+
+  btnNext.addEventListener("click", onNext);
+  btnReset.addEventListener("click", function () { hardReset(true); });
+
+  document.getElementById("ra-seg-mode").addEventListener("click", function (ev) {
+    var btn = ev.target.closest("button[data-mode]");
+    if (!btn) return;
+    mode = btn.getAttribute("data-mode");
+    hardReset(true);
+  });
+
+  document.getElementById("ra-seg-policy").addEventListener("click", function (ev) {
+    var btn = ev.target.closest("button[data-policy]");
+    if (!btn) return;
+    policy = btn.getAttribute("data-policy");
+    hardReset(true);
+  });
+
+  hardReset(true);
+})();
+</script>
