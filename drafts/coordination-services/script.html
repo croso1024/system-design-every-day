@@ -1,0 +1,518 @@
+<script>
+(function () {
+  "use strict";
+
+  var demo = document.getElementById("demo-cs");
+  if (!demo) return;
+
+  var HINTS = {
+    lock: "A 持有 token=1 後凍結。租約過期、B 以 token=2 寫入，A 醒來再寫。fencing ON 時拒絕 token=1；OFF 時資源被寫成 STALE。",
+    herd: "持有者 Session 逾時後，對比「全體 Watch」的 5 次通知 + 5 次搶鎖，與「排隊」的 1 次通知 + 1 次接任。"
+  };
+
+  var LOCK_TOTAL = 7;
+  var HERD_TOTAL = 4;
+
+  var mode = "lock";
+  var fencing = true;
+  var watchKind = "herd";
+  var step = 0;
+  var wire = [];
+
+  var actors = {
+    a: { klass: "idle", sub: "申請者", val: "token —", hint: "待命" },
+    coord: { klass: "coord idle", sub: "協調服務", val: "/lock = ∅", hint: "多數派 KV" },
+    b: { klass: "idle", sub: "申請者", val: "token —", hint: "待命" },
+    res: { klass: "idle", sub: "外部副作用", val: "value —", hint: "尚未寫入" }
+  };
+
+  var resource = { value: "—", token: 0, writer: "—", judge: "尚未寫入", tone: "" };
+  var panel = {
+    op: "—",
+    lock: "∅",
+    rule: "—",
+    cli: "—",
+    holder: "—",
+    fence: "ON",
+    n: "0",
+    try: "0"
+  };
+  var metrics = { ta: "—", tb: "—", n: 0 };
+  var queueState = [];
+  var verdict = { text: "判定尚未產生——走完一輪後會摘要資源是否被過期寫入，或兩種 Watch 策略的通知量。", tone: "" };
+  var statusText = "";
+
+  var statusEl = document.getElementById("cs-status");
+  var verdictEl = document.getElementById("cs-verdict");
+  var wireEl = document.getElementById("cs-wire");
+  var btnNext = document.getElementById("cs-btn-next");
+  var btnReset = document.getElementById("cs-btn-reset");
+  var lockView = document.getElementById("cs-lock-view");
+  var herdView = document.getElementById("cs-herd-view");
+  var actorsEl = document.getElementById("cs-actors");
+  var queueEl = document.getElementById("cs-queue");
+  var resBox = document.getElementById("cs-res");
+
+  var mStep = document.getElementById("cs-m-step");
+  var mTotal = document.getElementById("cs-m-total");
+  var mTa = document.getElementById("cs-m-ta");
+  var mTb = document.getElementById("cs-m-tb");
+  var mN = document.getElementById("cs-m-n");
+
+  var pOp = document.getElementById("cs-p-op");
+  var pLock = document.getElementById("cs-p-lock");
+  var pRule = document.getElementById("cs-p-rule");
+  var pCli = document.getElementById("cs-p-cli");
+  var pHolder = document.getElementById("cs-p-holder");
+  var pFence = document.getElementById("cs-p-fence");
+  var pN = document.getElementById("cs-p-n");
+  var pTry = document.getElementById("cs-p-try");
+
+  var resVal = document.getElementById("cs-res-val");
+  var resTok = document.getElementById("cs-res-tok");
+  var resWho = document.getElementById("cs-res-who");
+  var resJudge = document.getElementById("cs-res-judge");
+
+  function actorEls() {
+    return {
+      a: actorsEl.querySelector('[data-role="a"]'),
+      coord: actorsEl.querySelector('[data-role="coord"]'),
+      b: actorsEl.querySelector('[data-role="b"]'),
+      res: actorsEl.querySelector('[data-role="res"]')
+    };
+  }
+
+  function logRow(kind, tag, text, at) {
+    wire.push({ kind: kind, tag: tag, text: text, step: at == null ? step : at });
+  }
+
+  function writeResource(token, value, writer) {
+    if (fencing) {
+      if (token < resource.token) {
+        resource.judge = "REJECT token=" + token + " < " + resource.token;
+        resource.tone = "ok";
+        return false;
+      }
+      resource.value = value;
+      resource.token = token;
+      resource.writer = writer;
+      resource.judge = "ACCEPT token=" + token;
+      resource.tone = "ok";
+      return true;
+    }
+    resource.value = value;
+    resource.token = token;
+    resource.writer = writer;
+    resource.judge = "ACCEPT (no fencing) token=" + token;
+    resource.tone = value.indexOf("STALE") !== -1 ? "bad" : "";
+    return true;
+  }
+
+  function resetActors() {
+    actors.a = { klass: "idle", sub: "申請者", val: "token —", hint: "待命" };
+    actors.coord = { klass: "coord idle", sub: "協調服務", val: "/lock = ∅", hint: "多數派 KV" };
+    actors.b = { klass: "idle", sub: "申請者", val: "token —", hint: "待命" };
+    actors.res = { klass: "idle", sub: "外部副作用", val: "value —", hint: "尚未寫入" };
+  }
+
+  function resetQueue() {
+    queueState = [
+      { id: "h", klass: "hold", hint: "心跳中" },
+      { id: "1", klass: "wait", hint: watchKind === "queue" ? "Watch seq-001" : "Watch /lock" },
+      { id: "2", klass: "wait", hint: watchKind === "queue" ? "Watch seq-002" : "Watch /lock" },
+      { id: "3", klass: "wait", hint: watchKind === "queue" ? "Watch seq-003" : "Watch /lock" },
+      { id: "4", klass: "wait", hint: watchKind === "queue" ? "Watch seq-004" : "Watch /lock" },
+      { id: "5", klass: "wait", hint: watchKind === "queue" ? "Watch seq-005" : "Watch /lock" }
+    ];
+  }
+
+  function fresh() {
+    step = 0;
+    wire = [];
+    resource = { value: "—", token: 0, writer: "—", judge: "尚未寫入", tone: "" };
+    metrics = { ta: "—", tb: "—", n: 0 };
+    panel = {
+      op: "—",
+      lock: "∅",
+      rule: "—",
+      cli: "—",
+      holder: "—",
+      fence: fencing ? "ON" : "OFF",
+      n: "0",
+      try: "0"
+    };
+    resetActors();
+    resetQueue();
+    verdict = {
+      text: "判定尚未產生——走完一輪後會摘要資源是否被過期寫入，或兩種 Watch 策略的通知量。",
+      tone: ""
+    };
+    statusText = HINTS[mode];
+    btnNext.disabled = false;
+  }
+
+  function applyLockStep() {
+    resetActors();
+    resource = { value: "—", token: 0, writer: "—", judge: "尚未寫入", tone: "" };
+    metrics.ta = "—";
+    metrics.tb = "—";
+    metrics.n = 0;
+    panel.fence = fencing ? "ON" : "OFF";
+    panel.n = "0";
+    panel.try = "0";
+    wire = [];
+
+    if (step < 1) {
+      panel.op = "待命";
+      panel.lock = "∅";
+      panel.rule = "尚未授予";
+      panel.cli = "按下一步讓 A 搶鎖";
+      panel.holder = "—";
+      logRow("read", "IDLE", "協調服務空閒，資源尚未被寫入。", 0);
+      return;
+    }
+
+    actors.a.klass = "hold";
+    actors.a.val = "token 1";
+    actors.a.hint = "持有 /lock";
+    actors.coord.klass = "coord hold";
+    actors.coord.val = "/lock = A";
+    actors.coord.hint = "lease → A";
+    metrics.ta = "1";
+    panel.op = "A GRANT";
+    panel.lock = "A · token=1";
+    panel.rule = "ephemeral + lease";
+    panel.cli = "A 進入臨界區";
+    panel.holder = "A";
+    logRow("ok", "GRANT", "A 建立 ephemeral sequential / 搶下 etcd key，token=1（zxid / mod_revision）。", 1);
+
+    if (step < 2) return;
+
+    actors.a.hint = "臨界區 · 心跳中";
+    actors.res.hint = "A 尚未寫入";
+    panel.op = "A 心跳";
+    panel.cli = "keepalive OK";
+    logRow("read", "KEEP", "A 定期 keepalive。本地以為只要心跳在，鎖就還是自己的。", 2);
+
+    if (step < 3) return;
+
+    actors.a.klass = "frozen";
+    actors.a.hint = "GC pause · 心跳停";
+    actors.coord.hint = "等 session timeout";
+    panel.op = "GC PAUSE";
+    panel.rule = "本地計時器說謊";
+    panel.cli = "A 凍結，仍自認持有";
+    logRow("warn", "PAUSE", "A 進入 GC / 長 IO / SIGSTOP。執行緒凍結，keepalive 送不出去，變數裡仍是「我持有鎖」。", 3);
+
+    if (step < 4) return;
+
+    actors.coord.klass = "coord bad";
+    actors.coord.val = "/lock = ∅";
+    actors.coord.hint = "lease 過期，key 刪除";
+    actors.a.hint = "仍凍結 · 自認持有";
+    panel.op = "LEASE EXPIRE";
+    panel.lock = "∅";
+    panel.holder = "—";
+    panel.rule = "集群側契約到期";
+    panel.cli = "A 毫不知情";
+    logRow("bad", "EXPIRE", "Session / lease 在集群側過期，ephemeral key 被刪。A 還凍著，以為 token=1 仍有效。", 4);
+
+    if (step < 5) return;
+
+    actors.b.klass = "hold";
+    actors.b.val = "token 2";
+    actors.b.hint = "持有 /lock";
+    actors.coord.klass = "coord hold";
+    actors.coord.val = "/lock = B";
+    actors.coord.hint = "lease → B";
+    metrics.tb = "2";
+    panel.op = "B GRANT";
+    panel.lock = "B · token=2";
+    panel.holder = "B";
+    panel.cli = "B 進入臨界區";
+    logRow("ok", "GRANT", "B 搶下同一把鎖，token=2。集群保證這個 key 此刻只有 B 的 Session。", 5);
+
+    if (step < 6) return;
+
+    writeResource(2, "B-payload", "B");
+    actors.res.klass = resource.tone === "bad" ? "bad" : "hold";
+    actors.res.val = "value " + resource.value;
+    actors.res.hint = resource.judge;
+    actors.b.hint = "已寫入資源";
+    panel.op = "B WRITE";
+    panel.rule = fencing ? "token 2 ≥ 0 → ACCEPT" : "無 token 檢查";
+    panel.cli = "B 寫入成功";
+    logRow("ok", "WRITE", "B 帶 token=2 寫入被保護資源，value=B-payload。", 6);
+
+    if (step < 7) return;
+
+    actors.a.klass = "frozen";
+    actors.a.hint = "醒來 · 送出舊寫入";
+    var accepted = writeResource(1, "A-STALE", "A");
+    actors.res.klass = "hold";
+    if (resource.tone === "bad") actors.res.klass = "bad";
+    actors.res.val = "value " + resource.value;
+    actors.res.hint = resource.judge;
+    panel.op = "A STALE WRITE";
+    panel.cli = accepted ? "A 的過期寫入被接受" : "A 的過期寫入被拒";
+    if (fencing) {
+      actors.a.klass = "bad";
+      actors.a.hint = "token=1 被拒";
+      panel.rule = "token 1 < 2 → REJECT";
+      logRow("ok", "REJECT", "資源 lastSeenToken=2，拒絕 token=1。拒絕是保護成功，B-payload 仍在。", 7);
+      verdict = {
+        text: "fencing ON：過期持有者 A 的寫入被拒，資源仍是 B-payload。鎖服務在過期當下已經把鎖給 B，唯一防線是資源自己檢查單調 token。",
+        tone: "ok"
+      };
+    } else {
+      actors.a.klass = "bad";
+      actors.a.hint = "寫入 STALE（損壞）";
+      actors.b.klass = "bad";
+      actors.b.hint = "自己的寫入被覆蓋";
+      panel.rule = "無 fencing → 覆蓋";
+      logRow("bad", "CORRUPT", "沒有 token 檢查，A-STALE 覆蓋了 B-payload。雙持有在資源上成真。", 7);
+      verdict = {
+        text: "fencing OFF：A 醒來後把資源寫成 A-STALE。TTL / lease 無法阻止凍結行程的過期寫入——這就是「只有租約、沒有 token」的結局。",
+        tone: "bad"
+      };
+    }
+  }
+
+  function applyHerdStep() {
+    resetQueue();
+    metrics.n = 0;
+    panel.fence = watchKind === "queue" ? "排隊" : "羊群";
+    panel.lock = "H · seq-001";
+    panel.holder = "H";
+    panel.try = "0";
+    panel.n = "0";
+    wire = [];
+    resource = { value: "—", token: 0, writer: "—", judge: "本模式不寫資源", tone: "" };
+    actors.res.hint = "本模式不使用";
+    actors.res.val = "—";
+
+    if (step < 1) {
+      panel.op = "待命";
+      panel.rule = watchKind === "queue" ? "每人 Watch 前一位" : "全員 Watch /lock";
+      panel.cli = "五名等待者掛 Watch";
+      logRow("read", "WAIT", watchKind === "queue"
+        ? "W1 Watch seq-001，W2 Watch seq-002……通知鏈是一條隊伍。"
+        : "W1–W5 全部 Watch 同一個 /lock。持有者一消失，所有人會同時醒。", 0);
+      return;
+    }
+
+    queueState[0].klass = "gone";
+    queueState[0].hint = "Session 逾時 · 刪除";
+    panel.op = "HOLDER DOWN";
+    panel.lock = "∅";
+    panel.holder = "—";
+    panel.rule = "ephemeral 隨 Session 消失";
+    panel.cli = "等待者尚未被叫醒";
+    logRow("bad", "EXPIRE", "持有者 H 的 Session 過期，seq-001 被刪。這是探活原語：心跳停，成員從名單消失。", 1);
+
+    if (step < 2) return;
+
+    if (watchKind === "herd") {
+      metrics.n = 5;
+      panel.n = "5";
+      panel.op = "WATCH FIRE ×5";
+      panel.rule = "通知量 = 等待人數";
+      panel.cli = "五人同時被叫醒";
+      for (var i = 1; i <= 5; i += 1) {
+        queueState[i].klass = "notify";
+        queueState[i].hint = "收到 /lock 事件";
+      }
+      logRow("warn", "HERD", "父節點變更，五個 Watch 同時觸發。協調服務在故障切換當下推送 O(N) 事件。", 2);
+    } else {
+      metrics.n = 1;
+      panel.n = "1";
+      panel.op = "WATCH FIRE ×1";
+      panel.rule = "只叫醒前一位的下家";
+      panel.cli = "僅 W1 被叫醒";
+      queueState[1].klass = "notify";
+      queueState[1].hint = "seq-001 消失";
+      logRow("ok", "QUEUE", "只有 Watch seq-001 的 W1 被叫醒。W2–W5 的 Watch 仍指向還活著的前一位。", 2);
+    }
+
+    if (step < 3) return;
+
+    if (watchKind === "herd") {
+      panel.try = "5";
+      panel.op = "CREATE ×5";
+      panel.rule = "一人成功，四人衝突";
+      panel.cli = "W1 當選，其餘回去 Watch";
+      panel.holder = "W1";
+      panel.lock = "W1 · seq-007";
+      queueState[1].klass = "hold";
+      queueState[1].hint = "搶到 · 當選";
+      for (var j = 2; j <= 5; j += 1) {
+        queueState[j].klass = "wait";
+        queueState[j].hint = "衝突 · 再 Watch /lock";
+      }
+      logRow("warn", "RACE", "五人同時 create。一人勝出，四人失敗後重新掛 Watch——下一次切換還是五人一起醒。", 3);
+      verdict = {
+        text: "羊群：1 次成員變更 → 5 則通知、5 次搶鎖、4 次衝突。N 變大時，故障切換當下最先過載的是協調服務的 Watch 與寫入 QPS。",
+        tone: "lock"
+      };
+    } else {
+      panel.try = "1";
+      panel.op = "W1 重讀兄弟";
+      panel.rule = "自己最小 → 接任";
+      panel.cli = "W1 當選；其餘繼續等";
+      panel.holder = "W1";
+      panel.lock = "W1 · seq-002";
+      queueState[1].klass = "hold";
+      queueState[1].hint = "最小 · 接任";
+      queueState[2].hint = "Watch seq-002";
+      logRow("ok", "PROMOTE", "W1 列出兄弟，確認自己是最小 sequential node，進入臨界區。沒有競態 create。", 3);
+      verdict = {
+        text: "排隊：1 次成員變更 → 1 則通知、1 次接任。W1 仍須重讀「我是不是最小」，不能把 Watch 事件當成當選證書。",
+        tone: "ok"
+      };
+    }
+
+    if (step < 4) return;
+
+    panel.op = "穩定";
+    panel.cli = watchKind === "herd" ? "四人繼續擠在同一個 Watch 點" : "隊伍前進一位";
+    if (watchKind === "herd") {
+      logRow("read", "AGAIN", "下一次 H′ 消失，仍是 5 則通知。羊群不會自己消失，必須改排隊。", 4);
+    } else {
+      logRow("read", "SHIFT", "現在 W2 Watch 新的前一位 W1。切換成本與隊伍長度無關。", 4);
+    }
+  }
+
+  function renderActors() {
+    var els = actorEls();
+    ["a", "coord", "b", "res"].forEach(function (key) {
+      var el = els[key];
+      var st = actors[key];
+      if (!el) return;
+      el.className = "cs-node " + st.klass;
+      el.querySelector("[data-sub]").textContent = st.sub;
+      el.querySelector("[data-val]").textContent = st.val;
+      el.querySelector("[data-hint]").textContent = st.hint;
+    });
+  }
+
+  function renderQueue() {
+    queueState.forEach(function (st) {
+      var el = queueEl.querySelector('[data-q="' + st.id + '"]');
+      if (!el) return;
+      el.className = "cs-qnode " + st.klass;
+      el.querySelector("[data-qh]").textContent = st.hint;
+    });
+  }
+
+  function renderWire() {
+    if (!wire.length) {
+      wireEl.innerHTML = "";
+      return;
+    }
+    var html = "";
+    wire.forEach(function (row) {
+      html += '<div class="cs-row ' + row.kind + '">';
+      html += '<span class="ar">' + row.step + "</span>";
+      html += '<span class="tg">' + row.tag + "</span>";
+      html += '<span class="tx">' + row.text + "</span>";
+      html += "</div>";
+    });
+    wireEl.innerHTML = html;
+    wireEl.scrollTop = wireEl.scrollHeight;
+  }
+
+  function render() {
+    var total = mode === "lock" ? LOCK_TOTAL : HERD_TOTAL;
+    mStep.textContent = String(step);
+    mTotal.textContent = String(total);
+    mTa.textContent = metrics.ta;
+    mTb.textContent = metrics.tb;
+    mN.textContent = String(metrics.n);
+
+    pOp.textContent = panel.op;
+    pLock.textContent = panel.lock;
+    pRule.textContent = panel.rule;
+    pCli.textContent = panel.cli;
+    pHolder.textContent = panel.holder;
+    pFence.textContent = panel.fence;
+    pN.textContent = panel.n;
+    pTry.textContent = panel.try;
+
+    resVal.textContent = resource.value;
+    resTok.textContent = String(resource.token);
+    resWho.textContent = resource.writer;
+    resJudge.textContent = resource.judge;
+    resBox.className = "cs-res" + (resource.tone ? " " + resource.tone : "");
+
+    statusEl.textContent = statusText;
+    verdictEl.textContent = verdict.text;
+    verdictEl.className = "cs-verdict" + (verdict.tone ? " tone-" + verdict.tone : "");
+
+    lockView.hidden = mode !== "lock";
+    herdView.hidden = mode !== "herd";
+    actorsEl.hidden = mode !== "lock";
+    queueEl.hidden = mode !== "herd";
+    resBox.hidden = mode !== "lock";
+
+    if (mode === "lock") renderActors();
+    else renderQueue();
+    renderWire();
+
+    btnNext.disabled = step >= total;
+  }
+
+  function apply() {
+    if (mode === "lock") applyLockStep();
+    else applyHerdStep();
+    render();
+  }
+
+  function setSeg(group, attr, value) {
+    group.querySelectorAll("button").forEach(function (btn) {
+      btn.setAttribute("aria-pressed", btn.getAttribute(attr) === value ? "true" : "false");
+    });
+  }
+
+  document.getElementById("cs-seg-mode").addEventListener("click", function (ev) {
+    var btn = ev.target.closest("button[data-mode]");
+    if (!btn) return;
+    mode = btn.getAttribute("data-mode");
+    setSeg(document.getElementById("cs-seg-mode"), "data-mode", mode);
+    fresh();
+    apply();
+  });
+
+  document.getElementById("cs-seg-fence").addEventListener("click", function (ev) {
+    var btn = ev.target.closest("button[data-fence]");
+    if (!btn) return;
+    fencing = btn.getAttribute("data-fence") === "on";
+    setSeg(document.getElementById("cs-seg-fence"), "data-fence", fencing ? "on" : "off");
+    fresh();
+    apply();
+  });
+
+  document.getElementById("cs-seg-watch").addEventListener("click", function (ev) {
+    var btn = ev.target.closest("button[data-watch]");
+    if (!btn) return;
+    watchKind = btn.getAttribute("data-watch");
+    setSeg(document.getElementById("cs-seg-watch"), "data-watch", watchKind);
+    fresh();
+    apply();
+  });
+
+  btnNext.addEventListener("click", function () {
+    var total = mode === "lock" ? LOCK_TOTAL : HERD_TOTAL;
+    if (step >= total) return;
+    step += 1;
+    apply();
+  });
+
+  btnReset.addEventListener("click", function () {
+    fresh();
+    apply();
+  });
+
+  fresh();
+  apply();
+})();
+</script>
