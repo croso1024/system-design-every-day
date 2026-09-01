@@ -1,0 +1,3074 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>訊息佇列基礎 (Message Queue Fundamentals) | System Design Every Day</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@300;400;500;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+  <script>
+    mermaid.initialize({
+      startOnLoad: true,
+      theme: 'default',
+      securityLevel: 'loose'
+    });
+  </script>
+  <style>
+    :root {
+      --bg: #ffffff;
+      --bg-soft: #fafaf9;
+      --text: #262a2f;
+      --text-2: #6b7078;
+      --text-3: #9aa0a8;
+      --border: #ecebe8;
+      --border-strong: #dedcd8;
+      --code-bg: #f6f5f3;
+      --accent: #3f6188;
+      --accent-soft: #eef2f7;
+      --accent-line: #cdd9e6;
+      --ok: #4d7d68;
+      --ok-soft: #eef4f1;
+      --warn: #a3743e;
+      --warn-soft: #f6f0e7;
+      --bad: #a8554f;
+      --bad-soft: #f6ecea;
+      --radius: 10px;
+      --radius-sm: 7px;
+      --maxw: 760px;
+      --sans: "Noto Sans TC", system-ui, -apple-system, "Segoe UI", sans-serif;
+      --mono: "JetBrains Mono", "SFMono-Regular", Menlo, Consolas, monospace;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    html {
+      scroll-behavior: smooth;
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      html {
+        scroll-behavior: auto;
+      }
+      * {
+        animation-duration: .001ms !important;
+        transition-duration: .001ms !important;
+      }
+    }
+
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font-family: var(--sans);
+      font-weight: 400;
+      font-size: 16px;
+      line-height: 1.78;
+      -webkit-font-smoothing: antialiased;
+      letter-spacing: .005em;
+    }
+
+    ::selection {
+      background: var(--accent-soft);
+    }
+
+    /* ---------- layout ---------- */
+    .wrap {
+      display: flex;
+      max-width: 1180px;
+      margin: 0 auto;
+      gap: 0;
+    }
+
+    .toc {
+      width: 248px;
+      flex: 0 0 248px;
+      position: sticky;
+      top: 0;
+      height: 100vh;
+      padding: 54px 22px 40px 28px;
+      overflow-y: auto;
+      border-right: 1px solid var(--border);
+      transition: width .2s ease, flex-basis .2s ease, padding .2s ease, opacity .15s ease, border-color .15s ease;
+    }
+
+    .toc-kicker {
+      font-family: var(--mono);
+      font-size: 11px;
+      letter-spacing: .14em;
+      text-transform: uppercase;
+      color: var(--text-3);
+      margin-bottom: 20px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+    }
+
+    /* desktop：側欄內收合鈕；mobile 隱藏（沿用既有 .toc-toggle） */
+    .toc-collapse {
+      display: none;
+      flex: 0 0 auto;
+      align-items: center;
+      justify-content: center;
+      width: 28px;
+      height: 28px;
+      padding: 0;
+      border: none;
+      background: none;
+      border-radius: 6px;
+      color: var(--text-2);
+      line-height: 1;
+      cursor: pointer;
+    }
+
+    .toc-collapse:hover {
+      color: var(--text);
+      background: var(--bg-soft);
+    }
+
+    .toc-collapse:focus-visible {
+      outline: 2px solid var(--accent);
+      outline-offset: 2px;
+    }
+
+    .toc-collapse svg {
+      display: block;
+    }
+
+    /* desktop：側欄收合後的展開鈕（預設隱藏） */
+    .toc-reopen {
+      display: none;
+      position: fixed;
+      top: 18px;
+      left: 18px;
+      z-index: 900;
+      align-items: center;
+      gap: 7px;
+      font-size: 12.5px;
+      line-height: 1;
+      color: var(--text-2);
+      background: var(--bg);
+      border: 1px solid var(--border-strong);
+      border-radius: 999px;
+      padding: 7px 13px 7px 11px;
+      box-shadow: 0 1px 3px rgba(0, 0, 0, .06), 0 4px 12px rgba(0, 0, 0, .04);
+      cursor: pointer;
+      transition: background .15s, border-color .15s, color .15s;
+    }
+
+    .toc-reopen:hover {
+      background: var(--bg-soft);
+      color: var(--text);
+      border-color: var(--text-3);
+    }
+
+    .toc-reopen svg {
+      flex: 0 0 auto;
+      display: block;
+    }
+
+    @media (min-width: 921px) {
+      .toc-collapse {
+        display: inline-flex;
+      }
+
+      body.toc-collapsed .toc {
+        width: 0;
+        flex-basis: 0;
+        padding: 0;
+        opacity: 0;
+        overflow: hidden;
+        border-right-color: transparent;
+        pointer-events: none;
+      }
+
+      body.toc-collapsed .toc-reopen {
+        display: inline-flex;
+      }
+    }
+
+    .toc-kicker a {
+      color: var(--text-3);
+      text-decoration: none;
+      border-bottom: none;
+      transition: color .15s;
+    }
+
+    .toc-kicker a:hover {
+      color: var(--text);
+    }
+
+    .toc-title {
+      font-size: 15px;
+      font-weight: 700;
+      line-height: 1.4;
+      margin: 0 0 24px;
+    }
+
+    .toc a {
+      display: flex;
+      gap: 10px;
+      align-items: baseline;
+      text-decoration: none;
+      color: var(--text-2);
+      font-size: 13.5px;
+      padding: 6px 10px;
+      border-radius: 6px;
+      line-height: 1.45;
+      transition: background .15s, color .15s;
+      border-bottom: none;
+    }
+
+    .toc a:hover {
+      background: var(--bg-soft);
+      color: var(--text);
+      border-bottom: none;
+    }
+
+    .toc a.active {
+      color: var(--accent);
+      background: var(--accent-soft);
+      font-weight: 500;
+      border-bottom: none;
+    }
+
+    .toc a .n {
+      font-family: var(--mono);
+      font-size: 11px;
+      color: var(--text-3);
+      flex: 0 0 18px;
+    }
+
+    .toc a.active .n {
+      color: var(--accent);
+    }
+
+    main {
+      flex: 1 1 auto;
+      min-width: 0;
+      padding: 0 40px;
+    }
+
+    .inner {
+      max-width: var(--maxw);
+      margin: 0 auto;
+      padding: 72px 0 140px;
+    }
+
+    /* ---------- hero ---------- */
+    .hero {
+      margin-bottom: 64px;
+    }
+
+    .hero .eyebrow {
+      font-family: var(--mono);
+      font-size: 12px;
+      letter-spacing: .16em;
+      text-transform: uppercase;
+      color: var(--accent);
+      margin-bottom: 18px;
+    }
+
+    .hero h1 {
+      font-size: 40px;
+      line-height: 1.18;
+      font-weight: 700;
+      margin: 0 0 18px;
+      letter-spacing: -.01em;
+    }
+
+    .hero .lede {
+      font-size: 18px;
+      line-height: 1.7;
+      color: var(--text-2);
+      font-weight: 300;
+      margin: 0;
+      max-width: 620px;
+    }
+
+    .hero .meta {
+      margin-top: 28px;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+
+    .tag {
+      font-family: var(--mono);
+      font-size: 12px;
+      color: var(--text-2);
+      border: 1px solid var(--border-strong);
+      padding: 4px 11px;
+      border-radius: 999px;
+      background: var(--bg-soft);
+    }
+
+    /* ---------- sections ---------- */
+    section {
+      padding-top: 30px;
+      scroll-margin-top: 24px;
+    }
+
+    .sec-head {
+      display: flex;
+      align-items: baseline;
+      gap: 14px;
+      margin: 0 0 8px;
+    }
+
+    .sec-num {
+      font-family: var(--mono);
+      font-size: 13px;
+      color: var(--text-3);
+      font-weight: 500;
+      padding-top: 6px;
+      flex: 0 0 auto;
+    }
+
+    h2 {
+      font-size: 27px;
+      font-weight: 700;
+      line-height: 1.3;
+      margin: 0;
+      letter-spacing: -.01em;
+    }
+
+    .sec-sub {
+      color: var(--text-2);
+      font-size: 15px;
+      margin: 2px 0 28px 0;
+      font-weight: 300;
+    }
+
+    h3 {
+      font-size: 18.5px;
+      font-weight: 700;
+      margin: 38px 0 12px;
+      line-height: 1.45;
+    }
+
+    h4 {
+      font-size: 15.5px;
+      font-weight: 700;
+      margin: 26px 0 8px;
+      color: var(--text);
+    }
+
+    p {
+      margin: 0 0 16px;
+    }
+
+    a {
+      color: var(--accent);
+      text-decoration: none;
+      border-bottom: 1px solid var(--accent-line);
+      transition: border-color .15s;
+    }
+
+    a:hover {
+      border-color: var(--accent);
+    }
+
+    strong {
+      font-weight: 700;
+    }
+
+    em {
+      font-style: normal;
+      background: var(--accent-soft);
+      padding: 0 4px;
+      border-radius: 4px;
+      font-weight: 500;
+      color: #2f4d6e;
+    }
+
+    hr.div {
+      border: none;
+      border-top: 1px solid var(--border);
+      margin: 46px 0;
+    }
+
+    ul, ol {
+      margin: 0 0 18px;
+      padding-left: 22px;
+    }
+
+    li {
+      margin: 7px 0;
+      padding-left: 4px;
+    }
+
+    li::marker {
+      color: var(--text-3);
+    }
+
+    code {
+      font-family: var(--mono);
+      font-size: .86em;
+      background: var(--code-bg);
+      padding: 2px 6px;
+      border-radius: 5px;
+      color: #43494f;
+    }
+
+    pre {
+      background: var(--code-bg);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 16px 18px;
+      overflow-x: auto;
+      margin: 0 0 20px;
+      line-height: 1.6;
+    }
+
+    pre code {
+      background: none;
+      padding: 0;
+      font-size: 13px;
+    }
+
+    /* ---------- math notation ---------- */
+    /* 行內數學變數，如 W、R、N。本站不載入 MathJax/KaTeX，請勿使用 $...$ 或 \[...\] LaTeX 分隔符。 */
+    var {
+      font-family: var(--mono);
+      font-style: normal;
+      font-weight: 500;
+      color: var(--accent);
+    }
+
+    /* 區塊數學公式，置中等寬呈現，記得將 > < & 轉義為 &gt; &lt; &amp;。 */
+    .formula {
+      font-family: var(--mono);
+      font-size: 15px;
+      text-align: center;
+      background: var(--bg-soft);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      padding: 14px 18px;
+      margin: 0 0 20px;
+      color: var(--text);
+      letter-spacing: .03em;
+      overflow-x: auto;
+    }
+
+    /* ---------- callouts ---------- */
+    .callout {
+      border: 1px solid var(--border);
+      border-left: 3px solid var(--border-strong);
+      background: var(--bg-soft);
+      border-radius: var(--radius-sm);
+      padding: 15px 18px;
+      margin: 0 0 22px;
+      font-size: 14.5px;
+    }
+
+    .callout .c-title {
+      font-weight: 700;
+      font-size: 13px;
+      letter-spacing: .02em;
+      margin-bottom: 5px;
+      display: flex;
+      gap: 7px;
+      align-items: center;
+    }
+
+    .callout p:last-child {
+      margin-bottom: 0;
+    }
+
+    .callout.accent {
+      border-left-color: var(--accent);
+      background: var(--accent-soft);
+    }
+
+    .callout.accent .c-title {
+      color: #2f4d6e;
+    }
+
+    .callout.warn {
+      border-left-color: var(--warn);
+      background: var(--warn-soft);
+    }
+
+    .callout.warn .c-title {
+      color: var(--warn);
+    }
+
+    .callout .ic {
+      font-family: var(--mono);
+      font-size: 11px;
+      border: 1px solid currentColor;
+      border-radius: 4px;
+      padding: 0 4px;
+      line-height: 1.5;
+      opacity: .8;
+    }
+
+    .oneliner {
+      border: 1px dashed var(--accent-line);
+      border-radius: var(--radius-sm);
+      padding: 13px 16px;
+      margin: 0 0 22px;
+      font-size: 14.5px;
+      background: #fbfcfd;
+    }
+
+    .oneliner b {
+      font-family: var(--mono);
+      font-size: 11px;
+      letter-spacing: .08em;
+      color: var(--accent);
+      display: block;
+      margin-bottom: 4px;
+      text-transform: uppercase;
+    }
+
+    /* ---------- tables ---------- */
+    .tbl-wrap {
+      overflow-x: auto;
+      margin: 0 0 24px;
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+    }
+
+    table {
+      border-collapse: collapse;
+      width: 100%;
+      font-size: 14px;
+      min-width: 520px;
+    }
+
+    th, td {
+      text-align: left;
+      padding: 11px 14px;
+      border-bottom: 1px solid var(--border);
+      vertical-align: top;
+    }
+
+    th {
+      font-weight: 700;
+      background: var(--bg-soft);
+      font-size: 12.5px;
+      letter-spacing: .02em;
+      color: var(--text-2);
+      position: sticky;
+      top: 0;
+    }
+
+    tr:last-child td {
+      border-bottom: none;
+    }
+
+    td.hl {
+      background: var(--accent-soft);
+    }
+
+    .cap {
+      font-size: 12.5px;
+      color: var(--text-3);
+      margin: -12px 0 26px;
+      font-family: var(--mono);
+    }
+
+    /* ---------- interactive shell ---------- */
+    .demo {
+      border: 1px solid var(--border-strong);
+      border-radius: var(--radius);
+      background: var(--bg);
+      margin: 24px 0 26px;
+      overflow: hidden;
+    }
+
+    .demo-bar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      flex-wrap: wrap;
+      padding: 13px 16px;
+      border-bottom: 1px solid var(--border);
+      background: var(--bg-soft);
+    }
+
+    .demo-bar .label {
+      font-family: var(--mono);
+      font-size: 11px;
+      letter-spacing: .1em;
+      text-transform: uppercase;
+      color: var(--text-3);
+    }
+
+    .demo-body {
+      padding: 20px 18px;
+    }
+
+    .seg {
+      display: inline-flex;
+      border: 1px solid var(--border-strong);
+      border-radius: 999px;
+      overflow: hidden;
+      background: var(--bg);
+    }
+
+    .seg button {
+      border: none;
+      background: none;
+      font-family: var(--sans);
+      font-size: 12.5px;
+      color: var(--text-2);
+      padding: 6px 14px;
+      cursor: pointer;
+      transition: background .15s, color .15s;
+    }
+
+    .seg button:hover {
+      color: var(--text);
+    }
+
+    .seg button[aria-pressed="true"] {
+      background: var(--accent);
+      color: #fff;
+    }
+
+    .btn {
+      font-family: var(--sans);
+      font-size: 13px;
+      border: 1px solid var(--border-strong);
+      background: var(--bg);
+      color: var(--text);
+      padding: 7px 16px;
+      border-radius: 7px;
+      cursor: pointer;
+      transition: background .15s, border-color .15s;
+    }
+
+    .btn:hover {
+      background: var(--bg-soft);
+      border-color: var(--text-3);
+    }
+
+    .btn.primary {
+      background: var(--accent);
+      color: #fff;
+      border-color: var(--accent);
+    }
+
+    .btn.primary:hover {
+      background: #365578;
+    }
+
+    .btn:disabled {
+      opacity: .4;
+      cursor: not-allowed;
+    }
+
+    .btn:focus-visible, .seg button:focus-visible, .toc a:focus-visible, a:focus-visible,
+    summary:focus-visible {
+      outline: 2px solid var(--accent);
+      outline-offset: 2px;
+      border-radius: 4px;
+    }
+
+    .status-line {
+      font-size: 13.5px;
+      color: var(--text-2);
+      min-height: 42px;
+      margin-top: 14px;
+      background: var(--bg-soft);
+      border-radius: var(--radius-sm);
+      padding: 10px 13px;
+      border: 1px solid var(--border);
+    }
+
+    .status-line b {
+      color: var(--text);
+    }
+
+    .legend {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 14px;
+      font-size: 11.5px;
+      color: var(--text-2);
+      margin-top: 14px;
+      font-family: var(--mono);
+    }
+
+    .legend span {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .dot {
+      width: 9px;
+      height: 9px;
+      border-radius: 3px;
+      display: inline-block;
+      border: 1px solid rgba(0, 0, 0, .08);
+    }
+
+    /* node states used across diagrams */
+    .nstate-idle {
+      fill: #fff;
+      stroke: var(--border-strong);
+    }
+
+    .ns-idle {
+      background: #fff;
+      border-color: var(--border-strong);
+    }
+
+    .ns-lock {
+      background: var(--warn-soft);
+      border-color: var(--warn);
+    }
+
+    .ns-ok {
+      background: var(--ok-soft);
+      border-color: var(--ok);
+    }
+
+    .ns-bad {
+      background: var(--bad-soft);
+      border-color: var(--bad);
+    }
+
+    .ns-wait {
+      background: var(--accent-soft);
+      border-color: var(--accent);
+    }
+
+    /* spectrum */
+    .spectrum {
+      position: relative;
+      margin: 26px 6px 10px;
+    }
+
+    .spec-track {
+      height: 4px;
+      border-radius: 2px;
+      background: linear-gradient(90deg, #9fb6cf, #e7e5e1 50%, #c9d8c9);
+      position: relative;
+    }
+
+    .spec-ends {
+      display: flex;
+      justify-content: space-between;
+      font-family: var(--mono);
+      font-size: 11px;
+      color: var(--text-2);
+      margin-top: 10px;
+    }
+
+    .spec-mark {
+      position: absolute;
+      top: -12px;
+      transform: translateX(-50%);
+      cursor: pointer;
+      text-align: center;
+      background: none;
+      border: none;
+      padding: 0;
+    }
+
+    .spec-mark .pin {
+      width: 18px;
+      height: 18px;
+      border-radius: 50%;
+      background: #fff;
+      border: 2px solid var(--border-strong);
+      margin: 0 auto;
+      transition: border-color .15s, transform .15s, box-shadow .15s;
+      display: block;
+    }
+
+    .spec-mark .pn {
+      font-family: var(--mono);
+      font-size: 12px;
+      margin-top: 8px;
+      color: var(--text-2);
+      font-weight: 500;
+      white-space: nowrap;
+      display: block;
+    }
+
+    .spec-mark[aria-pressed="true"] .pin {
+      border-color: var(--accent);
+      transform: scale(1.18);
+      box-shadow: 0 0 0 4px var(--accent-soft);
+    }
+
+    .spec-mark[aria-pressed="true"] .pn {
+      color: var(--accent);
+    }
+
+    .spec-panel {
+      margin-top: 34px;
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 18px;
+      background: var(--bg-soft);
+    }
+
+    .spec-panel h4 {
+      margin: 0 0 4px;
+    }
+
+    .spec-panel .pmeta {
+      font-family: var(--mono);
+      font-size: 12px;
+      color: var(--text-3);
+      margin-bottom: 14px;
+    }
+
+    .bars {
+      display: grid;
+      grid-template-columns: 78px 1fr 56px;
+      gap: 9px 12px;
+      align-items: center;
+    }
+
+    .bars .blabel {
+      font-size: 13px;
+      color: var(--text-2);
+    }
+
+    .bars .btrack {
+      height: 8px;
+      background: #e9e7e3;
+      border-radius: 4px;
+      overflow: hidden;
+    }
+
+    .bars .bfill {
+      height: 100%;
+      border-radius: 4px;
+      background: var(--accent);
+      transition: width .4s ease;
+    }
+
+    .bars .bval {
+      font-family: var(--mono);
+      font-size: 11px;
+      color: var(--text-2);
+      text-align: right;
+    }
+
+    /* generic actor diagram */
+    .actors {
+      display: flex;
+      gap: 12px;
+      flex-wrap: wrap;
+    }
+
+    .actor {
+      flex: 1 1 0;
+      min-width: 96px;
+      border: 1.5px solid var(--border-strong);
+      border-radius: var(--radius-sm);
+      padding: 11px 10px;
+      text-align: center;
+      background: #fff;
+      transition: background .25s, border-color .25s;
+    }
+
+    .actor .aname {
+      font-weight: 700;
+      font-size: 13px;
+    }
+
+    .actor .arole {
+      font-family: var(--mono);
+      font-size: 10.5px;
+      color: var(--text-3);
+      margin-top: 2px;
+    }
+
+    .actor .astate {
+      font-size: 11.5px;
+      margin-top: 8px;
+      font-family: var(--mono);
+      color: var(--text-2);
+      min-height: 16px;
+    }
+
+    .coordinator {
+      border-style: dashed;
+    }
+
+    .flowsteps {
+      margin-top: 16px;
+    }
+
+    .stepitem {
+      display: flex;
+      gap: 11px;
+      font-size: 13.5px;
+      padding: 7px 0;
+      color: var(--text-3);
+      border-top: 1px solid var(--border);
+    }
+
+    .stepitem:first-child {
+      border-top: none;
+    }
+
+    .stepitem.done {
+      color: var(--text);
+    }
+
+    .stepitem.cur {
+      color: var(--text);
+      font-weight: 500;
+    }
+
+    .stepitem .sx {
+      font-family: var(--mono);
+      font-size: 11px;
+      flex: 0 0 26px;
+      color: var(--text-3);
+      padding-top: 2px;
+    }
+
+    .stepitem.cur .sx {
+      color: var(--accent);
+    }
+
+    /* timeline lab (TCC) */
+    .tl-scenarios {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      margin-bottom: 6px;
+    }
+
+    .tl-opt {
+      display: flex;
+      gap: 11px;
+      align-items: flex-start;
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      padding: 10px 13px;
+      cursor: pointer;
+      background: #fff;
+      transition: border-color .15s, background .15s;
+    }
+
+    .tl-opt:hover {
+      background: var(--bg-soft);
+    }
+
+    .tl-opt[aria-pressed="true"] {
+      border-color: var(--accent);
+      background: var(--accent-soft);
+    }
+
+    .tl-opt .tlname {
+      font-weight: 700;
+      font-size: 13.5px;
+    }
+
+    .tl-opt .tldesc {
+      font-size: 12.5px;
+      color: var(--text-2);
+      margin-top: 2px;
+    }
+
+    .tl-opt .tlbadge {
+      font-family: var(--mono);
+      font-size: 10px;
+      border: 1px solid var(--border-strong);
+      border-radius: 4px;
+      padding: 1px 5px;
+      color: var(--text-3);
+      flex: 0 0 auto;
+      margin-top: 1px;
+    }
+
+    .tl-result {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
+      margin-top: 16px;
+    }
+
+    @media (max-width: 560px) {
+      .tl-result {
+        grid-template-columns: 1fr;
+      }
+    }
+
+    .tl-card {
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      padding: 13px 14px;
+      font-size: 13px;
+    }
+
+    .tl-card .tch {
+      font-family: var(--mono);
+      font-size: 11px;
+      letter-spacing: .06em;
+      text-transform: uppercase;
+      margin-bottom: 8px;
+      color: var(--text-3);
+    }
+
+    .tl-card.naive {
+      border-left: 3px solid var(--bad);
+    }
+
+    .tl-card.fixed {
+      border-left: 3px solid var(--ok);
+    }
+
+    .tl-card .verdict {
+      font-weight: 700;
+      margin-top: 8px;
+      font-size: 13px;
+    }
+
+    .tl-card.naive .verdict {
+      color: var(--bad);
+    }
+
+    .tl-card.fixed .verdict {
+      color: var(--ok);
+    }
+
+    /* saga chain */
+    .saga-chain {
+      display: flex;
+      flex-direction: column;
+      gap: 0;
+      margin-top: 8px;
+    }
+
+    .saga-step {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .saga-box {
+      flex: 1 1 auto;
+      border: 1.5px solid var(--border-strong);
+      border-radius: var(--radius-sm);
+      padding: 10px 13px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      background: #fff;
+      transition: .25s;
+    }
+
+    .saga-box .sgn {
+      font-weight: 600;
+      font-size: 13.5px;
+    }
+
+    .saga-box .sgs {
+      font-family: var(--mono);
+      font-size: 11px;
+      color: var(--text-3);
+    }
+
+    .saga-arrow {
+      height: 18px;
+      width: 2px;
+      background: var(--border-strong);
+      margin-left: 18px;
+    }
+
+    .saga-pick {
+      font-size: 12.5px;
+      color: var(--text-2);
+      margin: 4px 0 10px;
+    }
+
+    .saga-pick select {
+      font-family: var(--sans);
+      font-size: 13px;
+      padding: 5px 8px;
+      border: 1px solid var(--border-strong);
+      border-radius: 6px;
+      background: #fff;
+      color: var(--text);
+    }
+
+    /* outbox toggle */
+    .ob-stage {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      margin-top: 8px;
+    }
+
+    .ob-row {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      font-size: 13px;
+    }
+
+    .ob-chip {
+      border: 1.5px solid var(--border-strong);
+      border-radius: var(--radius-sm);
+      padding: 9px 12px;
+      background: #fff;
+      font-size: 13px;
+      transition: .25s;
+      flex: 0 0 auto;
+    }
+
+    .ob-chip .obt {
+      font-weight: 600;
+    }
+
+    .ob-chip .obs {
+      font-family: var(--mono);
+      font-size: 10.5px;
+      color: var(--text-3);
+    }
+
+    .ob-flow {
+      font-family: var(--mono);
+      font-size: 11px;
+      color: var(--text-3);
+    }
+
+    /* wizard */
+    .wiz-q {
+      margin-bottom: 16px;
+    }
+
+    .wiz-q .wq {
+      font-size: 14px;
+      font-weight: 600;
+      margin-bottom: 8px;
+    }
+
+    .wiz-opts {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+
+    .wiz-opts button {
+      font-family: var(--sans);
+      font-size: 13px;
+      border: 1px solid var(--border-strong);
+      background: #fff;
+      color: var(--text-2);
+      padding: 7px 14px;
+      border-radius: 7px;
+      cursor: pointer;
+      transition: .15s;
+    }
+
+    .wiz-opts button:hover {
+      border-color: var(--text-3);
+      color: var(--text);
+    }
+
+    .wiz-opts button[aria-pressed="true"] {
+      background: var(--accent);
+      color: #fff;
+      border-color: var(--accent);
+    }
+
+    .wiz-result {
+      margin-top: 18px;
+      border: 1px solid var(--accent-line);
+      border-radius: var(--radius);
+      padding: 16px 18px;
+      background: var(--accent-soft);
+      font-size: 14px;
+      display: none;
+    }
+
+    .wiz-result.show {
+      display: block;
+    }
+
+    .wiz-result .wr-pick {
+      font-size: 17px;
+      font-weight: 700;
+      color: #2f4d6e;
+      margin-bottom: 6px;
+    }
+
+    .wiz-result .wr-why {
+      color: #3a5572;
+    }
+
+    /* FAQ */
+    details.faq {
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      margin-bottom: 10px;
+      background: #fff;
+      overflow: hidden;
+    }
+
+    details.faq summary {
+      cursor: pointer;
+      padding: 14px 16px;
+      font-weight: 600;
+      font-size: 14.5px;
+      list-style: none;
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      align-items: center;
+    }
+
+    details.faq summary::-webkit-details-marker {
+      display: none;
+    }
+
+    details.faq summary .q {
+      font-family: var(--mono);
+      font-size: 11px;
+      color: var(--accent);
+      flex: 0 0 auto;
+    }
+
+    details.faq summary .chev {
+      transition: transform .2s;
+      color: var(--text-3);
+      flex: 0 0 auto;
+      font-size: 13px;
+    }
+
+    details.faq[open] summary .chev {
+      transform: rotate(90deg);
+    }
+
+    details.faq .ans {
+      padding: 0 16px 16px;
+      font-size: 14px;
+      color: var(--text-2);
+    }
+
+    details.faq .ans p {
+      margin: 0 0 10px;
+    }
+
+    details.faq .ans p:last-child {
+      margin: 0;
+    }
+
+    .trap {
+      display: flex;
+      gap: 10px;
+      font-size: 14px;
+      margin: 9px 0;
+    }
+
+    .trap .tn {
+      font-family: var(--mono);
+      font-size: 11px;
+      color: var(--bad);
+      flex: 0 0 auto;
+      border: 1px solid var(--bad-soft);
+      background: var(--bad-soft);
+      border-radius: 4px;
+      padding: 1px 6px;
+      height: fit-content;
+      margin-top: 2px;
+    }
+
+    /* mobile responsive */
+    .toc-toggle {
+      display: none;
+    }
+
+    @media (max-width: 920px) {
+      .wrap {
+        flex-direction: column;
+      }
+      .toc {
+        position: static;
+        width: auto;
+        height: auto;
+        border-right: none;
+        border-bottom: 1px solid var(--border);
+        padding: 18px 22px;
+        transition: none;
+      }
+      .toc-title {
+        margin-bottom: 0;
+      }
+      .toc-kicker {
+        margin-bottom: 10px;
+      }
+      .toc-nav {
+        display: none;
+        margin-top: 16px;
+      }
+      .toc-nav.open {
+        display: block;
+      }
+      .toc-toggle {
+        display: inline-block;
+        margin-top: 10px;
+      }
+      .toc-collapse,
+      .toc-reopen {
+        display: none !important;
+      }
+      main {
+        padding: 0 22px;
+      }
+      .inner {
+        padding: 40px 0 100px;
+      }
+      .hero h1 {
+        font-size: 31px;
+      }
+    }
+
+    @media print {
+      .toc-reopen { display: none !important; }
+    }
+
+    @media (max-width: 480px) {
+      body {
+        font-size: 15px;
+      }
+      .hero h1 {
+        font-size: 27px;
+      }
+      h2 {
+        font-size: 23px;
+      }
+      .demo-body {
+        padding: 16px 13px;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <!-- ===================== TOC SIDEBAR ===================== -->
+    <nav class="toc" id="toc-panel" aria-label="目錄">
+      <div class="toc-kicker">
+        <a href="../index.html">← 返回目錄</a>
+        <button class="toc-collapse" type="button" aria-expanded="true" aria-controls="toc-panel"
+                aria-label="收合目錄" title="收合目錄">
+          <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor"
+               stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M15 18l-6-6 6-6"/>
+          </svg>
+        </button>
+      </div>
+      <div class="toc-title">訊息佇列基礎 (Message Queue Fundamentals)</div>
+      <button class="btn toc-toggle" type="button" aria-expanded="false" aria-controls="toc-nav">目錄 ▾</button>
+      <div class="toc-nav" id="toc-nav">
+        <a href="#s1"><span class="n">01</span>總覽與定位</a>
+        <a href="#s2"><span class="n">02</span>Queue 模型：消費即消失</a>
+        <a href="#s3"><span class="n">03</span>Log 模型：可重放的有序日誌</a>
+        <a href="#s4"><span class="n">04</span>Push、Pull 與 broker–consumer 流控</a>
+        <a href="#s5"><span class="n">05</span>ACK 與 Visibility Timeout：租約語意</a>
+        <a href="#s6"><span class="n">06</span>三種交付語義，以及「效果只發生一次」</a>
+        <a href="#s7"><span class="n">07</span>重試、退避與 Dead Letter Queue</a>
+        <a href="#s8"><span class="n">08</span>順序保證與 Competing Consumers</a>
+        <a href="#s9"><span class="n">09</span>互動 · Queue / Log 與租約重投</a>
+        <a href="#s10"><span class="n">10</span>面試折衷與邊界</a>
+      </div>
+    </nav>
+    <button class="btn toc-reopen" type="button" aria-expanded="true" aria-controls="toc-panel"
+            aria-label="展開目錄" title="展開目錄">
+      <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor"
+           stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M9 18l6-6-6-6"/>
+      </svg>
+      <span>目錄</span>
+    </button>
+
+    <!-- ===================== MAIN CONTENT ===================== -->
+    <main>
+      <div class="inner">
+        <style>
+  #mq-root {
+    --mq-c: #3f6188; --mq-c-soft: #eef2f7;
+    --mq-s: #4d7d68; --mq-s-soft: #eef4f1;
+    --mq-w: #a3743e; --mq-w-soft: #f6f0e7;
+    --mq-bad: #a8554f; --mq-bad-soft: #f6ecea;
+    --mq-alt: #6b6f9a; --mq-alt-soft: #eef0f6;
+  }
+  .mq-sub { font-weight: 700; font-size: 14px; margin: 20px 0 6px; padding-left: 10px; border-left: 3px solid var(--accent); color: var(--text); }
+
+  .mq-cards { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin: 12px 0 6px; }
+  @media (max-width: 900px) { .mq-cards { grid-template-columns: 1fr; } }
+  .mq-card { border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 12px 14px; background: #fff; border-left-width: 4px; }
+  .mq-card.k { border-left-color: var(--mq-c); background: var(--mq-c-soft); }
+  .mq-card.h { border-left-color: var(--mq-s); background: var(--mq-s-soft); }
+  .mq-card.t { border-left-color: var(--mq-w); background: var(--mq-w-soft); }
+  .mq-card.o { border-left-color: var(--mq-alt); background: var(--mq-alt-soft); }
+  .mq-card.bad { border-left-color: var(--mq-bad); background: var(--mq-bad-soft); }
+  .mq-card .ct { font-weight: 700; font-size: 13.5px; margin-bottom: 3px; }
+  .mq-card .cl { font-family: var(--mono); font-size: 11px; color: var(--text-3); margin-bottom: 6px; letter-spacing: .04em; }
+  .mq-card .cs { font-size: 12.5px; color: var(--text-2); line-height: 1.55; }
+
+  .mq-flow { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin: 10px 0 4px; font-family: var(--mono); font-size: 12px; }
+  .mq-chip { border: 1px solid var(--border-strong); border-radius: 6px; padding: 6px 10px; background: #fff; font-weight: 600; color: var(--text); }
+  .mq-chip.cli { background: var(--mq-c-soft); border-color: var(--mq-c); color: var(--mq-c); }
+  .mq-chip.node { background: var(--mq-alt-soft); border-color: var(--mq-alt); color: var(--mq-alt); }
+  .mq-chip.ok { background: var(--mq-s-soft); border-color: var(--mq-s); color: var(--mq-s); }
+  .mq-chip.op { background: var(--bg-soft); color: var(--text-3); border-style: dashed; font-weight: 500; }
+  .mq-chip.bad { background: var(--mq-bad-soft); border-color: var(--mq-bad); color: var(--mq-bad); }
+  .mq-chip.warn { background: var(--mq-w-soft); border-color: var(--mq-w); color: var(--mq-w); }
+
+  .mq-split { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin: 12px 0; }
+  @media (max-width: 640px) { .mq-split { grid-template-columns: 1fr; } }
+  .mq-pane {
+    border: 1px solid var(--border); border-radius: var(--radius-sm);
+    background: #fff; padding: 14px; border-top: 3px solid var(--border-strong);
+  }
+  .mq-pane.ok { border-top-color: var(--mq-s); }
+  .mq-pane.warn { border-top-color: var(--mq-w); }
+  .mq-pane.bad { border-top-color: var(--mq-bad); }
+  .mq-pane.read { border-top-color: var(--mq-c); }
+  .mq-pane.alt { border-top-color: var(--mq-alt); }
+  .mq-pane .st { font-weight: 700; font-size: 14px; margin-bottom: 2px; }
+  .mq-pane .ss { font-family: var(--mono); font-size: 11px; color: var(--text-3); margin-bottom: 8px; letter-spacing: .04em; }
+  .mq-pane ul { margin: 0; padding-left: 1.15em; font-size: 13px; color: var(--text-2); line-height: 1.65; }
+
+  .mq-ctrl { display: flex; flex-wrap: wrap; gap: 10px; margin: 10px 0 8px; align-items: center; }
+  .mq-metric { display: flex; flex-wrap: wrap; gap: 14px; margin: 8px 0 4px; font-size: 13px; color: var(--text-2); }
+  .mq-metric strong { color: var(--text); font-family: var(--mono); font-size: 12.5px; }
+
+  .mq-mode-hint { font-size: 12.5px; color: var(--text-2); margin: 8px 0 4px; line-height: 1.55; }
+
+  .mq-view { display: block; }
+  .mq-view[hidden] { display: none; }
+  .mq-lane { display: flex; flex-wrap: wrap; gap: 8px; align-items: stretch; margin: 8px 0 4px; }
+  .mq-lane[hidden] { display: none; }
+  .mq-actors { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin: 12px 0 6px; }
+  @media (max-width: 720px) { .mq-actors { grid-template-columns: 1fr; } }
+  .mq-actors[hidden] { display: none; }
+
+  .mq-col-label {
+    font-family: var(--mono); font-size: 10.5px; letter-spacing: .06em; text-transform: uppercase;
+    color: var(--text-3); margin: 10px 0 2px;
+  }
+
+  .mq-msg {
+    flex: 1 1 88px; min-width: 88px;
+    border: 1.5px solid var(--border-strong); border-radius: var(--radius-sm);
+    padding: 8px 8px 7px; background: #fff; text-align: center;
+    transition: background .18s, border-color .18s, box-shadow .18s, opacity .18s;
+  }
+  .mq-msg .mn { font-weight: 700; font-size: 13px; }
+  .mq-msg .ml { font-family: var(--mono); font-size: 10.5px; color: var(--text-3); margin-top: 2px; }
+  .mq-msg .mh { font-size: 11.5px; color: var(--text-2); margin-top: 5px; min-height: 1.35em; }
+  .mq-msg.ready { background: var(--mq-c-soft); border-color: var(--mq-c); }
+  .mq-msg.ready .mn { color: var(--mq-c); }
+  .mq-msg.hold { background: var(--warn-soft); border-color: var(--warn); box-shadow: 0 0 0 3px var(--warn-soft); }
+  .mq-msg.hold .mn { color: var(--warn); }
+  .mq-msg.ok { background: var(--ok-soft); border-color: var(--ok); }
+  .mq-msg.ok .mn { color: var(--ok); }
+  .mq-msg.gone { background: var(--bg-soft); border-color: var(--border); opacity: .55; }
+  .mq-msg.dup { background: var(--warn-soft); border-color: var(--warn); }
+  .mq-msg.dup .mn { color: var(--warn); }
+  .mq-msg.bad { background: var(--bad-soft); border-color: var(--bad); }
+  .mq-msg.bad .mn { color: var(--bad); }
+  .mq-msg.wait { background: var(--accent-soft); border-color: var(--accent); }
+  .mq-msg.idle { background: #fff; }
+
+  .mq-node {
+    border: 1.5px solid var(--border-strong); border-radius: var(--radius-sm);
+    padding: 10px 10px 8px; background: #fff;
+    transition: background .18s, border-color .18s, box-shadow .18s;
+  }
+  .mq-node .an { font-weight: 700; font-size: 13px; }
+  .mq-node .al { font-family: var(--mono); font-size: 10.5px; color: var(--text-3); margin-top: 2px; }
+  .mq-node .av { font-family: var(--mono); font-size: 12.5px; font-weight: 700; margin-top: 8px; color: var(--text); word-break: break-all; }
+  .mq-node .ah { font-size: 11.5px; color: var(--text-2); margin-top: 4px; min-height: 1.4em; }
+  .mq-node.idle { background: #fff; }
+  .mq-node.hold { background: var(--ok-soft); border-color: var(--ok); }
+  .mq-node.hold .an { color: var(--ok); }
+  .mq-node.frozen { background: var(--warn-soft); border-color: var(--warn); }
+  .mq-node.frozen .an { color: var(--warn); }
+  .mq-node.wait { background: var(--accent-soft); border-color: var(--accent); }
+  .mq-node.wait .an { color: var(--accent); }
+  .mq-node.bad { background: var(--bad-soft); border-color: var(--bad); }
+  .mq-node.bad .an { color: var(--bad); }
+  .mq-node.coord { border-style: dashed; }
+
+  .mq-dlq {
+    margin-top: 10px; padding: 12px 14px; border: 1.5px dashed var(--border-strong);
+    border-radius: var(--radius-sm); background: #fff;
+  }
+  .mq-dlq .rt { font-weight: 700; font-size: 13px; margin-bottom: 4px; }
+  .mq-dlq .rs { font-family: var(--mono); font-size: 11px; color: var(--text-3); margin-bottom: 8px; }
+  .mq-dlq.has { border-color: var(--bad); background: var(--bad-soft); border-style: solid; }
+
+  .mq-panels { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 12px; }
+  @media (max-width: 640px) { .mq-panels { grid-template-columns: 1fr; } }
+  .mq-panel { border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 12px; background: #fff; }
+  .mq-panel .pt {
+    font-size: 11px; color: var(--text-3); letter-spacing: .06em; text-transform: uppercase;
+    font-family: var(--mono); margin-bottom: 8px;
+  }
+  .mq-panel .prow {
+    display: flex; justify-content: space-between; gap: 8px;
+    font-family: var(--mono); font-size: 12px; padding: 4px 0;
+    border-bottom: 1px dashed var(--border);
+  }
+  .mq-panel .prow:last-child { border-bottom: none; }
+  .mq-panel .pk { color: var(--text-3); white-space: nowrap; }
+  .mq-panel .pv { color: var(--text); font-weight: 600; text-align: right; word-break: break-all; }
+  .mq-panel .pv.good { color: var(--ok); }
+  .mq-panel .pv.bad { color: var(--bad); }
+  .mq-panel .pv.warn { color: var(--warn); }
+
+  .mq-wire {
+    border: 1px solid var(--border); border-radius: var(--radius-sm);
+    background: #fff; padding: 8px 10px; margin-top: 10px; max-height: 280px; overflow-y: auto;
+  }
+  .mq-row {
+    display: flex; align-items: baseline; gap: 8px;
+    font-family: var(--mono); font-size: 11.5px; padding: 4px 0;
+    border-bottom: 1px dashed var(--border);
+  }
+  .mq-row:last-child { border-bottom: none; }
+  .mq-row .ar { width: 42px; flex: none; text-align: center; color: var(--text-3); font-weight: 700; }
+  .mq-row .tg {
+    flex: none; border-radius: 4px; padding: 2px 6px; font-size: 10.5px; font-weight: 700;
+    border: 1px solid var(--border-strong); background: var(--bg-soft); color: var(--text-3);
+  }
+  .mq-row .tx { color: var(--text-2); line-height: 1.5; }
+  .mq-row.read .tg { background: var(--mq-c-soft); border-color: var(--mq-c); color: var(--mq-c); }
+  .mq-row.ok .tg { background: var(--mq-s-soft); border-color: var(--mq-s); color: var(--mq-s); }
+  .mq-row.warn .tg { background: var(--mq-w-soft); border-color: var(--mq-w); color: var(--mq-w); }
+  .mq-row.bad .tg { background: var(--mq-bad-soft); border-color: var(--mq-bad); color: var(--mq-bad); }
+
+  .mq-verdict {
+    margin-top: 10px; padding: 10px 12px; border-radius: var(--radius-sm);
+    border: 1px solid var(--border); background: var(--bg-soft);
+    font-size: 13px; color: var(--text-2); line-height: 1.55;
+  }
+  .mq-verdict.tone-ok { border-left: 3px solid var(--ok); background: var(--ok-soft); color: var(--text); }
+  .mq-verdict.tone-lock { border-left: 3px solid var(--warn); background: var(--warn-soft); color: var(--text); }
+  .mq-verdict.tone-bad { border-left: 3px solid var(--bad); background: var(--bad-soft); color: var(--text); }
+</style>
+
+<div id="mq-root">
+
+<section id="s1">
+  <div class="sec-head">
+    <span class="sec-num">01</span>
+    <h2>總覽與定位</h2>
+  </div>
+  <p class="sec-sub">後端服務之間的資料骨幹，先分清兩種模型：訊息被消費即消失的 Queue，以及可重放的有序 Log。</p>
+
+  <p>同步 RPC 把呼叫者釘在被呼叫者的延遲、重試與容量上。訊息骨幹把這條耦合拆開：生產者把工作或事件交給 broker，消費者用自己的節奏處理。面試與設計文件裡「加一個 queue」常被當成萬靈丹，真正要先答的是<strong>這根骨幹是哪一種模型</strong>——因為兩種模型對「誰拿走這則訊息、能不能回頭再看一次、第二組消費者看不看得到」給出完全相反的答案。</p>
+
+  <div class="mq-cards">
+    <div class="mq-card k">
+      <div class="ct">1 · Queue</div>
+      <div class="cl">消費即消失 · Competing Consumers</div>
+      <div class="cs">一則訊息只給一個工人。ACK 之後 broker 不再持有它，後來者無法回溯。適合任務分派。</div>
+    </div>
+    <div class="mq-card h">
+      <div class="ct">2 · Log</div>
+      <div class="cl">保留 · 獨立游標 · 可重放</div>
+      <div class="cs">訊息追加後依保留策略留下。每一組消費者自己移動游標，互不搶奪。適合事件流。</div>
+    </div>
+    <div class="mq-card t">
+      <div class="ct">3 · 交付與失敗</div>
+      <div class="cl">租約 · 語義 · DLQ</div>
+      <div class="cs">Visibility timeout 是租約。At-least-once 是預設；效果只發生一次必須靠冪等。Poison 要進 DLQ。</div>
+    </div>
+  </div>
+
+  <p>本篇是 Messaging &amp; Streaming 這一群的<strong>定義層與入口</strong>。只用中立模型講語意與取捨，不走進任何單一產品的內部結構：Partition、Offset 協定、ISR、Rebalance 留給 <em>Kafka 架構</em>。用事件重劃服務邊界與 Transactional Outbox 留給 <em>Event-Driven Architecture</em>。有狀態運算與時間視窗留給 <em>Stream Processing</em>。資料庫變更日誌從哪裡來，留給 <em>CDC</em>。</p>
+  <p>相鄰兩篇也請分清座標：<em>MQTT 與 IoT Messaging</em> 處理裝置端受限網路下的 pub/sub 與 QoS 0/1/2；本篇處理<strong>後端服務之間</strong>的資料骨幹。<em>即時連線擴展</em> 的 Backpressure 是長連線 fan-out 視角（這條連線還吞不吞得下下一則推送）；本篇的流控發生在 <strong>broker 與消費者之間</strong>（這個工人還接不接得下一則工作）。</p>
+
+  <div class="callout accent">
+    <div class="c-title"><span class="ic">座標</span>先選模型，再選產品名</div>
+    <p>同一個產品可以同時暴露兩種臉：工作佇列模式走 Queue 語意，主題訂閱走 Log 語意。面試被問「Kafka 跟 SQS 差在哪」時，先答「一個預設是可重放的有序日誌、一個預設是消費即消失的工作佇列」，再補產品細節。反過來先背 API，分數會停在使用說明。</p>
+  </div>
+
+  <div class="oneliner">
+    <b>一句話答法</b>訊息骨幹先分 Queue 與 Log：前者消費即消失、工人互搶；後者保留歷史、各組獨立游標。交付語意、租約與 DLQ 建立在這條分界之上。
+  </div>
+</section>
+
+<section id="s2">
+  <div class="sec-head">
+    <span class="sec-num">02</span>
+    <h2>Queue 模型：消費即消失</h2>
+  </div>
+  <p class="sec-sub">一則訊息是一份工作。誰先拿走誰做，做完就從 broker 消失，後來者看不到歷史。</p>
+
+  <p>Queue 的單位是<strong>工作</strong>，不是「大家都該看見的事實」。生產者把一則訊息放進佇列；一組 Competing Consumers 互相競爭，broker 把每一則最多交給其中一個工人。成功 ACK 之後，這則訊息從 broker 刪除——它的生命週期結束了。</p>
+
+  <div class="mq-flow">
+    <span class="mq-chip cli">Producer</span>
+    <span class="mq-chip op">enqueue</span>
+    <span class="mq-chip node">Broker Queue</span>
+    <span class="mq-chip op">deliver one-of-N</span>
+    <span class="mq-chip warn">Worker 處理</span>
+    <span class="mq-chip op">ACK</span>
+    <span class="mq-chip ok">刪除 · 無法回溯</span>
+  </div>
+
+  <p>這份語意買到兩件事：</p>
+  <ul>
+    <li><strong>任務只做一次的意圖</strong>（在不發生重投的理想路徑上）。縮圖、寄信、扣庫存這類「有一個工人把它做完就好」的工作，對上 Queue。</li>
+    <li><strong>水平擴充工人即可提高吞吐</strong>。N 個 Competing Consumers 同時拉工作，佇列深度是積壓指標，工人數是處理容量。</li>
+  </ul>
+
+  <p>代價同樣清楚：<strong>沒有歷史</strong>。新上線的服務、要重算過去一小時的報表、要把同一批事件再餵給另一個團隊——Queue 給不了。訊息走了就是走了。若你發現自己在 Queue 前面再加一個「備份表」好讓別人重放，那是在用手刻 Log 模型，應該換模型而不是繼續補洞。</p>
+
+  <div class="callout warn">
+    <div class="c-title"><span class="ic">陷阱</span>把 Queue 當事件匯流排</div>
+    <p>「訂單建立」若要同時通知庫存、積分、搜尋索引與稽核，塞進同一條 Queue 再靠第一個工人轉發，等於把扇出寫進業務程式。第二個訂閱者週三才上線，週一週二的訂單它永遠看不到。這不是工人不夠，是模型選錯——事件扇出是 Log（或至少是可保留的 pub/sub）的工作。</p>
+  </div>
+
+  <div class="oneliner">
+    <b>一句話答法</b>Queue 把訊息當工作：Competing Consumers 互搶，ACK 後刪除，無法回溯。適合任務分派，不適合當多組獨立讀者的事件源。
+  </div>
+</section>
+
+<section id="s3">
+  <div class="sec-head">
+    <span class="sec-num">03</span>
+    <h2>Log 模型：可重放的有序日誌</h2>
+  </div>
+  <p class="sec-sub">訊息追加後留下。每一組消費者自己握游標，互不搶奪；重放是把游標往回撥。</p>
+
+  <p>Log 的單位是<strong>已發生的事實</strong>。生產者把訊息追加到一條有序日誌；broker 依保留策略（時間或容量）持有它，不因為有人讀過就刪。消費者以<strong>組</strong>為單位各自記住「我讀到哪裡」——這個位置叫游標。產品常把游標叫做 offset，那是實作名稱；本篇只需要語意：<strong>游標屬於消費者組，不屬於訊息本身</strong>。</p>
+
+  <div class="mq-split">
+    <div class="mq-pane read">
+      <div class="st">同一條 Log，兩組讀者</div>
+      <div class="ss">游標獨立，互不刪除對方的資料</div>
+      <ul>
+        <li>組 A 讀完 M1–M4，游標停在末端</li>
+        <li>組 B 週三才上線，仍可從保留起點重讀</li>
+        <li>組 A 把游標撥回起點，即可重放</li>
+        <li>訊息還在不取決於有沒有人 ACK</li>
+      </ul>
+    </div>
+    <div class="mq-pane alt">
+      <div class="st">Queue 做不到的三件事</div>
+      <div class="ss">因為 ACK 等價於刪除</div>
+      <ul>
+        <li>晚到的訂閱者補歷史</li>
+        <li>同一批訊息餵給獨立的下游</li>
+        <li>處理邏輯改版後重跑過去的資料</li>
+      </ul>
+    </div>
+  </div>
+
+  <p>Log 並不是無限硬碟。保留策略一到，舊訊息被丟掉，游標若還停在已被回收的位置，消費者必須決定「從現在的最早位置接著讀」還是「視為資料缺口」。把 Log 講成「永遠可重放」是行銷句，工程句是<strong>在保留窗口內可重放</strong>。</p>
+
+  <div class="callout accent">
+    <div class="c-title"><span class="ic">關鍵</span>ACK 在 Log 裡只移動自己的游標</div>
+    <p>Queue 的 ACK 對全世界生效：訊息消失。Log 的 ACK（或 commit cursor）只對<strong>這一個消費者組</strong>生效：其他人的游標不動，日誌本體不動。面試把兩種 ACK 講成同一件事，後面的重放、重試、Exactly-once 討論會全部錯位。分區怎麼切、游標怎麼提交、組員怎麼重排，是 <em>Kafka 架構</em> 的協定細節，本篇停在「游標是組私有的」這一句。</p>
+  </div>
+
+  <div class="oneliner">
+    <b>一句話答法</b>Log 把訊息當可保留的有序事實：各消費者組獨立移動游標，保留窗口內可重放。ACK 只推進自己的位置，不刪日誌。
+  </div>
+</section>
+
+<section id="s4">
+  <div class="sec-head">
+    <span class="sec-num">04</span>
+    <h2>Push、Pull 與 broker–consumer 流控</h2>
+  </div>
+  <p class="sec-sub">誰決定下一則何時出門？流控發生在 broker 與工人之間，不是長連線往裝置扇出的那一條。</p>
+
+  <p>模型決定「訊息活多久、誰看得到」；傳遞方向決定「慢消費者會不會被灌爆」。這裡的 Backpressure 問的是：<strong>這個工人處理不過來時，broker 還要不要繼續塞？</strong></p>
+
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th></th>
+          <th>Push</th>
+          <th>Pull / Long-poll</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>下一則由誰發起</td>
+          <td>Broker 主動送出</td>
+          <td class="hl">消費者來取，或掛著等</td>
+        </tr>
+        <tr>
+          <td>天然流控</td>
+          <td>弱。必須另做 credit / prefetch</td>
+          <td>強。不取就不來</td>
+        </tr>
+        <tr>
+          <td>空佇列成本</td>
+          <td>低（有貨才推）</td>
+          <td>短輪詢浪費；長輪詢把等待留給 broker</td>
+        </tr>
+        <tr>
+          <td>典型代價</td>
+          <td>慢工人記憶體被灌滿、ACK 落後</td>
+          <td>多一趟「我準備好了」的往返</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="cap">長輪詢是折衷：消費者發出「有貨再回我」，broker 在超時前一直握著這次請求。空佇列不打轉，有貨時延遲接近 Push。</p>
+
+  <p>純 Push 並非不能用，但必須有<strong>信用額度</strong>：消費者先聲明「最多同時在途 <var>N</var> 則」，broker 送滿就停，ACK 回來再補。這就是 prefetch / credit-based flow control。沒有額度的 Push，等於假設每個工人都是無限快——流量一尖，先爆的是消費者進程，不是 broker。</p>
+
+  <div class="callout warn">
+    <div class="c-title"><span class="ic">陷阱</span>把兩種 Backpressure 講成同一件事</div>
+    <p><em>即時連線擴展</em> 談的是：gateway 對這條長連線 fan-out 時，裝置或下游 socket 的接收窗口滿了怎麼辦。本篇談的是：broker 對工人投遞時，工人的處理隊列滿了怎麼辦。前者卡住會影響同房間其他人的推送路徑；後者卡住應該讓訊息<strong>留在 broker</strong>（或變成積壓指標），不要灌進即將 OOM 的工人。解法可以長得很像（credit、停推），座標不同，選錯層會修錯元件。</p>
+  </div>
+
+  <div class="oneliner">
+    <b>一句話答法</b>Push 要靠 credit / prefetch 才有流控；Pull 與長輪詢讓工人用「取」表達自己的容量。這裡的 Backpressure 在 broker 與消費者之間，不是長連線扇出。
+  </div>
+</section>
+
+<section id="s5">
+  <div class="sec-head">
+    <span class="sec-num">05</span>
+    <h2>ACK 與 Visibility Timeout：租約語意</h2>
+  </div>
+  <p class="sec-sub">ACK 的含義是「副作用做完了」，不是「我收到了」。沒 ACK 之前，訊息只是被租走。</p>
+
+  <p>工人從 broker 拿到一則訊息時，這則訊息並沒有被刪除。它進入<strong>不可見窗口</strong>：其他 Competing Consumers 暫時看不到它，避免兩個人同時做同一份工作。這個窗口就是 Visibility Timeout，本質是一張<strong>租約</strong>：在到期前，持有者必須 ACK（做完）或續租（還在做）；到期而沒有 ACK，訊息重新可見，下一個工人可以再拿走。</p>
+
+  <div class="formula">租約內 ACK → 刪除或推進游標；租約到期未 ACK → 重新可見（重投）</div>
+
+  <p>因此 ACK 的時機幾乎只有一個正確答案：<strong>外部副作用成功之後</strong>。先 ACK 再處理，等於選擇 At-most-once——進程在 ACK 與副作用之間崩潰，這則工作永遠消失。先處理再 ACK，崩潰會重投，走 At-least-once。沒有第三條既不丟又不重複、又完全不靠應用層的免費路徑。</p>
+
+  <p class="mq-sub">處理耗時必須小於租約，或你得會續租</p>
+  <p>租約長度是一道工程參數，不是協定魔法：</p>
+  <ul>
+    <li><strong>太短</strong>：正常處理還沒做完，訊息已重新可見。第二個工人接手，第一個工人稍後也 ACK——同一則工作的副作用發生兩次。</li>
+    <li><strong>太長</strong>：工人崩潰後，訊息要等整段租約才被救回。積壓看起來「有貨沒人做」，其實卡在一張過期很慢的租約上。</li>
+    <li><strong>可變工時</strong>：長尾請求必須能延長租約（heartbeat / change-visibility）。固定 timeout 假設「每則工作一樣久」，長尾一到就重投。</li>
+  </ul>
+
+  <div class="callout accent">
+    <div class="c-title"><span class="ic">關鍵</span>重投不是 bug，是租約的定義</div>
+    <p>Visibility timeout 到期後的第二次投遞，是系統在說「我不確定上一任做完沒有」。這跟協調服務的 Session 過期是同一類契約：集群側的時鐘說了算，工人本地「我還在做」不算數。GC pause、長 IO、被 SIGSTOP，都會讓本地計時器說謊。所以消費者必須把每一則訊息當成可能是重投，處理路徑從第一天就按冪等來寫。</p>
+  </div>
+
+  <div class="oneliner">
+    <b>一句話答法</b>Visibility timeout 是處理中的租約：ACK 代表副作用完成，到期未 ACK 就重投。ACK 必須發生在副作用之後，否則你選的是 At-most-once。
+  </div>
+</section>
+
+<section id="s6">
+  <div class="sec-head">
+    <span class="sec-num">06</span>
+    <h2>三種交付語義，以及「效果只發生一次」</h2>
+  </div>
+  <p class="sec-sub">Broker 能保證的是投遞次數的上界或下界。「效果只發生一次」是應用不變量，不是 checkbox。</p>
+
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>語義</th>
+          <th>Broker 側通常怎麼做</th>
+          <th>失敗時</th>
+          <th>適用</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>At-most-once</td>
+          <td>送出即丟，或 ACK 先於處理</td>
+          <td class="hl">可能遺失，不會重複</td>
+          <td>指標、日誌、可容忍缺口的取樣</td>
+        </tr>
+        <tr>
+          <td>At-least-once</td>
+          <td>未 ACK 則重投；租約到期再可見</td>
+          <td>可能重複，盡力不丟</td>
+          <td class="hl">預設。多數業務事件</td>
+        </tr>
+        <tr>
+          <td>Exactly-once（投遞）</td>
+          <td>端到端原子：產出與游標同一交易</td>
+          <td>產品能力，範圍有限</td>
+          <td>同系統內的讀→寫管線</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="cap">MQTT 的 QoS 0/1/2 是裝置端協定標籤，對應「最多一次 / 至少一次 / 握手去重」；那是 <em>MQTT 與 IoT Messaging</em> 的範圍。後端骨幹請用這張表的語意說話，不要把 QoS 2 直接翻譯成業務 Exactly-once。</p>
+
+  <p>面試高分句是把「投遞」和「效果」拆開：</p>
+
+  <div class="formula">效果只發生一次 = At-least-once 投遞 + 冪等處理（或去重鍵）</div>
+
+  <p>Broker 就算宣稱 Exactly-once，保證的通常是「這則紀錄不會在<strong>這條管線裡</strong>被提交兩次」——例如消費與寫入下一個 topic 落在同一事務。它<strong>看不見</strong>你對付款 API、郵件、第三方倉儲發出的副作用。那些呼叫崩潰重試一次，效果就是兩次。能把「效果只發生一次」變成不變量的，是：</p>
+  <ul>
+    <li><strong>冪等處理</strong>：同一則訊息做兩次，狀態與第一次相同（條件寫入、set 語意、自然冪等）。</li>
+    <li><strong>去重鍵</strong>：訊息帶穩定 <code>idempotency-key</code> / 業務單號，副作用端用唯一約束擋住第二次。</li>
+    <li><strong>收斂寫入</strong>：寫的是「最新值」而不是「加一」，亂序與重複都落到同一終態。</li>
+  </ul>
+
+  <div class="callout warn">
+    <div class="c-title"><span class="ic">陷阱</span>「我們開了 Exactly-once，所以 handler 可以不冪等」</div>
+    <p>產品的 Exactly-once 有範圍：通常止於該產品認識的儲存與游標。一跨出進程、一碰到外部 HTTP、一寫進另一套資料庫，範圍就結束。把 checkbox 當成全域物理定律，是生產事故的固定劇本。正確說法是：broker 減少<strong>管線內</strong>的重複提交；效果層的不變量仍由你寫。</p>
+  </div>
+
+  <div class="oneliner">
+    <b>一句話答法</b>At-most-once 可能丟、At-least-once 可能重複。Exactly-once 投遞是產品管線的範圍聲明；效果只發生一次必須靠冪等或去重，不能只靠 broker 的 checkbox。
+  </div>
+</section>
+
+<section id="s7">
+  <div class="sec-head">
+    <span class="sec-num">07</span>
+    <h2>重試、退避與 Dead Letter Queue</h2>
+  </div>
+  <p class="sec-sub">暫時故障該退後再試；Poison 必須分流。DLQ 是人工介入的入口，不是自動成功。</p>
+
+  <p>At-least-once 意味著失敗會再來一次。問題是「再來一次」的節奏與上限。兩類失敗要分開：</p>
+
+  <div class="mq-split">
+    <div class="mq-pane warn">
+      <div class="st">暫時故障</div>
+      <div class="ss">下一秒可能好</div>
+      <ul>
+        <li>下游 503、鎖衝突、短暫超時</li>
+        <li>指數退避 + jitter，避免同步重試打爆下游</li>
+        <li>租約內續租，避免還沒退完就被別人搶走</li>
+        <li>有預算：最多試 <var>N</var> 次或最長 <var>T</var></li>
+      </ul>
+    </div>
+    <div class="mq-pane bad">
+      <div class="st">Poison / 永久失敗</div>
+      <div class="ss">再試一百次仍會炸</div>
+      <ul>
+        <li>schema 對不上、必填欄缺失、業務拒絕</li>
+        <li>無限重試只會佔住工人與租約</li>
+        <li>達上限後移出主路徑，寫入 DLQ</li>
+        <li>主路徑繼續走，不被一則壞訊息塞死</li>
+      </ul>
+    </div>
+  </div>
+
+  <p>Dead Letter Queue 的工作是<strong>隔離</strong>：把無法自動完成的訊息從熱路徑拿開，保留原文、失敗原因、投遞次數，等人工或離線作業處理。它不是第二條會自己變成功的管道。常見誤用：</p>
+  <ul>
+    <li><strong>沒人看的 DLQ</strong>：等於靜默丟棄，只是換了個比較體面的桶。</li>
+    <li><strong>DLQ 再自動打回主佇列且不修資料</strong>：Poison 會在兩條佇列之間振盪。</li>
+    <li><strong>沒有告警與積壓 SLO</strong>：DLQ 深度是事故指標，應跟主佇列一樣被看著。</li>
+  </ul>
+
+  <div class="callout accent">
+    <div class="c-title"><span class="ic">關鍵</span>重試次數是產品決策，不是越大越可靠</div>
+    <p>每次重試都可能再做一次副作用。上限太高，Poison 在主路徑上燒工時；上限太低，暫時抖動被誤判成死信。實務上把「可重試錯誤」與「不可重試錯誤」從 handler 明確拋出：後者直接進 DLQ，前者才走退避。不要讓所有 exception 共用同一條指數曲線。</p>
+  </div>
+
+  <div class="oneliner">
+    <b>一句話答法</b>暫時故障用帶 jitter 的退避與有限次數重試；Poison 達上限進 DLQ，由人處理。DLQ 是隔離與可見性，不是自動修復。
+  </div>
+</section>
+
+<section id="s8">
+  <div class="sec-head">
+    <span class="sec-num">08</span>
+    <h2>順序保證與 Competing Consumers</h2>
+  </div>
+  <p class="sec-sub">全域有序用單一工人換來，代價是隊頭阻塞。要吞吐，就接受放棄全域順序。</p>
+
+  <p>「訊息要按順序」聽起來無害，直到你問<strong>哪一個範圍的順序</strong>。三種常見契約，吞吐與延遲完全不同：</p>
+
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>契約</th>
+          <th>怎麼實現（模型層）</th>
+          <th>吞吐</th>
+          <th>主要代價</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>無序</td>
+          <td class="hl">Competing Consumers，任意工人拿下一則</td>
+          <td>高，近乎工人數倍增</td>
+          <td>同一實體的先後可能顛倒</td>
+        </tr>
+        <tr>
+          <td>每把 key 有序</td>
+          <td>同 key 進同一條有序流，不同 key 並行</td>
+          <td>中，受最熱 key 限制</td>
+          <td>熱 key 變成單一小佇列</td>
+        </tr>
+        <tr>
+          <td>全域有序</td>
+          <td>單一有序流 + 單一活躍消費者</td>
+          <td>低，等於一個人的速度</td>
+          <td class="hl">Head-of-line blocking</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="cap">「每把 key 有序」在產品裡常落成「同一分區有序」。分區怎麼映射、怎麼再平衡是 Kafka 篇的事；這裡只需記住：有序範圍愈大，可並行的工人愈少。</p>
+
+  <p>Head-of-line blocking 是全域（或單流）有序的帳單：隊頭那則訊息若處理很慢、或卡在重試，<strong>後面所有已經到達、其實可以做的訊息都得等</strong>。你用順序換來的是「M2 絕不先於 M1 生效」；你付出去的是整條流的尾延遲。Competing Consumers 把這張帳單撕掉：任何人都能拿下一則，慢請求只擋住自己，但 M2 可能先於 M1 被處理。</p>
+
+  <div class="mq-flow">
+    <span class="mq-chip ok">要吞吐</span>
+    <span class="mq-chip op">→</span>
+    <span class="mq-chip cli">Competing Consumers</span>
+    <span class="mq-chip op">放棄全域序</span>
+    <span class="mq-chip warn">要同實體有序</span>
+    <span class="mq-chip op">→</span>
+    <span class="mq-chip node">按 key 分流</span>
+    <span class="mq-chip op">接受熱 key</span>
+    <span class="mq-chip bad">要全域序</span>
+    <span class="mq-chip op">→</span>
+    <span class="mq-chip bad">單流單工人</span>
+  </div>
+
+  <div class="callout warn">
+    <div class="c-title"><span class="ic">陷阱</span>「我們要順序，所以只開一個消費者」卻沒定義順序的範圍</div>
+    <p>多數業務要的其實是「同一張訂單的事件不要亂」，不是「全站所有訂單排成一列」。前者用訂單編號當 key 即可並行；後者把全站吞吐釘死在一個人身上。面試先問範圍，再決定工人數。不要為了一個沒寫清楚的「要有序」，主動送出 HOL 這張帳單。</p>
+  </div>
+
+  <div class="oneliner">
+    <b>一句話答法</b>Competing Consumers 換吞吐、放棄全域序；單一有序流換順序、付出 HOL blocking。先定義有序範圍，再決定能不能並行。
+  </div>
+</section>
+
+<section id="s9">
+  <div class="sec-head">
+    <span class="sec-num">09</span>
+    <h2>互動 · Queue / Log 與租約重投</h2>
+  </div>
+  <p class="sec-sub">同一批訊息在兩種模型下被消費與重放；再把處理耗時對上 Visibility timeout，看重複投遞與 DLQ。</p>
+
+  <div class="demo" id="demo-mq">
+    <div class="demo-bar">
+      <span class="label">互動 · 訊息模型</span>
+      <span class="label" style="text-transform:none;font-family:var(--sans);font-size:12px;color:var(--text-2)">下一步推進時序；重置回到起點</span>
+    </div>
+    <div class="demo-body">
+      <div class="seg" role="group" aria-label="情境切換" id="mq-seg-mode">
+        <button data-mode="model" aria-pressed="true">Queue vs Log</button>
+        <button data-mode="lease" aria-pressed="false">Visibility · DLQ</button>
+      </div>
+
+      <div id="mq-model-view" class="mq-view">
+        <div class="seg" role="group" aria-label="模型切換" id="mq-seg-kind" style="margin-top:8px">
+          <button data-kind="queue" aria-pressed="true">Queue · 消費即消失</button>
+          <button data-kind="log" aria-pressed="false">Log · 可重放</button>
+        </div>
+        <p class="mq-mode-hint">同一批 M1–M4。Queue 下工人互搶，ACK 後空佇列無法回溯；Log 下兩組獨立游標，組 A 可把游標撥回去重放。</p>
+      </div>
+
+      <div id="mq-lease-view" class="mq-view" hidden>
+        <div class="seg" role="group" aria-label="租約長度" id="mq-seg-vt" style="margin-top:8px">
+          <button data-vt="short" aria-pressed="true">VT = 2（短於慢請求）</button>
+          <button data-vt="long" aria-pressed="false">VT = 6（長於慢請求）</button>
+        </div>
+        <p class="mq-mode-hint">OK 處理 1 tick、SLOW 處理 4 ticks、POISON 每次都失敗。短租約會在 SLOW 做完前重投；兩種設定下 Poison 達 3 次都進 DLQ。</p>
+      </div>
+
+      <div class="mq-ctrl">
+        <button class="btn primary" id="mq-btn-next">下一步</button>
+        <button class="btn" id="mq-btn-reset">重置</button>
+      </div>
+
+      <div class="mq-metric">
+        <span>步 <strong id="mq-m-step">0</strong> / <span id="mq-m-total">5</span></span>
+        <span>投遞 <strong id="mq-m-del">0</strong></span>
+        <span>ACK <strong id="mq-m-ack">0</strong></span>
+        <span>重投 <strong id="mq-m-redel">0</strong></span>
+        <span>副作用 <strong id="mq-m-fx">0</strong></span>
+        <span>DLQ <strong id="mq-m-dlq">0</strong></span>
+      </div>
+
+      <div class="legend">
+        <span><i class="dot ns-idle"></i>待命 / 已刪</span>
+        <span><i class="dot ns-wait"></i>在 broker 可見</span>
+        <span><i class="dot ns-lock"></i>租約中 / 處理中</span>
+        <span><i class="dot ns-ok"></i>ACK / 已提交游標</span>
+        <span><i class="dot ns-bad"></i>重投 / Poison / DLQ</span>
+      </div>
+
+      <div class="mq-col-label" id="mq-lane-label">Broker</div>
+      <div class="mq-lane" id="mq-lane" aria-live="polite"></div>
+
+      <div class="mq-actors" id="mq-actors">
+        <div class="mq-node idle" data-role="prod">
+          <div class="an">Producer</div>
+          <div class="al" data-sub>寫入端</div>
+          <div class="av" data-val>—</div>
+          <div class="ah" data-hint>待命</div>
+        </div>
+        <div class="mq-node coord idle" data-role="broker">
+          <div class="an" id="mq-broker-name">Queue</div>
+          <div class="al" data-sub>Broker</div>
+          <div class="av" data-val>depth 0</div>
+          <div class="ah" data-hint>空</div>
+        </div>
+        <div class="mq-node idle" data-role="wa">
+          <div class="an" id="mq-wa-name">Worker A</div>
+          <div class="al" data-sub>消費者</div>
+          <div class="av" data-val>—</div>
+          <div class="ah" data-hint>待命</div>
+        </div>
+        <div class="mq-node idle" data-role="wb">
+          <div class="an" id="mq-wb-name">Worker B</div>
+          <div class="al" data-sub>消費者</div>
+          <div class="av" data-val>—</div>
+          <div class="ah" data-hint>待命</div>
+        </div>
+        <div class="mq-node idle" data-role="extra">
+          <div class="an" id="mq-ex-name">Worker C</div>
+          <div class="al" data-sub>晚到者</div>
+          <div class="av" data-val>—</div>
+          <div class="ah" data-hint>尚未加入</div>
+        </div>
+      </div>
+
+      <div id="mq-dlq" class="mq-dlq mq-view" hidden>
+        <div class="rt">Dead Letter Queue</div>
+        <div class="rs">主路徑隔離 · 等人工介入</div>
+        <div class="mq-metric" style="margin:0">
+          <span>內容 <strong id="mq-dlq-val">（空）</strong></span>
+          <span>失敗次數 <strong id="mq-dlq-n">0</strong></span>
+          <span>處置 <strong id="mq-dlq-act">尚未分流</strong></span>
+        </div>
+      </div>
+
+      <div class="mq-panels">
+        <div class="mq-panel">
+          <div class="pt">本步語義</div>
+          <div class="prow"><span class="pk">事件</span><span class="pv" id="mq-p-op">—</span></div>
+          <div class="prow"><span class="pk">規則</span><span class="pv" id="mq-p-rule">—</span></div>
+          <div class="prow"><span class="pk">持有 / 游標</span><span class="pv" id="mq-p-hold">—</span></div>
+          <div class="prow"><span class="pk">消費者</span><span class="pv" id="mq-p-cli">—</span></div>
+        </div>
+        <div class="mq-panel">
+          <div class="pt">觀測</div>
+          <div class="prow"><span class="pk">模型 / VT</span><span class="pv" id="mq-p-model">Queue</span></div>
+          <div class="prow"><span class="pk">可見深度</span><span class="pv" id="mq-p-depth">0</span></div>
+          <div class="prow"><span class="pk">重放可能</span><span class="pv" id="mq-p-replay">否</span></div>
+          <div class="prow"><span class="pk">效果次數</span><span class="pv" id="mq-p-fx">0</span></div>
+        </div>
+      </div>
+
+      <div class="status-line" id="mq-status">選擇情境後按「下一步」。Queue/Log 各 5 步；租約劇本 7 步。</div>
+      <div class="mq-verdict" id="mq-verdict">判定尚未產生——走完一輪後會摘要能否重放，或短租約是否造成重複副作用。</div>
+      <div class="mq-wire" id="mq-wire" aria-label="事件日誌"></div>
+    </div>
+  </div>
+  <p class="cap">Queue 走完後晚到者兩手空空，是模型定義，不是 bug。短 VT 下 SLOW 的第二次副作用請看成 At-least-once 的帳單；POISON 進 DLQ 是隔離成功（主路徑被救回來）。</p>
+
+  <div class="oneliner">
+    <b>一句話答法</b>同一批訊息：Queue ACK 後無法回溯，Log 靠獨立游標重放。處理慢於 Visibility timeout 就會重投；Poison 達上限必須離開主路徑。
+  </div>
+</section>
+
+<section id="s10">
+  <div class="sec-head">
+    <span class="sec-num">10</span>
+    <h2>面試折衷與邊界</h2>
+  </div>
+  <p class="sec-sub">先答模型與語意，再談產品。內部結構、事件邊界、串流運算各有自己的篇。</p>
+
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>面試常問</th>
+          <th>先答這句</th>
+          <th>不要滑去</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>Queue 和 Log 差在哪？</td>
+          <td>Queue 消費即消失、工人互搶；Log 保留、各組獨立游標、可重放</td>
+          <td>Kafka 分區、ISR、Rebalance 細節</td>
+        </tr>
+        <tr>
+          <td>為什麼會收到重複訊息？</td>
+          <td>Visibility timeout 是租約，到期未 ACK 就重投；這是 At-least-once</td>
+          <td>「broker bug」或把重複當異常警報</td>
+        </tr>
+        <tr>
+          <td>怎麼 Exactly-once？</td>
+          <td>效果只發生一次 = 至少一次投遞 + 冪等或去重。Broker checkbox 只管它認識的管線</td>
+          <td>QoS 2、產品行銷句、假設外部 API 也原子</td>
+        </tr>
+        <tr>
+          <td>ACK 應該何時發？</td>
+          <td>副作用成功之後。先 ACK 就是 At-most-once</td>
+          <td>收到即 ACK 以「降低延遲」</td>
+        </tr>
+        <tr>
+          <td>DLQ 做什麼？</td>
+          <td>隔離 Poison，保留證據等人工處理；要有告警，不要自動空轉打回</td>
+          <td>當第二條會自己變成功的熱路徑</td>
+        </tr>
+        <tr>
+          <td>要保證順序怎麼辦？</td>
+          <td>先定義範圍。全域序 = 單流 + HOL；同實體有序 = 按 key 分流</td>
+          <td>直接單消費者，卻說不清有序範圍</td>
+        </tr>
+        <tr>
+          <td>Push 還是 Pull？</td>
+          <td>Pull / 長輪詢自帶流控；Push 必須有 credit。對象是工人，不是裝置連線</td>
+          <td>長連線 fan-out、gateway 推送窗口</td>
+        </tr>
+        <tr>
+          <td>什麼時候不該用訊息骨幹？</td>
+          <td>需要同步回傳、跨步立即一致、或其實只是進程內工作排程</td>
+          <td>為了「解耦」把請求-回應硬拆成兩跳</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="cap">本篇停在中立模型。接著讀 <em>Kafka 架構</em> 看日誌的分區與重平衡；用事件重劃服務邊界見後續 Event-Driven 篇；裝置端 QoS 見 <em>MQTT 與 IoT Messaging</em>；長連線扇出見 <em>即時連線擴展</em>。</p>
+
+  <div class="callout accent">
+    <div class="c-title"><span class="ic">關鍵</span>訊息骨幹的成本是延遲與失敗模式，不是「比較現代」</div>
+    <p>每一則跨進程的訊息都付出序列化、磁碟或複製、至少一次投遞的重試語義。它換到的是時間與所有權上的解耦，不是免費的正確性。選 Queue 還是 Log，等於先承認「誰有權看歷史」與「失敗時重不重做」。產品名可以晚點再寫；這兩句寫不清楚，後面任何吞吐數字都站不住。</p>
+  </div>
+
+  <div class="oneliner">
+    <b>一句話答法</b>面試先畫 Queue vs Log，再講租約重投、三種交付與 DLQ。效果只發生一次寫在 handler，不寫在 broker 的設定頁。
+  </div>
+</section>
+
+</div>
+
+      </div>
+    </main>
+  </div>
+
+  <script>
+    "use strict";
+    document.addEventListener("DOMContentLoaded", function () {
+      /* ===== TOC scrollspy, mobile accordion & desktop collapse ===== */
+      (function () {
+        var links = Array.prototype.slice.call(document.querySelectorAll(".toc-nav a"));
+        var map = {};
+        links.forEach(function (a) {
+          var href = a.getAttribute("href");
+          if (href && href.startsWith("#")) {
+            map[href.slice(1)] = a;
+          }
+        });
+        var secs = links.map(function (a) {
+          var href = a.getAttribute("href");
+          return href && href.startsWith("#") ? document.getElementById(href.slice(1)) : null;
+        }).filter(Boolean);
+
+        if (secs.length > 0 && typeof IntersectionObserver !== "undefined") {
+          var obs = new IntersectionObserver(function (entries) {
+            entries.forEach(function (e) {
+              if (e.isIntersecting) {
+                links.forEach(function (l) { l.classList.remove("active"); });
+                var act = map[e.target.id];
+                if (act) act.classList.add("active");
+              }
+            });
+          }, { rootMargin: "-20% 0px -70% 0px", threshold: 0 });
+          secs.forEach(function (s) { obs.observe(s); });
+        }
+
+        /* mobile：目錄 accordion（≤920px） */
+        var toggle = document.querySelector(".toc-toggle");
+        var nav = document.querySelector(".toc-nav");
+        if (toggle && nav) {
+          toggle.addEventListener("click", function () {
+            var open = nav.classList.toggle("open");
+            toggle.setAttribute("aria-expanded", open ? "true" : "false");
+          });
+          nav.addEventListener("click", function (e) {
+            if (e.target.closest("a") && window.innerWidth <= 920) {
+              nav.classList.remove("open");
+              toggle.setAttribute("aria-expanded", "false");
+            }
+          });
+        }
+
+        /* desktop：收合側欄（預設展開；不持久化） */
+        var collapseBtn = document.querySelector(".toc-collapse");
+        var reopenBtn = document.querySelector(".toc-reopen");
+        function setTocCollapsed(collapsed) {
+          document.body.classList.toggle("toc-collapsed", collapsed);
+          if (collapseBtn) collapseBtn.setAttribute("aria-expanded", collapsed ? "false" : "true");
+          if (reopenBtn) reopenBtn.setAttribute("aria-expanded", collapsed ? "false" : "true");
+          if (collapsed && reopenBtn) reopenBtn.focus();
+          else if (!collapsed && collapseBtn) collapseBtn.focus();
+        }
+        if (collapseBtn) {
+          collapseBtn.addEventListener("click", function () { setTocCollapsed(true); });
+        }
+        if (reopenBtn) {
+          reopenBtn.addEventListener("click", function () { setTocCollapsed(false); });
+        }
+      })();
+    });
+  </script>
+
+  
+<script>
+(function () {
+  "use strict";
+
+  var demo = document.getElementById("demo-mq");
+  if (!demo) return;
+
+  var HINTS = {
+    model: "同一批 M1–M4。Queue：工人互搶，ACK 後空佇列無法回溯。Log：兩組獨立游標，組 A 可撥回重放。",
+    lease: "OK=1 tick、SLOW=4 ticks、POISON 每次失敗。短 VT=2 會在 SLOW 做完前重投；Poison 3 次進 DLQ。"
+  };
+
+  var MODEL_TOTAL = 5;
+  var LEASE_TOTAL = 7;
+
+  var mode = "model";
+  var kind = "queue";
+  var vtMode = "short";
+  var step = 0;
+  var wire = [];
+
+  var msgs = [];
+  var actors = {};
+  var metrics = { del: 0, ack: 0, redel: 0, fx: 0, dlq: 0 };
+  var panel = { op: "—", rule: "—", hold: "—", cli: "—", model: "Queue", depth: "0", replay: "否", fx: "0" };
+  var dlqState = { val: "（空）", n: 0, act: "尚未分流", has: false };
+  var verdict = { text: "判定尚未產生——走完一輪後會摘要能否重放，或短租約是否造成重複副作用。", tone: "" };
+  var statusText = "";
+
+  var statusEl = document.getElementById("mq-status");
+  var verdictEl = document.getElementById("mq-verdict");
+  var wireEl = document.getElementById("mq-wire");
+  var laneEl = document.getElementById("mq-lane");
+  var laneLabel = document.getElementById("mq-lane-label");
+  var actorsEl = document.getElementById("mq-actors");
+  var dlqBox = document.getElementById("mq-dlq");
+  var modelView = document.getElementById("mq-model-view");
+  var leaseView = document.getElementById("mq-lease-view");
+  var btnNext = document.getElementById("mq-btn-next");
+  var btnReset = document.getElementById("mq-btn-reset");
+
+  function el(id) { return document.getElementById(id); }
+
+  function logRow(k, tag, text, at) {
+    wire.push({ kind: k, tag: tag, text: text, step: at == null ? step : at });
+  }
+
+  function setActor(role, klass, val, hint) {
+    actors[role].klass = klass;
+    actors[role].val = val;
+    actors[role].hint = hint;
+  }
+
+  function blankActors() {
+    actors = {
+      prod: { klass: "idle", val: "—", hint: "待命" },
+      broker: { klass: "coord idle", val: "depth 0", hint: "空" },
+      wa: { klass: "idle", val: "—", hint: "待命" },
+      wb: { klass: "idle", val: "—", hint: "待命" },
+      extra: { klass: "idle", val: "—", hint: "尚未加入" }
+    };
+  }
+
+  function seedModelMsgs() {
+    msgs = [
+      { id: "m1", name: "M1", label: "order-1001", klass: "idle", hint: "未寫入" },
+      { id: "m2", name: "M2", label: "order-1002", klass: "idle", hint: "未寫入" },
+      { id: "m3", name: "M3", label: "order-1003", klass: "idle", hint: "未寫入" },
+      { id: "m4", name: "M4", label: "order-1004", klass: "idle", hint: "未寫入" }
+    ];
+  }
+
+  function seedLeaseMsgs() {
+    msgs = [
+      { id: "ok", name: "OK", label: "cost=1", klass: "idle", hint: "未寫入" },
+      { id: "slow", name: "SLOW", label: "cost=4", klass: "idle", hint: "未寫入" },
+      { id: "poison", name: "POISON", label: "always fail", klass: "idle", hint: "未寫入" }
+    ];
+  }
+
+  function countKlass(name) {
+    var n = 0;
+    msgs.forEach(function (m) { if (m.klass === name) n += 1; });
+    return n;
+  }
+
+  function fresh() {
+    step = 0;
+    wire = [];
+    metrics = { del: 0, ack: 0, redel: 0, fx: 0, dlq: 0 };
+    panel = {
+      op: "—",
+      rule: "—",
+      hold: "—",
+      cli: "—",
+      model: mode === "model" ? (kind === "queue" ? "Queue" : "Log") : (vtMode === "short" ? "VT=2" : "VT=6"),
+      depth: "0",
+      replay: mode === "model" && kind === "log" ? "是（保留中）" : "否",
+      fx: "0"
+    };
+    dlqState = { val: "（空）", n: 0, act: "尚未分流", has: false };
+    verdict = {
+      text: "判定尚未產生——走完一輪後會摘要能否重放，或短租約是否造成重複副作用。",
+      tone: ""
+    };
+    statusText = HINTS[mode];
+    blankActors();
+    if (mode === "model") seedModelMsgs();
+    else seedLeaseMsgs();
+    btnNext.disabled = false;
+  }
+
+  function applyModelQueue() {
+    seedModelMsgs();
+    blankActors();
+    metrics = { del: 0, ack: 0, redel: 0, fx: 0, dlq: 0 };
+    panel.model = "Queue";
+    panel.replay = "否";
+    wire = [];
+
+    if (step < 1) {
+      panel.op = "待命";
+      panel.rule = "消費即消失";
+      panel.hold = "∅";
+      panel.cli = "按下一步寫入 M1–M4";
+      panel.depth = "0";
+      setActor("broker", "coord idle", "depth 0", "空佇列");
+      logRow("read", "IDLE", "Queue 空。Competing Consumers 還沒有工作可搶。", 0);
+      return;
+    }
+
+    msgs.forEach(function (m) {
+      m.klass = "ready";
+      m.hint = "可見 · 待搶";
+    });
+    metrics.del = 0;
+    panel.op = "ENQUEUE ×4";
+    panel.rule = "一則工作，一人拿走";
+    panel.hold = "M1–M4 在佇列";
+    panel.cli = "A / B 尚未取件";
+    panel.depth = "4";
+    setActor("prod", "wait", "M1–M4", "已寫入");
+    setActor("broker", "coord wait", "depth 4", "四則可見");
+    logRow("read", "ENQ", "生產者寫入 M1–M4。Queue 的語意：每則最多交給一個工人。", 1);
+
+    if (step < 2) return;
+
+    msgs[0].klass = "hold"; msgs[0].hint = "A 租約中";
+    msgs[1].klass = "hold"; msgs[1].hint = "B 租約中";
+    msgs[2].klass = "ready"; msgs[2].hint = "可見 · 待搶";
+    msgs[3].klass = "ready"; msgs[3].hint = "可見 · 待搶";
+    metrics.del = 2;
+    panel.op = "DELIVER A←M1  B←M2";
+    panel.rule = "Competing Consumers";
+    panel.hold = "A:M1 · B:M2";
+    panel.cli = "兩人同時處理";
+    panel.depth = "2";
+    setActor("broker", "coord wait", "depth 2", "M3 M4 仍可見");
+    setActor("wa", "frozen", "M1", "處理中 · 未 ACK");
+    setActor("wb", "frozen", "M2", "處理中 · 未 ACK");
+    logRow("warn", "LEASE", "A 拿走 M1、B 拿走 M2。訊息進入 Visibility timeout，其他人暫時看不到。", 2);
+
+    if (step < 3) return;
+
+    msgs[0].klass = "gone"; msgs[0].hint = "ACK · 已刪";
+    msgs[1].klass = "gone"; msgs[1].hint = "ACK · 已刪";
+    msgs[2].klass = "hold"; msgs[2].hint = "A 租約中";
+    msgs[3].klass = "hold"; msgs[3].hint = "B 租約中";
+    metrics.del = 4;
+    metrics.ack = 2;
+    metrics.fx = 2;
+    panel.op = "ACK M1 M2 · 再取 M3 M4";
+    panel.rule = "ACK = 從 Queue 刪除";
+    panel.hold = "A:M3 · B:M4";
+    panel.cli = "M1 M2 對全世界消失";
+    panel.depth = "0";
+    panel.fx = "2";
+    setActor("broker", "coord wait", "depth 0", "可見層已空；兩則在途");
+    setActor("wa", "frozen", "M3", "M1 已 ACK，正做 M3");
+    setActor("wb", "frozen", "M4", "M2 已 ACK，正做 M4");
+    logRow("ok", "ACK", "M1、M2 副作用完成並 ACK，Queue 將它們刪除。A/B 繼續取走 M3、M4。", 3);
+
+    if (step < 4) return;
+
+    msgs[2].klass = "gone"; msgs[2].hint = "ACK · 已刪";
+    msgs[3].klass = "gone"; msgs[3].hint = "ACK · 已刪";
+    metrics.ack = 4;
+    metrics.fx = 4;
+    panel.op = "ACK M3 M4";
+    panel.rule = "佇列空，歷史不在";
+    panel.hold = "∅";
+    panel.cli = "四人皆完成";
+    panel.depth = "0";
+    panel.fx = "4";
+    panel.replay = "否";
+    setActor("broker", "coord idle", "depth 0", "空 · 無可重放");
+    setActor("wa", "hold", "游標不適用", "工作做完即走");
+    setActor("wb", "hold", "游標不適用", "工作做完即走");
+    setActor("extra", "idle", "—", "尚未加入");
+    logRow("ok", "EMPTY", "四則全部 ACK。Queue 現在是空的——這不是故障，是模型定義。", 4);
+
+    if (step < 5) return;
+
+    panel.op = "C 加入並嘗試重放";
+    panel.rule = "沒有歷史可以撥回";
+    panel.hold = "∅";
+    panel.cli = "C 兩手空空";
+    panel.replay = "否";
+    setActor("extra", "bad", "read ∅", "無法回溯");
+    setActor("broker", "coord idle", "depth 0", "沒有給 C 的訊息");
+    logRow("bad", "MISS", "晚到的 Worker C 想重放同一批訂單，Queue 裡什麼都沒有。新訂閱者補歷史，這條路走不通。", 5);
+    verdict = {
+      text: "Queue：4 則工作被 A/B 互搶做完後即刪除。晚到者無法重放，第二組讀者從頭就看不到這批訊息。要扇出或回溯，換 Log。",
+      tone: "lock"
+    };
+  }
+
+  function applyModelLog() {
+    seedModelMsgs();
+    blankActors();
+    metrics = { del: 0, ack: 0, redel: 0, fx: 0, dlq: 0 };
+    panel.model = "Log";
+    panel.replay = "是（保留中）";
+    wire = [];
+    el("mq-wa-name").textContent = "Group A";
+    el("mq-wb-name").textContent = "Group B";
+    el("mq-ex-name").textContent = "Group A 重放";
+    el("mq-broker-name").textContent = "Log";
+
+    if (step < 1) {
+      panel.op = "待命";
+      panel.rule = "追加後保留";
+      panel.hold = "A cursor=∅ · B cursor=∅";
+      panel.cli = "按下一步追加 M1–M4";
+      panel.depth = "0";
+      setActor("broker", "coord idle", "retained 0", "空日誌");
+      logRow("read", "IDLE", "Log 空。兩組消費者各有自己的游標，互不搶奪。", 0);
+      return;
+    }
+
+    msgs.forEach(function (m) {
+      m.klass = "ready";
+      m.hint = "已追加 · 保留";
+    });
+    panel.op = "APPEND ×4";
+    panel.rule = "ACK 只移動自己的游標";
+    panel.hold = "A=0 · B=0";
+    panel.cli = "日誌本體與讀者無關";
+    panel.depth = "4";
+    setActor("prod", "wait", "M1–M4", "已追加");
+    setActor("broker", "coord wait", "retained 4", "四則保留");
+    logRow("read", "APP", "M1–M4 追加到 Log。沒有人讀過也不刪；保留窗口內都在。", 1);
+
+    if (step < 2) return;
+
+    msgs[0].klass = "ok"; msgs[0].hint = "A 已讀 · 仍保留";
+    msgs[1].klass = "ok"; msgs[1].hint = "A 已讀 · 仍保留";
+    metrics.del = 2;
+    metrics.ack = 2;
+    metrics.fx = 2;
+    panel.op = "GROUP A 讀 M1 M2";
+    panel.rule = "游標屬組，不屬訊息";
+    panel.hold = "A=2 · B=0";
+    panel.cli = "B 尚未開始，資料還在";
+    panel.depth = "4";
+    panel.fx = "2";
+    setActor("wa", "hold", "cursor 2", "已處理 M1 M2");
+    setActor("wb", "idle", "cursor 0", "獨立、未讀");
+    setActor("broker", "coord wait", "retained 4", "A 讀過也不刪");
+    logRow("ok", "CUR-A", "組 A 把游標推到 2。Log 仍有四則。組 B 的游標仍是 0。", 2);
+
+    if (step < 3) return;
+
+    msgs[2].klass = "ok"; msgs[2].hint = "A 已讀 · 仍保留";
+    msgs[3].klass = "ok"; msgs[3].hint = "A 已讀 · 仍保留";
+    metrics.del = 6;
+    metrics.ack = 6;
+    metrics.fx = 6;
+    panel.op = "A 讀完 · B 讀 M1 M2";
+    panel.rule = "兩組各看完整歷史";
+    panel.hold = "A=4 · B=2";
+    panel.cli = "同一批訊息，兩份效果";
+    panel.depth = "4";
+    panel.fx = "6";
+    setActor("wa", "hold", "cursor 4", "本組已讀完");
+    setActor("wb", "wait", "cursor 2", "獨立重讀 M1 M2");
+    logRow("ok", "FANOUT", "組 A 游標=4。組 B 從 0 自己讀，不搶 A 的位置。這就是「多組獨立消費者」。", 3);
+
+    if (step < 4) return;
+
+    metrics.del = 8;
+    metrics.ack = 8;
+    metrics.fx = 8;
+    panel.op = "B 讀完 · A 把游標撥回 0";
+    panel.rule = "重放 = 移動自己的游標";
+    panel.hold = "A=0 · B=4";
+    panel.cli = "A 準備再看一次";
+    panel.depth = "4";
+    panel.fx = "8";
+    panel.replay = "是";
+    setActor("wa", "frozen", "cursor 0", "重放起點");
+    setActor("wb", "hold", "cursor 4", "本組已完成");
+    setActor("extra", "wait", "replay armed", "同一組、同一條 Log");
+    msgs.forEach(function (m) {
+      m.klass = "ready";
+      m.hint = "仍保留 · 可重放";
+    });
+    logRow("warn", "RESET", "組 A 把游標撥回 0。沒有人向 broker「再要一次已經刪掉的訊息」——訊息從來沒有刪。", 4);
+
+    if (step < 5) return;
+
+    msgs.forEach(function (m) {
+      m.klass = "ok";
+      m.hint = "A 重放完成 · 仍保留";
+    });
+    metrics.del = 12;
+    metrics.ack = 12;
+    metrics.fx = 12;
+    panel.op = "GROUP A 重放 M1–M4";
+    panel.rule = "保留窗口內可重放";
+    panel.hold = "A=4 · B=4";
+    panel.cli = "兩組都看過完整歷史；A 看了兩遍";
+    panel.depth = "4";
+    panel.fx = "12";
+    panel.replay = "是";
+    setActor("wa", "hold", "cursor 4", "重放完成");
+    setActor("extra", "hold", "replay done", "同一批四則仍在");
+    setActor("broker", "coord hold", "retained 4", "本體未刪");
+    logRow("ok", "REPLAY", "組 A 再次處理 M1–M4。Log 仍保留四則。Queue 在第 5 步給 C 的是空，這裡給的是歷史。", 5);
+    verdict = {
+      text: "Log：同一批 M1–M4，組 A 與組 B 獨立讀完；組 A 再把游標撥回即可重放。ACK 只移動自己的游標，不刪日誌。這是 Queue 做不到的三件事。",
+      tone: "ok"
+    };
+  }
+
+  function applyLease() {
+    seedLeaseMsgs();
+    blankActors();
+    metrics = { del: 0, ack: 0, redel: 0, fx: 0, dlq: 0 };
+    dlqState = { val: "（空）", n: 0, act: "尚未分流", has: false };
+    var vt = vtMode === "short" ? 2 : 6;
+    panel.model = "VT=" + vt;
+    panel.replay = "視 ACK";
+    wire = [];
+    el("mq-wa-name").textContent = "Worker A";
+    el("mq-wb-name").textContent = "Worker B";
+    el("mq-ex-name").textContent = "DLQ / 觀察";
+    el("mq-broker-name").textContent = "Queue";
+
+    if (step < 1) {
+      panel.op = "待命";
+      panel.rule = "租約=" + vt + " ticks；SLOW cost=4";
+      panel.hold = "∅";
+      panel.cli = "按下一步寫入三則";
+      panel.depth = "0";
+      setActor("broker", "coord idle", "depth 0", "空");
+      logRow("read", "IDLE", "三則待寫：OK（1 tick）、SLOW（4 ticks）、POISON（次次失敗）。VT=" + vt + "。", 0);
+      return;
+    }
+
+    msgs.forEach(function (m) {
+      m.klass = "ready";
+      m.hint = "可見 · 待取";
+    });
+    panel.op = "ENQUEUE ×3";
+    panel.rule = "ACK 在副作用之後";
+    panel.hold = "OK SLOW POISON";
+    panel.cli = "尚未取件";
+    panel.depth = "3";
+    setActor("prod", "wait", "3 msgs", "已寫入");
+    setActor("broker", "coord wait", "depth 3", "三則可見");
+    logRow("read", "ENQ", "寫入 OK / SLOW / POISON。接下來的重投只由租約與處理耗時決定。", 1);
+
+    if (step < 2) return;
+
+    msgs[0].klass = "ok"; msgs[0].hint = "ACK · 已刪";
+    msgs[1].klass = "ready"; msgs[1].hint = "可見";
+    msgs[2].klass = "ready"; msgs[2].hint = "可見";
+    metrics.del = 1;
+    metrics.ack = 1;
+    metrics.fx = 1;
+    panel.op = "A 取 OK · 1 tick · ACK";
+    panel.rule = "cost 1 < VT " + vt;
+    panel.hold = "∅（OK 已刪）";
+    panel.cli = "A 完成一則副作用";
+    panel.depth = "2";
+    panel.fx = "1";
+    setActor("wa", "hold", "OK done", "副作用 ×1");
+    setActor("broker", "coord wait", "depth 2", "SLOW POISON");
+    logRow("ok", "ACK", "OK 在租約內做完並 ACK。這是快樂路徑：一次投遞、一次效果。", 2);
+
+    if (vtMode === "short") applyLeaseShort();
+    else applyLeaseLong();
+  }
+
+  function applyLeaseShort() {
+    if (step < 3) return;
+
+    msgs[1].klass = "hold"; msgs[1].hint = "A 租約中 · t=0/4";
+    metrics.del = 2;
+    panel.op = "A 取 SLOW · 開始處理";
+    panel.rule = "cost 4 > VT 2";
+    panel.hold = "A:SLOW 租約剩餘 2";
+    panel.cli = "A 本地以為自己還握著";
+    panel.depth = "1";
+    setActor("wa", "frozen", "SLOW t=0", "處理中，未 ACK");
+    setActor("broker", "coord wait", "in-flight 1", "SLOW 不可見");
+    logRow("warn", "LEASE", "SLOW 進入 VT=2 的租約。A 還需要 4 ticks。租約比工作短。", 3);
+
+    if (step < 4) return;
+
+    msgs[1].klass = "dup"; msgs[1].hint = "租約到期 · 重新可見";
+    metrics.redel = 1;
+    panel.op = "t=2 · VT 到期";
+    panel.rule = "未 ACK → 重新可見";
+    panel.hold = "A 仍在做；broker 已收回";
+    panel.cli = "A 毫不知情";
+    panel.depth = "2";
+    setActor("wa", "frozen", "SLOW t=2", "本地仍處理中");
+    setActor("broker", "coord bad", "SLOW visible", "租約回收");
+    setActor("wb", "idle", "—", "即將看到重投");
+    logRow("bad", "EXPIRE", "2 ticks 到，A 還沒 ACK。Visibility timeout 讓 SLOW 重新可見。這是重投，不是 broker 故障。", 4);
+
+    if (step < 5) return;
+
+    msgs[1].klass = "dup"; msgs[1].hint = "A 與 B 同時在做";
+    metrics.del = 3;
+    metrics.redel = 1;
+    panel.op = "REDELIVER SLOW → B";
+    panel.rule = "At-least-once：不確定上一任";
+    panel.hold = "A:SLOW · B:SLOW";
+    panel.cli = "兩人各做一次即將發生";
+    panel.depth = "1";
+    setActor("wa", "frozen", "SLOW t=3", "第一份副作用未 ACK");
+    setActor("wb", "frozen", "SLOW copy", "第二份投遞");
+    logRow("warn", "REDEL", "B 拿走同一則 SLOW。Broker 的立場：上一張租約沒被 ACK，工作可能沒做完。", 5);
+
+    if (step < 6) return;
+
+    msgs[1].klass = "ok"; msgs[1].hint = "兩次 ACK · 效果 ×2";
+    metrics.ack = 3;
+    metrics.fx = 3;
+    panel.op = "A 與 B 都做完 SLOW";
+    panel.rule = "租約過短 → 重複副作用";
+    panel.hold = "∅";
+    panel.cli = "同一則工作，效果兩次";
+    panel.depth = "1";
+    panel.fx = "3";
+    setActor("wa", "bad", "SLOW done", "第一份效果");
+    setActor("wb", "bad", "SLOW done", "第二份效果");
+    setActor("broker", "coord wait", "depth 1", "剩 POISON");
+    logRow("bad", "DUP", "兩次副作用落地。At-least-once 的帳單：handler 若沒冪等，SLOW 的外部效果發生兩次。", 6);
+
+    if (step < 7) return;
+
+    msgs[2].klass = "bad"; msgs[2].hint = "3 次失敗 · 進 DLQ";
+    metrics.del = 6;
+    metrics.redel = 3;
+    metrics.dlq = 1;
+    dlqState = { val: "POISON", n: 3, act: "隔離 · 等人工", has: true };
+    panel.op = "POISON fail ×3 → DLQ";
+    panel.rule = "達上限離開主路徑";
+    panel.hold = "∅";
+    panel.cli = "主佇列被救回";
+    panel.depth = "0";
+    panel.fx = "3";
+    setActor("wa", "bad", "reject", "不可重試錯誤");
+    setActor("wb", "idle", "—", "主路徑空了");
+    setActor("extra", "bad", "DLQ=POISON", "人工介入");
+    setActor("broker", "coord idle", "depth 0", "熱路徑清空");
+    logRow("bad", "DLQ", "POISON 三次業務拒絕，不再占用工人。DLQ 留下原文與失敗次數，等人工——不是自動成功。", 7);
+    verdict = {
+      text: "VT=2 < SLOW(4)：同一則工作被投遞兩次，副作用 ×2。這是短租約的 At-least-once。POISON 達 3 次進 DLQ，主路徑恢復。要避免 SLOW 重複，把 VT 調長或做續租，並讓 handler 冪等。",
+      tone: "bad"
+    };
+  }
+
+  function applyLeaseLong() {
+    if (step < 3) return;
+
+    msgs[1].klass = "hold"; msgs[1].hint = "A 租約中 · t=0/4";
+    metrics.del = 2;
+    panel.op = "A 取 SLOW · 開始處理";
+    panel.rule = "cost 4 < VT 6";
+    panel.hold = "A:SLOW 租約剩餘 6";
+    panel.cli = "窗口足夠做完";
+    panel.depth = "1";
+    setActor("wa", "frozen", "SLOW t=0", "處理中，未 ACK");
+    setActor("broker", "coord wait", "in-flight 1", "SLOW 不可見");
+    logRow("warn", "LEASE", "SLOW 進入 VT=6 的租約。4 ticks 的工作裝得進去。", 3);
+
+    if (step < 4) return;
+
+    msgs[1].klass = "ok"; msgs[1].hint = "ACK · 單次效果";
+    metrics.ack = 2;
+    metrics.fx = 2;
+    panel.op = "t=4 · A ACK SLOW";
+    panel.rule = "租約內完成 → 不重投";
+    panel.hold = "∅";
+    panel.cli = "一次投遞、一次效果";
+    panel.depth = "1";
+    panel.fx = "2";
+    setActor("wa", "hold", "SLOW done", "副作用 ×1");
+    setActor("wb", "idle", "—", "沒有重可搶");
+    setActor("broker", "coord wait", "depth 1", "剩 POISON");
+    logRow("ok", "ACK", "SLOW 在租約到期前做完。沒有第二份投遞。對照短 VT 劇本的重複副作用。", 4);
+
+    if (step < 5) return;
+
+    msgs[2].klass = "hold"; msgs[2].hint = "失敗 1/3 · 將重試";
+    metrics.del = 3;
+    metrics.redel = 0;
+    panel.op = "A 取 POISON · 業務拒絕";
+    panel.rule = "可辨識的不可重試錯誤";
+    panel.hold = "A:POISON";
+    panel.cli = "計入失敗次數";
+    panel.depth = "0";
+    setActor("wa", "bad", "fail 1", "schema / 業務拒絕");
+    setActor("broker", "coord wait", "retry later", "尚未達上限");
+    logRow("warn", "FAIL", "POISON 第一次失敗。暫時故障才該退避；這種錯誤不該無限留在熱路徑。", 5);
+
+    if (step < 6) return;
+
+    msgs[2].klass = "dup"; msgs[2].hint = "失敗 2/3";
+    metrics.del = 4;
+    metrics.redel = 1;
+    panel.op = "重試 2 · 仍失敗";
+    panel.rule = "有限次數，不是越大越可靠";
+    panel.hold = "A:POISON";
+    panel.cli = "再一次仍拒絕";
+    setActor("wa", "bad", "fail 2", "同一則壞訊息");
+    logRow("warn", "RETRY", "第二次仍失敗。每次重試都可能再做一次副作用；上限是產品決策。", 6);
+
+    if (step < 7) return;
+
+    msgs[2].klass = "bad"; msgs[2].hint = "3 次失敗 · 進 DLQ";
+    metrics.del = 5;
+    metrics.redel = 2;
+    metrics.dlq = 1;
+    dlqState = { val: "POISON", n: 3, act: "隔離 · 等人工", has: true };
+    panel.op = "POISON fail ×3 → DLQ";
+    panel.rule = "達上限離開主路徑";
+    panel.hold = "∅";
+    panel.cli = "主佇列被救回";
+    panel.depth = "0";
+    panel.fx = "2";
+    setActor("wa", "idle", "—", "不再被 Poison 佔住");
+    setActor("extra", "bad", "DLQ=POISON", "人工介入");
+    setActor("broker", "coord idle", "depth 0", "熱路徑清空");
+    logRow("bad", "DLQ", "第三次失敗後分流。SLOW 只有一次效果（長租約），POISON 不再燒工人。DLQ 等的是人，不是下一輪自動打回。", 7);
+    verdict = {
+      text: "VT=6 > SLOW(4)：慢請求在租約內 ACK，副作用只有一次。POISON 仍在 3 次後進 DLQ——租約長短救不了壞訊息，只能救「還沒做完就被重投」這件事。",
+      tone: "ok"
+    };
+  }
+
+  function apply() {
+    el("mq-wa-name").textContent = "Worker A";
+    el("mq-wb-name").textContent = "Worker B";
+    el("mq-ex-name").textContent = "Worker C";
+    el("mq-broker-name").textContent = "Queue";
+    actors["wa"] && (el("mq-wa-name").textContent = mode === "model" && kind === "log" ? "Group A" : "Worker A");
+
+    if (mode === "model") {
+      if (kind === "queue") applyModelQueue();
+      else applyModelLog();
+    } else {
+      applyLease();
+    }
+    render();
+  }
+
+  function renderLane() {
+    var html = "";
+    msgs.forEach(function (m) {
+      html += '<div class="mq-msg ' + m.klass + '">';
+      html += '<div class="mn">' + m.name + "</div>";
+      html += '<div class="ml">' + m.label + "</div>";
+      html += '<div class="mh">' + m.hint + "</div>";
+      html += "</div>";
+    });
+    laneEl.innerHTML = html;
+  }
+
+  function renderActors() {
+    var map = {
+      prod: actors.prod,
+      broker: actors.broker,
+      wa: actors.wa,
+      wb: actors.wb,
+      extra: actors.extra
+    };
+    Object.keys(map).forEach(function (key) {
+      var node = actorsEl.querySelector('[data-role="' + key + '"]');
+      var st = map[key];
+      if (!node || !st) return;
+      node.className = "mq-node " + st.klass;
+      node.querySelector("[data-val]").textContent = st.val;
+      node.querySelector("[data-hint]").textContent = st.hint;
+    });
+  }
+
+  function renderWire() {
+    if (!wire.length) {
+      wireEl.innerHTML = "";
+      return;
+    }
+    var html = "";
+    wire.forEach(function (row) {
+      html += '<div class="mq-row ' + row.kind + '">';
+      html += '<span class="ar">' + row.step + "</span>";
+      html += '<span class="tg">' + row.tag + "</span>";
+      html += '<span class="tx">' + row.text + "</span>";
+      html += "</div>";
+    });
+    wireEl.innerHTML = html;
+    wireEl.scrollTop = wireEl.scrollHeight;
+  }
+
+  function render() {
+    var total = mode === "model" ? MODEL_TOTAL : LEASE_TOTAL;
+    el("mq-m-step").textContent = String(step);
+    el("mq-m-total").textContent = String(total);
+    el("mq-m-del").textContent = String(metrics.del);
+    el("mq-m-ack").textContent = String(metrics.ack);
+    el("mq-m-redel").textContent = String(metrics.redel);
+    el("mq-m-fx").textContent = String(metrics.fx);
+    el("mq-m-dlq").textContent = String(metrics.dlq);
+
+    el("mq-p-op").textContent = panel.op;
+    el("mq-p-rule").textContent = panel.rule;
+    el("mq-p-hold").textContent = panel.hold;
+    el("mq-p-cli").textContent = panel.cli;
+    el("mq-p-model").textContent = panel.model;
+    el("mq-p-depth").textContent = panel.depth;
+    el("mq-p-replay").textContent = panel.replay;
+    el("mq-p-fx").textContent = panel.fx;
+
+    el("mq-dlq-val").textContent = dlqState.val;
+    el("mq-dlq-n").textContent = String(dlqState.n);
+    el("mq-dlq-act").textContent = dlqState.act;
+    dlqBox.className = "mq-dlq" + (dlqState.has ? " has" : "");
+
+    statusEl.textContent = statusText;
+    verdictEl.textContent = verdict.text;
+    verdictEl.className = "mq-verdict" + (verdict.tone ? " tone-" + verdict.tone : "");
+
+    modelView.hidden = mode !== "model";
+    leaseView.hidden = mode !== "lease";
+    dlqBox.hidden = mode !== "lease";
+    laneLabel.textContent = mode === "lease" ? "訊息（OK / SLOW / POISON）" : (kind === "log" ? "Log 保留窗口" : "Queue 可見層");
+
+    if (mode === "model" && kind === "log") {
+      el("mq-wa-name").textContent = "Group A";
+      el("mq-wb-name").textContent = "Group B";
+      el("mq-ex-name").textContent = "Group A 重放";
+      el("mq-broker-name").textContent = "Log";
+    } else if (mode === "lease") {
+      el("mq-wa-name").textContent = "Worker A";
+      el("mq-wb-name").textContent = "Worker B";
+      el("mq-ex-name").textContent = "DLQ / 觀察";
+      el("mq-broker-name").textContent = "Queue";
+    } else {
+      el("mq-wa-name").textContent = "Worker A";
+      el("mq-wb-name").textContent = "Worker B";
+      el("mq-ex-name").textContent = "Worker C";
+      el("mq-broker-name").textContent = "Queue";
+    }
+
+    renderLane();
+    renderActors();
+    renderWire();
+    btnNext.disabled = step >= total;
+  }
+
+  function setSeg(group, attr, value) {
+    group.querySelectorAll("button").forEach(function (btn) {
+      btn.setAttribute("aria-pressed", btn.getAttribute(attr) === value ? "true" : "false");
+    });
+  }
+
+  document.getElementById("mq-seg-mode").addEventListener("click", function (ev) {
+    var btn = ev.target.closest("button[data-mode]");
+    if (!btn) return;
+    mode = btn.getAttribute("data-mode");
+    setSeg(document.getElementById("mq-seg-mode"), "data-mode", mode);
+    fresh();
+    apply();
+  });
+
+  document.getElementById("mq-seg-kind").addEventListener("click", function (ev) {
+    var btn = ev.target.closest("button[data-kind]");
+    if (!btn) return;
+    kind = btn.getAttribute("data-kind");
+    setSeg(document.getElementById("mq-seg-kind"), "data-kind", kind);
+    fresh();
+    apply();
+  });
+
+  document.getElementById("mq-seg-vt").addEventListener("click", function (ev) {
+    var btn = ev.target.closest("button[data-vt]");
+    if (!btn) return;
+    vtMode = btn.getAttribute("data-vt");
+    setSeg(document.getElementById("mq-seg-vt"), "data-vt", vtMode);
+    fresh();
+    apply();
+  });
+
+  btnNext.addEventListener("click", function () {
+    var total = mode === "model" ? MODEL_TOTAL : LEASE_TOTAL;
+    if (step >= total) return;
+    step += 1;
+    apply();
+  });
+
+  btnReset.addEventListener("click", function () {
+    fresh();
+    apply();
+  });
+
+  fresh();
+  apply();
+})();
+</script>
+
+
+<!-- FULLSCREEN-FEATURE:START -->
+<style>
+  .fs-toggle {
+    position: fixed;
+    top: 18px;
+    right: 18px;
+    z-index: 1000;
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    font-family: var(--sans, system-ui, -apple-system, "Segoe UI", sans-serif);
+    font-size: 12.5px;
+    line-height: 1;
+    color: var(--text-2, #6b7078);
+    background: var(--bg, #ffffff);
+    border: 1px solid var(--border-strong, #dedcd8);
+    border-radius: 999px;
+    padding: 7px 13px 7px 11px;
+    cursor: pointer;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, .06), 0 4px 12px rgba(0, 0, 0, .04);
+    transition: background .15s, border-color .15s, color .15s;
+  }
+
+  .fs-toggle:hover {
+    background: var(--bg-soft, #fafaf9);
+    color: var(--text, #262a2f);
+    border-color: var(--text-3, #9aa0a8);
+  }
+
+  .fs-toggle:focus-visible {
+    outline: 2px solid var(--accent, #3f6188);
+    outline-offset: 2px;
+  }
+
+  .fs-toggle[aria-pressed="true"] {
+    background: var(--accent, #3f6188);
+    color: #fff;
+    border-color: var(--accent, #3f6188);
+  }
+
+  .fs-toggle .fs-ic {
+    flex: 0 0 auto;
+    display: block;
+  }
+
+  @media print {
+    .fs-toggle { display: none !important; }
+  }
+
+  @media (max-width: 480px) {
+    .fs-toggle { padding: 8px; }
+    .fs-toggle .fs-label { display: none; }
+  }
+</style>
+<button id="fs-toggle-btn" class="fs-toggle" type="button" aria-pressed="false"
+        aria-label="切換全螢幕檢視 (快捷鍵 F)" title="全螢幕檢視 (F)">
+  <svg class="fs-ic fs-ic-expand" viewBox="0 0 24 24" width="15" height="15" fill="none"
+       stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+    <path d="M8 3H5a2 2 0 0 0-2 2v3m18 0V5a2 2 0 0 0-2-2h-3m0 18h3a2 2 0 0 0 2-2v-3M3 16v3a2 2 0 0 0 2 2h3"/>
+  </svg>
+  <svg class="fs-ic fs-ic-compress" viewBox="0 0 24 24" width="15" height="15" fill="none"
+       stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="display:none">
+    <path d="M8 3v3a2 2 0 0 1-2 2H3m18 0h-3a2 2 0 0 1-2-2V3m0 18v-3a2 2 0 0 1 2-2h3M3 16h3a2 2 0 0 1 2 2v3"/>
+  </svg>
+  <span class="fs-label">全螢幕</span>
+</button>
+<script>
+  "use strict";
+  (function () {
+    var btn = document.getElementById("fs-toggle-btn");
+    if (!btn) return;
+    var docEl = document.documentElement;
+    var canFs = !!(docEl.requestFullscreen || docEl.webkitRequestFullscreen);
+    // 不支援 Fullscreen API (如 iPhone Safari) → 隱藏按鈕，避免壞掉的 UI
+    if (!canFs) { btn.style.display = "none"; return; }
+
+    var expandIc = btn.querySelector(".fs-ic-expand");
+    var compressIc = btn.querySelector(".fs-ic-compress");
+    var label = btn.querySelector(".fs-label");
+
+    function isFs() {
+      return !!(document.fullscreenElement || document.webkitFullscreenElement);
+    }
+    function enter() {
+      if (docEl.requestFullscreen) docEl.requestFullscreen();
+      else if (docEl.webkitRequestFullscreen) docEl.webkitRequestFullscreen();
+    }
+    function exit() {
+      if (document.exitFullscreen) document.exitFullscreen();
+      else if (document.webkitExitFullscreen) document.webkitExitFullscreen();
+    }
+    function toggle() { isFs() ? exit() : enter(); }
+    function sync() {
+      var on = isFs();
+      btn.setAttribute("aria-pressed", on ? "true" : "false");
+      if (label) label.textContent = on ? "離開全螢幕" : "全螢幕";
+      if (expandIc) expandIc.style.display = on ? "none" : "block";
+      if (compressIc) compressIc.style.display = on ? "block" : "none";
+    }
+
+    btn.addEventListener("click", toggle);
+    document.addEventListener("fullscreenchange", sync);
+    document.addEventListener("webkitfullscreenchange", sync);
+    document.addEventListener("keydown", function (e) {
+      if (e.key !== "f" && e.key !== "F") return;
+      if (e.metaKey || e.ctrlKey || e.altKey) return;
+      var t = e.target;
+      var tag = t && t.tagName ? t.tagName.toUpperCase() : "";
+      if (tag === "INPUT" || tag === "TEXTAREA" || (t && t.isContentEditable)) return;
+      e.preventDefault();
+      toggle();
+    });
+    sync();
+  })();
+</script>
+<!-- FULLSCREEN-FEATURE:END -->
+</body>
+</html>

@@ -1,0 +1,724 @@
+<script>
+(function () {
+  "use strict";
+
+  var demo = document.getElementById("demo-mq");
+  if (!demo) return;
+
+  var HINTS = {
+    model: "同一批 M1–M4。Queue：工人互搶，ACK 後空佇列無法回溯。Log：兩組獨立游標，組 A 可撥回重放。",
+    lease: "OK=1 tick、SLOW=4 ticks、POISON 每次失敗。短 VT=2 會在 SLOW 做完前重投；Poison 3 次進 DLQ。"
+  };
+
+  var MODEL_TOTAL = 5;
+  var LEASE_TOTAL = 7;
+
+  var mode = "model";
+  var kind = "queue";
+  var vtMode = "short";
+  var step = 0;
+  var wire = [];
+
+  var msgs = [];
+  var actors = {};
+  var metrics = { del: 0, ack: 0, redel: 0, fx: 0, dlq: 0 };
+  var panel = { op: "—", rule: "—", hold: "—", cli: "—", model: "Queue", depth: "0", replay: "否", fx: "0" };
+  var dlqState = { val: "（空）", n: 0, act: "尚未分流", has: false };
+  var verdict = { text: "判定尚未產生——走完一輪後會摘要能否重放，或短租約是否造成重複副作用。", tone: "" };
+  var statusText = "";
+
+  var statusEl = document.getElementById("mq-status");
+  var verdictEl = document.getElementById("mq-verdict");
+  var wireEl = document.getElementById("mq-wire");
+  var laneEl = document.getElementById("mq-lane");
+  var laneLabel = document.getElementById("mq-lane-label");
+  var actorsEl = document.getElementById("mq-actors");
+  var dlqBox = document.getElementById("mq-dlq");
+  var modelView = document.getElementById("mq-model-view");
+  var leaseView = document.getElementById("mq-lease-view");
+  var btnNext = document.getElementById("mq-btn-next");
+  var btnReset = document.getElementById("mq-btn-reset");
+
+  function el(id) { return document.getElementById(id); }
+
+  function logRow(k, tag, text, at) {
+    wire.push({ kind: k, tag: tag, text: text, step: at == null ? step : at });
+  }
+
+  function setActor(role, klass, val, hint) {
+    actors[role].klass = klass;
+    actors[role].val = val;
+    actors[role].hint = hint;
+  }
+
+  function blankActors() {
+    actors = {
+      prod: { klass: "idle", val: "—", hint: "待命" },
+      broker: { klass: "coord idle", val: "depth 0", hint: "空" },
+      wa: { klass: "idle", val: "—", hint: "待命" },
+      wb: { klass: "idle", val: "—", hint: "待命" },
+      extra: { klass: "idle", val: "—", hint: "尚未加入" }
+    };
+  }
+
+  function seedModelMsgs() {
+    msgs = [
+      { id: "m1", name: "M1", label: "order-1001", klass: "idle", hint: "未寫入" },
+      { id: "m2", name: "M2", label: "order-1002", klass: "idle", hint: "未寫入" },
+      { id: "m3", name: "M3", label: "order-1003", klass: "idle", hint: "未寫入" },
+      { id: "m4", name: "M4", label: "order-1004", klass: "idle", hint: "未寫入" }
+    ];
+  }
+
+  function seedLeaseMsgs() {
+    msgs = [
+      { id: "ok", name: "OK", label: "cost=1", klass: "idle", hint: "未寫入" },
+      { id: "slow", name: "SLOW", label: "cost=4", klass: "idle", hint: "未寫入" },
+      { id: "poison", name: "POISON", label: "always fail", klass: "idle", hint: "未寫入" }
+    ];
+  }
+
+  function countKlass(name) {
+    var n = 0;
+    msgs.forEach(function (m) { if (m.klass === name) n += 1; });
+    return n;
+  }
+
+  function fresh() {
+    step = 0;
+    wire = [];
+    metrics = { del: 0, ack: 0, redel: 0, fx: 0, dlq: 0 };
+    panel = {
+      op: "—",
+      rule: "—",
+      hold: "—",
+      cli: "—",
+      model: mode === "model" ? (kind === "queue" ? "Queue" : "Log") : (vtMode === "short" ? "VT=2" : "VT=6"),
+      depth: "0",
+      replay: mode === "model" && kind === "log" ? "是（保留中）" : "否",
+      fx: "0"
+    };
+    dlqState = { val: "（空）", n: 0, act: "尚未分流", has: false };
+    verdict = {
+      text: "判定尚未產生——走完一輪後會摘要能否重放，或短租約是否造成重複副作用。",
+      tone: ""
+    };
+    statusText = HINTS[mode];
+    blankActors();
+    if (mode === "model") seedModelMsgs();
+    else seedLeaseMsgs();
+    btnNext.disabled = false;
+  }
+
+  function applyModelQueue() {
+    seedModelMsgs();
+    blankActors();
+    metrics = { del: 0, ack: 0, redel: 0, fx: 0, dlq: 0 };
+    panel.model = "Queue";
+    panel.replay = "否";
+    wire = [];
+
+    if (step < 1) {
+      panel.op = "待命";
+      panel.rule = "消費即消失";
+      panel.hold = "∅";
+      panel.cli = "按下一步寫入 M1–M4";
+      panel.depth = "0";
+      setActor("broker", "coord idle", "depth 0", "空佇列");
+      logRow("read", "IDLE", "Queue 空。Competing Consumers 還沒有工作可搶。", 0);
+      return;
+    }
+
+    msgs.forEach(function (m) {
+      m.klass = "ready";
+      m.hint = "可見 · 待搶";
+    });
+    metrics.del = 0;
+    panel.op = "ENQUEUE ×4";
+    panel.rule = "一則工作，一人拿走";
+    panel.hold = "M1–M4 在佇列";
+    panel.cli = "A / B 尚未取件";
+    panel.depth = "4";
+    setActor("prod", "wait", "M1–M4", "已寫入");
+    setActor("broker", "coord wait", "depth 4", "四則可見");
+    logRow("read", "ENQ", "生產者寫入 M1–M4。Queue 的語意：每則最多交給一個工人。", 1);
+
+    if (step < 2) return;
+
+    msgs[0].klass = "hold"; msgs[0].hint = "A 租約中";
+    msgs[1].klass = "hold"; msgs[1].hint = "B 租約中";
+    msgs[2].klass = "ready"; msgs[2].hint = "可見 · 待搶";
+    msgs[3].klass = "ready"; msgs[3].hint = "可見 · 待搶";
+    metrics.del = 2;
+    panel.op = "DELIVER A←M1  B←M2";
+    panel.rule = "Competing Consumers";
+    panel.hold = "A:M1 · B:M2";
+    panel.cli = "兩人同時處理";
+    panel.depth = "2";
+    setActor("broker", "coord wait", "depth 2", "M3 M4 仍可見");
+    setActor("wa", "frozen", "M1", "處理中 · 未 ACK");
+    setActor("wb", "frozen", "M2", "處理中 · 未 ACK");
+    logRow("warn", "LEASE", "A 拿走 M1、B 拿走 M2。訊息進入 Visibility timeout，其他人暫時看不到。", 2);
+
+    if (step < 3) return;
+
+    msgs[0].klass = "gone"; msgs[0].hint = "ACK · 已刪";
+    msgs[1].klass = "gone"; msgs[1].hint = "ACK · 已刪";
+    msgs[2].klass = "hold"; msgs[2].hint = "A 租約中";
+    msgs[3].klass = "hold"; msgs[3].hint = "B 租約中";
+    metrics.del = 4;
+    metrics.ack = 2;
+    metrics.fx = 2;
+    panel.op = "ACK M1 M2 · 再取 M3 M4";
+    panel.rule = "ACK = 從 Queue 刪除";
+    panel.hold = "A:M3 · B:M4";
+    panel.cli = "M1 M2 對全世界消失";
+    panel.depth = "0";
+    panel.fx = "2";
+    setActor("broker", "coord wait", "depth 0", "可見層已空；兩則在途");
+    setActor("wa", "frozen", "M3", "M1 已 ACK，正做 M3");
+    setActor("wb", "frozen", "M4", "M2 已 ACK，正做 M4");
+    logRow("ok", "ACK", "M1、M2 副作用完成並 ACK，Queue 將它們刪除。A/B 繼續取走 M3、M4。", 3);
+
+    if (step < 4) return;
+
+    msgs[2].klass = "gone"; msgs[2].hint = "ACK · 已刪";
+    msgs[3].klass = "gone"; msgs[3].hint = "ACK · 已刪";
+    metrics.ack = 4;
+    metrics.fx = 4;
+    panel.op = "ACK M3 M4";
+    panel.rule = "佇列空，歷史不在";
+    panel.hold = "∅";
+    panel.cli = "四人皆完成";
+    panel.depth = "0";
+    panel.fx = "4";
+    panel.replay = "否";
+    setActor("broker", "coord idle", "depth 0", "空 · 無可重放");
+    setActor("wa", "hold", "游標不適用", "工作做完即走");
+    setActor("wb", "hold", "游標不適用", "工作做完即走");
+    setActor("extra", "idle", "—", "尚未加入");
+    logRow("ok", "EMPTY", "四則全部 ACK。Queue 現在是空的——這不是故障，是模型定義。", 4);
+
+    if (step < 5) return;
+
+    panel.op = "C 加入並嘗試重放";
+    panel.rule = "沒有歷史可以撥回";
+    panel.hold = "∅";
+    panel.cli = "C 兩手空空";
+    panel.replay = "否";
+    setActor("extra", "bad", "read ∅", "無法回溯");
+    setActor("broker", "coord idle", "depth 0", "沒有給 C 的訊息");
+    logRow("bad", "MISS", "晚到的 Worker C 想重放同一批訂單，Queue 裡什麼都沒有。新訂閱者補歷史，這條路走不通。", 5);
+    verdict = {
+      text: "Queue：4 則工作被 A/B 互搶做完後即刪除。晚到者無法重放，第二組讀者從頭就看不到這批訊息。要扇出或回溯，換 Log。",
+      tone: "lock"
+    };
+  }
+
+  function applyModelLog() {
+    seedModelMsgs();
+    blankActors();
+    metrics = { del: 0, ack: 0, redel: 0, fx: 0, dlq: 0 };
+    panel.model = "Log";
+    panel.replay = "是（保留中）";
+    wire = [];
+    el("mq-wa-name").textContent = "Group A";
+    el("mq-wb-name").textContent = "Group B";
+    el("mq-ex-name").textContent = "Group A 重放";
+    el("mq-broker-name").textContent = "Log";
+
+    if (step < 1) {
+      panel.op = "待命";
+      panel.rule = "追加後保留";
+      panel.hold = "A cursor=∅ · B cursor=∅";
+      panel.cli = "按下一步追加 M1–M4";
+      panel.depth = "0";
+      setActor("broker", "coord idle", "retained 0", "空日誌");
+      logRow("read", "IDLE", "Log 空。兩組消費者各有自己的游標，互不搶奪。", 0);
+      return;
+    }
+
+    msgs.forEach(function (m) {
+      m.klass = "ready";
+      m.hint = "已追加 · 保留";
+    });
+    panel.op = "APPEND ×4";
+    panel.rule = "ACK 只移動自己的游標";
+    panel.hold = "A=0 · B=0";
+    panel.cli = "日誌本體與讀者無關";
+    panel.depth = "4";
+    setActor("prod", "wait", "M1–M4", "已追加");
+    setActor("broker", "coord wait", "retained 4", "四則保留");
+    logRow("read", "APP", "M1–M4 追加到 Log。沒有人讀過也不刪；保留窗口內都在。", 1);
+
+    if (step < 2) return;
+
+    msgs[0].klass = "ok"; msgs[0].hint = "A 已讀 · 仍保留";
+    msgs[1].klass = "ok"; msgs[1].hint = "A 已讀 · 仍保留";
+    metrics.del = 2;
+    metrics.ack = 2;
+    metrics.fx = 2;
+    panel.op = "GROUP A 讀 M1 M2";
+    panel.rule = "游標屬組，不屬訊息";
+    panel.hold = "A=2 · B=0";
+    panel.cli = "B 尚未開始，資料還在";
+    panel.depth = "4";
+    panel.fx = "2";
+    setActor("wa", "hold", "cursor 2", "已處理 M1 M2");
+    setActor("wb", "idle", "cursor 0", "獨立、未讀");
+    setActor("broker", "coord wait", "retained 4", "A 讀過也不刪");
+    logRow("ok", "CUR-A", "組 A 把游標推到 2。Log 仍有四則。組 B 的游標仍是 0。", 2);
+
+    if (step < 3) return;
+
+    msgs[2].klass = "ok"; msgs[2].hint = "A 已讀 · 仍保留";
+    msgs[3].klass = "ok"; msgs[3].hint = "A 已讀 · 仍保留";
+    metrics.del = 6;
+    metrics.ack = 6;
+    metrics.fx = 6;
+    panel.op = "A 讀完 · B 讀 M1 M2";
+    panel.rule = "兩組各看完整歷史";
+    panel.hold = "A=4 · B=2";
+    panel.cli = "同一批訊息，兩份效果";
+    panel.depth = "4";
+    panel.fx = "6";
+    setActor("wa", "hold", "cursor 4", "本組已讀完");
+    setActor("wb", "wait", "cursor 2", "獨立重讀 M1 M2");
+    logRow("ok", "FANOUT", "組 A 游標=4。組 B 從 0 自己讀，不搶 A 的位置。這就是「多組獨立消費者」。", 3);
+
+    if (step < 4) return;
+
+    metrics.del = 8;
+    metrics.ack = 8;
+    metrics.fx = 8;
+    panel.op = "B 讀完 · A 把游標撥回 0";
+    panel.rule = "重放 = 移動自己的游標";
+    panel.hold = "A=0 · B=4";
+    panel.cli = "A 準備再看一次";
+    panel.depth = "4";
+    panel.fx = "8";
+    panel.replay = "是";
+    setActor("wa", "frozen", "cursor 0", "重放起點");
+    setActor("wb", "hold", "cursor 4", "本組已完成");
+    setActor("extra", "wait", "replay armed", "同一組、同一條 Log");
+    msgs.forEach(function (m) {
+      m.klass = "ready";
+      m.hint = "仍保留 · 可重放";
+    });
+    logRow("warn", "RESET", "組 A 把游標撥回 0。沒有人向 broker「再要一次已經刪掉的訊息」——訊息從來沒有刪。", 4);
+
+    if (step < 5) return;
+
+    msgs.forEach(function (m) {
+      m.klass = "ok";
+      m.hint = "A 重放完成 · 仍保留";
+    });
+    metrics.del = 12;
+    metrics.ack = 12;
+    metrics.fx = 12;
+    panel.op = "GROUP A 重放 M1–M4";
+    panel.rule = "保留窗口內可重放";
+    panel.hold = "A=4 · B=4";
+    panel.cli = "兩組都看過完整歷史；A 看了兩遍";
+    panel.depth = "4";
+    panel.fx = "12";
+    panel.replay = "是";
+    setActor("wa", "hold", "cursor 4", "重放完成");
+    setActor("extra", "hold", "replay done", "同一批四則仍在");
+    setActor("broker", "coord hold", "retained 4", "本體未刪");
+    logRow("ok", "REPLAY", "組 A 再次處理 M1–M4。Log 仍保留四則。Queue 在第 5 步給 C 的是空，這裡給的是歷史。", 5);
+    verdict = {
+      text: "Log：同一批 M1–M4，組 A 與組 B 獨立讀完；組 A 再把游標撥回即可重放。ACK 只移動自己的游標，不刪日誌。這是 Queue 做不到的三件事。",
+      tone: "ok"
+    };
+  }
+
+  function applyLease() {
+    seedLeaseMsgs();
+    blankActors();
+    metrics = { del: 0, ack: 0, redel: 0, fx: 0, dlq: 0 };
+    dlqState = { val: "（空）", n: 0, act: "尚未分流", has: false };
+    var vt = vtMode === "short" ? 2 : 6;
+    panel.model = "VT=" + vt;
+    panel.replay = "視 ACK";
+    wire = [];
+    el("mq-wa-name").textContent = "Worker A";
+    el("mq-wb-name").textContent = "Worker B";
+    el("mq-ex-name").textContent = "DLQ / 觀察";
+    el("mq-broker-name").textContent = "Queue";
+
+    if (step < 1) {
+      panel.op = "待命";
+      panel.rule = "租約=" + vt + " ticks；SLOW cost=4";
+      panel.hold = "∅";
+      panel.cli = "按下一步寫入三則";
+      panel.depth = "0";
+      setActor("broker", "coord idle", "depth 0", "空");
+      logRow("read", "IDLE", "三則待寫：OK（1 tick）、SLOW（4 ticks）、POISON（次次失敗）。VT=" + vt + "。", 0);
+      return;
+    }
+
+    msgs.forEach(function (m) {
+      m.klass = "ready";
+      m.hint = "可見 · 待取";
+    });
+    panel.op = "ENQUEUE ×3";
+    panel.rule = "ACK 在副作用之後";
+    panel.hold = "OK SLOW POISON";
+    panel.cli = "尚未取件";
+    panel.depth = "3";
+    setActor("prod", "wait", "3 msgs", "已寫入");
+    setActor("broker", "coord wait", "depth 3", "三則可見");
+    logRow("read", "ENQ", "寫入 OK / SLOW / POISON。接下來的重投只由租約與處理耗時決定。", 1);
+
+    if (step < 2) return;
+
+    msgs[0].klass = "ok"; msgs[0].hint = "ACK · 已刪";
+    msgs[1].klass = "ready"; msgs[1].hint = "可見";
+    msgs[2].klass = "ready"; msgs[2].hint = "可見";
+    metrics.del = 1;
+    metrics.ack = 1;
+    metrics.fx = 1;
+    panel.op = "A 取 OK · 1 tick · ACK";
+    panel.rule = "cost 1 < VT " + vt;
+    panel.hold = "∅（OK 已刪）";
+    panel.cli = "A 完成一則副作用";
+    panel.depth = "2";
+    panel.fx = "1";
+    setActor("wa", "hold", "OK done", "副作用 ×1");
+    setActor("broker", "coord wait", "depth 2", "SLOW POISON");
+    logRow("ok", "ACK", "OK 在租約內做完並 ACK。這是快樂路徑：一次投遞、一次效果。", 2);
+
+    if (vtMode === "short") applyLeaseShort();
+    else applyLeaseLong();
+  }
+
+  function applyLeaseShort() {
+    if (step < 3) return;
+
+    msgs[1].klass = "hold"; msgs[1].hint = "A 租約中 · t=0/4";
+    metrics.del = 2;
+    panel.op = "A 取 SLOW · 開始處理";
+    panel.rule = "cost 4 > VT 2";
+    panel.hold = "A:SLOW 租約剩餘 2";
+    panel.cli = "A 本地以為自己還握著";
+    panel.depth = "1";
+    setActor("wa", "frozen", "SLOW t=0", "處理中，未 ACK");
+    setActor("broker", "coord wait", "in-flight 1", "SLOW 不可見");
+    logRow("warn", "LEASE", "SLOW 進入 VT=2 的租約。A 還需要 4 ticks。租約比工作短。", 3);
+
+    if (step < 4) return;
+
+    msgs[1].klass = "dup"; msgs[1].hint = "租約到期 · 重新可見";
+    metrics.redel = 1;
+    panel.op = "t=2 · VT 到期";
+    panel.rule = "未 ACK → 重新可見";
+    panel.hold = "A 仍在做；broker 已收回";
+    panel.cli = "A 毫不知情";
+    panel.depth = "2";
+    setActor("wa", "frozen", "SLOW t=2", "本地仍處理中");
+    setActor("broker", "coord bad", "SLOW visible", "租約回收");
+    setActor("wb", "idle", "—", "即將看到重投");
+    logRow("bad", "EXPIRE", "2 ticks 到，A 還沒 ACK。Visibility timeout 讓 SLOW 重新可見。這是重投，不是 broker 故障。", 4);
+
+    if (step < 5) return;
+
+    msgs[1].klass = "dup"; msgs[1].hint = "A 與 B 同時在做";
+    metrics.del = 3;
+    metrics.redel = 1;
+    panel.op = "REDELIVER SLOW → B";
+    panel.rule = "At-least-once：不確定上一任";
+    panel.hold = "A:SLOW · B:SLOW";
+    panel.cli = "兩人各做一次即將發生";
+    panel.depth = "1";
+    setActor("wa", "frozen", "SLOW t=3", "第一份副作用未 ACK");
+    setActor("wb", "frozen", "SLOW copy", "第二份投遞");
+    logRow("warn", "REDEL", "B 拿走同一則 SLOW。Broker 的立場：上一張租約沒被 ACK，工作可能沒做完。", 5);
+
+    if (step < 6) return;
+
+    msgs[1].klass = "ok"; msgs[1].hint = "兩次 ACK · 效果 ×2";
+    metrics.ack = 3;
+    metrics.fx = 3;
+    panel.op = "A 與 B 都做完 SLOW";
+    panel.rule = "租約過短 → 重複副作用";
+    panel.hold = "∅";
+    panel.cli = "同一則工作，效果兩次";
+    panel.depth = "1";
+    panel.fx = "3";
+    setActor("wa", "bad", "SLOW done", "第一份效果");
+    setActor("wb", "bad", "SLOW done", "第二份效果");
+    setActor("broker", "coord wait", "depth 1", "剩 POISON");
+    logRow("bad", "DUP", "兩次副作用落地。At-least-once 的帳單：handler 若沒冪等，SLOW 的外部效果發生兩次。", 6);
+
+    if (step < 7) return;
+
+    msgs[2].klass = "bad"; msgs[2].hint = "3 次失敗 · 進 DLQ";
+    metrics.del = 6;
+    metrics.redel = 3;
+    metrics.dlq = 1;
+    dlqState = { val: "POISON", n: 3, act: "隔離 · 等人工", has: true };
+    panel.op = "POISON fail ×3 → DLQ";
+    panel.rule = "達上限離開主路徑";
+    panel.hold = "∅";
+    panel.cli = "主佇列被救回";
+    panel.depth = "0";
+    panel.fx = "3";
+    setActor("wa", "bad", "reject", "不可重試錯誤");
+    setActor("wb", "idle", "—", "主路徑空了");
+    setActor("extra", "bad", "DLQ=POISON", "人工介入");
+    setActor("broker", "coord idle", "depth 0", "熱路徑清空");
+    logRow("bad", "DLQ", "POISON 三次業務拒絕，不再占用工人。DLQ 留下原文與失敗次數，等人工——不是自動成功。", 7);
+    verdict = {
+      text: "VT=2 < SLOW(4)：同一則工作被投遞兩次，副作用 ×2。這是短租約的 At-least-once。POISON 達 3 次進 DLQ，主路徑恢復。要避免 SLOW 重複，把 VT 調長或做續租，並讓 handler 冪等。",
+      tone: "bad"
+    };
+  }
+
+  function applyLeaseLong() {
+    if (step < 3) return;
+
+    msgs[1].klass = "hold"; msgs[1].hint = "A 租約中 · t=0/4";
+    metrics.del = 2;
+    panel.op = "A 取 SLOW · 開始處理";
+    panel.rule = "cost 4 < VT 6";
+    panel.hold = "A:SLOW 租約剩餘 6";
+    panel.cli = "窗口足夠做完";
+    panel.depth = "1";
+    setActor("wa", "frozen", "SLOW t=0", "處理中，未 ACK");
+    setActor("broker", "coord wait", "in-flight 1", "SLOW 不可見");
+    logRow("warn", "LEASE", "SLOW 進入 VT=6 的租約。4 ticks 的工作裝得進去。", 3);
+
+    if (step < 4) return;
+
+    msgs[1].klass = "ok"; msgs[1].hint = "ACK · 單次效果";
+    metrics.ack = 2;
+    metrics.fx = 2;
+    panel.op = "t=4 · A ACK SLOW";
+    panel.rule = "租約內完成 → 不重投";
+    panel.hold = "∅";
+    panel.cli = "一次投遞、一次效果";
+    panel.depth = "1";
+    panel.fx = "2";
+    setActor("wa", "hold", "SLOW done", "副作用 ×1");
+    setActor("wb", "idle", "—", "沒有重可搶");
+    setActor("broker", "coord wait", "depth 1", "剩 POISON");
+    logRow("ok", "ACK", "SLOW 在租約到期前做完。沒有第二份投遞。對照短 VT 劇本的重複副作用。", 4);
+
+    if (step < 5) return;
+
+    msgs[2].klass = "hold"; msgs[2].hint = "失敗 1/3 · 將重試";
+    metrics.del = 3;
+    metrics.redel = 0;
+    panel.op = "A 取 POISON · 業務拒絕";
+    panel.rule = "可辨識的不可重試錯誤";
+    panel.hold = "A:POISON";
+    panel.cli = "計入失敗次數";
+    panel.depth = "0";
+    setActor("wa", "bad", "fail 1", "schema / 業務拒絕");
+    setActor("broker", "coord wait", "retry later", "尚未達上限");
+    logRow("warn", "FAIL", "POISON 第一次失敗。暫時故障才該退避；這種錯誤不該無限留在熱路徑。", 5);
+
+    if (step < 6) return;
+
+    msgs[2].klass = "dup"; msgs[2].hint = "失敗 2/3";
+    metrics.del = 4;
+    metrics.redel = 1;
+    panel.op = "重試 2 · 仍失敗";
+    panel.rule = "有限次數，不是越大越可靠";
+    panel.hold = "A:POISON";
+    panel.cli = "再一次仍拒絕";
+    setActor("wa", "bad", "fail 2", "同一則壞訊息");
+    logRow("warn", "RETRY", "第二次仍失敗。每次重試都可能再做一次副作用；上限是產品決策。", 6);
+
+    if (step < 7) return;
+
+    msgs[2].klass = "bad"; msgs[2].hint = "3 次失敗 · 進 DLQ";
+    metrics.del = 5;
+    metrics.redel = 2;
+    metrics.dlq = 1;
+    dlqState = { val: "POISON", n: 3, act: "隔離 · 等人工", has: true };
+    panel.op = "POISON fail ×3 → DLQ";
+    panel.rule = "達上限離開主路徑";
+    panel.hold = "∅";
+    panel.cli = "主佇列被救回";
+    panel.depth = "0";
+    panel.fx = "2";
+    setActor("wa", "idle", "—", "不再被 Poison 佔住");
+    setActor("extra", "bad", "DLQ=POISON", "人工介入");
+    setActor("broker", "coord idle", "depth 0", "熱路徑清空");
+    logRow("bad", "DLQ", "第三次失敗後分流。SLOW 只有一次效果（長租約），POISON 不再燒工人。DLQ 等的是人，不是下一輪自動打回。", 7);
+    verdict = {
+      text: "VT=6 > SLOW(4)：慢請求在租約內 ACK，副作用只有一次。POISON 仍在 3 次後進 DLQ——租約長短救不了壞訊息，只能救「還沒做完就被重投」這件事。",
+      tone: "ok"
+    };
+  }
+
+  function apply() {
+    el("mq-wa-name").textContent = "Worker A";
+    el("mq-wb-name").textContent = "Worker B";
+    el("mq-ex-name").textContent = "Worker C";
+    el("mq-broker-name").textContent = "Queue";
+    actors["wa"] && (el("mq-wa-name").textContent = mode === "model" && kind === "log" ? "Group A" : "Worker A");
+
+    if (mode === "model") {
+      if (kind === "queue") applyModelQueue();
+      else applyModelLog();
+    } else {
+      applyLease();
+    }
+    render();
+  }
+
+  function renderLane() {
+    var html = "";
+    msgs.forEach(function (m) {
+      html += '<div class="mq-msg ' + m.klass + '">';
+      html += '<div class="mn">' + m.name + "</div>";
+      html += '<div class="ml">' + m.label + "</div>";
+      html += '<div class="mh">' + m.hint + "</div>";
+      html += "</div>";
+    });
+    laneEl.innerHTML = html;
+  }
+
+  function renderActors() {
+    var map = {
+      prod: actors.prod,
+      broker: actors.broker,
+      wa: actors.wa,
+      wb: actors.wb,
+      extra: actors.extra
+    };
+    Object.keys(map).forEach(function (key) {
+      var node = actorsEl.querySelector('[data-role="' + key + '"]');
+      var st = map[key];
+      if (!node || !st) return;
+      node.className = "mq-node " + st.klass;
+      node.querySelector("[data-val]").textContent = st.val;
+      node.querySelector("[data-hint]").textContent = st.hint;
+    });
+  }
+
+  function renderWire() {
+    if (!wire.length) {
+      wireEl.innerHTML = "";
+      return;
+    }
+    var html = "";
+    wire.forEach(function (row) {
+      html += '<div class="mq-row ' + row.kind + '">';
+      html += '<span class="ar">' + row.step + "</span>";
+      html += '<span class="tg">' + row.tag + "</span>";
+      html += '<span class="tx">' + row.text + "</span>";
+      html += "</div>";
+    });
+    wireEl.innerHTML = html;
+    wireEl.scrollTop = wireEl.scrollHeight;
+  }
+
+  function render() {
+    var total = mode === "model" ? MODEL_TOTAL : LEASE_TOTAL;
+    el("mq-m-step").textContent = String(step);
+    el("mq-m-total").textContent = String(total);
+    el("mq-m-del").textContent = String(metrics.del);
+    el("mq-m-ack").textContent = String(metrics.ack);
+    el("mq-m-redel").textContent = String(metrics.redel);
+    el("mq-m-fx").textContent = String(metrics.fx);
+    el("mq-m-dlq").textContent = String(metrics.dlq);
+
+    el("mq-p-op").textContent = panel.op;
+    el("mq-p-rule").textContent = panel.rule;
+    el("mq-p-hold").textContent = panel.hold;
+    el("mq-p-cli").textContent = panel.cli;
+    el("mq-p-model").textContent = panel.model;
+    el("mq-p-depth").textContent = panel.depth;
+    el("mq-p-replay").textContent = panel.replay;
+    el("mq-p-fx").textContent = panel.fx;
+
+    el("mq-dlq-val").textContent = dlqState.val;
+    el("mq-dlq-n").textContent = String(dlqState.n);
+    el("mq-dlq-act").textContent = dlqState.act;
+    dlqBox.className = "mq-dlq" + (dlqState.has ? " has" : "");
+
+    statusEl.textContent = statusText;
+    verdictEl.textContent = verdict.text;
+    verdictEl.className = "mq-verdict" + (verdict.tone ? " tone-" + verdict.tone : "");
+
+    modelView.hidden = mode !== "model";
+    leaseView.hidden = mode !== "lease";
+    dlqBox.hidden = mode !== "lease";
+    laneLabel.textContent = mode === "lease" ? "訊息（OK / SLOW / POISON）" : (kind === "log" ? "Log 保留窗口" : "Queue 可見層");
+
+    if (mode === "model" && kind === "log") {
+      el("mq-wa-name").textContent = "Group A";
+      el("mq-wb-name").textContent = "Group B";
+      el("mq-ex-name").textContent = "Group A 重放";
+      el("mq-broker-name").textContent = "Log";
+    } else if (mode === "lease") {
+      el("mq-wa-name").textContent = "Worker A";
+      el("mq-wb-name").textContent = "Worker B";
+      el("mq-ex-name").textContent = "DLQ / 觀察";
+      el("mq-broker-name").textContent = "Queue";
+    } else {
+      el("mq-wa-name").textContent = "Worker A";
+      el("mq-wb-name").textContent = "Worker B";
+      el("mq-ex-name").textContent = "Worker C";
+      el("mq-broker-name").textContent = "Queue";
+    }
+
+    renderLane();
+    renderActors();
+    renderWire();
+    btnNext.disabled = step >= total;
+  }
+
+  function setSeg(group, attr, value) {
+    group.querySelectorAll("button").forEach(function (btn) {
+      btn.setAttribute("aria-pressed", btn.getAttribute(attr) === value ? "true" : "false");
+    });
+  }
+
+  document.getElementById("mq-seg-mode").addEventListener("click", function (ev) {
+    var btn = ev.target.closest("button[data-mode]");
+    if (!btn) return;
+    mode = btn.getAttribute("data-mode");
+    setSeg(document.getElementById("mq-seg-mode"), "data-mode", mode);
+    fresh();
+    apply();
+  });
+
+  document.getElementById("mq-seg-kind").addEventListener("click", function (ev) {
+    var btn = ev.target.closest("button[data-kind]");
+    if (!btn) return;
+    kind = btn.getAttribute("data-kind");
+    setSeg(document.getElementById("mq-seg-kind"), "data-kind", kind);
+    fresh();
+    apply();
+  });
+
+  document.getElementById("mq-seg-vt").addEventListener("click", function (ev) {
+    var btn = ev.target.closest("button[data-vt]");
+    if (!btn) return;
+    vtMode = btn.getAttribute("data-vt");
+    setSeg(document.getElementById("mq-seg-vt"), "data-vt", vtMode);
+    fresh();
+    apply();
+  });
+
+  btnNext.addEventListener("click", function () {
+    var total = mode === "model" ? MODEL_TOTAL : LEASE_TOTAL;
+    if (step >= total) return;
+    step += 1;
+    apply();
+  });
+
+  btnReset.addEventListener("click", function () {
+    fresh();
+    apply();
+  });
+
+  fresh();
+  apply();
+})();
+</script>
