@@ -1,0 +1,873 @@
+<script>
+(function () {
+  "use strict";
+
+  var demo = document.getElementById("demo-kf");
+  if (!demo) return;
+
+  var HINTS = {
+    rebal: "三條 partition、兩名成員。第三名加入時看 Eager 全停，或 Sticky 只讓 P1 換手。",
+    dur: "RF=3。調 acks / min.isr / unclean，依序寫入並下線副本，觀察拒寫與遺失。"
+  };
+
+  var REBAL_TOTAL = 6;
+  var DUR_TOTAL = 6;
+
+  var mode = "rebal";
+  var assign = "eager";
+  var acks = "all";
+  var minIsr = 2;
+  var unclean = false;
+
+  var step = 0;
+  var wire = [];
+  var metrics = { prod: 0, commit: 0, rej: 0, lost: 0 };
+  var panel = { op: "—", rule: "—", hold: "—", cli: "—", model: "Eager", hwm: "0", writable: "是", risk: "無" };
+  var verdict = { text: "", tone: "" };
+  var statusText = "";
+
+  var parts = [];
+  var actors = [];
+
+  var statusEl = document.getElementById("kf-status");
+  var verdictEl = document.getElementById("kf-verdict");
+  var wireEl = document.getElementById("kf-wire");
+  var partsEl = document.getElementById("kf-parts");
+  var actorsEl = document.getElementById("kf-actors");
+  var partsLabel = document.getElementById("kf-parts-label");
+  var actorsLabel = document.getElementById("kf-actors-label");
+  var rebalView = document.getElementById("kf-rebal-view");
+  var durView = document.getElementById("kf-dur-view");
+  var btnNext = document.getElementById("kf-btn-next");
+  var btnReset = document.getElementById("kf-btn-reset");
+
+  function el(id) { return document.getElementById(id); }
+
+  function logRow(k, tag, text, at) {
+    wire.push({ kind: k, tag: tag, text: text, step: at == null ? step : at });
+  }
+
+  function setSeg(rootId, attr, value) {
+    var root = document.getElementById(rootId);
+    if (!root) return;
+    var buttons = root.querySelectorAll("button");
+    for (var i = 0; i < buttons.length; i += 1) {
+      buttons[i].setAttribute("aria-pressed", buttons[i].getAttribute(attr) === value ? "true" : "false");
+    }
+  }
+
+  function knobLabel() {
+    if (mode === "rebal") return assign === "eager" ? "Eager" : "Sticky";
+    return "acks=" + acks + " · min.isr=" + minIsr + " · unclean=" + (unclean ? "on" : "off");
+  }
+
+  function fresh() {
+    step = 0;
+    wire = [];
+    metrics = { prod: 0, commit: 0, rej: 0, lost: 0 };
+    panel = {
+      op: "—",
+      rule: "—",
+      hold: "—",
+      cli: "—",
+      model: knobLabel(),
+      hwm: "0",
+      writable: "是",
+      risk: "無"
+    };
+    verdict = {
+      text: "判定尚未產生——走完一輪後會摘要換手停頓，或拒寫／遺失是保護還是事故。",
+      tone: ""
+    };
+    statusText = HINTS[mode];
+    parts = [];
+    actors = [];
+    btnNext.disabled = false;
+  }
+
+  function emptyPart(id, title) {
+    return {
+      id: id,
+      title: title,
+      owner: "—",
+      klass: "idle",
+      hint: "空",
+      slots: []
+    };
+  }
+
+  function actor(id, name, sub, klass, val, hint) {
+    return { id: id, name: name, sub: sub, klass: klass, val: val, hint: hint };
+  }
+
+  function slot(label, klass) {
+    return { label: label, klass: klass };
+  }
+
+  function applyRebal() {
+    var p0 = emptyPart("p0", "P0");
+    var p1 = emptyPart("p1", "P1");
+    var p2 = emptyPart("p2", "P2");
+    var c1 = actor("c1", "Consumer 1", "group G", "idle", "—", "待命");
+    var c2 = actor("c2", "Consumer 2", "group G", "idle", "—", "待命");
+    var c3 = actor("c3", "Consumer 3", "尚未入組", "idle", "—", "不在 group");
+
+    function own(p, name) {
+      p.owner = name;
+    }
+
+    function fillTwo(p, key) {
+      p.slots = [slot(key + "@0", "ready"), slot(key + "@1", "ready")];
+    }
+
+    function markOk(p) {
+      p.slots.forEach(function (s) { s.klass = "ok"; });
+    }
+
+    function addM2(p, key) {
+      p.slots.push(slot(key + "@2", "ready"));
+    }
+
+    own(p0, "C1");
+    own(p1, "C1");
+    own(p2, "C2");
+    c1.val = "P0, P1";
+    c1.hint = "兩區主人";
+    c1.klass = "ok";
+    c2.val = "P2";
+    c2.hint = "一區主人";
+    c2.klass = "ok";
+    p0.klass = "ok";
+    p1.klass = "ok";
+    p2.klass = "ok";
+    p0.hint = "committed=0";
+    p1.hint = "committed=0";
+    p2.hint = "committed=0";
+
+    panel.op = "初始指派";
+    panel.rule = "一區一人";
+    panel.hold = "C1→P0,P1 · C2→P2";
+    panel.cli = "C3 尚未加入";
+    panel.hwm = "游標 0 / 0 / 0";
+    panel.writable = "—";
+    panel.risk = "無";
+    logRow("read", "JOIN", "Group G：C1 持有 P0+P1，C2 持有 P2。每個 partition 同一時間只有一個主人。", 0);
+
+    if (step < 1) {
+      parts = [p0, p1, p2];
+      actors = [c1, c2, c3];
+      return;
+    }
+
+    fillTwo(p0, "A");
+    fillTwo(p1, "B");
+    fillTwo(p2, "C");
+    metrics.prod = 6;
+    p0.hint = "LEO=2 · committed=0";
+    p1.hint = "LEO=2 · committed=0";
+    p2.hint = "LEO=2 · committed=0";
+    p0.klass = "wait";
+    p1.klass = "wait";
+    p2.klass = "wait";
+    panel.op = "PRODUCE ×6";
+    panel.rule = "追加到各區尾巴";
+    panel.hold = "每區 offset 0,1";
+    panel.cli = "尚未 fetch";
+    panel.hwm = "可見 2 / 2 / 2";
+    logRow("read", "PROD", "每條 partition 追加兩筆。地址是 topic+partition+offset，不是「佇列下一筆」。", 1);
+
+    if (step < 2) {
+      parts = [p0, p1, p2];
+      actors = [c1, c2, c3];
+      return;
+    }
+
+    markOk(p0);
+    markOk(p1);
+    markOk(p2);
+    metrics.commit = 6;
+    p0.hint = "LEO=2 · committed=2";
+    p1.hint = "LEO=2 · committed=2";
+    p2.hint = "LEO=2 · committed=2";
+    p0.klass = "ok";
+    p1.klass = "ok";
+    p2.klass = "ok";
+    c1.hint = "已提交 P0、P1";
+    c2.hint = "已提交 P2";
+    panel.op = "FETCH + COMMIT";
+    panel.rule = "主人拉自己的區";
+    panel.hold = "游標全部到 2";
+    panel.cli = "C1、C2 正常拉";
+    panel.hwm = "committed 2 / 2 / 2";
+    logRow("ok", "COMMIT", "C1 提交 P0、P1；C2 提交 P2。另一個 group 仍可從自己的游標重放同一批資料。", 2);
+
+    if (step < 3) {
+      parts = [p0, p1, p2];
+      actors = [c1, c2, c3];
+      return;
+    }
+
+    addM2(p0, "A");
+    addM2(p1, "B");
+    addM2(p2, "C");
+    metrics.prod = 9;
+    c3.sub = "正在加入";
+    c3.klass = "wait";
+    c3.val = "JOIN";
+    c3.hint = "觸發 rebalance";
+
+    if (assign === "eager") {
+      own(p0, "（收回）");
+      own(p1, "（收回）");
+      own(p2, "（收回）");
+      p0.klass = "hold";
+      p1.klass = "hold";
+      p2.klass = "hold";
+      p0.hint = "revoke · A@2 未拉";
+      p1.hint = "revoke · B@2 未拉";
+      p2.hint = "revoke · C@2 未拉";
+      c1.klass = "hold";
+      c2.klass = "hold";
+      c1.val = "∅";
+      c2.val = "∅";
+      c1.hint = "停手 · 等待新指派";
+      c2.hint = "停手 · 等待新指派";
+      panel.op = "REBALANCE · Eager";
+      panel.rule = "先收回全部再重分";
+      panel.hold = "三區皆無主人";
+      panel.cli = "C1 C2 C3 全組停頓";
+      panel.hwm = "A@2 B@2 C@2 堆積";
+      panel.risk = "全組 lag";
+      logRow("warn", "STOP", "Eager：第三名加入，C1、C2 必須放下正在做的區。三條 partition 暫時沒有人拉。", 3);
+    } else {
+      own(p0, "C1");
+      own(p1, "（收回）");
+      own(p2, "C2");
+      p0.slots[2].klass = "ok";
+      p2.slots[2].klass = "ok";
+      metrics.commit = 8;
+      p0.klass = "ok";
+      p1.klass = "hold";
+      p2.klass = "ok";
+      p0.hint = "仍屬 C1 · committed=3";
+      p1.hint = "revoke · B@2 未拉";
+      p2.hint = "仍屬 C2 · committed=3";
+      c1.klass = "ok";
+      c2.klass = "ok";
+      c1.val = "P0";
+      c2.val = "P2";
+      c1.hint = "只交回 P1，P0 續拉";
+      c2.hint = "P2 不必搬家，繼續拉";
+      panel.op = "REBALANCE · Sticky";
+      panel.rule = "只收回必須換手的區";
+      panel.hold = "P1 停 · P0/P2 仍在拉";
+      panel.cli = "C2 不受誤傷";
+      panel.hwm = "P0、P2 已到 3；P1 停在 2";
+      panel.risk = "僅 P1 lag";
+      logRow("warn", "MOVE", "Sticky：只有 P1 要交給新人，被收回。C1 續拉 P0、C2 續拉 P2，A@2 與 C@2 已被提交。", 3);
+    }
+
+    if (step < 4) {
+      parts = [p0, p1, p2];
+      actors = [c1, c2, c3];
+      return;
+    }
+
+    own(p0, "C1");
+    own(p1, "C3");
+    own(p2, "C2");
+    c3.sub = "group G";
+    c1.val = "P0";
+    c2.val = "P2";
+    c3.val = "P1";
+    c1.klass = "ok";
+    c2.klass = "ok";
+    c3.klass = "ok";
+    c1.hint = "新指派：只留 P0";
+    c2.hint = "新指派：仍是 P2";
+    c3.hint = "接手 P1";
+    p0.klass = "ok";
+    p1.klass = "wait";
+    p2.klass = "ok";
+
+    if (assign === "eager") {
+      p0.hint = "C1 · A@2 待拉";
+      p1.hint = "C3 · B@2 待拉";
+      p2.hint = "C2 · C@2 待拉";
+      panel.op = "ASSIGN 完成";
+      panel.rule = "C1→P0 · C2→P2 · C3→P1";
+      panel.hold = "三區重新有主人";
+      panel.cli = "開始補拉 @2";
+      panel.hwm = "committed 仍是 2 / 2 / 2";
+      panel.risk = "空窗結束";
+      logRow("ok", "ASSIGN", "新指派生效。Eager 期間堆積的三筆 @2 現在才有人能拉。", 4);
+    } else {
+      p0.hint = "C1 · committed=3";
+      p1.hint = "C3 · B@2 待拉";
+      p2.hint = "C2 · committed=3";
+      p1.slots[2].klass = "ready";
+      panel.op = "ASSIGN 完成";
+      panel.rule = "C3 只接走 P1";
+      panel.hold = "P0、P2 從未中斷";
+      panel.cli = "C3 補拉 B@2";
+      panel.hwm = "committed 3 / 2 / 3";
+      panel.risk = "僅 P1 有空窗";
+      logRow("ok", "ASSIGN", "C3 成為 P1 主人。P0 與 P2 在 sticky 下沒有停過，游標已經在 3。", 4);
+    }
+
+    if (step < 5) {
+      parts = [p0, p1, p2];
+      actors = [c1, c2, c3];
+      return;
+    }
+
+    p0.slots.forEach(function (s) { s.klass = "ok"; });
+    p1.slots.forEach(function (s) { s.klass = "ok"; });
+    p2.slots.forEach(function (s) { s.klass = "ok"; });
+    metrics.commit = 9;
+    p0.klass = "ok";
+    p1.klass = "ok";
+    p2.klass = "ok";
+    p0.hint = "committed=3";
+    p1.hint = "committed=3";
+    p2.hint = "committed=3";
+    c1.hint = "穩定持有 P0";
+    c2.hint = "穩定持有 P2";
+    c3.hint = "穩定持有 P1";
+    panel.op = "RESUME + COMMIT";
+    panel.rule = "新主人從上次 commit 接";
+    panel.hold = "游標全部到 3";
+    panel.cli = "三名成員恢復拉取";
+    panel.hwm = "committed 3 / 3 / 3";
+    panel.risk = "無";
+    logRow("ok", "RESUME", "剩餘 @2 提交完畢。若 rebalance 當下有未提交的 fetch，新主人會從舊 commit 重拉——at-least-once 再次出現。", 5);
+
+    if (assign === "eager") {
+      verdict = {
+        text: "判定：Eager 讓 C3 加入變成全組停手，三條區的 @2 都堆積到指派結束。換手完成後資料還在（Log 可重放），帳單是 lag 與可能的重拉。",
+        tone: "lock"
+      };
+    } else {
+      verdict = {
+        text: "判定：Sticky 只移動 P1，C2 全程續拉 P2。停頓被限制在「必須換手」的那一區——這就是 cooperative sticky 的動機。",
+        tone: "ok"
+      };
+    }
+    btnNext.disabled = true;
+
+    parts = [p0, p1, p2];
+    actors = [c1, c2, c3];
+  }
+
+  function countIsr(brokers) {
+    var n = 0;
+    brokers.forEach(function (b) {
+      if (b.up && b.inIsr) n += 1;
+    });
+    return n;
+  }
+
+  function minIsrLeo(brokers) {
+    var m = Infinity;
+    brokers.forEach(function (b) {
+      if (b.up && b.inIsr && b.leo < m) m = b.leo;
+    });
+    return m === Infinity ? 0 : m;
+  }
+
+  function leaderOf(brokers) {
+    for (var i = 0; i < brokers.length; i += 1) {
+      if (brokers[i].role === "leader" && brokers[i].up) return brokers[i];
+    }
+    return null;
+  }
+
+  function applyDur() {
+    var b1 = { id: "b1", name: "Broker 1", sub: "Leader · P0", up: true, inIsr: true, leo: 0, role: "leader", klass: "ok", val: "LEO 0", hint: "ISR 內" };
+    var b2 = { id: "b2", name: "Broker 2", sub: "Follower", up: true, inIsr: true, leo: 0, role: "follower", klass: "ok", val: "LEO 0", hint: "ISR 內" };
+    var b3 = { id: "b3", name: "Broker 3", sub: "Follower", up: true, inIsr: true, leo: 0, role: "follower", klass: "ok", val: "LEO 0", hint: "ISR 內" };
+    var log = emptyPart("log", "P0 log");
+    log.owner = "Leader = B1";
+    log.hint = "HWM=0";
+    log.klass = "idle";
+
+    var brokers = [b1, b2, b3];
+    var rejectedLast = false;
+    var lostCount = 0;
+    var noLeader = false;
+
+    function paintBrokers() {
+      brokers.forEach(function (b) {
+        if (!b.up) {
+          b.klass = "bad down";
+          b.sub = b.id === "b1" ? "前 Leader · 下線" : "Follower · 下線";
+          b.val = "LEO " + b.leo + " · DOWN";
+          b.hint = "已下線 · 不在 ISR";
+          return;
+        }
+        if (b.role === "leader") {
+          b.klass = "ok";
+          b.sub = "Leader · P0";
+          b.val = "LEO " + b.leo;
+          b.hint = b.inIsr ? "ISR 內 · 接寫入" : "Leader 但不在 ISR";
+          return;
+        }
+        if (b.inIsr) {
+          b.klass = "wait";
+          b.sub = "Follower · ISR";
+          b.val = "LEO " + b.leo;
+          b.hint = "跟得上 Leader";
+        } else {
+          b.klass = "hold";
+          b.sub = "Follower · 落後";
+          b.val = "LEO " + b.leo;
+          b.hint = "不在 ISR";
+        }
+      });
+    }
+
+    function syncIsr() {
+      brokers.forEach(function (b) {
+        if (!b.up) {
+          b.inIsr = false;
+        }
+      });
+    }
+
+    function canWrite() {
+      var leader = leaderOf(brokers);
+      if (!leader) return false;
+      if (acks === "all" && countIsr(brokers) < minIsr) return false;
+      return true;
+    }
+
+    function produce(label) {
+      if (!canWrite()) {
+        metrics.rej += 1;
+        rejectedLast = true;
+        log.slots.push(slot(label + " 拒", "hold"));
+        return "reject";
+      }
+      rejectedLast = false;
+      metrics.prod += 1;
+      var leader = leaderOf(brokers);
+      leader.leo += 1;
+      if (acks === "0") {
+        log.slots.push(slot(label, "hold"));
+        return "acks0";
+      }
+      if (acks === "1") {
+        brokers.forEach(function (b) {
+          if (b.up && b.inIsr && b !== leader) b.leo = leader.leo;
+        });
+        log.slots.push(slot(label, "ready"));
+        return "acks1";
+      }
+      brokers.forEach(function (b) {
+        if (b.up && b.inIsr) b.leo = leader.leo;
+      });
+      log.slots.push(slot(label, "ok"));
+      return "acksall";
+    }
+
+    function hwm() {
+      return minIsrLeo(brokers);
+    }
+
+    function riskText() {
+      if (lostCount > 0) return "已遺失 " + lostCount;
+      if (noLeader) return "無 Leader";
+      if (acks === "0") return "fire-and-forget";
+      if (acks === "all" && countIsr(brokers) >= minIsr && minIsr >= 2) return "ISR 耐久";
+      if (acks === "all" && countIsr(brokers) < minIsr) return "寫入已擋";
+      if (countIsr(brokers) <= 1) return "只在 Leader";
+      return "Leader 點頭";
+    }
+
+    paintBrokers();
+    panel.op = "叢集健康";
+    panel.rule = "RF=3 · ISR={B1,B2,B3}";
+    panel.hold = "ISR 3";
+    panel.cli = "尚未寫入";
+    panel.hwm = "HWM 0";
+    panel.writable = "是";
+    panel.risk = "無";
+    logRow("read", "ISR", "三台都在 ISR。消費者能讀的是 HWM（ISR 最小 LEO），不是 Leader 自己的尾巴。", 0);
+
+    if (step < 1) {
+      paintBrokers();
+      parts = [log];
+      actors = brokers;
+      return;
+    }
+
+    var r1 = produce("R1");
+    paintBrokers();
+    log.hint = "HWM=" + hwm();
+    log.klass = r1 === "reject" ? "hold" : "wait";
+    panel.op = "PRODUCE R1";
+    if (r1 === "acks0") {
+      panel.rule = "acks=0 不等待";
+      panel.cli = "客戶端當下當成功";
+      panel.risk = "可能沒落地";
+      logRow("warn", "ACK0", "R1 只在 Leader 記憶體／頁快取視角。Follower 尚未抄，客戶端已經往下走。", 1);
+    } else if (r1 === "acks1") {
+      panel.rule = "只等 Leader";
+      panel.cli = "Leader 點頭即成功";
+      panel.risk = "抄寫仍是非同步";
+      logRow("read", "ACK1", "R1 先在 Leader 成功。本步讓仍在 ISR 的 Follower 隨後追上，HWM=" + hwm() + "。", 1);
+    } else if (r1 === "acksall") {
+      panel.rule = "等滿目前 ISR";
+      panel.cli = "ISR 皆寫入才成功";
+      panel.risk = "ISR 耐久";
+      logRow("ok", "ACKALL", "R1 寫進 ISR 內每一份副本。HWM 推進到 " + hwm() + "。", 1);
+    }
+    panel.hold = "ISR " + countIsr(brokers);
+    panel.hwm = "HWM " + hwm();
+    panel.writable = canWrite() ? "是" : "否";
+
+    if (step < 2) {
+      parts = [log];
+      actors = brokers;
+      return;
+    }
+
+    b3.up = false;
+    b3.inIsr = false;
+    syncIsr();
+    paintBrokers();
+    log.owner = "Leader = B1 · F2 下線";
+    log.hint = "HWM=" + hwm() + " · ISR=" + countIsr(brokers);
+    log.klass = "hold";
+    panel.op = "KILL Broker 3";
+    panel.rule = "落後／下線者踢出 ISR";
+    panel.hold = "ISR {B1,B2}";
+    panel.cli = "寫入路徑仍有兩張嘴";
+    panel.hwm = "HWM " + hwm();
+    panel.writable = canWrite() ? "是" : "否";
+    panel.risk = riskText();
+    logRow("warn", "DOWN", "B3 下線，ISR 縮成 {B1,B2}。它的 LEO 停在 " + b3.leo + "，之後的寫入它看不到。", 2);
+
+    if (step < 3) {
+      parts = [log];
+      actors = brokers;
+      return;
+    }
+
+    var r2 = produce("R2");
+    paintBrokers();
+    log.hint = "HWM=" + hwm();
+    log.klass = r2 === "reject" ? "hold" : "wait";
+    panel.op = "PRODUCE R2";
+    panel.hold = "ISR " + countIsr(brokers) + " · B3.LEO=" + b3.leo;
+    panel.hwm = "HWM " + hwm();
+    panel.writable = canWrite() ? "是" : "否";
+    panel.risk = riskText();
+    if (r2 === "reject") {
+      panel.rule = "ISR < min.isr → 拒寫";
+      panel.cli = "NOT_ENOUGH_REPLICAS";
+      logRow("ok", "REJECT", "R2 被拒。這是保護成功：叢集拒絕在不安全的 ISR 上繼續 ack。", 3);
+    } else if (r2 === "acksall") {
+      panel.rule = "ISR=2 ≥ min.isr";
+      panel.cli = "B1、B2 寫入成功";
+      logRow("ok", "ACKALL", "R2 只寫進仍在 ISR 的 B1、B2。B3 停在 LEO " + b3.leo + "，已經是過期副本。", 3);
+    } else if (r2 === "acks1") {
+      panel.rule = "只等 Leader";
+      panel.cli = "R2 在 B1 成功";
+      logRow("read", "ACK1", "R2 被 Leader 接受。B3 仍停在 LEO " + b3.leo + "。", 3);
+    } else {
+      panel.rule = "acks=0";
+      panel.cli = "未等待任何副本";
+      logRow("warn", "ACK0", "R2 再次 fire-and-forget。B3 完全沒看到這筆。", 3);
+    }
+
+    if (step < 4) {
+      parts = [log];
+      actors = brokers;
+      return;
+    }
+
+    b2.up = false;
+    b2.inIsr = false;
+    syncIsr();
+    var r3 = produce("R3");
+    paintBrokers();
+    log.owner = "只剩 Leader";
+    log.hint = "HWM=" + hwm() + " · ISR=" + countIsr(brokers);
+    log.klass = r3 === "reject" ? "ok" : "hold";
+    panel.op = "KILL B2 + PRODUCE R3";
+    panel.hold = "ISR {B1}";
+    panel.hwm = "HWM " + hwm();
+    panel.writable = canWrite() ? "是" : "否";
+    if (r3 === "reject") {
+      panel.rule = "min.isr=2 擋住單點寫";
+      panel.cli = "拒寫 · 保護成功";
+      panel.risk = "寫入已擋";
+      log.slots[log.slots.length - 1].klass = "hold";
+      logRow("ok", "REJECT", "只剩 Leader，acks=all 且 min.isr=2 → NOT_ENOUGH_REPLICAS。R3 沒有變成「只寫在一臺」。", 4);
+    } else {
+      panel.rule = acks === "all" ? "min.isr=1 允許退化" : ("acks=" + acks + " 不等 ISR");
+      panel.cli = "R3 只在 B1";
+      panel.risk = "只在 Leader";
+      logRow("warn", "SOLO", "R3 被接受，但 ISR 只剩 Leader。這筆資料的命運綁在 B1 還活著。", 4);
+    }
+
+    if (step < 5) {
+      parts = [log];
+      actors = brokers;
+      return;
+    }
+
+    var leaderLeoBefore = b1.leo;
+    b1.up = false;
+    b1.inIsr = false;
+    b1.role = "follower";
+
+    if (unclean) {
+      b3.up = true;
+      b3.role = "leader";
+      b3.inIsr = true;
+      b3.sub = "Leader · unclean";
+      var cut = b3.leo;
+      log.slots.forEach(function (s, idx) {
+        if (idx >= cut && s.klass !== "hold") {
+          s.klass = "lost";
+          lostCount += 1;
+        }
+      });
+      metrics.lost = lostCount;
+      log.owner = "Unclean Leader = B3";
+      log.hint = "HWM 倒退到 " + cut;
+      log.klass = "bad";
+      panel.op = "KILL Leader · unclean 接班";
+      panel.rule = "過期副本的 LEO 成為新 HWM";
+      panel.hold = "新 Leader LEO=" + cut;
+      panel.cli = "已 ack 的 offset 可能蒸發";
+      panel.hwm = "HWM " + cut + "（倒退）";
+      panel.writable = "是（但資料已少）";
+      panel.risk = "已遺失 " + lostCount;
+      logRow("bad", "UNCLEAN", "B3 以 LEO " + cut + " 上台。B1 曾經寫到 " + leaderLeoBefore + " 的紀錄，對新叢集而言不存在。", 5);
+      verdict = {
+        text: "判定：unclean election 用可用性換資料。過期 Follower 接班後，HWM 倒退，中間的 offset 永久消失——這是事故，不是保護。",
+        tone: "bad"
+      };
+    } else {
+      noLeader = true;
+      b3.role = "follower";
+      log.owner = "無 Leader";
+      log.hint = "ISR 空 · 等待同步副本";
+      log.klass = "hold";
+      panel.op = "KILL Leader · 拒絕 unclean";
+      panel.rule = "只有 ISR 成員能接班";
+      panel.hold = "沒有合格接班者";
+      panel.cli = "partition 不可用";
+      panel.hwm = "停在 " + leaderLeoBefore + "（離線）";
+      panel.writable = "否";
+      panel.risk = "無 Leader · 資料未宣告遺失";
+      logRow("warn", "UNAVAIL", "B1 倒下，剩餘的 B3 不在 ISR。unclean=off → 不選舉，P0 停止服務，但也不用過期日誌重寫歷史。", 5);
+      if (metrics.rej > 0 && acks === "all" && minIsr >= 2) {
+        verdict = {
+          text: "判定：min.isr 在單點時拒寫是保護成功；接著 unclean=off 選擇停機而不是丟資料。可用性的帳單已經付了，耐久沒有被賣掉。",
+          tone: "ok"
+        };
+      } else {
+        verdict = {
+          text: "判定：Leader 與 ISR 同伴都沒了，clean election 讓 P0 不可用。資料還在倒下的磁碟上，沒有被過期副本覆寫——這是用停機換不丟。",
+          tone: "lock"
+        };
+      }
+    }
+
+    paintBrokers();
+    if (!b1.up && unclean) {
+      b3.klass = "ok";
+      b3.val = "LEO " + b3.leo;
+      b3.hint = "過期接班 · 已丟資料";
+    }
+    btnNext.disabled = true;
+    parts = [log];
+    actors = brokers;
+  }
+
+  function apply() {
+    wire = [];
+    metrics = { prod: 0, commit: 0, rej: 0, lost: 0 };
+    panel.model = knobLabel();
+    verdict = {
+      text: "判定尚未產生——走完一輪後會摘要換手停頓，或拒寫／遺失是保護還是事故。",
+      tone: ""
+    };
+    btnNext.disabled = false;
+    if (mode === "rebal") applyRebal();
+    else applyDur();
+    if (step === 0) {
+      statusText = HINTS[mode];
+    } else {
+      statusText = panel.op + " · " + panel.rule;
+    }
+    render();
+  }
+
+  function renderParts() {
+    partsEl.innerHTML = "";
+    parts.forEach(function (p) {
+      var box = document.createElement("div");
+      box.className = "kf-part " + p.klass;
+      var slots = document.createElement("div");
+      slots.className = "kf-slots";
+      if (p.slots.length === 0) {
+        var empty = document.createElement("span");
+        empty.className = "kf-slot";
+        empty.textContent = "（空）";
+        slots.appendChild(empty);
+      } else {
+        p.slots.forEach(function (s) {
+          var chip = document.createElement("span");
+          chip.className = "kf-slot " + s.klass;
+          chip.textContent = s.label;
+          slots.appendChild(chip);
+        });
+      }
+      box.innerHTML = '<div class="an"></div><div class="al"></div><div class="ah"></div>';
+      box.querySelector(".an").textContent = p.title;
+      box.querySelector(".al").textContent = "owner " + p.owner;
+      box.querySelector(".ah").textContent = p.hint;
+      box.appendChild(slots);
+      partsEl.appendChild(box);
+    });
+  }
+
+  function renderActors() {
+    actorsEl.innerHTML = "";
+    actors.forEach(function (a) {
+      var box = document.createElement("div");
+      box.className = "kf-node " + a.klass;
+      box.innerHTML = '<div class="an"></div><div class="al"></div><div class="av"></div><div class="ah"></div>';
+      box.querySelector(".an").textContent = a.name;
+      box.querySelector(".al").textContent = a.sub;
+      box.querySelector(".av").textContent = a.val;
+      box.querySelector(".ah").textContent = a.hint;
+      actorsEl.appendChild(box);
+    });
+  }
+
+  function renderWire() {
+    wireEl.innerHTML = "";
+    wire.forEach(function (row) {
+      var div = document.createElement("div");
+      div.className = "kf-row " + row.kind;
+      div.innerHTML = '<span class="ar"></span><span class="tg"></span><span class="tx"></span>';
+      div.querySelector(".ar").textContent = String(row.step);
+      div.querySelector(".tg").textContent = row.tag;
+      div.querySelector(".tx").textContent = row.text;
+      wireEl.appendChild(div);
+    });
+  }
+
+  function toneClass(elNode, val, goodList, badList, warnList) {
+    elNode.classList.remove("good", "bad", "warn");
+    if (goodList && goodList.indexOf(val) !== -1) elNode.classList.add("good");
+    else if (badList && badList.indexOf(val) !== -1) elNode.classList.add("bad");
+    else if (warnList && warnList.indexOf(val) !== -1) elNode.classList.add("warn");
+  }
+
+  function render() {
+    var total = mode === "rebal" ? REBAL_TOTAL : DUR_TOTAL;
+    el("kf-m-step").textContent = String(step);
+    el("kf-m-total").textContent = String(total);
+    el("kf-m-prod").textContent = String(metrics.prod);
+    el("kf-m-commit").textContent = String(metrics.commit);
+    el("kf-m-rej").textContent = String(metrics.rej);
+    el("kf-m-lost").textContent = String(metrics.lost);
+
+    el("kf-p-op").textContent = panel.op;
+    el("kf-p-rule").textContent = panel.rule;
+    el("kf-p-hold").textContent = panel.hold;
+    el("kf-p-cli").textContent = panel.cli;
+    el("kf-p-model").textContent = panel.model;
+    el("kf-p-hwm").textContent = panel.hwm;
+    el("kf-p-writable").textContent = panel.writable;
+    el("kf-p-risk").textContent = panel.risk;
+
+    toneClass(el("kf-p-writable"), panel.writable, ["是"], ["否"], []);
+    var riskEl = el("kf-p-risk");
+    riskEl.classList.remove("good", "bad", "warn");
+    if (/已遺失|只在 Leader|fire-and-forget/.test(panel.risk)) riskEl.classList.add("bad");
+    else if (/已擋|無 Leader|lag/.test(panel.risk)) riskEl.classList.add("warn");
+    else if (/耐久|無/.test(panel.risk)) riskEl.classList.add("good");
+
+    partsLabel.textContent = mode === "rebal" ? "Partitions" : "Partition log";
+    actorsLabel.textContent = mode === "rebal" ? "Consumers" : "Brokers";
+
+    renderParts();
+    renderActors();
+    renderWire();
+
+    statusEl.textContent = statusText;
+    verdictEl.textContent = verdict.text;
+    verdictEl.className = "kf-verdict" + (verdict.tone ? " tone-" + verdict.tone : "");
+
+    rebalView.hidden = mode !== "rebal";
+    durView.hidden = mode !== "dur";
+  }
+
+  function totalSteps() {
+    return mode === "rebal" ? REBAL_TOTAL : DUR_TOTAL;
+  }
+
+  document.getElementById("kf-seg-mode").addEventListener("click", function (e) {
+    var btn = e.target.closest("button[data-mode]");
+    if (!btn) return;
+    mode = btn.getAttribute("data-mode");
+    setSeg("kf-seg-mode", "data-mode", mode);
+    fresh();
+    apply();
+  });
+
+  document.getElementById("kf-seg-assign").addEventListener("click", function (e) {
+    var btn = e.target.closest("button[data-assign]");
+    if (!btn) return;
+    assign = btn.getAttribute("data-assign");
+    setSeg("kf-seg-assign", "data-assign", assign);
+    apply();
+  });
+
+  document.getElementById("kf-seg-acks").addEventListener("click", function (e) {
+    var btn = e.target.closest("button[data-acks]");
+    if (!btn) return;
+    acks = btn.getAttribute("data-acks");
+    setSeg("kf-seg-acks", "data-acks", acks);
+    apply();
+  });
+
+  document.getElementById("kf-seg-isr").addEventListener("click", function (e) {
+    var btn = e.target.closest("button[data-isr]");
+    if (!btn) return;
+    minIsr = parseInt(btn.getAttribute("data-isr"), 10);
+    setSeg("kf-seg-isr", "data-isr", String(minIsr));
+    apply();
+  });
+
+  document.getElementById("kf-seg-unclean").addEventListener("click", function (e) {
+    var btn = e.target.closest("button[data-unclean]");
+    if (!btn) return;
+    unclean = btn.getAttribute("data-unclean") === "on";
+    setSeg("kf-seg-unclean", "data-unclean", unclean ? "on" : "off");
+    apply();
+  });
+
+  btnNext.addEventListener("click", function () {
+    if (step >= totalSteps() - 1) return;
+    step += 1;
+    apply();
+  });
+
+  btnReset.addEventListener("click", function () {
+    fresh();
+    apply();
+  });
+
+  fresh();
+  apply();
+})();
+</script>
