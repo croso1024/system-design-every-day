@@ -1,0 +1,605 @@
+<script>
+(function () {
+  "use strict";
+
+  var demo = document.getElementById("demo-sp");
+  if (!demo) return;
+
+  var T_MAX = 20;
+  var TUMBLE = 5;
+  var SLIDE_SIZE = 6;
+  var SLIDE_STEP = 3;
+  var SESSION_GAP = 4;
+
+  var DEFAULT_ET = [2, 7, 4, 13, 11, 3];
+
+  var HINTS = {
+    tumbling: "Tumbling 每 5 個 event-time 單位切一扇不重疊的窗。六則事件依 e1→e6 到達；預設時間戳已是亂序。",
+    sliding: "Sliding 長度 6、步進 3，窗會重疊。同一則事件可同時落入兩扇窗。",
+    session: "Session 間隙為 4：同一 key 的事件若 et 差距小於 4 就合併成一場會話。"
+  };
+
+  var kind = "tumbling";
+  var policy = "side";
+  var lateness = 3;
+  var delay = 3;
+  var step = 0;
+  var etValues = DEFAULT_ET.slice();
+
+  var wire = [];
+  var metrics = { on: 0, late: 0, drop: 0 };
+  var panel = { op: "—", rule: "—", hold: "—", cli: "—", model: "Tumbling 5", hwm: "−∞", writable: "0", risk: "尚未送入" };
+  var verdict = { text: "", tone: "" };
+  var statusText = "";
+  var run = null;
+
+  var statusEl = document.getElementById("sp-status");
+  var verdictEl = document.getElementById("sp-verdict");
+  var wireEl = document.getElementById("sp-wire");
+  var evsEl = document.getElementById("sp-evs");
+  var tlEl = document.getElementById("sp-tl");
+  var winsEl = document.getElementById("sp-wins");
+  var sideEl = document.getElementById("sp-side");
+  var sideLabel = document.getElementById("sp-side-label");
+  var hintEl = document.getElementById("sp-kind-hint");
+  var delayInput = document.getElementById("sp-delay");
+  var delayVal = document.getElementById("sp-delay-val");
+  var btnNext = document.getElementById("sp-btn-next");
+  var btnAll = document.getElementById("sp-btn-all");
+  var btnReset = document.getElementById("sp-btn-reset");
+
+  function el(id) { return document.getElementById(id); }
+
+  function esc(s) {
+    return String(s)
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;");
+  }
+
+  function fmtWm(w) {
+    return w <= -1e8 ? "−∞" : String(w);
+  }
+
+  function winId(start, end) {
+    return "[" + start + "," + end + ")";
+  }
+
+  function kindLabel() {
+    if (kind === "sliding") return "Sliding 6/3";
+    if (kind === "session") return "Session gap=4";
+    return "Tumbling 5";
+  }
+
+  function setSeg(rootId, attr, value) {
+    var root = document.getElementById(rootId);
+    if (!root) return;
+    var buttons = root.querySelectorAll("button");
+    for (var i = 0; i < buttons.length; i += 1) {
+      buttons[i].setAttribute("aria-pressed", buttons[i].getAttribute(attr) === value ? "true" : "false");
+    }
+  }
+
+  function tumblingWinsFor(t) {
+    var start = Math.floor(t / TUMBLE) * TUMBLE;
+    return [{ start: start, end: start + TUMBLE, id: winId(start, start + TUMBLE) }];
+  }
+
+  function slidingWinsFor(t) {
+    var out = [];
+    for (var s = 0; s < T_MAX + SLIDE_STEP; s += SLIDE_STEP) {
+      if (s <= t && t < s + SLIDE_SIZE) {
+        out.push({ start: s, end: s + SLIDE_SIZE, id: winId(s, s + SLIDE_SIZE) });
+      }
+    }
+    return out;
+  }
+
+  function allFixedWindows() {
+    var out = [];
+    var seen = {};
+    var t;
+    if (kind === "tumbling") {
+      for (t = 0; t < T_MAX; t += TUMBLE) {
+        out.push({ start: t, end: t + TUMBLE, id: winId(t, t + TUMBLE) });
+      }
+    } else if (kind === "sliding") {
+      for (t = 0; t < T_MAX + SLIDE_STEP; t += SLIDE_STEP) {
+        var id = winId(t, t + SLIDE_SIZE);
+        if (!seen[id]) {
+          seen[id] = true;
+          out.push({ start: t, end: t + SLIDE_SIZE, id: id });
+        }
+      }
+    }
+    return out;
+  }
+
+  function clusterSessions(admitted) {
+    if (!admitted.length) return [];
+    var sorted = admitted.slice().sort(function (a, b) { return a.et - b.et; });
+    var clusters = [];
+    var cur = { start: sorted[0].et, end: sorted[0].et + SESSION_GAP, members: [sorted[0]] };
+    var i;
+    for (i = 1; i < sorted.length; i += 1) {
+      var e = sorted[i];
+      if (e.et < cur.end) {
+        cur.members.push(e);
+        if (e.et + SESSION_GAP > cur.end) cur.end = e.et + SESSION_GAP;
+      } else {
+        clusters.push(cur);
+        cur = { start: e.et, end: e.et + SESSION_GAP, members: [e] };
+      }
+    }
+    clusters.push(cur);
+    for (i = 0; i < clusters.length; i += 1) {
+      clusters[i].id = winId(clusters[i].start, clusters[i].end);
+    }
+    return clusters;
+  }
+
+  function isClosed(win, wm) {
+    return wm >= win.end + lateness;
+  }
+
+  function assignFixed(et) {
+    return kind === "sliding" ? slidingWinsFor(et) : tumblingWinsFor(et);
+  }
+
+  function simulate(upto) {
+    var events = [];
+    var i;
+    for (i = 0; i < 6; i += 1) {
+      events.push({
+        idx: i,
+        name: "e" + (i + 1),
+        et: etValues[i],
+        fate: "pending",
+        windows: [],
+        lateWins: [],
+        cls: "pending"
+      });
+    }
+
+    var maxEt = -1e9;
+    var watermark = -1e9;
+    var admitted = [];
+    var side = [];
+    var log = [];
+    var lastOp = "—";
+    var lastRule = "—";
+    var lastHold = "—";
+    var lastCli = "—";
+    var on = 0;
+    var lateN = 0;
+    var dropN = 0;
+
+    function snapshotWins(wm) {
+      if (kind === "session") {
+        return clusterSessions(admitted).map(function (w) {
+          return { id: w.id, start: w.start, end: w.end, closed: isClosed(w, wm) };
+        });
+      }
+      return allFixedWindows().map(function (w) {
+        return { id: w.id, start: w.start, end: w.end, closed: isClosed(w, wm) };
+      });
+    }
+
+    for (i = 0; i < upto; i += 1) {
+      var ev = events[i];
+      var wmBefore = watermark;
+      var openIds = [];
+      var closedIds = [];
+      var fate;
+      var hold;
+
+      if (kind === "session") {
+        var wouldEnd = ev.et + SESSION_GAP;
+        var sessionDead = wmBefore >= wouldEnd + lateness;
+        if (sessionDead) {
+          fate = policy === "side" ? "side" : "drop";
+          hold = "會話 " + winId(ev.et, wouldEnd) + " 已過回收線";
+        } else {
+          var tentative = admitted.concat([{ et: ev.et, name: ev.name }]);
+          var clusters = clusterSessions(tentative);
+          var mine = null;
+          var c;
+          for (c = 0; c < clusters.length; c += 1) {
+            if (clusters[c].members.some(function (m) { return m.name === ev.name; })) {
+              mine = clusters[c];
+              break;
+            }
+          }
+          ev.windows = mine ? [mine.id] : [];
+          if (ev.et < wmBefore) {
+            fate = "late";
+            hold = mine ? mine.id + "（遲到准入）" : "新會話（遲到准入）";
+          } else {
+            fate = "on";
+            hold = mine ? mine.id : "新會話";
+          }
+        }
+      } else {
+        var wins = assignFixed(ev.et);
+        var w;
+        for (w = 0; w < wins.length; w += 1) {
+          if (isClosed(wins[w], wmBefore)) {
+            closedIds.push(wins[w].id);
+            ev.lateWins.push(wins[w].id);
+          } else {
+            openIds.push(wins[w].id);
+            ev.windows.push(wins[w].id);
+          }
+        }
+        if (!openIds.length) {
+          fate = policy === "side" ? "side" : "drop";
+          hold = closedIds.join(" · ") || "無窗";
+        } else if (ev.et < wmBefore) {
+          fate = "late";
+          hold = openIds.join(" · ") + (closedIds.length ? "（部分已回收）" : "（遲到准入）");
+        } else {
+          fate = "on";
+          hold = openIds.join(" · ");
+        }
+      }
+
+      ev.fate = fate;
+      if (fate === "on") {
+        ev.cls = "ok";
+        on += 1;
+        admitted.push({ et: ev.et, name: ev.name });
+      } else if (fate === "late") {
+        ev.cls = "hold";
+        lateN += 1;
+        admitted.push({ et: ev.et, name: ev.name });
+      } else {
+        ev.cls = "bad";
+        dropN += 1;
+        side.push(ev.name + "@" + ev.et);
+      }
+
+      if (ev.et > maxEt) maxEt = ev.et;
+      var wmAfter = maxEt - delay;
+      watermark = wmAfter;
+
+      lastOp = ev.name + " · et=" + ev.et;
+      if (fate === "on") lastRule = "準時（et ≥ 送入前 W）";
+      else if (fate === "late") lastRule = "遲到但窗未回收";
+      else lastRule = policy === "side" ? "太遲 → 側輸出" : "太遲 → 丟棄";
+      lastHold = hold;
+      lastCli = fmtWm(wmBefore) + " → " + fmtWm(wmAfter);
+
+      var tag = fate === "on" ? "ON" : fate === "late" ? "LATE" : policy === "side" ? "SIDE" : "DROP";
+      var kindClass = fate === "on" ? "ok" : fate === "late" ? "warn" : "bad";
+      log.push({
+        kind: kindClass,
+        tag: tag,
+        text: ev.name + " et=" + ev.et + " → " + hold + "；W " + lastCli,
+        step: i + 1
+      });
+    }
+
+    for (i = upto; i < 6; i += 1) {
+      events[i].cls = "pending";
+      events[i].fate = "pending";
+    }
+    if (upto > 0) events[upto - 1].now = true;
+
+    var openCount = 0;
+    var winSnap = snapshotWins(watermark);
+    for (i = 0; i < winSnap.length; i += 1) {
+      if (!winSnap[i].closed) openCount += 1;
+    }
+
+    var risk = "尚未送入";
+    if (upto > 0) {
+      if (dropN === 0 && lateN === 0) risk = "全部準時";
+      else if (dropN === 0) risk = "有遲到、尚能更正";
+      else risk = policy === "side" ? "有事件走側輸出" : "有事件被丟棄";
+    }
+
+    return {
+      events: events,
+      maxEt: maxEt,
+      watermark: watermark,
+      admitted: admitted,
+      side: side,
+      log: log,
+      on: on,
+      late: lateN,
+      drop: dropN,
+      winSnap: winSnap,
+      openCount: openCount,
+      lastOp: lastOp,
+      lastRule: lastRule,
+      lastHold: lastHold,
+      lastCli: lastCli,
+      risk: risk
+    };
+  }
+
+  function renderTimeline(state) {
+    if (!tlEl) return;
+    var html = "";
+    var i;
+    var innerW = Math.max(tlEl.clientWidth - 56, 200);
+
+    function px(t) { return 44 + (t / T_MAX) * innerW; }
+
+    var rows = state.winSnap.slice();
+    var bandH = 20;
+    var bandGap = 3;
+    var top0 = 8;
+    var maxBands = Math.min(rows.length, 3);
+    for (i = 0; i < maxBands; i += 1) {
+      var w = rows[i];
+      var x1 = px(Math.max(0, w.start));
+      var x2 = px(Math.min(T_MAX, w.end));
+      var width = Math.max(x2 - x1, 18);
+      var top = top0 + i * (bandH + bandGap);
+      html += '<div class="sp-win' + (w.closed ? " closed" : " open") + '" style="left:' + x1 + "px;width:" + width + "px;top:" + top + 'px">';
+      html += '<span class="wn">' + esc(w.id) + (w.closed ? " · 關" : "") + "</span></div>";
+    }
+    if (rows.length > maxBands) {
+      html += '<div class="sp-win closed" style="left:44px;width:80px;top:' + (top0 + maxBands * (bandH + bandGap)) + 'px"><span class="wn">+' + (rows.length - maxBands) + " 窗</span></div>";
+    }
+
+    html += '<div class="sp-tl-axis"></div>';
+    for (i = 0; i <= T_MAX; i += 5) {
+      html += '<div class="sp-tick" style="left:' + px(i) + 'px"><span>' + i + "</span></div>";
+    }
+
+    if (step > 0 && state.watermark > -1e8) {
+      var wmx = px(Math.max(0, Math.min(T_MAX, state.watermark)));
+      html += '<div class="sp-wm" style="left:' + wmx + 'px"><span>W=' + esc(fmtWm(state.watermark)) + "</span></div>";
+    }
+
+    for (i = 0; i < state.events.length; i += 1) {
+      var ev = state.events[i];
+      var cls = ev.cls;
+      if (ev.now) cls = "wait";
+      html += '<div class="sp-dot ' + cls + '" style="left:' + px(ev.et) + 'px" title="' + esc(ev.name + " et=" + ev.et) + '">' + (i + 1) + "</div>";
+    }
+
+    tlEl.innerHTML = html;
+  }
+
+  function eventCaption(ev, i) {
+    var cap = "到達序 " + (i + 1) + " · et=" + ev.et;
+    if (ev.fate === "on") cap += " · 準時";
+    else if (ev.fate === "late") cap += " · 遲到准入";
+    else if (ev.fate === "side") cap += " · 側輸出";
+    else if (ev.fate === "drop") cap += " · 丟棄";
+    return cap;
+  }
+
+  function eventClass(ev) {
+    return ev.now ? "wait" : ev.cls;
+  }
+
+  function renderEvents(state) {
+    if (!evsEl) return;
+    var html = "";
+    var i;
+    for (i = 0; i < 6; i += 1) {
+      var ev = state.events[i];
+      html += '<div class="sp-ev ' + eventClass(ev) + '" data-card="' + i + '">';
+      html += '<div class="en">' + ev.name + (ev.now ? " · 本步" : "") + "</div>";
+      html += '<div class="el">' + eventCaption(ev, i) + "</div>";
+      html += '<input type="range" min="0" max="19" step="1" value="' + ev.et + '" data-idx="' + i + '" aria-label="' + ev.name + ' event time">';
+      html += "</div>";
+    }
+    evsEl.innerHTML = html;
+    var sliders = evsEl.querySelectorAll("input[type='range']");
+    for (i = 0; i < sliders.length; i += 1) {
+      sliders[i].addEventListener("input", onEtInput);
+    }
+  }
+
+  function updateEventCards(state) {
+    if (!evsEl) return;
+    var cards = evsEl.querySelectorAll("[data-card]");
+    if (cards.length !== 6) {
+      renderEvents(state);
+      return;
+    }
+    var i;
+    for (i = 0; i < 6; i += 1) {
+      var ev = state.events[i];
+      var card = cards[i];
+      card.className = "sp-ev " + eventClass(ev);
+      var title = card.querySelector(".en");
+      var cap = card.querySelector(".el");
+      if (title) title.textContent = ev.name + (ev.now ? " · 本步" : "");
+      if (cap) cap.textContent = eventCaption(ev, i);
+      var slider = card.querySelector("input[type='range']");
+      if (slider && String(slider.value) !== String(ev.et)) slider.value = String(ev.et);
+    }
+  }
+
+  function renderWins(state) {
+    if (!winsEl) return;
+    if (!state.winSnap.length) {
+      winsEl.innerHTML = '<span class="sp-wchip">尚無窗</span>';
+      return;
+    }
+    var html = "";
+    var i;
+    for (i = 0; i < state.winSnap.length; i += 1) {
+      var w = state.winSnap[i];
+      html += '<span class="sp-wchip ' + (w.closed ? "closed" : "open") + '">' + esc(w.id) + "</span>";
+    }
+    winsEl.innerHTML = html;
+  }
+
+  function renderSide(state) {
+    if (!sideEl) return;
+    if (sideLabel) {
+      sideLabel.textContent = policy === "side" ? "側輸出匣" : "丟棄匣";
+    }
+    if (!state.side.length) {
+      sideEl.innerHTML = '<span class="ph">' + (policy === "side" ? "尚無太遲事件" : "尚無被丟棄事件") + "</span>";
+      return;
+    }
+    var html = "";
+    var i;
+    for (i = 0; i < state.side.length; i += 1) {
+      html += '<span class="sp-chip bad">' + esc(state.side[i]) + "</span>";
+    }
+    sideEl.innerHTML = html;
+  }
+
+  function renderWire() {
+    if (!wireEl) return;
+    if (!wire.length) {
+      wireEl.innerHTML = "";
+      return;
+    }
+    var html = "";
+    var i;
+    for (i = wire.length - 1; i >= 0; i -= 1) {
+      var row = wire[i];
+      html += '<div class="sp-row ' + row.kind + '">';
+      html += '<span class="ar">' + row.step + "</span>";
+      html += '<span class="tg">' + esc(row.tag) + "</span>";
+      html += '<span class="tx">' + esc(row.text) + "</span>";
+      html += "</div>";
+    }
+    wireEl.innerHTML = html;
+  }
+
+  function paint(opts) {
+    opts = opts || {};
+    run = simulate(step);
+    metrics = { on: run.on, late: run.late, drop: run.drop };
+    panel = {
+      op: run.lastOp,
+      rule: run.lastRule,
+      hold: run.lastHold,
+      cli: run.lastCli,
+      model: kindLabel() + " · delay=" + delay + " · L=" + lateness,
+      hwm: fmtWm(run.watermark) + " / +" + lateness,
+      writable: String(run.openCount),
+      risk: run.risk
+    };
+    wire = run.log;
+    statusText = step === 0
+      ? "拖動時間戳或水位延遲後，按「下一步」依 e1→e6 送入。判定用的是送入前的 Watermark。"
+      : "已送入 " + step + " / 6。判定看送入前 W=" + fmtWm(step > 0 ? run.watermark : -1e9) + " 的前一狀態（見本步語義）。";
+
+    if (step === 0) {
+      verdict = { text: "判定尚未產生——走完一輪後會摘要準時、遲到准入與太遲各有幾則。", tone: "" };
+      statusText = HINTS[kind] + " 判定用的是送入前的 Watermark。";
+    } else if (step < 6) {
+      verdict = {
+        text: "進行中：準時 " + run.on + "、遲到准入 " + run.late + "、太遲 " + run.drop + "。把 delay 加大會讓水位走慢、窗晚關。",
+        tone: run.drop ? "lock" : "ok"
+      };
+    } else {
+      var tone = "ok";
+      if (run.drop > 0 && run.late > 0) tone = "lock";
+      if (run.drop > 0 && lateness === 0 && delay <= 2) tone = "bad";
+      verdict = {
+        text: "本輪結束：準時 " + run.on + "、遲到准入 " + run.late + "、太遲 " + run.drop +
+          "。太遲是延遲上限的保護——加大 W delay 或 lateness 才能讓更早的事件重新准入。",
+        tone: tone
+      };
+    }
+
+    if (hintEl) hintEl.textContent = HINTS[kind];
+    if (delayVal) delayVal.textContent = String(delay);
+    if (el("sp-m-step")) el("sp-m-step").textContent = String(step);
+    if (el("sp-m-max")) el("sp-m-max").textContent = step === 0 ? "—" : String(run.maxEt);
+    if (el("sp-m-wm")) el("sp-m-wm").textContent = fmtWm(run.watermark);
+    if (el("sp-m-on")) el("sp-m-on").textContent = String(run.on);
+    if (el("sp-m-late")) el("sp-m-late").textContent = String(run.late);
+    if (el("sp-m-drop")) el("sp-m-drop").textContent = String(run.drop);
+    if (el("sp-p-op")) el("sp-p-op").textContent = panel.op;
+    if (el("sp-p-rule")) el("sp-p-rule").textContent = panel.rule;
+    if (el("sp-p-hold")) el("sp-p-hold").textContent = panel.hold;
+    if (el("sp-p-cli")) el("sp-p-cli").textContent = panel.cli;
+    if (el("sp-p-model")) el("sp-p-model").textContent = panel.model;
+    if (el("sp-p-hwm")) el("sp-p-hwm").textContent = panel.hwm;
+    if (el("sp-p-writable")) el("sp-p-writable").textContent = panel.writable;
+    if (el("sp-p-risk")) {
+      el("sp-p-risk").textContent = panel.risk;
+      el("sp-p-risk").className = "pv" + (run.drop ? " warn" : run.late ? "" : step ? " good" : "");
+    }
+    if (statusEl) statusEl.textContent = statusText;
+    if (verdictEl) {
+      verdictEl.textContent = verdict.text;
+      verdictEl.className = "sp-verdict" + (verdict.tone ? " tone-" + verdict.tone : "");
+    }
+    if (btnNext) btnNext.disabled = step >= 6;
+
+    if (opts.skipEvs) updateEventCards(run);
+    else renderEvents(run);
+    renderTimeline(run);
+    renderWins(run);
+    renderSide(run);
+    renderWire();
+  }
+
+  function onEtInput(ev) {
+    var idx = parseInt(ev.target.getAttribute("data-idx"), 10);
+    var val = parseInt(ev.target.value, 10);
+    if (isNaN(idx) || isNaN(val)) return;
+    etValues[idx] = val;
+    paint({ skipEvs: true });
+  }
+
+  function onKind(ev) {
+    var btn = ev.target.closest("button");
+    if (!btn) return;
+    kind = btn.getAttribute("data-kind");
+    setSeg("sp-seg-kind", "data-kind", kind);
+    paint();
+  }
+
+  function onPolicy(ev) {
+    var btn = ev.target.closest("button");
+    if (!btn) return;
+    policy = btn.getAttribute("data-policy");
+    setSeg("sp-seg-policy", "data-policy", policy);
+    paint();
+  }
+
+  function onLate(ev) {
+    var btn = ev.target.closest("button");
+    if (!btn) return;
+    lateness = parseInt(btn.getAttribute("data-late"), 10);
+    setSeg("sp-seg-late", "data-late", String(lateness));
+    paint();
+  }
+
+  function onDelay() {
+    delay = parseInt(delayInput.value, 10);
+    if (isNaN(delay)) delay = 3;
+    paint();
+  }
+
+  document.getElementById("sp-seg-kind").addEventListener("click", onKind);
+  document.getElementById("sp-seg-policy").addEventListener("click", onPolicy);
+  document.getElementById("sp-seg-late").addEventListener("click", onLate);
+  delayInput.addEventListener("input", onDelay);
+  btnNext.addEventListener("click", function () {
+    if (step < 6) step += 1;
+    paint();
+  });
+  btnAll.addEventListener("click", function () {
+    step = 6;
+    paint();
+  });
+  btnReset.addEventListener("click", function () {
+    step = 0;
+    paint();
+  });
+
+  window.addEventListener("resize", function () {
+    if (run) renderTimeline(run);
+  });
+
+  paint();
+})();
+</script>
