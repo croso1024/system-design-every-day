@@ -1,0 +1,729 @@
+<script>
+(function () {
+  "use strict";
+
+  var demo = document.getElementById("demo-eda");
+  if (!demo) return;
+
+  var FAULT_HINT = {
+    none: "兩邊同時付同一筆訂單。雙寫先 commit 再 send；Outbox 把列與訊息放進同一交易，再由發佈器投遞。",
+    midcrash: "兩邊都已把訂單標成 paid。下一步在 send 前崩潰：雙寫沒有耐久意圖，Outbox 列還在。",
+    broker: "send 當下 broker 拒收。雙寫的 HTTP 已結束，不會自動再送；Outbox 列保持 PENDING，broker 恢復後重試。",
+    dup: "兩邊都成功發出 evt-1。第二次投遞同一 id：天真 handler 再扣一次庫存，去重表則拒絕重做。"
+  };
+
+  var FAULT_LABEL = {
+    none: "正常路徑",
+    midcrash: "中間崩潰",
+    broker: "Broker 中斷",
+    dup: "重複投遞"
+  };
+
+  var COMPAT_HINT = {
+    backward: "BACKWARD：新消費者必須讀得懂舊資料。消費者先升級。v1→v2 可登錄；v3 改名會被拒。",
+    forward: "FORWARD：舊消費者必須讀得懂新資料。生產者先升級。前提是舊程式忽略未知欄位。v3 仍會被拒。",
+    full: "FULL：兩個方向都要成立，共存順序任意。只放行加可選欄位這類窄門；v3 被拒。",
+    none: "NONE：Registry 不擋登錄。v3 能上線，執行期再由解碼器爆掉——這不是寬容，是把檢查推遲到半夜。"
+  };
+
+  var VERSIONS = ["v1", "v2", "v3"];
+
+  var PAYLOAD = {
+    v1: '{ "eventId": "evt-1", "orderId": "O-1001", "amount": 80 }',
+    v2: '{ "eventId": "evt-1", "orderId": "O-1001", "amount": 80, "currency": "TWD" }',
+    v3: '{ "eventId": "evt-1", "orderId": "O-1001", "amountCents": 8000, "currency": "TWD" }'
+  };
+
+  var view = "outbox";
+  var fault = "none";
+  var consMode = "naive";
+  var compat = "backward";
+  var prodVer = "v2";
+  var consVer = "v1";
+  var step = 0;
+  var wire = [];
+  var panel = {
+    op: "—",
+    rule: "—",
+    dw: "—",
+    ob: "—",
+    model: "正常路徑",
+    consis: "尚未走步",
+    handler: "天真 handler",
+    risk: "無",
+    consisCls: "",
+    riskCls: ""
+  };
+  var verdict = { text: "判定尚未產生——走完一輪後會對照兩邊的訂單、主題與庫存。", tone: "" };
+  var statusText = "選擇情境後按「下一步」。雙寫與 Outbox 並排走同一筆 O-1001。";
+  var dw = null;
+  var ob = null;
+
+  var statusEl = document.getElementById("eda-status");
+  var verdictEl = document.getElementById("eda-verdict");
+  var wireEl = document.getElementById("eda-wire");
+  var outboxView = document.getElementById("eda-outbox-view");
+  var schemaView = document.getElementById("eda-schema-view");
+  var schemaBoard = document.getElementById("eda-schema-board");
+  var lanesEl = document.getElementById("eda-lanes");
+  var outboxCtrl = document.getElementById("eda-outbox-ctrl");
+  var outboxMetric = document.getElementById("eda-outbox-metric");
+  var btnNext = document.getElementById("eda-btn-next");
+  var btnAll = document.getElementById("eda-btn-all");
+  var btnReset = document.getElementById("eda-btn-reset");
+
+  function el(id) {
+    return document.getElementById(id);
+  }
+
+  function esc(s) {
+    return String(s)
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;");
+  }
+
+  function setSeg(rootId, attr, value) {
+    var root = document.getElementById(rootId);
+    if (!root) return;
+    var buttons = root.querySelectorAll("button");
+    for (var i = 0; i < buttons.length; i += 1) {
+      buttons[i].setAttribute("aria-pressed", buttons[i].getAttribute(attr) === value ? "true" : "false");
+    }
+  }
+
+  function logRow(kind, tag, text) {
+    wire.push({ kind: kind, tag: tag, text: text, step: step });
+  }
+
+  function freshLane() {
+    return {
+      order: "pending",
+      outbox: null,
+      events: [],
+      inv: 10,
+      seen: false,
+      applied: 0,
+      crashed: false,
+      brokerDown: false
+    };
+  }
+
+  function totalSteps() {
+    return fault === "none" ? 3 : 4;
+  }
+
+  function resetRun() {
+    step = 0;
+    wire = [];
+    dw = freshLane();
+    ob = freshLane();
+    panel.op = "—";
+    panel.rule = "—";
+    panel.dw = "待寫入";
+    panel.ob = "待寫入";
+    panel.model = FAULT_LABEL[fault];
+    panel.consis = "尚未走步";
+    panel.handler = consMode === "idem" ? "冪等去重" : "天真 handler";
+    panel.risk = "無";
+    panel.consisCls = "";
+    panel.riskCls = "";
+    verdict = { text: "判定尚未產生——走完一輪後會對照兩邊的訂單、主題與庫存。", tone: "" };
+    statusText = FAULT_HINT[fault];
+  }
+
+  function consume(lane, name) {
+    if (lane.events.length === 0) {
+      logRow("warn", name, "主題是空的，handler 無事件可套用。");
+      return "無事件";
+    }
+    if (consMode === "idem" && lane.seen) {
+      logRow("ok", name, "evt-1 已在去重表。插入衝突，整筆 rollback，庫存維持 " + lane.inv + "。這是保護。");
+      return "去重命中";
+    }
+    lane.inv -= 2;
+    lane.applied += 1;
+    lane.seen = true;
+    logRow(lane.applied > 1 ? "bad" : "ok", name, "套用 OrderPaid：SKU-A qty " + (lane.inv + 2) + " → " + lane.inv + "。");
+    return lane.applied > 1 ? "重複扣量" : "扣量 10→8";
+  }
+
+  function applyOutboxStep() {
+    var dwR;
+    var obR;
+    if (fault === "none") {
+      if (step === 1) {
+        dw.order = "paid";
+        ob.order = "paid";
+        ob.outbox = "pending";
+        panel.op = "本地提交";
+        panel.rule = "雙寫只 commit 訂單；Outbox 同交易寫入待發列";
+        panel.dw = "paid · 尚無意圖列";
+        panel.ob = "paid + outbox PENDING";
+        logRow("read", "雙寫", "UPDATE orders SET status=paid 已 commit。");
+        logRow("ok", "Outbox", "同一交易寫入 orders=paid 與 outbox(evt-1)。");
+        statusText = "兩邊訂單都已付款。雙寫還沒 send；Outbox 列等發佈器。";
+      } else if (step === 2) {
+        dw.events.push("evt-1");
+        ob.events.push("evt-1");
+        ob.outbox = "sent";
+        panel.op = "發佈";
+        panel.rule = "雙寫現場 send；Outbox 由發佈器讀 PENDING 再 send";
+        panel.dw = "主題有 evt-1";
+        panel.ob = "發佈器標 published";
+        logRow("read", "雙寫", "producer.send(OrderPaid evt-1) 成功。");
+        logRow("ok", "Outbox", "發佈器投遞 evt-1，published_at 已填。");
+        statusText = "兩邊主題都有 evt-1。下一步讓庫存 handler 消費。";
+      } else if (step === 3) {
+        dwR = consume(dw, "雙寫消費");
+        obR = consume(ob, "Outbox 消費");
+        panel.op = "消費";
+        panel.rule = "同一則 OrderPaid，qty -= 2";
+        panel.dw = dwR;
+        panel.ob = obR;
+        statusText = "兩邊庫存都是 8，訂單與事件對得上。";
+      }
+    } else if (fault === "midcrash") {
+      if (step === 1) {
+        dw.order = "paid";
+        ob.order = "paid";
+        ob.outbox = "pending";
+        panel.op = "本地提交";
+        panel.rule = "崩潰將發生在 send 之前";
+        panel.dw = "paid · 尚未 send";
+        panel.ob = "paid + outbox PENDING";
+        logRow("read", "雙寫", "訂單已 commit 為 paid。");
+        logRow("ok", "Outbox", "訂單與 outbox 同交易 commit。");
+        statusText = "下一步注入崩潰：雙寫的 send 還沒發生。";
+      } else if (step === 2) {
+        dw.crashed = true;
+        panel.op = "崩潰";
+        panel.rule = "進程在兩個提交中間被殺";
+        panel.dw = "paid · 意圖遺失";
+        panel.ob = "PENDING 列仍在";
+        logRow("bad", "雙寫", "send 前崩潰。沒有第二個系統記得這則 OrderPaid。");
+        logRow("warn", "Outbox", "發佈器還沒跑。outbox 列與訂單一起留下。");
+        statusText = "雙寫已經裂開。Outbox 仍握著耐久意圖。";
+      } else if (step === 3) {
+        dw.crashed = false;
+        ob.events.push("evt-1");
+        ob.outbox = "sent";
+        panel.op = "恢復";
+        panel.rule = "雙寫沒有可重試的意圖；Outbox 重掃 PENDING";
+        panel.dw = "主題仍空";
+        panel.ob = "補送 evt-1";
+        logRow("bad", "雙寫", "重啟後無 outbox 可掃，也不會重做已回 200 的那次請求。");
+        logRow("ok", "Outbox", "發佈器找到 evt-1，投遞成功。");
+        statusText = "Outbox 補上主題；雙寫的庫存將永遠聽不到這筆付款。";
+      } else if (step === 4) {
+        dwR = consume(dw, "雙寫消費");
+        obR = consume(ob, "Outbox 消費");
+        panel.op = "消費";
+        panel.rule = "有事件才扣庫存";
+        panel.dw = dwR;
+        panel.ob = obR;
+        statusText = "雙寫：訂單 paid、庫存 10。Outbox：訂單 paid、庫存 8。";
+      }
+    } else if (fault === "broker") {
+      if (step === 1) {
+        dw.order = "paid";
+        ob.order = "paid";
+        ob.outbox = "pending";
+        panel.op = "本地提交";
+        panel.rule = "下一步 broker 拒收";
+        panel.dw = "paid · 準備 send";
+        panel.ob = "paid + outbox PENDING";
+        logRow("read", "雙寫", "訂單已 commit。");
+        logRow("ok", "Outbox", "訂單與 outbox 已 commit。");
+        statusText = "兩邊都已提交。下一步 send 會撞上 broker 中斷。";
+      } else if (step === 2) {
+        dw.brokerDown = true;
+        ob.brokerDown = true;
+        panel.op = "Broker 拒收";
+        panel.rule = "雙寫的請求結束即放棄；Outbox 列保持 PENDING";
+        panel.dw = "send 失敗 · 無重試句柄";
+        panel.ob = "PENDING 留下";
+        logRow("bad", "雙寫", "producer.send 丟例外。呼叫端已拿 200，沒有背景重試。");
+        logRow("warn", "Outbox", "發佈器 send 失敗，published_at 仍是 NULL。");
+        statusText = "broker 恢復後，只有 Outbox 還知道該再送一次。";
+      } else if (step === 3) {
+        dw.brokerDown = false;
+        ob.brokerDown = false;
+        ob.events.push("evt-1");
+        ob.outbox = "sent";
+        panel.op = "Broker 恢復";
+        panel.rule = "只重試耐久意圖";
+        panel.dw = "仍然沒有事件";
+        panel.ob = "重試成功";
+        logRow("bad", "雙寫", "沒有待發紀錄，恢復也不會憑空補送。");
+        logRow("ok", "Outbox", "發佈器重試 evt-1，broker 接受。");
+        statusText = "Outbox 追上主題。雙寫這側的付款成為靜默缺口。";
+      } else if (step === 4) {
+        dwR = consume(dw, "雙寫消費");
+        obR = consume(ob, "Outbox 消費");
+        panel.op = "消費";
+        panel.rule = "有事件才扣庫存";
+        panel.dw = dwR;
+        panel.ob = obR;
+        statusText = "雙寫庫存仍 10；Outbox 庫存 8。拒收本身不是事故，沒有可重試意圖才是。";
+      }
+    } else if (fault === "dup") {
+      if (step === 1) {
+        dw.order = "paid";
+        ob.order = "paid";
+        ob.outbox = "pending";
+        panel.op = "本地提交";
+        panel.rule = "先走到兩邊都有事件";
+        panel.dw = "paid";
+        panel.ob = "paid + PENDING";
+        logRow("read", "雙寫", "訂單 commit。");
+        logRow("ok", "Outbox", "訂單與 outbox commit。");
+        statusText = "下一步兩邊都發佈成功。";
+      } else if (step === 2) {
+        dw.events.push("evt-1");
+        ob.events.push("evt-1");
+        ob.outbox = "sent";
+        panel.op = "發佈";
+        panel.rule = "at-least-once：同一 id 稍後會再來一次";
+        panel.dw = "主題 evt-1";
+        panel.ob = "主題 evt-1";
+        logRow("ok", "雙寫", "send 成功。");
+        logRow("ok", "Outbox", "發佈器投遞成功。");
+        statusText = "下一步第一次消費。再下一步重投同一則。";
+      } else if (step === 3) {
+        dwR = consume(dw, "雙寫消費");
+        obR = consume(ob, "Outbox 消費");
+        panel.op = "第一次消費";
+        panel.rule = consMode === "idem" ? "插入去重表並扣量" : "直接 qty -= 2";
+        panel.dw = dwR;
+        panel.ob = obR;
+        statusText = "兩邊庫存都是 8。下一步 broker 重投 evt-1。";
+      } else if (step === 4) {
+        dwR = consume(dw, "雙寫重投");
+        obR = consume(ob, "Outbox 重投");
+        panel.op = "重複投遞";
+        panel.rule = consMode === "idem" ? "唯一鍵衝突 = 保護成功" : "再扣一次 = 雙花";
+        panel.dw = dwR;
+        panel.ob = obR;
+        statusText = consMode === "idem"
+          ? "去重表擋住第二筆，庫存維持 8。"
+          : "兩邊庫存都被扣到 6。重複投遞變成雙花。";
+      }
+    }
+    finishPanel();
+  }
+
+  function finishPanel() {
+    var dwGap = dw.order === "paid" && dw.events.length === 0;
+    var dwDouble = dw.applied > 1;
+    var obGap = ob.order === "paid" && ob.events.length === 0;
+    var obDouble = ob.applied > 1;
+    var bothOk = dw.order === "paid" && ob.order === "paid" && dw.events.length > 0 && ob.events.length > 0 && dw.inv === 8 && ob.inv === 8 && dw.applied === 1 && ob.applied === 1;
+
+    if (step === 0) {
+      panel.consis = "尚未走步";
+      panel.consisCls = "";
+      panel.risk = "無";
+      panel.riskCls = "";
+      verdict = { text: "判定尚未產生——走完一輪後會對照兩邊的訂單、主題與庫存。", tone: "" };
+      return;
+    }
+
+    if (step < totalSteps()) {
+      if (dwGap && !obGap) {
+        panel.consis = "雙寫已裂、Outbox 未裂";
+        panel.consisCls = "warn";
+        panel.risk = "雙寫意圖可能遺失";
+        panel.riskCls = "warn";
+        verdict = { text: "中間態：雙寫只剩訂單列，Outbox 仍握著待發列。繼續走完才看最終對照。", tone: "lock" };
+      } else if (dw.brokerDown) {
+        panel.consis = "發送失敗";
+        panel.consisCls = "warn";
+        panel.risk = "看有沒有可重試意圖";
+        panel.riskCls = "warn";
+        verdict = { text: "Broker 拒收。判定先不要下：看恢復之後誰還能再送。", tone: "lock" };
+      } else {
+        panel.consis = "進行中";
+        panel.consisCls = "";
+        panel.risk = "無";
+        panel.riskCls = "";
+        verdict = { text: "還沒走完。最終一致性要看到消費之後的庫存。", tone: "" };
+      }
+      return;
+    }
+
+    if (fault === "dup" && consMode === "naive") {
+      panel.consis = "雙花";
+      panel.consisCls = "bad";
+      panel.risk = "同一付款扣兩次庫存";
+      panel.riskCls = "bad";
+      verdict = {
+        text: "重複投遞被天真 handler 做成兩次扣量（10→8→6）。這是事故。Outbox 不能替你消這次雙花——去重表才行。",
+        tone: "bad"
+      };
+      return;
+    }
+    if (fault === "dup" && consMode === "idem") {
+      panel.consis = "效果一次";
+      panel.consisCls = "good";
+      panel.risk = "無（去重是保護）";
+      panel.riskCls = "good";
+      verdict = {
+        text: "第二筆 evt-1 撞上唯一鍵，庫存維持 8。重投被擋是保護成功，不要把衝突當成消費失敗去重試到爆。",
+        tone: "ok"
+      };
+      return;
+    }
+    if (dwGap || dwDouble) {
+      panel.consis = "雙寫不一致";
+      panel.consisCls = "bad";
+      panel.risk = dwGap ? "付款事件遺失" : "雙花";
+      panel.riskCls = "bad";
+      verdict = {
+        text: "雙寫事故：訂單已 paid，主題沒有事件，庫存仍是 10。Outbox 用同一筆交易留下意圖，恢復後補送並扣到 8——那一側是保護，不是運氣。",
+        tone: "bad"
+      };
+      return;
+    }
+    if (bothOk) {
+      panel.consis = "兩邊最終一致";
+      panel.consisCls = "good";
+      panel.risk = "無";
+      panel.riskCls = "";
+      verdict = {
+        text: "正常路徑下兩邊都走到 paid + evt-1 + 庫存 8。雙寫的問題不在快樂路徑，而在中間崩潰與拒收之後沒有第二份意圖。",
+        tone: "ok"
+      };
+      return;
+    }
+    panel.consis = "對照完成";
+    panel.consisCls = "";
+    panel.risk = obGap ? "Outbox 也沒發出" : "見日誌";
+    panel.riskCls = obGap ? "bad" : "";
+    verdict = { text: "走完一輪。對照兩邊的訂單、主題與庫存。", tone: "" };
+  }
+
+  function boxTone(kind, lane) {
+    if (kind === "order") {
+      if (lane.crashed && lane.order === "paid") return "hold";
+      if (lane.order === "paid") return "ok";
+      return "idle";
+    }
+    if (kind === "topic") {
+      if (lane.brokerDown) return "bad";
+      if (lane.events.length) return "ok";
+      if (lane.order === "paid") return "hold";
+      return "idle";
+    }
+    if (kind === "inv") {
+      if (lane.applied > 1) return "bad";
+      if (lane.applied === 1) return "ok";
+      if (lane.order === "paid" && lane.events.length === 0) return "hold";
+      return "idle";
+    }
+    return "idle";
+  }
+
+  function renderSlots(node, events, emptyLabel) {
+    if (!node) return;
+    if (!events.length) {
+      node.innerHTML = '<span class="eda-slot">' + esc(emptyLabel) + "</span>";
+      return;
+    }
+    node.innerHTML = events.map(function (id) {
+      return '<span class="eda-slot ok">' + esc(id) + "</span>";
+    }).join("");
+  }
+
+  function setBox(id, tone) {
+    var node = el(id);
+    if (!node) return;
+    node.className = "eda-box " + tone;
+  }
+
+  function decodePair(p, c) {
+    if (p === c) {
+      return { ok: true, tone: "ok", label: "相同版本", detail: "契約一致，解碼無轉換。" };
+    }
+    if (p === "v2" && c === "v1") {
+      return { ok: true, tone: "hold", label: "忽略未知欄", detail: "舊消費者略過 currency。FORWARD 的執行期前提。" };
+    }
+    if (p === "v1" && c === "v2") {
+      return { ok: true, tone: "hold", label: "填預設", detail: "新消費者讀舊資料，currency 預設 TWD。BACKWARD 成立。" };
+    }
+    if (p === "v3") {
+      return { ok: false, tone: "bad", label: "缺 amount", detail: "v1/v2 消費者找不到 amount，v3 把它改名成 amountCents。" };
+    }
+    if (c === "v3") {
+      return { ok: false, tone: "bad", label: "缺 amountCents", detail: "新消費者是必填 amountCents，舊資料沒有這個欄位。" };
+    }
+    return { ok: false, tone: "bad", label: "不相容", detail: "無法解碼。" };
+  }
+
+  function registryAccept(mode, from, to) {
+    if (from === to) return true;
+    if (mode === "none") return true;
+    var upgrade = from + ">" + to;
+    if (upgrade === "v1>v2" || upgrade === "v2>v1") {
+      if (mode === "backward" || mode === "forward" || mode === "full") return true;
+    }
+    return false;
+  }
+
+  function schemaNarrate() {
+    var dec = decodePair(prodVer, consVer);
+    var newer = prodVer > consVer ? prodVer : consVer;
+    var older = prodVer > consVer ? consVer : prodVer;
+    var accepted = registryAccept(compat, older, newer);
+    var modeLabel = compat.toUpperCase();
+
+    panel.op = dec.label;
+    panel.rule = dec.detail;
+    panel.dw = "生產者 " + prodVer;
+    panel.ob = "消費者 " + consVer;
+    panel.model = modeLabel;
+    panel.handler = "解碼 " + consVer;
+    panel.consis = dec.ok ? "執行期可讀" : "執行期失敗";
+    panel.consisCls = dec.ok ? "good" : "bad";
+    if (prodVer === consVer) {
+      panel.risk = "無";
+      panel.riskCls = "";
+    } else if (accepted && dec.ok) {
+      panel.risk = modeLabel + " 放行此演進";
+      panel.riskCls = "good";
+    } else if (!accepted && dec.ok) {
+      panel.risk = modeLabel + " 不會擋、但也不保證另一方向";
+      panel.riskCls = "warn";
+    } else if (compat === "none") {
+      panel.risk = "NONE 放行登錄，執行期仍爆";
+      panel.riskCls = "bad";
+    } else {
+      panel.risk = modeLabel + " 應拒登 v3";
+      panel.riskCls = "bad";
+    }
+
+    statusText = COMPAT_HINT[compat];
+    if (prodVer === consVer) {
+      verdict = { text: prodVer + " 對 " + consVer + "：同一契約。Registry 無演進可審。", tone: "ok" };
+    } else if (dec.ok && accepted) {
+      verdict = {
+        text: "執行期解得開，且 " + modeLabel + " 允許 " + older + " → " + newer + "。加可選欄位、忽略未知欄位，是這段共存能活下來的原因。",
+        tone: "ok"
+      };
+    } else if (dec.ok && !accepted) {
+      verdict = {
+        text: "這一對執行期剛好解得開，但 " + modeLabel + " 管的是另一個方向。選錯模式會放行你還沒準備好的升級順序。",
+        tone: "lock"
+      };
+    } else if (compat === "none") {
+      verdict = {
+        text: "v3 改名破壞兩個方向。NONE 讓它登錄成功，舊進程會在反序列化時失敗——拒登才是保護，放行是把事故推遲。",
+        tone: "bad"
+      };
+    } else {
+      verdict = {
+        text: "改名不是演進：v3 與 v1/v2 兩個方向都解不開。" + modeLabel + " 在登錄時拒絕，是保護成功。",
+        tone: "bad"
+      };
+    }
+  }
+
+  function renderMatrix() {
+    var root = el("eda-matrix");
+    if (!root) return;
+    var html = '<div class="eda-mh"></div>';
+    VERSIONS.forEach(function (p) {
+      html += '<div class="eda-mh">產 ' + p + "</div>";
+    });
+    VERSIONS.forEach(function (c) {
+      html += '<div class="eda-ml">消 ' + c + "</div>";
+      VERSIONS.forEach(function (p) {
+        var dec = decodePair(p, c);
+        var sel = p === prodVer && c === consVer ? " sel" : "";
+        html += '<button type="button" class="eda-cell ' + dec.tone + sel + '" data-prod="' + p + '" data-cons="' + c + '">' +
+          esc(dec.label) + '<span class="cs">' + p + " → " + c + "</span></button>";
+      });
+    });
+    root.innerHTML = html;
+    var payload = el("eda-payload");
+    if (payload) {
+      payload.textContent = "生產者 " + prodVer + " 寫出：\n" + PAYLOAD[prodVer] +
+        "\n\n消費者 " + consVer + "：" + decodePair(prodVer, consVer).detail;
+    }
+  }
+
+  function renderWire() {
+    if (!wireEl) return;
+    if (!wire.length) {
+      wireEl.innerHTML = '<div class="eda-row"><span class="tx">尚無日誌。</span></div>';
+      return;
+    }
+    wireEl.innerHTML = wire.map(function (row) {
+      return '<div class="eda-row ' + row.kind + '">' +
+        '<span class="ar">' + row.step + "</span>" +
+        '<span class="tg">' + esc(row.tag) + "</span>" +
+        '<span class="tx">' + esc(row.text) + "</span></div>";
+    }).join("");
+    wireEl.scrollTop = wireEl.scrollHeight;
+  }
+
+  function paintOutbox() {
+    el("eda-fault-hint").textContent = FAULT_HINT[fault];
+    el("eda-m-step").textContent = String(step);
+    el("eda-m-total").textContent = String(totalSteps());
+    el("eda-m-dw").textContent = String(dw.events.length);
+    el("eda-m-ob").textContent = String(ob.events.length);
+    el("eda-m-inv-dw").textContent = String(dw.inv);
+    el("eda-m-inv-ob").textContent = String(ob.inv);
+
+    setBox("eda-dw-order", boxTone("order", dw));
+    setBox("eda-dw-topic", boxTone("topic", dw));
+    setBox("eda-dw-inv", boxTone("inv", dw));
+    setBox("eda-ob-order", boxTone("order", ob));
+    setBox("eda-ob-topic", boxTone("topic", ob));
+    setBox("eda-ob-inv", boxTone("inv", ob));
+
+    var dwOut = dw.crashed ? "（崩潰，send 未發生）" : "";
+    var obOut = ob.outbox === "pending" ? "outbox PENDING" : ob.outbox === "sent" ? "outbox published" : "outbox 空";
+    el("eda-dw-order-v").textContent = "status = " + dw.order + dwOut;
+    el("eda-ob-order-v").textContent = "status = " + ob.order + " · " + obOut;
+
+    renderSlots(el("eda-dw-slots"), dw.events, dw.brokerDown ? "broker down" : "（空）");
+    renderSlots(el("eda-ob-slots"), ob.events, ob.brokerDown ? "broker down" : "（空）");
+
+    var dwDedup = consMode === "idem" ? (dw.seen ? "去重表有 evt-1" : "去重表空") : "無去重表";
+    var obDedup = consMode === "idem" ? (ob.seen ? "去重表有 evt-1" : "去重表空") : "無去重表";
+    el("eda-dw-inv-v").textContent = "qty = " + dw.inv + " · " + dwDedup;
+    el("eda-ob-inv-v").textContent = "qty = " + ob.inv + " · " + obDedup;
+
+    btnNext.disabled = step >= totalSteps();
+    btnAll.disabled = step >= totalSteps();
+  }
+
+  function paintPanel() {
+    el("eda-p-op").textContent = panel.op;
+    el("eda-p-rule").textContent = panel.rule;
+    el("eda-p-dw").textContent = panel.dw;
+    el("eda-p-ob").textContent = panel.ob;
+    el("eda-p-model").textContent = panel.model;
+    el("eda-p-handler").textContent = panel.handler;
+    var consis = el("eda-p-consis");
+    var risk = el("eda-p-risk");
+    consis.textContent = panel.consis;
+    risk.textContent = panel.risk;
+    consis.className = "pv" + (panel.consisCls ? " " + panel.consisCls : "");
+    risk.className = "pv" + (panel.riskCls ? " " + panel.riskCls : "");
+    statusEl.textContent = statusText;
+    verdictEl.textContent = verdict.text;
+    verdictEl.className = "eda-verdict" + (verdict.tone ? " tone-" + verdict.tone : "");
+    renderWire();
+  }
+
+  function paint() {
+    var isOut = view === "outbox";
+    outboxView.hidden = !isOut;
+    schemaView.hidden = isOut;
+    schemaBoard.hidden = isOut;
+    lanesEl.hidden = !isOut;
+    outboxCtrl.hidden = !isOut;
+    outboxMetric.hidden = !isOut;
+
+    if (isOut) {
+      paintOutbox();
+    } else {
+      el("eda-schema-hint").textContent = COMPAT_HINT[compat];
+      schemaNarrate();
+      renderMatrix();
+    }
+    paintPanel();
+  }
+
+  function onNext() {
+    if (view !== "outbox") return;
+    if (step >= totalSteps()) return;
+    step += 1;
+    applyOutboxStep();
+    paint();
+  }
+
+  function onAll() {
+    if (view !== "outbox") return;
+    while (step < totalSteps()) {
+      step += 1;
+      applyOutboxStep();
+    }
+    paint();
+  }
+
+  function bindSeg(rootId, attr, apply) {
+    var root = document.getElementById(rootId);
+    if (!root) return;
+    root.addEventListener("click", function (ev) {
+      var btn = ev.target.closest("button");
+      if (!btn || !root.contains(btn)) return;
+      var value = btn.getAttribute(attr);
+      if (value == null) return;
+      apply(value);
+    });
+  }
+
+  bindSeg("eda-seg-view", "data-view", function (value) {
+    view = value;
+    setSeg("eda-seg-view", "data-view", view);
+    if (view === "outbox") {
+      resetRun();
+    } else {
+      wire = [];
+      panel.handler = "消費者 " + consVer;
+    }
+    paint();
+  });
+
+  bindSeg("eda-seg-fault", "data-fault", function (value) {
+    fault = value;
+    setSeg("eda-seg-fault", "data-fault", fault);
+    resetRun();
+    paint();
+  });
+
+  bindSeg("eda-seg-cons", "data-cons", function (value) {
+    consMode = value;
+    setSeg("eda-seg-cons", "data-cons", consMode);
+    resetRun();
+    paint();
+  });
+
+  bindSeg("eda-seg-compat", "data-compat", function (value) {
+    compat = value;
+    setSeg("eda-seg-compat", "data-compat", compat);
+    paint();
+  });
+
+  el("eda-matrix").addEventListener("click", function (ev) {
+    var btn = ev.target.closest("button[data-prod]");
+    if (!btn) return;
+    prodVer = btn.getAttribute("data-prod");
+    consVer = btn.getAttribute("data-cons");
+    paint();
+  });
+
+  btnNext.addEventListener("click", onNext);
+  btnAll.addEventListener("click", onAll);
+  btnReset.addEventListener("click", function () {
+    if (view === "outbox") {
+      resetRun();
+    } else {
+      prodVer = "v2";
+      consVer = "v1";
+      compat = "backward";
+      setSeg("eda-seg-compat", "data-compat", compat);
+      wire = [];
+    }
+    paint();
+  });
+
+  resetRun();
+  paint();
+})();
+</script>
