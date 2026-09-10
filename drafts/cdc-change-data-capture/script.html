@@ -1,0 +1,683 @@
+<script>
+(function () {
+  "use strict";
+
+  var demo = document.getElementById("demo-cdc");
+  if (!demo) return;
+
+  var SCENE_HINT = {
+    burst: "同一輪詢間隔內 INSERT 後連改兩次。輪詢只看到最後一幀；日誌留下每一次 before / after。",
+    delete: "寫入後硬刪。輪詢掃不到已消失的列；日誌有 DELETE + before image，索引才能清掉幽靈文件。",
+    snap: "Snapshot 先送 op=r，串流又重放同一主鍵。天真 INSERT 會讓倉儲加倍；依主鍵 merge 是拒登保護。"
+  };
+
+  var SCENE_LABEL = {
+    burst: "兩次快改",
+    delete: "刪除列",
+    snap: "Snapshot 交界"
+  };
+
+  var PROP_HINT = {
+    live: "一筆 UPDATE 從 ROW 事件走到快取 DEL 與索引 upsert。每一步都有可見延遲，但位點會前進。",
+    paused: "Connector 停住、slot 不確認 LSN。WAL 堆積是保護游標的代價；恢復後追上，中間窗口是最終一致。"
+  };
+
+  var view = "capture";
+  var scene = "burst";
+  var consMode = "naive";
+  var propScene = "live";
+  var step = 0;
+  var wire = [];
+  var st = null;
+
+  var statusEl = document.getElementById("cdc-scene-hint");
+  var propHintEl = document.getElementById("cdc-prop-hint");
+  var verdictEl = document.getElementById("cdc-verdict");
+  var wireEl = document.getElementById("cdc-wire");
+  var captureView = document.getElementById("cdc-capture-view");
+  var propagateView = document.getElementById("cdc-propagate-view");
+  var lanesEl = document.getElementById("cdc-lanes");
+  var pipeEl = document.getElementById("cdc-pipe");
+  var btnNext = document.getElementById("cdc-btn-next");
+  var btnAll = document.getElementById("cdc-btn-all");
+  var btnReset = document.getElementById("cdc-btn-reset");
+
+  function el(id) {
+    return document.getElementById(id);
+  }
+
+  function esc(s) {
+    return String(s)
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;");
+  }
+
+  function setPressed(groupId, attr, value) {
+    var group = el(groupId);
+    if (!group) return;
+    var buttons = group.querySelectorAll("button");
+    for (var i = 0; i < buttons.length; i++) {
+      var btn = buttons[i];
+      btn.setAttribute("aria-pressed", btn.getAttribute(attr) === value ? "true" : "false");
+    }
+  }
+
+  function setBox(id, tone) {
+    var box = el(id);
+    if (!box) return;
+    box.className = "cdc-box " + (tone || "idle");
+  }
+
+  function tableText(row) {
+    if (!row) return "（空）";
+    return "status=" + row.status + " · amount=" + row.amount + " · ver=" + row.ver + " · ts=" + row.ts;
+  }
+
+  function slotHtml(items) {
+    if (!items || !items.length) {
+      return "<span class=\"cdc-slot\">（空）</span>";
+    }
+    return items.map(function (it) {
+      return "<span class=\"cdc-slot " + it.cls + "\">" + esc(it.text) + "</span>";
+    }).join("");
+  }
+
+  function pushWire(kind, tag, text) {
+    wire.push({ kind: kind, tag: tag, text: text, t: wire.length + 1 });
+  }
+
+  function applyDown(side, ev) {
+    var idem = consMode === "idem";
+    var key = ev.pk + ":" + ev.lsn;
+    var seen = side.seen;
+    var pks = side.pks;
+    var down = side.down;
+
+    if (idem && seen[key]) {
+      down.last = "拒登重放 " + ev.op + "@lsn" + ev.lsn;
+      down.protect += 1;
+      return "protect";
+    }
+    seen[key] = true;
+
+    if (ev.op === "d") {
+      down.cache = "MISS";
+      down.index = "（已刪）";
+      if (idem) {
+        if (pks[ev.pk]) down.rows = Math.max(0, down.rows - 1);
+        delete pks[ev.pk];
+      } else {
+        down.rows += 1;
+      }
+      down.last = "DELETE 已套用";
+      return "delete";
+    }
+
+    down.cache = ev.status + "/" + ev.amount;
+    down.index = ev.status + "/" + ev.amount;
+    if (idem && pks[ev.pk]) {
+      down.last = "merge " + ev.op + " → " + ev.status + "/" + ev.amount;
+      down.protect += 1;
+      pks[ev.pk] = ev.lsn;
+      return "protect";
+    }
+    pks[ev.pk] = ev.lsn;
+    down.rows += 1;
+    down.last = ev.op + " → " + ev.status + "/" + ev.amount;
+    return "apply";
+  }
+
+  function totals() {
+    if (view === "propagate") return st.propTotal;
+    if (scene === "burst") return 5;
+    if (scene === "delete") return 5;
+    return 5;
+  }
+
+  function freshCapture() {
+    var row = null;
+    if (scene === "snap") {
+      row = { status: "paid", amount: 80, ver: 1, ts: 4 };
+    }
+    return {
+      row: row,
+      t: scene === "snap" ? 4 : 0,
+      lsn: scene === "snap" ? 10 : 0,
+      pollCursor: 0,
+      scan: 0,
+      pollSlots: [],
+      logSlots: [],
+      outSlots: [],
+      poll: { seen: {}, pks: {}, down: { cache: "—", index: "—", rows: 0, protect: 0, last: "尚未套用" } },
+      log: { seen: {}, pks: {}, down: { cache: "—", index: "—", rows: 0, protect: 0, last: "尚未套用" } },
+      miss: "尚未走步",
+      logOk: "尚未走步",
+      risk: "無",
+      riskCls: "",
+      missCls: "",
+      logCls: "",
+      pdCls: "",
+      ldCls: "",
+      verdict: { text: "判定尚未產生——走完一輪後會對照輪詢與日誌各自看見的變更。", tone: "" },
+      pTone: { table: "idle", cur: "idle", cap: "idle", down: "idle" },
+      lTone: { table: "idle", log: "idle", cap: "idle", down: "idle" }
+    };
+  }
+
+  function freshProp() {
+    return {
+      writer: { tone: "idle", text: "待命" },
+      bin: { tone: "idle", text: "（空）" },
+      conn: { tone: "idle", text: "待命" },
+      topic: [],
+      cache: { tone: "idle", text: "key order:O-1001 仍在（舊值 paid/80）" },
+      idx: { tone: "idle", text: "文件 = paid / 80" },
+      offset: 0,
+      wal: 1,
+      lag: 0,
+      miss: "尚未走步",
+      logOk: "尚未走步",
+      risk: "無",
+      riskCls: "",
+      missCls: "",
+      logCls: "",
+      verdict: { text: "判定尚未產生——走完傳播鏈後會標出延遲窗口與 slot 行為。", tone: "" },
+      propTotal: propScene === "paused" ? 5 : 5
+    };
+  }
+
+  function downLine(side) {
+    return "cache " + side.down.cache + " · index " + side.down.index + " · rows " + side.down.rows +
+      (side.down.protect ? " · 拒登 " + side.down.protect : "");
+  }
+
+  function runCaptureStep() {
+    var row;
+    if (scene === "burst") {
+      if (step === 1) {
+        st.t = 1;
+        st.lsn = 1;
+        st.row = { status: "pending", amount: 80, ver: 1, ts: 1 };
+        st.logSlots.push({ cls: "ready", text: "c@1 pending/80" });
+        st.outSlots.push({ cls: "ok", text: "c lsn=1" });
+        applyDown(st.log, { pk: "O-1001", lsn: 1, op: "c", status: "pending", amount: 80 });
+        st.pTone.table = "wait";
+        st.lTone.table = "wait";
+        st.lTone.log = "wait";
+        st.lTone.cap = "ok";
+        st.lTone.down = "ok";
+        st.pTone.cur = "hold";
+        pushWire("ok", "INSERT", "COMMIT pending/80 · GTID 1:1 · 輪詢仍等下一拍");
+        st.miss = "中間態尚未發生";
+        st.logOk = "已捕捉 CREATE";
+        st.logCls = "good";
+      } else if (step === 2) {
+        st.t = 2;
+        st.lsn = 2;
+        st.row = { status: "paid", amount: 80, ver: 2, ts: 2 };
+        st.logSlots.push({ cls: "ready", text: "u@2 paid/80" });
+        st.outSlots.push({ cls: "ok", text: "u lsn=2" });
+        applyDown(st.log, { pk: "O-1001", lsn: 2, op: "u", status: "paid", amount: 80 });
+        st.lTone.table = "wait";
+        pushWire("ok", "UPDATE", "paid/80 · 仍在同一 poll 窗口");
+        st.miss = "pending 已被摺進尚未發生的 poll";
+        st.missCls = "warn";
+        st.logOk = "CREATE + UPDATE";
+      } else if (step === 3) {
+        st.t = 3;
+        st.lsn = 3;
+        st.row = { status: "shipped", amount: 80, ver: 3, ts: 3 };
+        st.logSlots.push({ cls: "ready", text: "u@3 shipped/80" });
+        st.outSlots.push({ cls: "ok", text: "u lsn=3" });
+        applyDown(st.log, { pk: "O-1001", lsn: 3, op: "u", status: "shipped", amount: 80 });
+        pushWire("warn", "UPDATE", "shipped/80 · 第三次變更，poll 還沒收");
+        st.miss = "pending、paid 兩幀已從現況消失";
+        st.missCls = "warn";
+        st.logOk = "三次 ROW 齊";
+        st.risk = "輪詢即將丟失中間態";
+        st.riskCls = "warn";
+      } else if (step === 4) {
+        st.t = 10;
+        st.scan += 1;
+        st.pollCursor = 3;
+        st.pollSlots.push({ cls: "hold", text: "upsert shipped/80" });
+        applyDown(st.poll, { pk: "O-1001", lsn: 3, op: "u", status: "shipped", amount: 80 });
+        st.pTone.cur = "ok";
+        st.pTone.cap = "hold";
+        st.pTone.down = "hold";
+        pushWire("warn", "POLL", "updated_at>0 → 一列 shipped。掃描成本 +1，看不到 pending/paid");
+        st.miss = "漏掉 pending、paid 兩次變更";
+        st.missCls = "bad";
+        st.logOk = "三次 ROW 完整";
+        st.logCls = "good";
+        st.risk = "中間觸發（發券、風控）不會被叫醒";
+        st.riskCls = "bad";
+      } else if (step === 5) {
+        st.pTone.table = "ok";
+        st.lTone.table = "ok";
+        st.verdict = {
+          text: "兩邊最終列都是 shipped/80，所以「現況一致」成立。但輪詢把三次變更摺成一幀，依賴付款瞬間的下游永遠不會跑。日誌留下 c/u/u；天真 INSERT 會讓倉儲變成三列，依主鍵 merge 才摺回一列。",
+          tone: "tone-bad"
+        };
+        pushWire("bad", "判定", "最終列碰巧相同 ≠ 變更都被看見");
+      }
+    } else if (scene === "delete") {
+      if (step === 1) {
+        st.t = 1;
+        st.lsn = 1;
+        st.row = { status: "pending", amount: 80, ver: 1, ts: 1 };
+        st.logSlots.push({ cls: "ready", text: "c@1 pending/80" });
+        st.outSlots.push({ cls: "ok", text: "c lsn=1" });
+        applyDown(st.log, { pk: "O-1001", lsn: 1, op: "c", status: "pending", amount: 80 });
+        applyDown(st.poll, { pk: "O-1001", lsn: 1, op: "c", status: "pending", amount: 80 });
+        st.pollSlots.push({ cls: "hold", text: "upsert pending/80" });
+        st.pollCursor = 1;
+        st.scan += 1;
+        st.pTone.table = "wait";
+        st.lTone.table = "wait";
+        st.lTone.log = "ok";
+        st.lTone.cap = "ok";
+        st.lTone.down = "ok";
+        st.pTone.cur = "ok";
+        st.pTone.cap = "hold";
+        st.pTone.down = "hold";
+        pushWire("ok", "INSERT", "第一拍兩邊都看到 pending（輪詢幸運地趕上一幀）");
+        st.miss = "尚無刪除";
+        st.logOk = "已捕捉 CREATE";
+        st.logCls = "good";
+      } else if (step === 2) {
+        st.t = 2;
+        st.lsn = 2;
+        st.row = { status: "paid", amount: 80, ver: 2, ts: 2 };
+        st.logSlots.push({ cls: "ready", text: "u@2 paid/80" });
+        st.outSlots.push({ cls: "ok", text: "u lsn=2" });
+        applyDown(st.log, { pk: "O-1001", lsn: 2, op: "u", status: "paid", amount: 80 });
+        pushWire("ok", "UPDATE", "paid/80 進入 binlog；下一拍才輪到 poll");
+        st.logOk = "CREATE + UPDATE";
+      } else if (step === 3) {
+        st.t = 3;
+        st.lsn = 3;
+        st.row = null;
+        st.logSlots.push({ cls: "lost", text: "d@3 paid/80" });
+        st.outSlots.push({ cls: "ok", text: "d lsn=3" });
+        applyDown(st.log, { pk: "O-1001", lsn: 3, op: "d", status: "paid", amount: 80 });
+        st.lTone.table = "hold";
+        st.lTone.down = "ok";
+        pushWire("warn", "DELETE", "列消失。日誌帶 before image；輪詢已無此 PK");
+        st.miss = "硬刪對 updated_at 查詢隱形";
+        st.missCls = "warn";
+        st.logOk = "含 DELETE 事件";
+        st.logCls = "good";
+      } else if (step === 4) {
+        st.t = 10;
+        st.scan += 1;
+        st.pTone.cur = "hold";
+        st.pTone.cap = "bad";
+        st.pTone.down = "bad";
+        pushWire("bad", "POLL", "WHERE updated_at>1 → 零列。cursor 不前進到刪除，快取/索引仍停在 pending");
+        st.miss = "DELETE 蒸發；下游留下幽靈文件";
+        st.missCls = "bad";
+        st.risk = "索引搜得到已刪訂單";
+        st.riskCls = "bad";
+        st.poll.down.last = "本拍無列可 upsert";
+      } else if (step === 5) {
+        st.verdict = {
+          text: "日誌路徑 cache=MISS、index 已刪，這是正確的失效。輪詢路徑仍停在第一拍的 pending：硬刪沒有 updated_at，對帳前幽靈文件會一直被搜到。軟刪只是把這個問題假裝成 UPDATE。",
+          tone: "tone-bad"
+        };
+        pushWire("bad", "判定", "硬刪是輪詢的死角，不是間隔設太長");
+      }
+    } else if (scene === "snap") {
+      if (step === 1) {
+        st.lsn = 11;
+        row = { pk: "O-1001", lsn: 11, op: "r", status: "paid", amount: 80 };
+        st.logSlots.push({ cls: "ready", text: "r@11 paid/80" });
+        st.outSlots.push({ cls: "ok", text: "r lsn=11" });
+        applyDown(st.log, row);
+        applyDown(st.poll, row);
+        st.pollSlots.push({ cls: "hold", text: "snapshot paid/80" });
+        st.scan += 1;
+        st.pTone.table = "wait";
+        st.lTone.table = "wait";
+        st.lTone.log = "wait";
+        st.lTone.cap = "ok";
+        st.pTone.cur = "ok";
+        st.pTone.cap = "hold";
+        st.pTone.down = "ok";
+        st.lTone.down = "ok";
+        pushWire("read", "SNAP", "一致快照讀到 paid/80，兩邊各發 op=r");
+        st.miss = "輪詢路徑把 Snapshot 當一次 upsert";
+        st.logOk = "read 事件已送";
+        st.logCls = "good";
+      } else if (step === 2) {
+        st.lsn = 10;
+        row = { pk: "O-1001", lsn: 10, op: "c", status: "paid", amount: 80 };
+        st.logSlots.push({ cls: "hold", text: "c@10 paid/80" });
+        st.outSlots.push({ cls: "hold", text: "c lsn=10" });
+        var logHit = applyDown(st.log, row);
+        var pollHit = applyDown(st.poll, { pk: "O-1001", lsn: 10, op: "c", status: "paid", amount: 80 });
+        st.pollSlots.push({ cls: consMode === "idem" ? "ok" : "lost", text: consMode === "idem" ? "merge c@10" : "再插入 paid/80" });
+        if (consMode === "idem") {
+          st.lTone.down = "ok";
+          st.pTone.down = "ok";
+          st.risk = "merge 擋下交界重放";
+          st.riskCls = "good";
+          pushWire("ok", "重放", "串流低水位重送 CREATE（另一個 LSN）。依主鍵 merge 原地更新，倉儲列數不變——這是保護。");
+          st.logOk = "r + merge 後的 c";
+        } else {
+          st.lTone.down = "hold";
+          st.pTone.down = "bad";
+          st.risk = "倉儲列加倍";
+          st.riskCls = "bad";
+          pushWire("bad", "重放", "同一主鍵再 INSERT 一次。天真倉儲 rows+1，不是新事實");
+          st.logOk = "r + 重複 c（未 merge）";
+          st.logCls = "warn";
+        }
+        st.miss = pollHit === "protect" ? "輪詢側也 merge 了重複" : "輪詢側把重放當成新列";
+        st.missCls = pollHit === "protect" ? "good" : "bad";
+      } else if (step === 3) {
+        st.t = 5;
+        st.lsn = 12;
+        st.row = { status: "paid", amount: 100, ver: 2, ts: 5 };
+        st.logSlots.push({ cls: "ready", text: "u@12 paid/100" });
+        st.outSlots.push({ cls: "ok", text: "u lsn=12" });
+        applyDown(st.log, { pk: "O-1001", lsn: 12, op: "u", status: "paid", amount: 100 });
+        st.lTone.table = "ok";
+        st.pTone.table = "ok";
+        pushWire("ok", "UPDATE", "快照窗口內的金額變更 paid/100，只走日誌");
+        st.logOk = consMode === "idem" ? "r + 拒登 + u" : "r + 重複 c + u";
+      } else if (step === 4) {
+        st.scan += 1;
+        st.pollCursor = 5;
+        st.pollSlots.push({ cls: "hold", text: "upsert paid/100" });
+        applyDown(st.poll, { pk: "O-1001", lsn: 12, op: "u", status: "paid", amount: 100 });
+        st.pTone.cap = "hold";
+        pushWire("warn", "POLL", "現況已是 100。輪詢補上終點，但交界那次重複仍留在倉儲列數裡");
+        st.miss = consMode === "idem" ? "終點追上，重複已被擋" : "終點追上，歷史多一列";
+        st.missCls = consMode === "idem" ? "" : "warn";
+      } else if (step === 5) {
+        if (consMode === "idem") {
+          st.verdict = {
+            text: "Snapshot 與串流重疊是預期的 at-least-once。依主鍵 merge 把第二次寫入收成原地更新——這是保護，不是損壞。同一事件重放才用 (pk, LSN) unique insert；交界處的 r 與 c 位點不同，要靠主鍵摺疊。",
+            tone: "tone-ok"
+          };
+          st.risk = "無（merge 保護）";
+          st.riskCls = "good";
+          pushWire("ok", "判定", "交界重複被摺進同一列，不是資料損壞");
+        } else {
+          st.verdict = {
+            text: "同一主鍵被 Snapshot 與串流各寫一次，倉儲列數大於真實實體。重跑 Snapshot 當「清乾淨重來」會再加倍。回填必須 merge-by-pk，不能盲目 INSERT。",
+            tone: "tone-bad"
+          };
+          st.risk = "回填會再加倍";
+          st.riskCls = "bad";
+          pushWire("bad", "判定", "天真套用把交界重放當成新事實");
+        }
+      }
+    }
+  }
+
+  function runPropStep() {
+    if (propScene === "live") {
+      if (step === 1) {
+        st.writer = { tone: "wait", text: "UPDATE paid/80 → shipped/80 · 交易中" };
+        pushWire("read", "APP", "應用送出 UPDATE，尚未 COMMIT");
+        st.miss = "來源尚未耐久";
+        st.logOk = "binlog 還是舊位點";
+      } else if (step === 2) {
+        st.writer = { tone: "ok", text: "COMMIT shipped/80" };
+        st.bin = { tone: "wait", text: "ROW u · GTID 1:5 · before paid/80 → after shipped/80" };
+        pushWire("ok", "BINLOG", "ROW 事件落地。複寫與 CDC 讀的是同一則");
+        st.logOk = "GTID 1:5 可被第二個讀者消費";
+        st.logCls = "good";
+        st.miss = "下游仍是舊值";
+        st.missCls = "warn";
+      } else if (step === 3) {
+        st.bin = { tone: "ok", text: "ROW u · GTID 1:5 已讀" };
+        st.conn = { tone: "wait", text: "讀取 GTID 1:5 · offset 未提交" };
+        st.lag = 1;
+        pushWire("read", "CONN", "connector dump binlog，envelope 尚未進主題");
+      } else if (step === 4) {
+        st.conn = { tone: "ok", text: "offset=1:5 已提交 · slot flush" };
+        st.topic = [{ cls: "ok", text: "u shipped/80" }];
+        st.cache = { tone: "wait", text: "收到事件，準備 DEL" };
+        st.lag = 2;
+        pushWire("ok", "TOPIC", "db.orders 追加 envelope；快取還持有舊 key");
+        st.miss = "快取窗口：commit 已過、DEL 未到";
+        st.missCls = "warn";
+        st.risk = "讀到過期 paid/80";
+        st.riskCls = "warn";
+      } else if (step === 5) {
+        st.cache = { tone: "ok", text: "DEL order:O-1001 · 下次讀回源" };
+        st.idx = { tone: "ok", text: "upsert shipped/80" };
+        st.lag = 3;
+        st.wal = 1;
+        st.verdict = {
+          text: "傳播鏈走完：快取被失效、索引依主鍵 upsert。延遲 = commit 到下游寫入的尾延遲，不是「即時」。CDC 觸發的是失效與重建，不是把 binlog 當 write-through。",
+          tone: "tone-ok"
+        };
+        st.miss = "窗口已關閉";
+        st.missCls = "good";
+        st.logOk = "位點與下游都到 shipped";
+        st.logCls = "good";
+        st.risk = "無";
+        st.riskCls = "";
+        pushWire("ok", "DOWN", "cache DEL + index upsert。最終一致收斂");
+      }
+    } else {
+      if (step === 1) {
+        st.writer = { tone: "ok", text: "COMMIT shipped/80" };
+        st.bin = { tone: "hold", text: "ROW u · GTID 1:5 等待讀者" };
+        pushWire("ok", "COMMIT", "來源已耐久。connector 這一拍被暫停");
+        st.miss = "下游完全沒動";
+        st.missCls = "warn";
+        st.logOk = "事件在 WAL / binlog 裡";
+        st.logCls = "good";
+      } else if (step === 2) {
+        st.conn = { tone: "hold", text: "暫停 · confirmed_flush 停在 1:4" };
+        st.wal = 4;
+        st.lag = 8;
+        pushWire("warn", "SLOT", "slot 不前進，WAL 不能回收。這是續讀的代價");
+        st.risk = "磁碟開始膨脹";
+        st.riskCls = "warn";
+      } else if (step === 3) {
+        st.wal = 12;
+        st.lag = 20;
+        st.conn = { tone: "bad", text: "仍暫停 · WAL 檔增加到 12" };
+        pushWire("bad", "GROW", "沒人看的 CDC slot 比落後 replica 更危險：常常沒有延遲告警");
+        st.risk = "WAL 堆到磁碟滿";
+        st.riskCls = "bad";
+        st.miss = "快取/索引仍是 paid/80";
+        st.missCls = "bad";
+      } else if (step === 4) {
+        st.conn = { tone: "wait", text: "恢復 · 從 1:4 catch-up 到 1:5" };
+        st.topic = [{ cls: "ok", text: "u shipped/80" }];
+        st.wal = 3;
+        st.lag = 4;
+        pushWire("read", "RESUME", "位點還在，事件沒丟。追的是延遲，不是資料");
+        st.risk = "窗口尚未關";
+        st.riskCls = "warn";
+      } else if (step === 5) {
+        st.conn = { tone: "ok", text: "offset=1:5 · WAL 回收到 1" };
+        st.wal = 1;
+        st.lag = 3;
+        st.cache = { tone: "ok", text: "DEL order:O-1001" };
+        st.idx = { tone: "ok", text: "upsert shipped/80" };
+        st.bin = { tone: "ok", text: "ROW u · GTID 1:5 已消費" };
+        st.verdict = {
+          text: "暫停期間下游讀到的是舊值，這是最終一致而不是丟失。真正的事故是 slot 一直停、WAL 把磁碟吃滿——確認 flush 與 binlog expire 是運維時鐘，不是業務時鐘。",
+          tone: "tone-lock"
+        };
+        st.miss = "已追上";
+        st.missCls = "good";
+        st.logOk = "同一則 ROW，延後送達";
+        st.logCls = "good";
+        st.risk = "曾有磁碟膨脹窗口";
+        st.riskCls = "warn";
+        pushWire("ok", "判定", "能追上 ≠ 中間窗口可當真相；slot 不消費才是事故");
+      }
+    }
+  }
+
+  function paintCapture() {
+    var table = tableText(st.row);
+    el("cdc-p-table-v").textContent = table;
+    el("cdc-l-table-v").textContent = table;
+    el("cdc-p-cur-v").textContent = "cursor = " + st.pollCursor + " · 掃描 " + st.scan + " 次";
+    el("cdc-p-slots").innerHTML = slotHtml(st.pollSlots);
+    el("cdc-l-slots").innerHTML = slotHtml(st.logSlots);
+    el("cdc-l-out").innerHTML = slotHtml(st.outSlots);
+    el("cdc-p-down-v").textContent = downLine(st.poll);
+    el("cdc-l-down-v").textContent = downLine(st.log);
+
+    setBox("cdc-p-table", st.pTone.table);
+    setBox("cdc-p-cur", st.pTone.cur);
+    setBox("cdc-p-cap", st.pTone.cap);
+    setBox("cdc-p-down", st.pTone.down);
+    setBox("cdc-l-table", st.lTone.table);
+    setBox("cdc-l-log", st.lTone.log);
+    setBox("cdc-l-cap", st.lTone.cap);
+    setBox("cdc-l-down", st.lTone.down);
+
+    el("cdc-f-scene").textContent = SCENE_LABEL[scene];
+    el("cdc-f-table").textContent = table;
+    el("cdc-f-miss").textContent = st.miss;
+    el("cdc-f-miss").className = "pv" + (st.missCls ? " " + st.missCls : "");
+    el("cdc-f-log").textContent = st.logOk;
+    el("cdc-f-log").className = "pv" + (st.logCls ? " " + st.logCls : "");
+    el("cdc-f-cons").textContent = consMode === "idem" ? "依主鍵 merge" : "天真 INSERT";
+    el("cdc-ml-1").innerHTML = "輪詢捕捉 <strong id=\"cdc-m-poll\">" + st.pollSlots.length + "</strong>";
+    el("cdc-ml-2").innerHTML = "日誌事件 <strong id=\"cdc-m-log\">" + st.logSlots.length + "</strong>";
+    el("cdc-ml-3").innerHTML = "掃描成本 <strong id=\"cdc-m-scan\">" + st.scan + "</strong>";
+    el("cdc-ml-4").innerHTML = "倉儲列（輪詢 / 日誌） <strong id=\"cdc-m-wh\">" + st.poll.down.rows + " / " + st.log.down.rows + "</strong>";
+    el("cdc-f-pd").textContent = st.poll.down.last;
+    el("cdc-f-pd").className = "pv" + (st.pdCls ? " " + st.pdCls : "");
+    el("cdc-f-ld").textContent = st.log.down.last;
+    el("cdc-f-ld").className = "pv" + (st.ldCls ? " " + st.ldCls : "");
+    el("cdc-f-risk").textContent = st.risk;
+    el("cdc-f-risk").className = "pv" + (st.riskCls ? " " + st.riskCls : "");
+  }
+
+  function paintProp() {
+    el("cdc-x-write-v").textContent = st.writer.text;
+    el("cdc-x-bin-v").textContent = st.bin.text;
+    el("cdc-x-conn-v").textContent = st.conn.text;
+    el("cdc-x-slots").innerHTML = slotHtml(st.topic);
+    el("cdc-x-cache-v").textContent = st.cache.text;
+    el("cdc-x-idx-v").textContent = st.idx.text;
+    setBox("cdc-x-write", st.writer.tone);
+    setBox("cdc-x-bin", st.bin.tone);
+    setBox("cdc-x-conn", st.conn.tone);
+    setBox("cdc-x-topic", st.topic.length ? "ok" : "idle");
+    setBox("cdc-x-cache", st.cache.tone);
+    setBox("cdc-x-idx", st.idx.tone);
+
+    el("cdc-ml-1").innerHTML = "WAL 檔 <strong id=\"cdc-m-poll\">" + st.wal + "</strong>";
+    el("cdc-ml-2").innerHTML = "位點 <strong id=\"cdc-m-log\">" + (st.topic.length ? "1:5" : "1:4") + "</strong>";
+    el("cdc-ml-3").innerHTML = "可見延遲 <strong id=\"cdc-m-scan\">" + st.lag + "</strong>";
+    el("cdc-ml-4").innerHTML = "slot 狀態 <strong id=\"cdc-m-wh\">" + (propScene === "paused" && step > 0 && step < 5 ? "落後" : "跟上") + "</strong>";
+
+    el("cdc-f-scene").textContent = propScene === "paused" ? "Connector 暫停" : "即時跟上";
+    el("cdc-f-table").textContent = step === 0 ? "paid/80（舊）" : "shipped/80";
+    el("cdc-f-miss").textContent = st.miss;
+    el("cdc-f-miss").className = "pv" + (st.missCls ? " " + st.missCls : "");
+    el("cdc-f-log").textContent = st.logOk;
+    el("cdc-f-log").className = "pv" + (st.logCls ? " " + st.logCls : "");
+    el("cdc-f-cons").textContent = "失效 + upsert";
+    el("cdc-f-pd").textContent = st.cache.text;
+    el("cdc-f-ld").textContent = st.idx.text;
+    el("cdc-f-risk").textContent = st.risk;
+    el("cdc-f-risk").className = "pv" + (st.riskCls ? " " + st.riskCls : "");
+  }
+
+  function paintWire() {
+    if (!wire.length) {
+      wireEl.innerHTML = "<div class=\"cdc-row\"><span class=\"ar\">·</span><span class=\"tg\">READY</span><span class=\"tx\">按「下一步」開始。</span></div>";
+      return;
+    }
+    wireEl.innerHTML = wire.map(function (row) {
+      return "<div class=\"cdc-row " + row.kind + "\"><span class=\"ar\">" + row.t +
+        "</span><span class=\"tg\">" + esc(row.tag) + "</span><span class=\"tx\">" + esc(row.text) + "</span></div>";
+    }).join("");
+    wireEl.scrollTop = wireEl.scrollHeight;
+  }
+
+  function paint() {
+    el("cdc-m-step").textContent = String(step);
+    el("cdc-m-total").textContent = String(totals());
+    captureView.hidden = view !== "capture";
+    propagateView.hidden = view !== "propagate";
+    lanesEl.hidden = view !== "capture";
+    pipeEl.hidden = view !== "propagate";
+
+    if (view === "capture") {
+      statusEl.textContent = SCENE_HINT[scene];
+      paintCapture();
+    } else {
+      propHintEl.textContent = PROP_HINT[propScene];
+      paintProp();
+    }
+    paintWire();
+    verdictEl.className = "cdc-verdict" + (st.verdict.tone ? " " + st.verdict.tone : "");
+    verdictEl.textContent = st.verdict.text;
+    btnNext.disabled = step >= totals();
+  }
+
+  function reset() {
+    step = 0;
+    wire = [];
+    if (view === "capture") st = freshCapture();
+    else st = freshProp();
+    paint();
+  }
+
+  function next() {
+    if (step >= totals()) return;
+    step += 1;
+    if (view === "capture") runCaptureStep();
+    else runPropStep();
+    paint();
+  }
+
+  function bindSeg(id, attr, onChange) {
+    var group = el(id);
+    if (!group) return;
+    group.addEventListener("click", function (ev) {
+      var btn = ev.target.closest("button");
+      if (!btn || !btn.hasAttribute(attr)) return;
+      onChange(btn.getAttribute(attr));
+    });
+  }
+
+  bindSeg("cdc-seg-view", "data-view", function (v) {
+    view = v;
+    setPressed("cdc-seg-view", "data-view", view);
+    reset();
+  });
+  bindSeg("cdc-seg-scene", "data-scene", function (v) {
+    scene = v;
+    setPressed("cdc-seg-scene", "data-scene", scene);
+    reset();
+  });
+  bindSeg("cdc-seg-cons", "data-cons", function (v) {
+    consMode = v;
+    setPressed("cdc-seg-cons", "data-cons", consMode);
+    reset();
+  });
+  bindSeg("cdc-seg-prop", "data-prop", function (v) {
+    propScene = v;
+    setPressed("cdc-seg-prop", "data-prop", propScene);
+    reset();
+  });
+
+  btnNext.addEventListener("click", next);
+  btnAll.addEventListener("click", function () {
+    while (step < totals()) next();
+  });
+  btnReset.addEventListener("click", reset);
+
+  reset();
+})();
+</script>
