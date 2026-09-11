@@ -110,7 +110,7 @@
 
 ```
 system-design-every-day/
-├── Agents.md                 # AI Agent 專屬自動化工作指南（Agent 啟動必讀 🚨）
+├── AGENTS.md                 # AI Agent 專屬自動化工作指南（Agent 啟動必讀 🚨）
 ├── README.md                 # 專案概念與工具鏈說明（本文件）
 ├── guidelines/
 │   └── style-guide.md        # Notion 淺色極簡風格與互動式演示規格
@@ -158,7 +158,7 @@ node scripts/generate.js --topic rate-limiter --title "Rate Limiter (限流器)"
 ## 🚨 Agent 必讀事項
 
 所有參與本專案的 AI Agent，在執行任務前**必須嚴格閱讀並遵循**以下文件：
-- **[Agents.md](Agents.md)**：包含智能選題的 CLI 調用步驟，與寫作的 6 個核心鐵律。
+- **[AGENTS.md](AGENTS.md)**：包含智能選題的 CLI 調用步驟，與寫作的 6 個核心鐵律。
 - **[guidelines/style-guide.md](guidelines/style-guide.md)**：包含色彩系統（Notion-like Light Mode）、`.callout`、`.oneliner`、與互動元件類別的定義。
 
 ---
