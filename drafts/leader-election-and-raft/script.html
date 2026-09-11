@@ -5,592 +5,958 @@
   var demo = document.getElementById("demo-ler");
   if (!demo) return;
 
-  var NAMES = ["N1", "N2", "N3", "N4", "N5"];
+  var COUNT = 5;
   var MAJORITY = 3;
 
+  var TOTAL = { elect: 12, fence: 8 };
+
   var HINTS = {
-    elect: "五節點多數派 = 3。觀察 N1 當選、x=1 提交、y=2 未封印就切主，以及「本 term no-op 才能把前任 term 的尾巴封印」。",
-    fence: "分區後舊 Leader 仍會打外部資源。fencing ON 時 token=1 被拒；OFF 時 x 被寫成 STALE。"
+    elect: "五節點，多數派 = 3。你可以決定誰先超時當上 term 1 的 Leader，以及 Leader 崩潰後由誰接手——兩條路都合法，但那條「已複製、未提交」的尾巴會有截然不同的下場。",
+    fence: "N1 是 term 1 Leader。分區把它隔開後，多數側選出 term 2 的新 Leader，舊 Leader 仍會對「外部資源」發出寫入。fencing 開關決定那筆過期寫入進不進得去。"
   };
 
+  var LEGEND = {
+    elect: [
+      ["ns-ok", "已提交（多數派封印）"],
+      ["ns-lock", "已複製、未提交"],
+      ["ns-bad", "節點崩潰 / 項目被覆蓋"],
+      ["ns-idle", "該位置尚無項目"]
+    ],
+    fence: [
+      ["ns-ok", "已提交 / 寫入被接受"],
+      ["ns-lock", "已複製、未提交"],
+      ["ns-wait", "分區隔離"],
+      ["ns-bad", "過期寫入 / 項目被覆蓋"],
+      ["ns-idle", "該位置尚無項目"]
+    ]
+  };
+
+  var PHASES = {
+    elect: [
+      { name: "選舉 term 1", end: 3 },
+      { name: "複製與提交", end: 8 },
+      { name: "崩潰改選", end: 11 },
+      { name: "前任 term 規則", end: 12 }
+    ],
+    fence: [
+      { name: "穩定集群", end: 2 },
+      { name: "腦裂成形", end: 4 },
+      { name: "幽靈寫入", end: 7 },
+      { name: "分區修復", end: 8 }
+    ]
+  };
+
+  /* ── 使用者的決定 ───────────────────────────────── */
   var mode = "elect";
+  var leader1 = 1;
+  var cand2 = 2;
   var fencing = true;
   var step = 0;
-  var nodes = [];
-  var commitIndex = 0;
-  var currentTerm = 0;
-  var leaderId = 0;
-  var resource = { value: "—", token: 0, writer: "—", judge: "尚未寫入", tone: "" };
-  var wire = [];
-  var panel = { op: "—", rule: "—", cli: "—", ext: "本模式不使用" };
 
-  var statusEl = document.getElementById("ler-status");
-  var verdictEl = document.getElementById("ler-verdict");
-  var wireEl = document.getElementById("ler-wire");
-  var btnNext = document.getElementById("ler-btn-next");
-  var btnReset = document.getElementById("ler-btn-reset");
-  var electView = document.getElementById("ler-elect-view");
-  var fenceView = document.getElementById("ler-fence-view");
-  var resEl = document.getElementById("ler-res");
-  var nodeEls = demo.querySelectorAll(".ler-node");
+  /* ── DOM ────────────────────────────────────────── */
+  var el = function (id) { return document.getElementById(id); };
+  var hintEl = el("ler-hint");
+  var dec1 = el("ler-dec1");
+  var dec2 = el("ler-dec2");
+  var decF = el("ler-decf");
+  var segMode = el("ler-seg-mode");
+  var segL1 = el("ler-seg-l1");
+  var segC2 = el("ler-seg-c2");
+  var segFence = el("ler-seg-fence");
+  var dec2Hint = el("ler-dec2-hint");
+  var rangeEl = el("ler-range");
+  var phasesEl = el("ler-phases");
+  var matrixEl = el("ler-matrix");
+  var rpcEl = el("ler-rpc");
+  var quorumEl = el("ler-quorum");
+  var resEl = el("ler-res");
+  var statusEl = el("ler-status");
+  var verdictEl = el("ler-verdict");
+  var wireEl = el("ler-wire");
+  var legendEl = el("ler-legend");
+  var btnPrev = el("ler-btn-prev");
+  var btnNext = el("ler-btn-next");
+  var btnReset = el("ler-btn-reset");
 
-  var mStep = document.getElementById("ler-m-step");
-  var mTotal = document.getElementById("ler-m-total");
-  var mTerm = document.getElementById("ler-m-term");
-  var mCommit = document.getElementById("ler-m-commit");
-  var mLeader = document.getElementById("ler-m-leader");
+  var mStep = el("ler-m-step");
+  var mTotal = el("ler-m-total");
+  var mTerm = el("ler-m-term");
+  var mCommit = el("ler-m-commit");
+  var mLeader = el("ler-m-leader");
+  var mTermLabel = el("ler-m-term-label");
+  var mLeaderLabel = el("ler-m-leader-label");
+  var wOp = el("ler-w-op");
+  var wRule = el("ler-w-rule");
+  var wCli = el("ler-w-cli");
+  var resVal = el("ler-res-val");
+  var resTok = el("ler-res-tok");
+  var resWho = el("ler-res-who");
+  var resJudge = el("ler-res-judge");
 
-  var pOp = document.getElementById("ler-p-op");
-  var pRule = document.getElementById("ler-p-rule");
-  var pCli = document.getElementById("ler-p-cli");
-  var pLead = document.getElementById("ler-p-lead");
-  var pCmt = document.getElementById("ler-p-cmt");
-  var pUnc = document.getElementById("ler-p-unc");
-  var pExt = document.getElementById("ler-p-ext");
-
-  var resVal = document.getElementById("ler-res-val");
-  var resTok = document.getElementById("ler-res-tok");
-  var resWho = document.getElementById("ler-res-who");
-  var resJudge = document.getElementById("ler-res-judge");
-
-  function freshNodes() {
-    return NAMES.map(function (_n, i) {
-      return {
-        id: i + 1,
-        role: "follower",
-        term: 0,
-        log: [],
-        votedFor: 0,
-        alive: true,
-        partitioned: false,
-        hint: "待命",
-        active: false
-      };
-    });
+  function esc(s) {
+    return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
   }
 
-  function logText(entry) {
-    return "T" + entry.term + ":" + entry.cmd;
+  function nm(id) { return "N" + id; }
+
+  /* ── 狀態快照：完全由 (mode, step, 決策) 推導 ───── */
+  function freshState() {
+    var nodes = [];
+    for (var i = 1; i <= COUNT; i += 1) {
+      nodes.push({
+        id: i, role: "follower", term: 0, votedFor: 0,
+        log: [], trunc: [], commit: 0, fresh: [],
+        alive: true, part: false, act: false, note: null
+      });
+    }
+    return {
+      nodes: nodes, term: 0, leader: 0,
+      rpc: null, quorum: null, res: null,
+      op: "—", rule: "—", cli: "—",
+      status: "", verdict: null, wire: []
+    };
   }
 
-  function prefixText(upto) {
-    var parts = [];
-    var src = null;
-    nodes.forEach(function (n) {
-      if (n.alive && n.log.length >= upto) src = n;
-    });
-    if (!src || upto <= 0) return "∅";
-    for (var i = 0; i < upto; i += 1) parts.push(logText(src.log[i]));
-    return parts.join(" · ");
-  }
-
-  function tailText() {
-    var longest = 0;
-    nodes.forEach(function (n) {
-      if (n.log.length > longest) longest = n.log.length;
-    });
-    if (longest <= commitIndex) return "∅";
-    var seen = {};
-    var parts = [];
-    nodes.forEach(function (n) {
-      for (var i = commitIndex; i < n.log.length; i += 1) {
-        var t = logText(n.log[i]);
-        if (!seen[t]) {
-          seen[t] = true;
-          parts.push(t);
+  function makeCtx(st) {
+    return {
+      at: function (id) { return st.nodes[id - 1]; },
+      give: function (ids, term, cmd) {
+        for (var i = 0; i < ids.length; i += 1) {
+          var n = st.nodes[ids[i] - 1];
+          n.fresh.push(n.log.length);
+          n.log.push({ term: term, cmd: cmd });
         }
+      },
+      commitTo: function (ids, c) {
+        for (var i = 0; i < ids.length; i += 1) { st.nodes[ids[i] - 1].commit = c; }
+      },
+      act: function (ids) {
+        for (var i = 0; i < ids.length; i += 1) { st.nodes[ids[i] - 1].act = true; }
+      },
+      note: function (id, text, tone) {
+        st.nodes[id - 1].note = { t: text, k: tone || "" };
+      },
+      noteAll: function (text, tone) {
+        for (var i = 0; i < st.nodes.length; i += 1) {
+          st.nodes[i].note = { t: text, k: tone || "" };
+        }
+      },
+      wire: function (kind, tag, text, at) {
+        st.wire.push({ kind: kind, tag: tag, text: text, step: at });
+      },
+      lastLog: function (id) {
+        var n = st.nodes[id - 1];
+        return n.log.length
+          ? { term: n.log[n.log.length - 1].term, idx: n.log.length }
+          : { term: 0, idx: 0 };
+      }
+    };
+  }
+
+  /* 候選人的 log 是否「至少與投票者一樣新」：先比 term，再比 index */
+  function atLeastAsNew(cand, voter) {
+    if (cand.term !== voter.term) return cand.term > voter.term;
+    return cand.idx >= voter.idx;
+  }
+
+  function runSteps(st, steps, target) {
+    for (var s = 0; s < target && s < steps.length; s += 1) {
+      for (var i = 0; i < st.nodes.length; i += 1) {
+        st.nodes[i].fresh = [];
+        st.nodes[i].trunc = [];
+        st.nodes[i].act = false;
+        st.nodes[i].note = null;
+      }
+      st.rpc = null;
+      st.quorum = null;
+      steps[s]();
+    }
+    return st;
+  }
+
+  /* ── 劇本一：選舉 → 複製 → 前任 term 的提交規則 ── */
+  function buildElect(target) {
+    var L = leader1;
+    var others = [];
+    var i;
+    for (i = 1; i <= COUNT; i += 1) { if (i !== L) others.push(i); }
+
+    var C = others.indexOf(cand2) === -1 ? others[0] : cand2;
+    var carrier = others[0];            /* 唯一跟著 Leader 拿到 y=2 的 Follower */
+    var second = others[1];             /* 讓 x=1 達成多數派的第三票 */
+    var laggards = [others[2], others[3]];
+    var carriesY = C === carrier;
+
+    var rest = [];
+    for (i = 0; i < others.length; i += 1) { if (others[i] !== C) rest.push(others[i]); }
+    var repl = rest.slice(0, 2);        /* term 2 Leader 用來湊多數派的兩台 */
+
+    var st = freshState();
+    var cx = makeCtx(st);
+    var steps = [];
+
+    st.status = "五台都是 Follower、log 全空、term 0。先決定誰的 election timeout 先到，再按「下一步」。";
+
+    steps.push(function () {            /* 1 */
+      var l = cx.at(L);
+      l.role = "candidate"; l.term = 1; l.votedFor = L;
+      st.term = 1;
+      cx.act([L]);
+      cx.noteAll("收到 RequestVote，尚未回覆");
+      cx.note(L, "election timeout → Candidate", "warn");
+      st.rpc = { label: "RPC", kind: "vote", from: nm(L), to: others.map(nm).join(" "), msg: "RequestVote term=1 · lastLog=(T0, 0)" };
+      st.quorum = { hits: [L], need: MAJORITY, label: "term 1 的選票" };
+      st.op = nm(L) + " 的 election timeout 先到：currentTerm 加一，先投自己一票";
+      st.rule = "每個 term 一票，Candidate 一定先投給自己";
+      st.cli = "集群暫時不可寫（沒有 Leader）";
+      st.status = "隨機超時的意義就在這一步：其他四台還在各自計時，票還沒被拆走。若兩台同時超時，就會出現 split vote——下一輪的隨機超時幾乎不會再對齊。";
+      cx.wire("warn", "VOTE", nm(L) + " election timeout，currentTerm=1，投自己，發出 RequestVote。", 1);
+    });
+
+    steps.push(function () {            /* 2 */
+      for (var k = 0; k < others.length; k += 1) {
+        var v = cx.at(others[k]);
+        v.term = 1; v.votedFor = L;
+        cx.note(others[k], "YES → " + nm(L) + "（log 一樣新）", "ok");
+      }
+      var l = cx.at(L);
+      l.role = "leader";
+      st.leader = L;
+      cx.note(L, "當選 term 1 Leader", "ok");
+      cx.act([L].concat(others));
+      st.rpc = { label: "回覆", kind: "vote", from: others.map(nm).join(" "), to: nm(L), msg: "RequestVote YES ×4" };
+      st.quorum = { hits: [L].concat(others), need: MAJORITY, label: "term 1 的選票" };
+      st.op = "四台 Follower 的 log 都是空的，與候選人「一樣新」→ 全部投 YES";
+      st.rule = "湊到第 " + MAJORITY + " 票的瞬間就轉為 Leader（這裡四票全收，是因為開局大家的 log 都一樣新）";
+      st.cli = "集群恢復可寫";
+      st.status = "投票規則的第二條（候選人的 log 至少要一樣新）在開局形同虛設——大家都是空的。等到第 9 步崩潰之後，它才會真正咬人。";
+      cx.wire("ok", "LEAD", nm(L) + " 取得全部 5 票，成為 term 1 Leader，開始送心跳阻止其他人再選。", 2);
+    });
+
+    steps.push(function () {            /* 3 */
+      cx.act([L]);
+      cx.noteAll("重置 election timer");
+      cx.note(L, "送出空心跳", "");
+      st.rpc = { label: "RPC", kind: "ae", from: nm(L), to: others.map(nm).join(" "), msg: "AppendEntries（空）· leaderCommit=0" };
+      st.op = "空的 AppendEntries 當心跳，壓住其他節點的 election timer";
+      st.rule = "心跳週期必須明顯短於 election timeout 的下界，否則正常抖動就會觸發改選";
+      st.cli = "尚無寫入";
+      st.status = "心跳同時是複製通道：它捎帶 leaderCommit，讓落後的 Follower 知道可以把哪些項目套用到狀態機。Catch-up 不是另一條協定。";
+      cx.wire("read", "HB", "空 AppendEntries 心跳，宣告 leaderCommit=0。", 3);
+    });
+
+    steps.push(function () {            /* 4 */
+      cx.give([L], 1, "x=1");
+      cx.act([L]);
+      cx.note(L, "本地 append idx1", "warn");
+      st.rpc = { label: "客戶端", kind: "cli", from: "Client", to: nm(L), msg: "SET x=1" };
+      st.quorum = { hits: [L], need: MAJORITY, label: "x=1 的複製數" };
+      st.op = "客戶端寫入抵達 Leader，附加在 index 1";
+      st.rule = "只在 Leader 本地 · commitIndex 仍為 0";
+      st.cli = "等待中——此時回覆成功等於說謊";
+      st.status = "順序在這一刻決定，但「成功」還沒有兌現。這筆項目現在只存在一台機器的磁碟上，Leader 一崩潰就可能消失。";
+      cx.wire("read", "WR", nm(L) + " 把 T1:x=1 附加在 index 1，尚未複製。", 4);
+    });
+
+    steps.push(function () {            /* 5 */
+      cx.give([carrier], 1, "x=1");
+      cx.act([L, carrier]);
+      cx.note(L, "matchIndex[" + nm(carrier) + "]=1", "");
+      cx.note(carrier, "prevLog 檢查通過 · 落盤", "warn");
+      st.rpc = { label: "RPC", kind: "ae", from: nm(L), to: nm(carrier), msg: "AppendEntries prevLogIndex=0 · entries=[T1:x=1]" };
+      st.quorum = { hits: [L, carrier], need: MAJORITY, label: "x=1 的複製數" };
+      st.op = nm(carrier) + " 通過 prevLog 錨點檢查並持久化";
+      st.rule = "複製數 2 / 5 未達多數派 → commitIndex 不動";
+      st.cli = "仍在等待";
+      st.status = "兩份不夠。多數派是 ⌊5/2⌋+1 = 3，少一份都不能宣告提交——這個門檻不是保守，是 Leader Completeness 的證明前提。";
+      cx.wire("warn", "AE", nm(carrier) + " 持久化 idx1。2 / 5 仍不足以提交。", 5);
+    });
+
+    steps.push(function () {            /* 6 */
+      cx.give([second], 1, "x=1");
+      cx.commitTo([L], 1);
+      cx.act([L, carrier, second]);
+      cx.note(L, "commitIndex=1 · 回覆客戶端 OK", "ok");
+      cx.note(carrier, "已落盤，尚不知已提交", "warn");
+      cx.note(second, "已落盤，尚不知已提交", "warn");
+      st.rpc = { label: "RPC", kind: "ae", from: nm(L), to: nm(second), msg: "AppendEntries → ACK（第 3 份）" };
+      st.quorum = { hits: [L, carrier, second], need: MAJORITY, label: "x=1 的複製數" };
+      st.op = "第三份落盤 → 多數派達成，Leader 推進 commitIndex 並回覆客戶端";
+      st.rule = "本 term（T1）的項目複製數 3 ≥ 3 → 可以靠計數提交";
+      st.cli = "OK · x=1 已確認";
+      st.status = "注意兩位 Follower 這一步還是黃色：它們已經落盤，但要等下一輪心跳捎來 leaderCommit 才知道自己手上那筆已經封印。提交是 Leader 的判斷，傳播比判斷慢一拍。";
+      cx.wire("ok", "CMT", "多數派（" + nm(L) + "," + nm(carrier) + "," + nm(second) + "）持久化 idx1，commitIndex=1，客戶端收到成功。", 6);
+    });
+
+    steps.push(function () {            /* 7 */
+      cx.give(laggards, 1, "x=1");
+      cx.commitTo([1, 2, 3, 4, 5], 1);
+      cx.act(laggards);
+      cx.noteAll("已提交前綴 idx1");
+      cx.note(L, "Leader 穩定", "ok");
+      cx.note(laggards[0], "catch-up 完成", "ok");
+      cx.note(laggards[1], "catch-up 完成", "ok");
+      st.rpc = { label: "RPC", kind: "ae", from: nm(L), to: laggards.map(nm).join(" "), msg: "AppendEntries idx1 · leaderCommit=1" };
+      st.quorum = { hits: [1, 2, 3, 4, 5], need: MAJORITY, label: "x=1 的複製數" };
+      st.op = "落後的兩台靠心跳補上 idx1，並從 leaderCommit 學到它已提交";
+      st.rule = "Catch-up 就是同一支 AppendEntries 在 nextIndex 回溯後連續送 log";
+      st.cli = "x=1 已在全體 log";
+      st.status = "全綠。接下來寫第二筆，但這次只讓它複製到兩台就抽掉 Leader——那正是分辨「已提交」與「已複製」的場景。";
+      cx.wire("read", "AE", laggards.map(nm).join("、") + " 補上 idx1 並套用。全體 commitIndex=1。", 7);
+    });
+
+    steps.push(function () {            /* 8 */
+      cx.give([L, carrier], 1, "y=2");
+      cx.act([L, carrier]);
+      cx.note(L, "append idx2（未提交）", "warn");
+      cx.note(carrier, "persist idx2（未提交）", "warn");
+      cx.note(second, "仍停在 idx1", "");
+      st.rpc = { label: "客戶端", kind: "cli", from: "Client", to: nm(L), msg: "SET y=2 → 只送達 " + nm(carrier) };
+      st.quorum = { hits: [L, carrier], need: MAJORITY, label: "y=2 的複製數" };
+      st.op = "第二筆寫入只複製到一台 Follower 就停住";
+      st.rule = "複製數 2 / 5 · 不可提交";
+      st.cli = "等待中（客戶端尚未收到 OK）";
+      st.status = "y=2 現在是一條「未封印的尾巴」。下一步 Leader 崩潰——它會不會活下來，完全取決於誰接手。這就是你的第二個決定。";
+      cx.wire("warn", "WR", "T1:y=2 只在 " + nm(L) + "、" + nm(carrier) + "。多數派未成，commitIndex 仍為 1。", 8);
+    });
+
+    steps.push(function () {            /* 9 */
+      var l = cx.at(L);
+      l.alive = false; l.role = "down";
+      st.leader = 0;
+      cx.note(L, "CRASH", "bad");
+      cx.note(carrier, "手上有未提交的 y=2", "warn");
+      cx.note(second, "只有 idx1", "");
+      cx.note(laggards[0], "只有 idx1", "");
+      cx.note(laggards[1], "只有 idx1", "");
+      st.rpc = { label: "事件", kind: "bad", from: nm(L), to: "—", msg: "節點失效 · 心跳中斷" };
+      st.op = nm(L) + " 崩潰，心跳停止，其餘四台的 election timer 開始倒數";
+      st.rule = "無 Leader 期間集群不接受寫入——這是 Raft 用可用性換來的可理解性";
+      st.cli = "寫入暫停";
+      st.status = "現在請用上面第二個決定選擇由誰發起 term 2。選 " + nm(carrier) + "（唯一持有 y=2 的那台），或選其他三台之一——兩條路都通得過投票規則，但 y=2 的命運相反。";
+      cx.wire("bad", "DOWN", nm(L) + " 中斷。未提交的 y=2 只剩 " + nm(carrier) + " 持有。", 9);
+    });
+
+    steps.push(function () {            /* 10 */
+      var cn = cx.at(C);
+      cn.role = "candidate"; cn.term = 2; cn.votedFor = C;
+      st.term = 2;
+      var candLast = cx.lastLog(C);
+      var yes = [C];
+      var no = [];
+      for (var k = 0; k < others.length; k += 1) {
+        var vid = others[k];
+        if (vid === C) { continue; }
+        if (atLeastAsNew(candLast, cx.lastLog(vid))) { yes.push(vid); } else { no.push(vid); }
+      }
+      cx.act([C]);
+      cx.note(L, "仍然 down", "bad");
+      cx.note(C, "Candidate T2 · last=(T" + candLast.term + ", idx" + candLast.idx + ")", "warn");
+      for (k = 0; k < yes.length; k += 1) {
+        if (yes[k] !== C) { cx.note(yes[k], "YES（候選人不比我舊）", "ok"); }
+      }
+      for (k = 0; k < no.length; k += 1) {
+        cx.note(no[k], "NO（我的 log 比較新）", "bad");
+      }
+      st.rpc = { label: "RPC", kind: "vote", from: nm(C), to: rest.map(nm).join(" "), msg: "RequestVote term=2 · lastLog=(T" + candLast.term + ", " + candLast.idx + ")" };
+      st.quorum = { hits: yes, need: MAJORITY, label: "term 2 的選票" };
+      st.op = nm(C) + " 發起 term 2 選舉，四台存活節點逐一套用投票規則";
+      st.rule = no.length
+        ? nm(no[0]) + " 的 last=(T1, idx2) 比候選人新 → 拒票；其餘同意，加上自投剛好 " + yes.length + " 票"
+        : "沒有人比 " + nm(C) + " 新 → " + yes.length + " 票全收";
+      st.cli = "寫入仍暫停";
+      st.status = carriesY
+        ? "你選了持有 y=2 的那台。它的 last=(T1, idx2) 不比任何人舊，所以沒有人有理由拒絕——它會帶著那條未提交的尾巴當選。"
+        : "你選的節點沒有 y=2，於是 " + nm(carrier) + " 拒絕投票（它的 log 比較新）。但剩下兩票加自投剛好 " + yes.length + " 票——" + nm(C) + " 仍然合法當選。「log 不夠新就選不上」只在票數不足時才擋得住人。";
+      cx.wire(no.length ? "warn" : "ok", "VOTE",
+        nm(C) + " 拉票：YES = " + yes.map(nm).join("、") + (no.length ? "；NO = " + no.map(nm).join("、") : "") + "。", 10);
+    });
+
+    steps.push(function () {            /* 11 */
+      var cn = cx.at(C);
+      cn.role = "leader";
+      st.leader = C;
+      for (var k = 0; k < others.length; k += 1) {
+        var v = cx.at(others[k]);
+        if (others[k] !== C) { v.role = "follower"; v.term = 2; v.votedFor = C; }
+      }
+      cx.note(L, "仍然 down", "bad");
+
+      if (carriesY) {
+        cx.give(repl, 1, "y=2");
+        cx.act([C].concat(repl));
+        cx.note(C, "把前任 term 的 y=2 補到多數派", "warn");
+        for (k = 0; k < repl.length; k += 1) { cx.note(repl[k], "收到 T1:y=2", "warn"); }
+        st.rpc = { label: "RPC", kind: "ae", from: nm(C), to: repl.map(nm).join(" "), msg: "AppendEntries entries=[T1:y=2]" };
+        st.quorum = { hits: [C].concat(repl), need: MAJORITY, label: "y=2 的複製數（term 1 的項目）" };
+        st.op = nm(C) + " 當選 term 2，並把前任 term 留下的 y=2 複製到多數派";
+        st.rule = "3 / 5 已達多數派，但項目的 term=1 ≠ 現任 term=2 → 仍然禁止靠計數提交";
+        st.cli = "y=2 依然不可回覆 OK";
+        st.status = "這就是論文 Figure 8 的入口。若此刻把 commitIndex 推到 2 並回覆客戶端，而後續某場選舉選出一個不含 y=2 的 Leader，這筆「已確認」的寫入就會被截斷——成功回覆過的東西消失，是共識系統最嚴重的違約。";
+        cx.wire("warn", "FIG8", "y=2 現在在 " + [C].concat(repl).map(nm).join("、") + "。看起來是多數派，但它是前任 term 的項目。", 11);
+      } else {
+        cx.act([C].concat(rest));
+        cx.note(C, "當選 term 2（log 不含 y=2）", "ok");
+        cx.note(carrier, "仍持有未提交的 y=2", "warn");
+        st.rpc = { label: "RPC", kind: "ae", from: nm(C), to: rest.map(nm).join(" "), msg: "AppendEntries（空心跳）prevLogIndex=1 · prevLogTerm=T1" };
+        st.quorum = { hits: [C].concat(rest), need: MAJORITY, label: "新 Leader 的 log 前綴" };
+        st.op = nm(C) + " 當選 term 2 並開始送心跳；它的 log 裡沒有 y=2";
+        st.rule = "空心跳在 index 1 對得上，不會刪掉 " + nm(carrier) + " 較長的尾巴";
+        st.cli = "y=2 還懸著：既沒被提交，也還沒被刪除";
+        st.status = "這裡有個常見的實作錯誤：以為「心跳的 prevLog 一對上就把後面砍掉」。那會在 RPC 亂序時刪掉已提交的項目。真正的規則是 Follower 只在收到<strong>與既有項目同 index、卻不同 term</strong>的新項目時，才刪除該位置及其之後——所以此刻 y=2 還好端端留在 " + nm(carrier) + " 手上。下一步新 Leader 真的寫東西到 index 2，它才會消失。";
+        cx.wire("warn", "HB", nm(C) + " 當選並送出空心跳。index 1 兩邊吻合，" + nm(carrier) + " 的 idx2 尾巴暫時不受影響。", 11);
       }
     });
-    return parts.length ? parts.join(" · ") : "∅";
-  }
 
-  function logRow(kind, tag, text) {
-    wire.push({ kind: kind, tag: tag, text: text, step: step });
-  }
-
-  function setRoles(map) {
-    nodes.forEach(function (n) {
-      if (map[n.id]) n.role = map[n.id];
+    steps.push(function () {            /* 12 */
+      var targets = [C].concat(repl);
+      if (carriesY) {
+        cx.give(targets, 2, "no-op");
+        cx.commitTo(targets, 3);
+        cx.act(targets);
+        cx.note(L, "仍然 down", "bad");
+        cx.note(C, "commitIndex=3 · y=2 一併封印", "ok");
+        for (var k = 0; k < repl.length; k += 1) { cx.note(repl[k], "前綴已封印", "ok"); }
+        st.rpc = { label: "RPC", kind: "ae", from: nm(C), to: repl.map(nm).join(" "), msg: "AppendEntries entries=[T2:no-op]" };
+        st.quorum = { hits: targets, need: MAJORITY, label: "no-op 的複製數（本 term 項目）" };
+        st.op = nm(C) + " 附加一筆本 term 的 no-op，多數派落盤後一次推進 commitIndex 到 3";
+        st.rule = "本 term 項目可靠計數提交；Log Matching 讓它前面的 y=2 一起變成已提交";
+        st.cli = "y=2 現在才真正收到 OK";
+        st.status = "實務上 Raft 實作會在當選後立刻寫一筆 no-op，就是為了盡快取得「本 term 已提交一筆」這張門票，把前任遺留的尾巴一次封印。";
+        cx.wire("ok", "CMT", "T2:no-op 在 " + targets.map(nm).join("、") + " 落盤，commitIndex=3，T1:y=2 隨前綴一併提交。", 12);
+        st.verdict = {
+          text: "判定：x=1 在 term 1 靠多數派提交，Leader 崩潰完全沒有動搖它。y=2 曾經複製到 3 台卻仍不算數，直到本 term 的 no-op 被提交才連帶封印——「複製到多數派」與「已提交」是兩件事，這正是 Figure 8 的結論。",
+          tone: "ok"
+        };
+      } else {
+        /* 新 Leader 在 index 2 寫入本 term 的項目，這才觸發 Follower 的衝突截斷 */
+        var leaderLen = cx.at(C).log.length;
+        for (var t = 0; t < st.nodes.length; t += 1) {
+          var x = st.nodes[t];
+          if (!x.alive || x.log.length <= leaderLen) { continue; }
+          var cut = x.log.splice(leaderLen);
+          for (var u = 0; u < cut.length; u += 1) {
+            x.trunc.push({ idx: leaderLen + u, term: cut[u].term, cmd: cut[u].cmd });
+          }
+        }
+        cx.give(targets, 2, "z=3");
+        cx.commitTo(targets, 2);
+        cx.act(targets);
+        cx.note(L, "仍然 down", "bad");
+        cx.note(C, "commitIndex=2 · 回覆 OK", "ok");
+        for (var j = 0; j < repl.length; j += 1) {
+          cx.note(repl[j], repl[j] === carrier ? "idx2 衝突 → 覆蓋掉 y=2" : "已落盤", repl[j] === carrier ? "bad" : "ok");
+        }
+        st.rpc = { label: "RPC", kind: "ae", from: nm(C), to: repl.map(nm).join(" "), msg: "AppendEntries prevLogIndex=1 · entries=[T2:z=3]" };
+        st.quorum = { hits: targets, need: MAJORITY, label: "z=3 的複製數（本 term 項目）" };
+        st.op = nm(C) + " 在 index 2 寫入本 term 的 z=3；同一個位置的 T1:y=2 這時才被覆蓋";
+        st.rule = "同 index 不同 term → Follower 刪除該位置及其之後，再附加新項目";
+        st.cli = "OK · z=3 已確認；x=1 依然在每一台的 log 裡";
+        st.status = "y=2 到這一步才真正消失，而且完全合法：它從來沒有被提交，客戶端也從來沒收到成功。Raft 保證的是「已確認的寫入不丟」，不是「寫進 log 的東西都會留下」。對照另一條路——同樣的崩潰，換個接任者，y=2 的下場相反。";
+        cx.wire("bad", "OVERWRITE", "index 2 的 T1:y=2 被 T2:z=3 覆蓋。commitIndex=2，已提交的 x=1 完好無損。", 12);
+        st.verdict = {
+          text: "判定：y=2 只複製到 2 台就失去 Leader，接任者不含它，於是在新 Leader 寫入同一個 index 時被覆蓋——這沒有違反任何保證，因為它從未提交、客戶端也從未收到成功。真正受保護的是已提交的 x=1：它出現在每一位後續 Leader 的 log 裡，這就是 Leader Completeness。",
+          tone: "ok"
+        };
+      }
     });
+
+    return runSteps(st, steps, target);
   }
 
-  function setHints(map) {
-    nodes.forEach(function (n) {
-      if (map[n.id] !== undefined) n.hint = map[n.id];
-    });
-  }
+  /* ── 劇本二：分區、腦裂與 fencing token ─────────── */
+  function buildFence(target) {
+    var st = freshState();
+    st.res = { value: "—", token: 0, writer: "—", judge: "尚未寫入", tone: "" };
+    var cx = makeCtx(st);
+    var steps = [];
 
-  function setActive(ids) {
-    nodes.forEach(function (n) {
-      n.active = ids.indexOf(n.id) !== -1;
-    });
-  }
-
-  function appendTo(ids, entry) {
-    nodes.forEach(function (n) {
-      if (ids.indexOf(n.id) !== -1) n.log.push({ term: entry.term, cmd: entry.cmd });
-    });
-  }
-
-  function setTerm(ids, term) {
-    nodes.forEach(function (n) {
-      if (ids.indexOf(n.id) !== -1) n.term = term;
-    });
-  }
-
-  function writeResource(token, value, writer) {
-    if (fencing) {
-      if (token < resource.token) {
-        resource.judge = "REJECT token=" + token + " < " + resource.token;
-        resource.tone = "ok";
+    function writeRes(token, value, writer) {
+      var r = st.res;
+      if (fencing && token < r.token) {
+        r.judge = "REJECT · token " + token + " < " + r.token;
+        r.tone = "ok";
         return false;
       }
-      resource.value = value;
-      resource.token = token;
-      resource.writer = writer;
-      resource.judge = "ACCEPT token=" + token;
-      resource.tone = "ok";
+      r.value = value;
+      r.writer = writer;
+      if (token > r.token) { r.token = token; }
+      r.judge = fencing ? "ACCEPT · token " + token : "NO CHECK · 直接套用 token " + token;
+      r.tone = fencing ? "ok" : (value === "STALE" ? "bad" : "warn");
       return true;
     }
-    resource.value = value;
-    resource.writer = writer;
-    resource.judge = "NO CHECK · 寫入已套用";
-    resource.tone = value === "STALE" ? "bad" : "warn";
-    if (token > resource.token) resource.token = token;
-    return true;
-  }
 
-  var ELECT = [
-    function () {
-      currentTerm = 1;
-      nodes[0].role = "candidate";
-      nodes[0].term = 1;
-      nodes[0].votedFor = 1;
-      setActive([1]);
-      setHints({ 1: "timeout → Candidate T1", 2: "等待 RequestVote", 3: "等待 RequestVote", 4: "等待 RequestVote", 5: "等待 RequestVote" });
-      panel.op = "RequestVote T1 from N1";
-      panel.rule = "尚未投票";
-      panel.cli = "—";
-      logRow("warn", "VOTE", "N1 election timeout，自增 term=1，投自己，發出 RequestVote。");
-      statusEl.textContent = "N1 最先超時成為 Candidate。隨機超時的意義：其他人還在 Follower 計時，票還沒被拆走。";
-    },
-    function () {
-      [1, 2, 3, 4].forEach(function (i) {
-        nodes[i].votedFor = 1;
-        nodes[i].term = 1;
-      });
-      nodes[0].role = "leader";
-      leaderId = 1;
-      setActive([1, 2, 3]);
-      setHints({ 1: "Leader · 3/5 票", 2: "votedFor=N1", 3: "votedFor=N1", 4: "votedFor=N1", 5: "votedFor=N1" });
-      panel.op = "RequestVote 回覆 YES ×4";
-      panel.rule = "多數派 3 已達成（含自投票）";
-      panel.cli = "集群可寫";
-      logRow("ok", "LEAD", "N2–N5 log 皆空，與 N1 一樣新。N1 成為 term 1 唯一 Leader。");
-      statusEl.textContent = "四張票都過 log 新舊檢查。N1 開始心跳，阻止其他人再選。";
-    },
-    function () {
-      setTerm([1, 2, 3, 4, 5], 1);
-      setRoles({ 1: "leader", 2: "follower", 3: "follower", 4: "follower", 5: "follower" });
-      setActive([1]);
-      setHints({ 1: "heartbeat AE", 2: "重置 timeout", 3: "重置 timeout", 4: "重置 timeout", 5: "重置 timeout" });
-      panel.op = "AppendEntries（空心跳）";
-      panel.rule = "heartbeat ≪ election timeout";
-      panel.cli = "尚無寫入";
-      logRow("read", "HB", "空 AppendEntries 當心跳，同時宣告 leaderCommit=0。");
-      statusEl.textContent = "心跳讓 Follower 待在 term 1。下一步客戶端寫入才會真正附加 log。";
-    },
-    function () {
-      appendTo([1], { term: 1, cmd: "SET x=1" });
-      setActive([1]);
-      setHints({ 1: "append idx1 本地", 2: "尚未收到", 3: "尚未收到", 4: "尚未收到", 5: "尚未收到" });
-      panel.op = "Client SET x=1 → N1";
-      panel.rule = "僅 Leader 本地，commitIndex 仍為 0";
-      panel.cli = "等待多數派 ACK";
-      logRow("read", "WR", "N1 把 T1:SET x=1 附加在 index 1。此時回覆成功等於說謊。");
-      statusEl.textContent = "寫入先落在 Leader 自己的 log。commitIndex 還沒動，客戶端還在等。";
-    },
-    function () {
-      appendTo([2], { term: 1, cmd: "SET x=1" });
-      setActive([1, 2]);
-      setHints({ 1: "matchIndex[N2]=1", 2: "persist idx1", 3: "尚未收到", 4: "尚未收到", 5: "尚未收到" });
-      panel.op = "AppendEntries → N2 ACK";
-      panel.rule = "複製數 2 / 5，未達多數派";
-      panel.cli = "仍等待";
-      logRow("warn", "AE", "N2 通過 prevLog 檢查並持久化。兩份不夠，commitIndex 不動。");
-      statusEl.textContent = "五節點要三份。N1+N2 只有兩份，x=1 仍是未封印尾巴。";
-    },
-    function () {
-      appendTo([3], { term: 1, cmd: "SET x=1" });
-      commitIndex = 1;
-      setActive([1, 2, 3]);
-      setHints({ 1: "commitIndex=1 · 回覆 OK", 2: "已提交前綴", 3: "已提交前綴", 4: "落後", 5: "落後" });
-      panel.op = "AppendEntries → N3 ACK";
-      panel.rule = "本 term 項目複製數 3 → 可提交";
-      panel.cli = "OK · x=1 已確認";
-      logRow("ok", "CMT", "多數派（N1,N2,N3）持久化 T1 的 idx1。commitIndex=1，客戶端收到成功。");
-      statusEl.textContent = "這筆是現任 term 的項目，可以靠計數提交。N4、N5 稍後用心跳追上。";
-    },
-    function () {
-      appendTo([4, 5], { term: 1, cmd: "SET x=1" });
-      setActive([4, 5]);
-      setHints({ 1: "Leader 穩定", 2: "in sync", 3: "in sync", 4: "catch-up idx1", 5: "catch-up idx1" });
-      panel.op = "heartbeat 攜帶 idx1 → N4,N5";
-      panel.rule = "leaderCommit=1 讓落後者套用";
-      panel.cli = "x=1 已在全體 log";
-      logRow("read", "AE", "N4、N5 經心跳追上已提交前綴。Catch-up 不是第二條協定。");
-      statusEl.textContent = "五台都有 T1:SET x=1。下一步再寫 y=2，但只複製到兩台就讓 N1 掛掉。";
-    },
-    function () {
-      appendTo([1, 2], { term: 1, cmd: "SET y=2" });
-      setActive([1, 2]);
-      setHints({ 1: "append idx2 未提交", 2: "persist idx2", 3: "仍停在 idx1", 4: "仍停在 idx1", 5: "仍停在 idx1" });
-      panel.op = "Client SET y=2";
-      panel.rule = "複製數 2 / 5 · 不可提交";
-      panel.cli = "等待中（尚未 OK）";
-      logRow("warn", "WR", "T1:SET y=2 只在 N1、N2。多數派未成，commitIndex 仍為 1。");
-      statusEl.textContent = "y=2 是未封印尾巴。下一步 N1 崩潰——這筆有可能被留下，也可能被截斷，取決於誰當選。";
-    },
-    function () {
-      nodes[0].alive = false;
-      nodes[0].role = "down";
-      nodes[0].active = false;
-      leaderId = 0;
-      nodes[1].role = "candidate";
-      nodes[1].term = 2;
-      nodes[1].votedFor = 2;
-      currentTerm = 2;
-      setActive([2]);
-      setHints({ 1: "CRASH", 2: "Candidate T2 · log 較新", 3: "timeout 中", 4: "timeout 中", 5: "timeout 中" });
-      panel.op = "N1 crash · N2 RequestVote T2";
-      panel.rule = "N2 last=(T1,idx2) 新於 N3–N5 的 (T1,idx1)";
-      panel.cli = "寫入暫停（無 Leader）";
-      logRow("bad", "DOWN", "N1 中斷。N2 持有未提交的 y=2，log 比其他人新，開始 term 2 選舉。");
-      statusEl.textContent = "投票規則此時關鍵：空白或較短的 N3 不能贏，否則已複製到 N2 的 y=2 會被截斷（它本來就還沒提交，這沒違反 Completeness）。";
-    },
-    function () {
-      nodes[2].votedFor = 2;
-      nodes[2].term = 2;
-      nodes[3].votedFor = 2;
-      nodes[3].term = 2;
-      nodes[1].role = "leader";
-      leaderId = 2;
-      setTerm([2, 3, 4, 5], 2);
-      setActive([2, 3, 4]);
-      setHints({ 1: "仍 down", 2: "Leader T2", 3: "votedFor=N2", 4: "votedFor=N2", 5: "term=2 Follower" });
-      panel.op = "YES from N3,N4（+自投票 = 3）";
-      panel.rule = "log 夠新才能當選";
-      panel.cli = "新 Leader 可寫，但 y=2 仍未提交";
-      logRow("ok", "LEAD", "N2 當選 term 2。它帶著 T1:y=2。下一步即使複製到多數派，也還不能把它標成 committed。");
-      statusEl.textContent = "新 Leader 帶著前任 term 的未提交尾巴。這正是 Figure 8 場景的入口。";
-    },
-    function () {
-      appendTo([3], { term: 1, cmd: "SET y=2" });
-      setActive([2, 3]);
-      setHints({ 1: "down", 2: "y=2 已在 3 台，仍不 commit", 3: "追上 idx2", 4: "仍 idx1", 5: "仍 idx1" });
-      panel.op = "N2 複製 T1:y=2 → N3";
-      panel.rule = "3 份但仍是前任 term → 禁止靠計數提交";
-      panel.cli = "y=2 仍不可回覆 OK";
-      logRow("warn", "FIG8", "y=2 現在在 N2,N3（N1 也有但已 down）。3 份看起來像多數派，但項目的 term=1 ≠ 現任 term=2。");
-      statusEl.textContent = "若此處把 commitIndex 推到 2 並回覆客戶端，而另一場選舉選出不含 y=2 的 Leader，已確認寫入就消失。";
-    },
-    function () {
-      appendTo([4], { term: 1, cmd: "SET y=2" });
-      appendTo([2, 3, 4], { term: 2, cmd: "NOOP" });
-      commitIndex = 3;
-      appendTo([5], { term: 1, cmd: "SET y=2" });
-      appendTo([5], { term: 2, cmd: "NOOP" });
-      setActive([2, 3, 4]);
-      setHints({ 1: "down", 2: "commitIndex=3", 3: "前綴已封印", 4: "前綴已封印", 5: "catch-up 完成" });
-      panel.op = "N2 append T2:NOOP · 多數派 ACK";
-      panel.rule = "本 term 項目提交 → 前綴 y=2 一併封印";
-      panel.cli = "y=2 現在才真正 OK";
-      logRow("ok", "CMT", "T2:NOOP 在 N2,N3,N4 持久化。commitIndex 跳到 3，Matching 讓 T1:y=2 一起 committed。");
-      statusEl.textContent = "這就是規則：先提交一筆現任 term 的項目（實務常在當選後立刻寫 no-op），前任 term 的尾巴才一起成為不可回捲的歷史。";
-      verdictEl.textContent = "判定：x=1 在 T1 靠多數派提交；y=2 雖曾複製到 3 台仍須等 T2:NOOP。N1 崩潰沒有丟掉已確認的 x=1。";
-      verdictEl.className = "ler-verdict tone-ok";
-    }
-  ];
+    st.status = "起點是一個健康的五節點集群。按「下一步」讓它進入分區。";
 
-  var FENCE = [
-    function () {
-      currentTerm = 1;
-      leaderId = 1;
-      nodes.forEach(function (n) {
-        n.term = 1;
+    steps.push(function () {            /* 1 */
+      for (var i = 0; i < st.nodes.length; i += 1) {
+        var n = st.nodes[i];
+        n.term = 1; n.votedFor = 1; n.commit = 1;
         n.role = n.id === 1 ? "leader" : "follower";
-        n.log = [{ term: 1, cmd: "SET x=A" }];
-        n.votedFor = 1;
-        n.alive = true;
-        n.partitioned = false;
-      });
-      commitIndex = 1;
-      writeResource(1, "A", "N1");
-      setActive([1]);
-      setHints({ 1: "Leader T1 · 已提交 x=A", 2: "Follower", 3: "Follower", 4: "Follower", 5: "Follower" });
-      panel.op = "穩定集群 · 外部資源 token=1";
-      panel.rule = "commitIndex=1";
-      panel.cli = "x=A 已 OK";
-      panel.ext = "value=A · token=1";
-      logRow("ok", "INIT", "N1 為 term 1 Leader，x=A 已在五台提交。外部資源接受 token=1。");
-      statusEl.textContent = "起點是健康集群。下一步把 N1 從 N2–N5 隔開——N1 仍自認 Leader。";
-    },
-    function () {
-      nodes[0].partitioned = true;
-      setActive([1]);
-      setHints({ 1: "分區 · 聽不到其他人", 2: "心跳消失", 3: "心跳消失", 4: "心跳消失", 5: "心跳消失" });
-      panel.op = "Network partition：N1 | N2–N5";
-      panel.rule = "N1 湊不齊多數派，log 不可再提交";
-      panel.cli = "連到 N1 的寫入會卡住（正確 Raft）";
-      panel.ext = "尚未被舊主再寫";
-      logRow("warn", "NET", "N1 被隔離。它的 Raft log 無法推進 commitIndex；但它還能對外部資源發請求。");
-      statusEl.textContent = "協定內：舊 Leader 寫不進多數派。協定外：副作用通道不知道發生了分區。";
-    },
-    function () {
-      nodes[1].role = "candidate";
-      nodes[1].term = 2;
-      nodes[1].votedFor = 2;
-      currentTerm = 2;
-      setActive([2]);
-      setHints({ 1: "仍自認 T1 Leader", 2: "Candidate T2", 3: "可投票", 4: "可投票", 5: "可投票" });
-      panel.op = "N2 RequestVote T2（多數側）";
-      panel.rule = "N2–N5 仍有 4 台，多數派 3 湊得齊";
-      panel.cli = "多數側準備切主";
-      logRow("warn", "VOTE", "N2–N5 收不到心跳。N2 先超時，term=2 拉票。N1 在分區另一側，這一票它看不到。");
-      statusEl.textContent = "兩個「Leader」即將並存於不同 term。這不是 Raft 的 bug，是分區的物理事實。";
-    },
-    function () {
-      [2, 3, 4].forEach(function (i) {
-        nodes[i].term = 2;
-        nodes[i].votedFor = 2;
-        nodes[i].role = "follower";
-      });
-      nodes[1].role = "leader";
-      leaderId = 2;
-      setActive([2, 3, 4]);
-      setHints({ 1: "舊 Leader T1（幽靈）", 2: "新 Leader T2", 3: "votedFor=N2", 4: "votedFor=N2", 5: "Follower T2" });
-      panel.op = "N3,N4 YES → N2 Leader T2";
-      panel.rule = "同一時間兩個 Leader，但 term 不同";
-      panel.cli = "多數側可寫；N1 側不該成功";
-      logRow("ok", "LEAD", "N2 成為 term 2 Leader。N1 沒聽到更高 term，仍以 T1 Leader 自居。");
-      statusEl.textContent = "腦裂成形：log 以多數派為準；外部資源還沒被通知世代已換。";
-    },
-    function () {
-      appendTo([2, 3, 4], { term: 2, cmd: "SET x=B" });
-      commitIndex = 2;
-      writeResource(2, "B", "N2");
-      nodes[4].term = 2;
-      setActive([2, 3, 4]);
-      setHints({ 1: "log 仍停在 x=A", 2: "commit x=B token=2", 3: "已提交", 4: "已提交", 5: "追隨 T2" });
-      panel.op = "多數側 Client SET x=B";
-      panel.rule = "T2 項目多數派提交";
-      panel.cli = "OK · x=B";
-      panel.ext = "value=B · token=2";
-      logRow("ok", "CMT", "N2 提交 T2:SET x=B，並以 fencing token=2 寫入外部資源。資源 lastSeenToken=2。");
-      statusEl.textContent = "Raft 狀態機在多數側已是 x=B。外部資源也更新了。舊 N1 下一步會帶 token=1 打過來。";
-    },
-    function () {
-      appendTo([1], { term: 1, cmd: "SET x=STALE" });
-      setActive([1]);
-      setHints({ 1: "本地 append STALE · 無多數派", 2: "不知情", 3: "不知情", 4: "不知情", 5: "不知情" });
-      panel.op = "舊 N1 接受 SET x=STALE";
-      panel.rule = "N1 無法推進 commitIndex（只有 1/5）";
-      panel.cli = "正確實作應卡住；本步模擬它仍去打外部資源";
-      panel.ext = "即將收到 token=1 的寫入";
-      logRow("bad", "STALE", "N1 把 STALE 附加在自己的 log，湊不齊多數派——Raft log 不會提交它。它卻對外部資源發出寫入。");
-      statusEl.textContent = "重點：log 是安全的，副作用不是。下一步看 fencing 開關決定外部資源的命運。";
-    },
-    function () {
-      var accepted = writeResource(1, "STALE", "N1");
-      setActive([1]);
-      nodes[0].hint = accepted ? "外部寫入成功（壞）" : "外部寫入被拒（好）";
-      panel.op = "N1 → 外部資源  write x=STALE token=1";
-      panel.rule = fencing ? "token 1 < lastSeen 2 → REJECT" : "無檢查 → 過期寫入生效";
-      panel.cli = fencing ? "副作用未發生" : "外部狀態已與多數派 log 分叉";
-      panel.ext = "value=" + resource.value + " · token=" + resource.token;
-      if (accepted) {
-        logRow("bad", "CORRUPT", "fencing OFF：資源接受 STALE。多數派 log 是 B，外部是 STALE。");
-        statusEl.textContent = "沒有 token 檢查時，TTL 或「我還自認 Leader」都會讓過期持有者寫壞外部狀態。";
-      } else {
-        logRow("ok", "FENCE", "fencing ON：資源拒絕 token=1。value 仍為 B，與多數派 log 一致。");
-        statusEl.textContent = "被保護資源自己記住單調 token。舊 Leader 的 GC、時鐘、lease 自我感覺都無效。";
+        n.log = [{ term: 1, cmd: "x=A" }];
+        n.fresh = [0];
       }
-    },
-    function () {
-      nodes[0].partitioned = false;
-      nodes[0].alive = true;
-      nodes[0].role = "follower";
-      nodes[0].term = 2;
-      nodes[0].log = [
-        { term: 1, cmd: "SET x=A" },
-        { term: 2, cmd: "SET x=B" }
-      ];
-      nodes[4].log = [
-        { term: 1, cmd: "SET x=A" },
-        { term: 2, cmd: "SET x=B" }
-      ];
-      nodes[0].votedFor = 2;
-      setTerm([1, 2, 3, 4, 5], 2);
-      setRoles({ 1: "follower", 2: "leader", 3: "follower", 4: "follower", 5: "follower" });
-      leaderId = 2;
-      setActive([1, 2]);
-      setHints({ 1: "看到 T2 · 截斷 STALE 尾巴", 2: "Leader T2", 3: "in sync", 4: "in sync", 5: "in sync" });
-      panel.op = "分區修復 · N1 收到 AE T2";
-      panel.rule = "更高 term → 降為 Follower，未提交尾巴截斷";
-      panel.cli = "集群單一 Leader";
-      var extOk = resource.value === "B";
-      panel.ext = extOk ? "與 log 一致 value=B" : "分叉殘留 value=" + resource.value;
-      logRow("read", "HEAL", "N1 發現 term 2，降級並截斷未提交的 STALE。Raft log 重新對齊為 A,B。");
-      if (extOk) {
-        resource.tone = "ok";
-        statusEl.textContent = "log 對齊且外部資源仍為 B。fencing 讓分區期間的幽靈寫入沒有留下痕跡。";
-        verdictEl.textContent = "判定：腦裂時兩位 Leader 可以並存於不同 term；Raft 多數派保住 log，fencing token 保住外部資源。TTL 沒有參與這次救援。";
-        verdictEl.className = "ler-verdict tone-ok";
-      } else {
-        resource.tone = "bad";
-        statusEl.textContent = "log 對齊成 B，但外部資源停在 STALE。共識修得好，副作用通道已經寫壞。";
-        verdictEl.textContent = "判定：關閉 fencing 後，修復只能修好 Raft log。外部資源被 token=1 的過期寫入污染，必須另外補償。";
-        verdictEl.className = "ler-verdict tone-bad";
-      }
-    }
-  ];
-
-  function steps() {
-    return mode === "elect" ? ELECT : FENCE;
-  }
-
-  function resetState() {
-    nodes = freshNodes();
-    commitIndex = 0;
-    currentTerm = 0;
-    leaderId = 0;
-    step = 0;
-    wire = [];
-    panel = { op: "—", rule: "—", cli: "—", ext: mode === "fence" ? "等待寫入" : "本模式不使用" };
-    resource = { value: "—", token: 0, writer: "—", judge: "尚未寫入", tone: "" };
-    verdictEl.textContent = "判定尚未產生——走完一輪後會摘要 commitIndex 或 fencing 是否擋住過期寫入。";
-    verdictEl.className = "ler-verdict";
-    statusEl.textContent = HINTS[mode];
-  }
-
-  function render() {
-    mStep.textContent = String(step);
-    mTotal.textContent = String(steps().length);
-    mTerm.textContent = String(currentTerm);
-    mCommit.textContent = String(commitIndex);
-    mLeader.textContent = leaderId ? "N" + leaderId : "—";
-
-    nodeEls.forEach(function (el) {
-      var id = Number(el.getAttribute("data-n"));
-      var n = nodes[id - 1];
-      var cls = "ler-node " + n.role;
-      if (n.partitioned && n.role !== "down") cls += " part";
-      if (n.active) cls += " act";
-      el.className = cls;
-      el.querySelector("[data-role]").textContent = n.partitioned && n.role === "leader"
-        ? "Leader（隔離）"
-        : n.role === "down" ? "CRASH" : n.role.charAt(0).toUpperCase() + n.role.slice(1);
-      el.querySelector("[data-term]").textContent = "T" + n.term + (n.votedFor ? " · vN" + n.votedFor : "");
-      el.querySelector("[data-hint]").textContent = n.hint;
-      var logBox = el.querySelector("[data-log]");
-      logBox.innerHTML = "";
-      if (!n.log.length) {
-        var empty = document.createElement("span");
-        empty.className = "ler-ent";
-        empty.textContent = "∅";
-        logBox.appendChild(empty);
-      } else {
-        n.log.forEach(function (e, idx) {
-          var chip = document.createElement("span");
-          chip.className = "ler-ent " + (idx < commitIndex ? "cmt" : "unc");
-          chip.textContent = logText(e);
-          logBox.appendChild(chip);
-        });
-      }
+      st.term = 1; st.leader = 1;
+      writeRes(1, "A", "N1");
+      cx.act([1]);
+      cx.noteAll("in sync · 已提交 x=A");
+      cx.note(1, "Leader term 1", "ok");
+      st.rpc = { label: "RPC", kind: "ae", from: "N1", to: "N2 N3 N4 N5", msg: "AppendEntries · leaderCommit=1" };
+      st.quorum = { hits: [1, 2, 3, 4, 5], need: MAJORITY, label: "x=A 的複製數" };
+      st.op = "N1 是 term 1 Leader，x=A 已在五台提交；外部資源記下 token=1";
+      st.rule = "fencing token 的來源就是 Raft 的 term——單調、由集群分配、客戶端無法偽造";
+      st.cli = "OK · x=A";
+      st.status = "注意「外部資源」不是 Raft 狀態機的一部分：它可能是物件儲存、磁碟陣列或另一套沒有共識的資料庫。它唯一的防線是自己記住看過的最大 token。";
+      cx.wire("ok", "INIT", "N1 為 term 1 Leader，x=A 已提交。外部資源接受 token=1。", 1);
     });
 
-    pOp.textContent = panel.op;
-    pRule.textContent = panel.rule;
-    pCli.textContent = panel.cli;
-    pLead.textContent = leaderId ? "N" + leaderId + " · T" + currentTerm : "無";
-    pCmt.textContent = prefixText(commitIndex);
-    pUnc.textContent = tailText();
-    pExt.textContent = panel.ext;
-
-    var showRes = mode === "fence";
-    resEl.hidden = !showRes;
-    if (showRes) {
-      resEl.className = "ler-res" + (resource.tone ? " " + resource.tone : "");
-      resVal.textContent = resource.value;
-      resTok.textContent = String(resource.token);
-      resWho.textContent = resource.writer;
-      resJudge.textContent = resource.judge;
-      resJudge.style.color = resource.tone === "ok" ? "var(--ok)" : resource.tone === "bad" ? "var(--bad)" : "var(--text)";
-    }
-
-    electView.hidden = mode !== "elect";
-    fenceView.hidden = mode !== "fence";
-
-    btnNext.disabled = step >= steps().length;
-
-    wireEl.innerHTML = "";
-    wire.forEach(function (row) {
-      var div = document.createElement("div");
-      div.className = "ler-row " + row.kind;
-      div.innerHTML = '<span class="ar">#' + row.step + '</span><span class="tg">' + row.tag + '</span><span class="tx"></span>';
-      div.querySelector(".tx").textContent = row.text;
-      wireEl.appendChild(div);
+    steps.push(function () {            /* 2 */
+      cx.at(1).part = true;
+      cx.act([1]);
+      cx.note(1, "分區 · 聽不到其他四台", "warn");
+      cx.note(2, "心跳消失，開始倒數", "");
+      cx.note(3, "心跳消失，開始倒數", "");
+      cx.note(4, "心跳消失，開始倒數", "");
+      cx.note(5, "心跳消失，開始倒數", "");
+      st.rpc = { label: "事件", kind: "bad", from: "網路", to: "N1 | N2–N5", msg: "partition · 雙向不可達" };
+      st.op = "網路把 N1 隔到少數側，N2–N5 收不到心跳";
+      st.rule = "N1 湊不齊多數派 → 它的 commitIndex 再也不能前進";
+      st.cli = "連到 N1 的寫入會卡住（正確的 Raft 實作不會回覆成功）";
+      st.status = "協定內部是安全的：少數側提交不了任何東西。危險全部在協定外面——N1 對「外部資源」發出的請求，那個系統並不知道這裡發生了分區。";
+      cx.wire("warn", "NET", "N1 被隔離。Raft log 無法推進，但它仍能對外部資源發請求。", 2);
     });
+
+    steps.push(function () {            /* 3 */
+      var c = cx.at(2);
+      c.role = "candidate"; c.term = 2; c.votedFor = 2;
+      st.term = 2;
+      cx.act([2]);
+      cx.note(1, "仍自認 term 1 Leader", "warn");
+      cx.note(2, "Candidate term 2", "warn");
+      cx.note(3, "收到 RequestVote", "");
+      cx.note(4, "收到 RequestVote", "");
+      cx.note(5, "收到 RequestVote", "");
+      st.rpc = { label: "RPC", kind: "vote", from: "N2", to: "N3 N4 N5", msg: "RequestVote term=2 · lastLog=(T1, 1)" };
+      st.quorum = { hits: [2], need: MAJORITY, label: "term 2 的選票（多數側）" };
+      st.op = "多數側的 N2 先超時，發起 term 2 選舉";
+      st.rule = "多數側還有四台，湊得齊 3 票；N1 在分區另一側，看不到這場選舉";
+      st.cli = "多數側準備切主";
+      st.status = "兩個「Leader」即將並存。這不是 Raft 的 bug，是分區的物理事實——協定能保證的是它們不會處在同一個 term。";
+      cx.wire("warn", "VOTE", "N2–N5 收不到心跳，N2 先超時並以 term 2 拉票。N1 看不到這一票。", 3);
+    });
+
+    steps.push(function () {            /* 4 */
+      var c = cx.at(2);
+      c.role = "leader";
+      st.leader = 2;
+      for (var i = 3; i <= 5; i += 1) {
+        var v = cx.at(i);
+        v.term = 2; v.votedFor = 2; v.role = "follower";
+      }
+      cx.act([2, 3, 4, 5]);
+      cx.note(1, "舊 Leader term 1（幽靈）", "warn");
+      cx.note(2, "新 Leader term 2", "ok");
+      cx.note(3, "YES → N2", "ok");
+      cx.note(4, "YES → N2", "ok");
+      cx.note(5, "YES → N2", "ok");
+      st.rpc = { label: "回覆", kind: "vote", from: "N3 N4 N5", to: "N2", msg: "RequestVote YES ×3" };
+      st.quorum = { hits: [2, 3, 4, 5], need: MAJORITY, label: "term 2 的選票（多數側）" };
+      st.op = "N2 取得多數派選票，成為 term 2 的 Leader";
+      st.rule = "同一時間出現兩個 Leader，但它們處在不同 term——term 就是後面 fencing 要用的世代號";
+      st.cli = "多數側可寫；N1 側不該成功";
+      st.status = "腦裂成形。N1 沒有聽到任何更高 term 的 RPC，所以它仍以 term 1 Leader 自居——它沒有辦法知道自己已經被取代。";
+      cx.wire("ok", "LEAD", "N2 成為 term 2 Leader。N1 沒聽到更高 term，仍自認 Leader。", 4);
+    });
+
+    steps.push(function () {            /* 5 */
+      cx.give([2, 3, 4], 2, "x=B");
+      cx.commitTo([2, 3, 4], 2);
+      cx.at(5).term = 2;
+      writeRes(2, "B", "N2");
+      cx.act([2, 3, 4]);
+      cx.note(1, "log 仍停在 x=A", "warn");
+      cx.note(2, "commit x=B · 帶 token=2 寫外部資源", "ok");
+      cx.note(3, "已提交", "ok");
+      cx.note(4, "已提交", "ok");
+      cx.note(5, "追隨 term 2", "");
+      st.rpc = { label: "RPC", kind: "ae", from: "N2", to: "N3 N4", msg: "AppendEntries entries=[T2:x=B] → 多數派 ACK" };
+      st.quorum = { hits: [2, 3, 4], need: MAJORITY, label: "x=B 的複製數" };
+      st.op = "多數側提交 x=B，並以 fencing token = 2（即 term）寫入外部資源";
+      st.rule = "資源把 lastSeenToken 從 1 抬到 2 — 這一步決定了稍後誰會被拒";
+      st.cli = "OK · x=B";
+      st.status = "Raft 狀態機在多數側已經是 x=B，外部資源也更新了。下一步輪到那個還沒意識到自己過期的舊 Leader。";
+      cx.wire("ok", "CMT", "N2 提交 T2:x=B，以 token=2 寫入外部資源，lastSeenToken=2。", 5);
+    });
+
+    steps.push(function () {            /* 6 */
+      cx.give([1], 1, "x=STALE");
+      cx.act([1]);
+      cx.note(1, "本地 append · 湊不齊多數派", "bad");
+      cx.note(2, "不知情", "");
+      cx.note(3, "不知情", "");
+      cx.note(4, "不知情", "");
+      cx.note(5, "不知情", "");
+      st.rpc = { label: "客戶端", kind: "cli", from: "Client", to: "N1", msg: "SET x=STALE（連到少數側）" };
+      st.quorum = { hits: [1], need: MAJORITY, label: "x=STALE 的複製數（少數側）" };
+      st.op = "仍有客戶端連到 N1，把寫入送了進去";
+      st.rule = "1 / 5 遠不及多數派 → Raft log 絕對不會提交這一筆";
+      st.cli = "正確實作應該卡住不回覆；本步模擬它仍對外部資源送出副作用";
+      st.status = "重點來了：log 是安全的，副作用不是。Raft 擋得住的只有它自己那條 log；N1 對外部系統發出的請求，協定完全管不到。";
+      cx.wire("bad", "STALE", "N1 把 x=STALE 附加在本地，湊不齊多數派。它卻對外部資源發出了寫入。", 6);
+    });
+
+    steps.push(function () {            /* 7 */
+      var accepted = writeRes(1, "STALE", "N1");
+      cx.act([1]);
+      cx.note(1, accepted ? "過期寫入被接受（損壞）" : "token=1 被拒（保護成功）", accepted ? "bad" : "ok");
+      cx.note(2, accepted ? "自己的寫入已被覆蓋" : "資源仍是 B", accepted ? "bad" : "ok");
+      st.rpc = { label: "副作用", kind: accepted ? "bad" : "ae", from: "N1", to: "外部資源", msg: "write x=STALE · token=1" };
+      st.op = "舊 Leader 帶著 term 1 的 token 去寫外部資源";
+      st.rule = fencing
+        ? "資源檢查：token 1 < lastSeenToken 2 → REJECT"
+        : "資源沒有任何檢查 → 過期寫入照單全收";
+      st.cli = fencing ? "副作用沒有發生" : "外部狀態已與多數派 log 分叉";
+      st.status = fencing
+        ? "被保護的資源自己記住單調 token。舊 Leader 的 GC 停頓、時鐘偏移、lease 自我感覺良好，在這道檢查面前全部無效——它甚至不需要知道分區發生過。"
+        : "沒有 token 檢查時，「我還自認是 Leader」和「TTL 還沒到」都足以讓過期持有者寫壞外部狀態。切到 fencing ON 對照同一步的結果。";
+      cx.wire(accepted ? "bad" : "ok", accepted ? "CORRUPT" : "FENCE",
+        accepted
+          ? "fencing OFF：資源接受了 STALE。多數派 log 是 B，外部資源是 STALE，兩邊分叉。"
+          : "fencing ON：資源拒絕 token=1，value 仍為 B，與多數派 log 一致。", 7);
+    });
+
+    steps.push(function () {            /* 8 */
+      var n1 = cx.at(1);
+      n1.part = false;
+      n1.role = "follower";
+      n1.term = 2;
+      n1.votedFor = 2;
+      var cutAt = 1;
+      var cut = n1.log.splice(cutAt);
+      for (var ci = 0; ci < cut.length; ci += 1) {
+        n1.trunc.push({ idx: cutAt + ci, term: cut[ci].term, cmd: cut[ci].cmd });
+      }
+      n1.log.push({ term: 2, cmd: "x=B" });
+      n1.fresh = [1];
+      n1.commit = 2;
+      cx.at(5).log = [{ term: 1, cmd: "x=A" }, { term: 2, cmd: "x=B" }];
+      cx.at(5).commit = 2;
+      cx.at(5).term = 2;
+      cx.commitTo([2, 3, 4], 2);
+      cx.act([1, 2]);
+      var clean = st.res.value === "B";
+      cx.note(1, "看到 term 2 → 降級並截斷 STALE", "bad");
+      cx.note(2, "Leader term 2", "ok");
+      cx.note(3, "in sync", "ok");
+      cx.note(4, "in sync", "ok");
+      cx.note(5, "in sync", "ok");
+      st.rpc = { label: "RPC", kind: "ae", from: "N2", to: "N1", msg: "AppendEntries term=2 → N1 降為 Follower" };
+      st.quorum = { hits: [1, 2, 3, 4, 5], need: MAJORITY, label: "x=B 的複製數（修復後）" };
+      st.op = "分區修復，N1 收到 term 2 的 AppendEntries";
+      st.rule = "任何 RPC 攜帶更高 term → 收件者先更新 term、放棄身分，未提交的尾巴被截斷";
+      st.cli = clean ? "集群回到單一 Leader，內外一致" : "log 修好了，外部資源還壞著";
+      st.status = clean
+        ? "Raft log 自己對齊了，而且外部資源仍然是 B——fencing 讓分區期間那筆幽靈寫入沒有留下任何痕跡。"
+        : "log 對齊成 A、B，但外部資源停在 STALE。共識修得好，副作用通道已經寫壞，只能靠人工補償。";
+      cx.wire("read", "HEAL", "N1 發現 term 2，降為 Follower 並截斷未提交的 STALE，log 重新對齊為 A、B。", 8);
+      st.verdict = clean
+        ? { text: "判定：腦裂時兩位 Leader 可以並存於不同 term。Raft 的多數派保住了 log，被保護資源的單調 token 擋下了少數側的幽靈寫入——TTL 完全沒有參與這次救援。", tone: "ok" }
+        : { text: "判定：關閉 fencing 之後，修復流程只能修好 Raft log。外部資源被 token=1 的過期寫入污染，共識層無從察覺，必須另外補償。這就是「鎖服務無法替資源做 fencing」的實證。", tone: "bad" };
+    });
+
+    return runSteps(st, steps, target);
+  }
+
+  function build(target) {
+    return mode === "elect" ? buildElect(target) : buildFence(target);
+  }
+
+  /* ── 渲染 ───────────────────────────────────────── */
+  function roleLabel(n) {
+    if (n.role === "down") { return "CRASH · T" + n.term; }
+    var base = n.role === "leader" ? "Leader" : (n.role === "candidate" ? "Candidate" : "Follower");
+    if (n.part) { base += "（隔離）"; }
+    return base + " · T" + n.term;
+  }
+
+  function renderMatrix(st) {
+    var maxLen = 2;
+    var i, j, k;
+    for (i = 0; i < st.nodes.length; i += 1) {
+      var n0 = st.nodes[i];
+      var len = n0.log.length;
+      for (k = 0; k < n0.trunc.length; k += 1) {
+        if (n0.trunc[k].idx + 1 > len) { len = n0.trunc[k].idx + 1; }
+      }
+      if (len > maxLen) { maxLen = len; }
+    }
+    var cols = "minmax(86px,0.95fr) repeat(" + maxLen + ", minmax(52px,1fr)) minmax(116px,1.6fr)";
+    /* 欄寬下限是硬的，窄螢幕靠 .ler-matrix 的 overflow-x 橫向捲動，不裁切 */
+    var rowStyle = "grid-template-columns:" + cols + ";min-width:" + (86 + maxLen * 52 + 116) + "px";
+
+    var html = '<div class="ler-mrow head" style="' + rowStyle + '">';
+    html += '<div class="mname">節點</div>';
+    for (i = 1; i <= maxLen; i += 1) { html += "<div>idx " + i + "</div>"; }
+    html += "<div>本步</div></div>";
+
+    for (i = 0; i < st.nodes.length; i += 1) {
+      var n = st.nodes[i];
+      var cls = "ler-mrow " + n.role;
+      if (n.part) { cls += " part"; }
+      if (n.act) { cls += " act"; }
+      html += '<div class="' + cls + '" style="' + rowStyle + '">';
+      html += '<div class="ler-mname"><b>' + nm(n.id) + "</b><i>" + esc(roleLabel(n)) + "</i></div>";
+      for (j = 0; j < maxLen; j += 1) {
+        var cellCls = "ler-mcell";
+        var inner = "";
+        var gone = null;
+        for (k = 0; k < n.trunc.length; k += 1) {
+          if (n.trunc[k].idx === j) { gone = n.trunc[k]; }
+        }
+        if (j < n.log.length) {
+          var e = n.log[j];
+          cellCls += j < n.commit ? " c" : " u";
+          if (n.fresh.indexOf(j) !== -1) { cellCls += " new"; }
+          inner = '<span class="ct">T' + e.term + "</span>" + esc(e.cmd);
+          if (gone) {
+            cellCls += " ovw";
+            inner += '<span class="ov">T' + gone.term + " " + esc(gone.cmd) + "</span>";
+          }
+        } else if (gone) {
+          cellCls += " x";
+          inner = '<span class="ct">T' + gone.term + "</span>" + esc(gone.cmd);
+        } else {
+          cellCls += " e";
+        }
+        html += '<div class="' + cellCls + '">' + inner + "</div>";
+      }
+      var note = n.note || { t: "—", k: "" };
+      html += '<div class="ler-mact ' + note.k + '">' + esc(note.t) + "</div>";
+      html += "</div>";
+    }
+    matrixEl.innerHTML = html;
+  }
+
+  function renderRpc(st) {
+    var r = st.rpc;
+    if (!r) {
+      rpcEl.className = "ler-rpc k-none";
+      rpcEl.innerHTML = '<span class="rk">訊息</span><span class="rmsg">這一步沒有 RPC 往返</span>';
+      return;
+    }
+    rpcEl.className = "ler-rpc k-" + r.kind;
+    rpcEl.innerHTML = '<span class="rk">' + esc(r.label) + "</span>" +
+      '<span class="rfrom">' + esc(r.from) + "</span>" +
+      '<span class="rarrow">&#9472;&#9472;&#9656;</span>' +
+      '<span class="rto">' + esc(r.to) + "</span>" +
+      '<span class="rmsg">' + esc(r.msg) + "</span>";
+  }
+
+  function renderQuorum(st) {
+    var q = st.quorum;
+    if (!q) {
+      quorumEl.innerHTML = "";
+      quorumEl.hidden = true;
+      return;
+    }
+    quorumEl.hidden = false;
+    var reached = q.hits.length >= q.need;
+    var html = '<span class="qk">多數派</span><div class="ler-qbar' + (reached ? " reached" : "") + '">';
+    for (var i = 1; i <= COUNT; i += 1) {
+      html += '<div class="ler-qcell' + (q.hits.indexOf(i) !== -1 ? " hit" : "") + '">' + nm(i) + "</div>";
+    }
+    html += "</div>";
+    html += '<span class="qv ' + (reached ? "reached" : "miss") + '">' +
+      q.hits.length + " / " + COUNT + " · 需要 " + q.need + (reached ? " · 達成" : " · 未達") + "</span>";
+    html += '<span class="qk" style="text-transform:none;letter-spacing:0">' + esc(q.label) + "</span>";
+    quorumEl.innerHTML = html;
+  }
+
+  function renderLegend() {
+    var list = LEGEND[mode];
+    var html = "";
+    for (var i = 0; i < list.length; i += 1) {
+      html += '<span><i class="dot ' + list[i][0] + '"></i>' + list[i][1] + "</span>";
+    }
+    legendEl.innerHTML = html;
+  }
+
+  function renderPhases(cur) {
+    var list = PHASES[mode];
+    var active = list.length - 1;
+    var i;
+    for (i = 0; i < list.length; i += 1) {
+      if (cur <= list[i].end) { active = i; break; }
+    }
+    var html = "";
+    for (i = 0; i < list.length; i += 1) {
+      var cls = "ler-phase";
+      if (i === active) { cls += " on"; }
+      else if (i < active) { cls += " done"; }
+      html += '<div class="' + cls + '">' + esc(list[i].name) + "</div>";
+    }
+    phasesEl.innerHTML = html;
+  }
+
+  function renderWire(st) {
+    var html = "";
+    for (var i = 0; i < st.wire.length; i += 1) {
+      var row = st.wire[i];
+      var cls = "ler-row " + row.kind + (i === st.wire.length - 1 ? " cur" : "");
+      html += '<div class="' + cls + '"><span class="ar">#' + row.step + '</span>' +
+        '<span class="tg">' + esc(row.tag) + '</span>' +
+        '<span class="tx">' + esc(row.text) + "</span></div>";
+    }
+    wireEl.innerHTML = html || '<div class="ler-row"><span class="tx">尚無事件。按「下一步」開始。</span></div>';
     wireEl.scrollTop = wireEl.scrollHeight;
   }
 
-  function setMode(next) {
-    mode = next;
-    demo.querySelectorAll("#ler-seg-mode button").forEach(function (btn) {
-      btn.setAttribute("aria-pressed", btn.getAttribute("data-mode") === mode ? "true" : "false");
-    });
-    resetState();
-    render();
+  function renderDec2() {
+    var others = [];
+    for (var i = 1; i <= COUNT; i += 1) { if (i !== leader1) { others.push(i); } }
+    if (others.indexOf(cand2) === -1) { cand2 = others[0]; }
+    var html = "";
+    for (i = 0; i < others.length; i += 1) {
+      html += '<button data-c2="' + others[i] + '" aria-pressed="' +
+        (others[i] === cand2 ? "true" : "false") + '">' + nm(others[i]) + "</button>";
+    }
+    segC2.innerHTML = html;
+    var carrier = others[0];
+    var when = "<em>這個選擇在第 9 步（Leader 崩潰）之後生效，現在就可以先決定。</em><br>";
+    dec2Hint.innerHTML = when + (cand2 === carrier
+      ? "<b>" + nm(carrier) + "</b> 是唯一跟著 Leader 收到 <code>y=2</code> 的 Follower。選它，那條未提交的尾巴會活下來——接著你會看到「已複製到多數派仍不可提交」的規則。"
+      : "<b>" + nm(cand2) + "</b> 手上沒有 <code>y=2</code>。它<strong>仍然選得上</strong>（log 不比多數人舊），代價是那條未提交的尾巴會被新 Leader 的項目覆蓋。兩條路都合法，差別只在 <code>y=2</code> 的命運。");
   }
 
-  function setFence(on) {
-    fencing = on;
-    demo.querySelectorAll("#ler-seg-fence button").forEach(function (btn) {
-      var want = btn.getAttribute("data-fence") === "on";
-      btn.setAttribute("aria-pressed", want === fencing ? "true" : "false");
-    });
-    if (mode === "fence") {
-      resetState();
-      render();
+  function setPressed(container, attr, value) {
+    var btns = container.querySelectorAll("button");
+    for (var i = 0; i < btns.length; i += 1) {
+      btns[i].setAttribute("aria-pressed", btns[i].getAttribute(attr) === String(value) ? "true" : "false");
     }
   }
 
-  demo.querySelectorAll("#ler-seg-mode button").forEach(function (btn) {
-    btn.addEventListener("click", function () {
-      setMode(btn.getAttribute("data-mode"));
-    });
+  function render() {
+    var total = TOTAL[mode];
+    if (step > total) { step = total; }
+    if (step < 0) { step = 0; }
+
+    var st = build(step);
+
+    hintEl.textContent = HINTS[mode];
+    dec1.hidden = mode !== "elect";
+    dec2.hidden = mode !== "elect";
+    decF.hidden = mode !== "fence";
+    if (mode === "elect") {
+      dec2.className = "ler-decide ler-view" + (step < 9 ? " off" : "");
+    }
+
+    rangeEl.max = String(total);
+    rangeEl.value = String(step);
+    btnPrev.disabled = step <= 0;
+    btnNext.disabled = step >= total;
+
+    mStep.textContent = String(step);
+    mTotal.textContent = String(total);
+    mTerm.textContent = String(st.term);
+    mTermLabel.textContent = mode === "fence" ? "多數側 term" : "現任 term";
+    mLeaderLabel.textContent = mode === "fence" ? "多數側 Leader" : "Leader";
+    var shownCommit = 0;
+    if (st.leader) {
+      shownCommit = st.nodes[st.leader - 1].commit;
+    } else {
+      for (var ci = 0; ci < st.nodes.length; ci += 1) {
+        if (st.nodes[ci].commit > shownCommit) { shownCommit = st.nodes[ci].commit; }
+      }
+    }
+    mCommit.textContent = String(shownCommit);
+    mLeader.textContent = st.leader ? nm(st.leader) : "—";
+
+    renderPhases(step);
+    renderLegend();
+    renderRpc(st);
+    renderQuorum(st);
+    renderMatrix(st);
+    renderWire(st);
+
+    wOp.textContent = st.op;
+    wRule.textContent = st.rule;
+    wCli.textContent = st.cli;
+
+    var showRes = mode === "fence";
+    resEl.hidden = !showRes;
+    if (showRes && st.res) {
+      resEl.className = "ler-res ler-view" + (st.res.tone ? " " + st.res.tone : "");
+      resVal.textContent = st.res.value;
+      resTok.textContent = String(st.res.token);
+      resWho.textContent = st.res.writer;
+      resJudge.textContent = st.res.judge;
+    }
+
+    statusEl.textContent = st.status;
+    if (st.verdict) {
+      verdictEl.textContent = st.verdict.text;
+      verdictEl.className = "ler-verdict tone-" + st.verdict.tone;
+    } else {
+      verdictEl.textContent = "判定尚未產生——走完一輪後，這裡會摘要「已提交」與「已複製」的差別，或 fencing 是否擋下過期寫入。";
+      verdictEl.className = "ler-verdict";
+    }
+  }
+
+  /* ── 事件 ───────────────────────────────────────── */
+  segMode.addEventListener("click", function (ev) {
+    var btn = ev.target.closest("button[data-mode]");
+    if (!btn) { return; }
+    mode = btn.getAttribute("data-mode");
+    setPressed(segMode, "data-mode", mode);
+    step = 0;
+    render();
   });
 
-  demo.querySelectorAll("#ler-seg-fence button").forEach(function (btn) {
-    btn.addEventListener("click", function () {
-      setFence(btn.getAttribute("data-fence") === "on");
-    });
+  segL1.addEventListener("click", function (ev) {
+    var btn = ev.target.closest("button[data-l1]");
+    if (!btn) { return; }
+    leader1 = Number(btn.getAttribute("data-l1"));
+    setPressed(segL1, "data-l1", leader1);
+    renderDec2();
+    render();
+  });
+
+  segC2.addEventListener("click", function (ev) {
+    var btn = ev.target.closest("button[data-c2]");
+    if (!btn) { return; }
+    cand2 = Number(btn.getAttribute("data-c2"));
+    setPressed(segC2, "data-c2", cand2);
+    renderDec2();
+    render();
+  });
+
+  segFence.addEventListener("click", function (ev) {
+    var btn = ev.target.closest("button[data-fence]");
+    if (!btn) { return; }
+    fencing = btn.getAttribute("data-fence") === "on";
+    setPressed(segFence, "data-fence", fencing ? "on" : "off");
+    render();
+  });
+
+  rangeEl.addEventListener("input", function () {
+    step = Number(rangeEl.value);
+    render();
+  });
+
+  btnPrev.addEventListener("click", function () {
+    if (step > 0) { step -= 1; render(); }
   });
 
   btnNext.addEventListener("click", function () {
-    var seq = steps();
-    if (step >= seq.length) return;
-    step += 1;
-    seq[step - 1]();
-    render();
+    if (step < TOTAL[mode]) { step += 1; render(); }
   });
 
   btnReset.addEventListener("click", function () {
-    resetState();
+    step = 0;
     render();
   });
 
-  resetState();
+  renderDec2();
   render();
 })();
 </script>
