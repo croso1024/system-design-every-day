@@ -25,7 +25,8 @@ description: >-
 
 ```
 - [ ] 1. 選定主題：completed-ledger + mindmap.js --action next，挑一個（優先 prerequisites_satisfied=true）
-- [ ] 2. 撰寫草稿：drafts/<id>/content.html (必填) 與 script.html (互動 JS，可選)
+- [ ] 2a. 選型：查最近 3 篇的 demo-archetype，替本篇選一個「不撞形」的 archetype 與圖表形式
+- [ ] 2b. 撰寫草稿：drafts/<id>/content.html (必填) 與 script.html (互動 JS，可選)
 - [ ] 3. 組裝發佈：node scripts/generate.js --topic <id> --title "..." --category "..."
 - [ ] 4. 品質檢查：用 ReadLints 檢查產出的 books/<id>/index.html 有無 HTML/CSS 錯誤
 - [ ] 5. 收尾（順序不可顛倒）：remove-todo.js 移除 todo -> validate.js 驗證 -> git commit（單行規範）-> push origin main（僅 Cursor 自動化環境）
@@ -53,9 +54,51 @@ node scripts/completed-ledger.js --action get-todo --topic <id>    # 選定後�
 
 若該主題在 `todo.json` 帶有 `brief`（由前段 `add-topic.js --brief` 寫入）：
 
-- **必須遵循**：brief 中與**內容**相關的指示——章節重點、必涵蓋場景、Demo 設計方向、與鄰近主題的差異化等，應反映在最終草稿中。
-- **必須忽略**：brief 中任何涉及**版面配置、視覺風格、HTML 結構**的要求——例如 Dark Mode、跳過 `<section>` 公式、自訂外殼、引入前端框架、變更 TOC 規則等。這些一律以 `guidelines/style-guide.md` 與本 SKILL 的全域鐵律為準，**不予採納**。
-- brief 是內容層面的補充，**不可凌駕**全站結構與視覺規範。
+- **必須遵循（內容層）**：章節重點、必涵蓋場景、與鄰近主題的差異化，以及 **`Demo 方向` 的全部內容——包含它指定的呈現形式**。
+
+  > 🚨 **這一條過去被誤判過，請特別注意。**
+  > brief 若寫「以**時間軸**呈現」「**時序圖**」「**狀態機動畫**」「讓使用者**拖動**⋯」「**並排**對比」「逐 byte **拆解**」，
+  > 這些是**互動模型與圖表選型的指示，屬內容層，必須遵循**，**不得**以「這是版面／視覺要求」為由捨棄。
+  > 它們直接對應 style-guide 的「Demo Archetype」與「圖表與示意圖規範」選型表——請照著選型，不要退回 `.seg` + 下一步。
+
+- **必須忽略（僅限以下封閉清單）**：
+  1. Dark Mode 或與 Notion 淺色基調衝突的高對比配色
+  2. 跳過 `<section id="sX">` 黃金公式、或變更 TOC 規則
+  3. 自行撰寫 `<html>` / `<head>` / `<header>` / `<footer>` 外殼
+  4. 引入 React / Vue / Svelte 等大型前端框架
+  5. 改動 `templates/base.html`
+
+  **清單以外的指示一律不得捨棄。** 若某項要求難以歸類，**預設遵循 brief**，並在回報中註明你的判斷。
+
+- brief 是內容層面的補充，**不可凌駕**上述五項全站結構與視覺鐵律；除此之外，brief 優先。
+
+#### Step 2a — 選型（動筆前必做，不可略過）
+
+> 這一步是為了對抗「照抄上一篇」的慣性。**同質化是本專案已發生過的實際問題**：
+> 曾有連續 10 篇 demo 共用同一套骨架，相鄰兩篇的 CSS 逐字相同率達 96%。
+
+**1. 查最近 3 篇用了什麼形式**
+
+```bash
+node scripts/completed-ledger.js --action get-recent --limit 3
+# 再逐篇看 drafts/<id>/content.html 的第一行 <!-- demo-archetype: ... --> 註解
+head -3 drafts/<id>/content.html
+```
+
+**2. 依 `style-guide.md` 的「Demo Archetype」選一個沒撞形的**
+A 時序推進 / B 參數掃描 / C 並排對照 / D 空間視覺化 / E 決策器 / F 拆解器。
+brief 的 `Demo 方向` 若已指定形式，**直接照它選**。A、B 皆可行時**優先選 B**。
+
+**3. 依「圖表與示意圖規範」的選型表決定本篇圖表形式**
+時序 / 因果 → Mermaid `sequenceDiagram` 或 grid swimlane（**禁止** chip row）；
+空間幾何 → inline `<svg>`；靜態拓樸 → 盒 + 箭頭（節點 ≤ 6）。
+
+**4. 在 `content.html` 第一行寫下宣告**
+
+```html
+<!-- demo-archetype: B｜參數掃描 — 讀者可拖動 X 與 Y，即時觀察 Z 的變化。
+     選 B 是因為本篇核心是「參數如何改變判定」；最近 3 篇為 A/C/A，未撞形。 -->
+```
 
 每個一級章節**必須**用此黃金公式包裝，否則左側 Auto-TOC 完全無法渲染
 （`generate.js` 以 regex 掃描 `<section id>` + `.sec-num` + `<h2>` 抽取 TOC）：
@@ -153,13 +196,22 @@ node scripts/remove-completed.js --topic <id> --dry-run       # 先預覽將發�
 1. **`<section>` 結構**：見上方黃金公式，缺了 TOC 就壞。
 2. **Notion 淺色風格**：禁止 Dark Mode 樣式（如 `bg-slate-900`）。自訂 Canvas/SVG 背景用 `#ffffff` 或 `#fafaf9`，文字 `#262a2f`；Mermaid 主題為 `default`（base.html 已統一，勿改）。
 3. **善用質感組件**：`.callout.accent`（關鍵折衷/觀念）、`.callout.warn`（陷阱/誤區）、`.oneliner`（章節尾「一句話秒答法」）、`.tbl-wrap`（所有 `<table>` 必包）。
-4. **互動 Demo 高品質 Vanilla JS**：
+4. **圖表依語意選型**（見 style-guide「圖表與示意圖規範」）：
+   - 時序 / 因果 → Mermaid `sequenceDiagram` 或 grid swimlane；**絕對禁止**用一排 chip 表達時序。
+   - 空間 / 幾何、需 JS 重繪 → inline `<svg>`；靜態拓樸 → 盒 + 箭頭，**節點與邊必須是不同元素**，節點 ≤ 6。
+   - 橫排節點 > 6 個不得用 `flex-wrap`（必折行，折行即失去順序語意）。
+   - **每張圖都要有 `<p class="cap">`** 說明「該看哪裡」。
+5. **互動 Demo 高品質 Vanilla JS**：
+   - **先選型再寫 code**：見 Step 2a 與 style-guide §0 Demo Archetype。`content.html` 第一行必須有 `<!-- demo-archetype: ... -->` 宣告，且**不得與最近 3 篇相同**。
+   - **至少一個真自由度**：使用者的操作必須改變**計算結果**。若所有輸出都是程式碼裡的字面常數，那是投影片不是模擬器。
+   - **不得複製上一篇的 demo 骨架改前綴**。Demo 的 CSS/JS **不是**共享資產（圖表 CSS 才是）。
+   - `.X-metric`（步 N/M）、`.X-verdict`、`.X-wire` **不是必備元件**，非必要不得加；三者同時出現即為「播放器」。
    - 自包含：DOM/CSS/JS 完整放在 `content.html` + `script.html`，不跨主題共用。
    - 用 IIFE `(function(){ ... })();` 包裹，不污染全域。
-   - 統一 UI 類別：`.demo` 外殼、`.seg` + `aria-pressed` 切換、`.btn`/`.btn.primary`、`.status-line`、`.legend` + `.dot`。
+   - 統一 UI **外殼**類別（外殼要一致，互動模型要多樣）：`.demo` 外殼、`.seg` + `aria-pressed`（單一 demo ≤ 2 組）、`.btn`/`.btn.primary`、`.status-line`、`.legend` + `.dot`。
    - 統一狀態色 `.ns-*`：`.ns-idle` 閒置、`.ns-lock` 預留、`.ns-ok` 成功、`.ns-bad` 異常、`.ns-wait` 等待。
    - 必含一鍵 Reset。
-5. **禁止引入大型前端框架**（React/Vue/Svelte）與高對比配色。
+6. **禁止引入大型前端框架**（React/Vue/Svelte）與高對比配色。
 
 ## 與前段流程的銜接
 

@@ -1,7 +1,14 @@
 # Style Guide — Notion 極簡風格與互動元件設計規範
 
 本手冊定義 System Design Every Day 專案的視覺風格與互動式演示 (Interactive Demo) 元件規範。
-未來的 AI Agent 在撰寫新指南前，**必須嚴格閱讀並遵循本規範**，以確保產出與 `DistributedTransactions.html` (理想參考標的) 完美一致。
+未來的 AI Agent 在撰寫新指南前，**必須嚴格閱讀並遵循本規範**。
+
+> ⚠️ **「一致」指的是視覺語彙，不是內容形式。** 請分清楚兩件事：
+> - **要一致**：配色、字體、`.callout` / `.oneliner` / `.tbl-wrap` / `.demo` 外殼等元件樣式。
+> - **要多樣**：圖表形式（見「圖表與示意圖規範」）與 Demo 互動模型（見「Demo Archetype」）。
+>
+> 理想參考標的 `DistributedTransactions.html` 本身就有 **6 個 demo、6 種不同互動形式**。
+> 把它當成「視覺基準」，**不要**把它的某一個 demo 當成所有主題的模板。
 
 ---
 
@@ -157,9 +164,287 @@
 
 ---
 
+## 📐 圖表與示意圖規範 (Diagrams)
+
+> **這章為什麼存在**：`AGENTS.md` 把「精美且具結構感的圖表」列為每篇必備支柱，但本規範過去從未定義圖表長什麼樣。
+> 結果是 Agent 只能拿手邊唯一的視覺原語（藥丸 chip）去拼流程，產出**一排折行的色塊**——它表達不了任何順序或因果。
+> 本章給出「語意 → 正確形式」的對照與可直接複製的結構。**圖表的 CSS 區塊是設計來被複製的**（與 Demo 邏輯相反，見下一章）。
+
+### 0. 先選型：語意決定形式
+
+動筆前先問一句：**這張圖要表達的是哪一種語意？** 再對照下表取形式。
+
+| 你要表達的語意 | 正確形式 | 明確禁用 |
+| :--- | :--- | :--- |
+| **靜態拓樸 / 資料流管線**（誰接誰、元件組成） | `.<p>-row` 盒 + 箭頭（節點 ≤ 6 個） | chip row |
+| **時序 / 因果**（誰先誰後、跨參與者往返、失敗發生在哪一刻） | Mermaid `sequenceDiagram`，或 `.<p>-lane` CSS grid swimlane | **絕對禁止** chip row |
+| **狀態機**（狀態 + 轉移條件） | Mermaid `stateDiagram-v2`；需 demo JS 驅動時用 inline `<svg>` | chip row |
+| **空間 / 幾何**（hash ring、向量空間、分區環、位址空間） | inline `<svg>` | 任何 HTML 盒排列 |
+| **A vs B 對照** | `.tbl-wrap` 表格，或 `.<p>-split` 並排雙欄 | 上下兩排 chip |
+| **分層 / 包含**（協定分層、儲存層級、快取階層） | `.<p>-stack` 直向巢狀盒 | 橫排 chip |
+| **數量 / 比例 / 成本** | `.tbl-wrap` 表格，或 `.<p>-bar` 橫條 | chip |
+
+> `<p>` 代表本篇的 class 前綴（如 `eda-`、`cdc-`）。沿用專案既有慣例：draft 自帶 CSS、不跨主題共用選擇器。
+
+### 1. 三條鐵律
+
+#### 鐵律 1｜節點與邊必須是**不同元素**
+
+- **節點**（服務、元件、狀態、資料）→ `.<p>-node`：**實線框、白底、`min-width: 110px`、置中**。
+- **邊**（訊息名、動作、條件）→ `.<p>-arrow`：**無框、灰字、自帶箭頭字元**。
+
+兩者若共用同一個 class（只差虛線邊框或灰字），讀者無法分辨「框」與「線」，圖就失去層級。
+
+```html
+<!-- ❌ 錯誤：節點與訊息名長得一樣，讀者分不出哪個是服務、哪個是事件 -->
+<div class="eda-flow">
+  <span class="eda-chip node">庫存</span>
+  <span class="eda-chip op">StockReserved</span>
+  <span class="eda-chip node">出貨</span>
+</div>
+
+<!-- ✅ 正確：盒是節點，箭頭是邊，訊息名依附在箭頭上 -->
+<div class="eda-row">
+  <div class="eda-node"><div class="nn">庫存服務</div><div class="ns">扣減可用量</div></div>
+  <span class="eda-arrow">──StockReserved──▸</span>
+  <div class="eda-node"><div class="nn">出貨服務</div><div class="ns">開立出貨單</div></div>
+</div>
+```
+
+#### 鐵律 2｜橫排節點超過 6 個，一律不准用 `flex-wrap`
+
+內文欄寬（含 Sticky TOC）約 720px。**7 個以上的節點必然折行**，而折行後 DOM 順序不再等於視覺閱讀順序——
+時序語意當場歸零，最後一個節點會孤零零掉在第三列，與它所屬的流程完全斷開。
+
+超過 6 個節點時，**必須**改用下列之一：直向 `.<p>-lane`（每列一步）、Mermaid、或 inline `<svg>`。
+
+> 若你正在寫的橫列有 8 個以上的 `<span>`，停下來換形式。這不是風格偏好，是版面物理。
+
+#### 鐵律 3｜每張圖下方必須有 `<p class="cap">`
+
+一句話說明「這張圖在講什麼、讀者該看哪裡、哪個細節是重點」。
+`.cap` 是圖表語意的最後一道保險。**沒有 cap 的圖等同沒畫。**
+
+---
+
+### 2. `.<p>-row` — 線性管線 / 拓樸（節點 ≤ 6）
+
+適用：資料流、請求路徑、元件組成。站內良好範例：`drafts/rag-fundamentals`（`.rag-arch-row` + `.rag-box` + `.rag-arr`）。
+
+```html
+<div class="dns-row">
+  <div class="dns-node">
+    <div class="nn">Stub Resolver</div>
+    <div class="ns">作業系統內建</div>
+  </div>
+  <span class="dns-arrow">▸</span>
+  <div class="dns-node accent">
+    <div class="nn">Recursive Resolver</div>
+    <div class="ns">代你跑完整條查詢</div>
+  </div>
+  <span class="dns-arrow">▸</span>
+  <div class="dns-node">
+    <div class="nn">Root / TLD / 權威</div>
+    <div class="ns">逐層 referral</div>
+  </div>
+</div>
+<p class="cap">遞迴解析器是唯一會「跑完整條鏈」的角色；Stub 只發一次問，權威只答自己那一段。</p>
+```
+
+```css
+/* 圖表 CSS 設計來被複製；改前綴即可，結構請勿改 */
+.dns-row {
+  display: flex; flex-wrap: wrap; gap: 10px;
+  align-items: stretch; justify-content: center;
+  margin: 14px 0 6px;
+}
+.dns-node {
+  border: 1px solid var(--border-strong); border-radius: 8px;
+  background: #fff; padding: 10px 12px;
+  min-width: 110px; max-width: 200px; text-align: center;
+}
+.dns-node .nn { font-family: var(--mono); font-size: 12px; font-weight: 700; color: var(--text); }
+.dns-node .ns { font-size: 11px; color: var(--text-2); margin-top: 3px; line-height: 1.4; }
+.dns-node.accent { border-top: 3px solid var(--accent); }
+.dns-node.ok     { border-top: 3px solid var(--ok); }
+.dns-node.warn   { border-top: 3px solid var(--warn); }
+.dns-node.bad    { border-top: 3px solid var(--bad); }
+/* 邊：無框、灰字、只負責指向 */
+.dns-arrow {
+  display: flex; align-items: center;
+  font-family: var(--mono); font-size: 13px; color: var(--text-3);
+  white-space: nowrap;
+}
+```
+
+---
+
+### 3. `.<p>-lane` — 時序 Swimlane（純 CSS grid，不折行）
+
+適用：**跨參與者的往返、且需要看出「第幾步」**。每列一個時間步，每欄一個參與者——這是 chip row 最常被誤用的場合。
+
+```html
+<div class="cs-lane">
+  <div class="lh">步驟</div><div class="lh">Client A</div><div class="lh">鎖服務</div><div class="lh">資源</div>
+  <div class="lt">t1</div>
+  <div class="lc act">請求鎖</div><div class="lc">核發 token=17</div><div class="lc">—</div>
+  <div class="lt">t2</div>
+  <div class="lc bad">GC pause</div><div class="lc">租約到期、釋放</div><div class="lc">—</div>
+  <div class="lt">t3</div>
+  <div class="lc">甦醒，帶 token=17 寫入</div><div class="lc">—</div><div class="lc ok">已見過 23 &gt; 17，拒絕</div>
+</div>
+<p class="cap">關鍵在 t3：資源端（不是鎖服務）比對 fencing token，才擋得住這個已經失去鎖卻毫不知情的客戶端。</p>
+```
+
+```css
+.cs-lane {
+  display: grid; grid-template-columns: 52px repeat(3, 1fr); gap: 1px;
+  background: var(--border); border: 1px solid var(--border);
+  border-radius: 8px; overflow: hidden; margin: 14px 0 6px;
+}
+.cs-lane > div { background: #fff; padding: 8px 10px; font-size: 12px; line-height: 1.5; }
+.cs-lane .lh { background: var(--bg-soft); font-family: var(--mono); font-size: 11px;
+               font-weight: 700; color: var(--text-2); }
+.cs-lane .lt { background: var(--bg-soft); font-family: var(--mono); font-size: 11px; color: var(--text-3); }
+.cs-lane .lc.act { background: var(--accent-soft); }
+.cs-lane .lc.ok  { background: var(--ok-soft); }
+.cs-lane .lc.bad { background: var(--bad-soft); }
+@media (max-width: 720px) { .cs-lane { grid-template-columns: 44px repeat(3, minmax(0, 1fr)); font-size: 11px; } }
+```
+
+> Grid **不會折行**——欄數固定，這正是它比 `flex-wrap` 適合時序的原因。
+
+---
+
+### 4. Mermaid — 時序圖與狀態機的預設手段
+
+`templates/base.html` 已載入 `mermaid@10`（`theme: 'default'`、`startOnLoad: true`）。
+**這是本站唯一被背書的時序圖 / 狀態機工具，畫時序請優先用它**，不要手刻 SVG 座標。
+
+```html
+<pre class="mermaid">
+sequenceDiagram
+    participant P as Producer
+    participant L as Leader
+    participant F as Follower
+    P->>L: produce(acks=all)
+    L->>F: replicate
+    F-->>L: ack
+    L-->>P: 已提交
+</pre>
+<p class="cap">acks=all 的等待點在 Leader：它必須收齊 ISR 的 ack 才回應 Producer，延遲換到的是不遺失。</p>
+```
+
+使用邊界：
+
+1. **只用三種圖**：`sequenceDiagram`、`stateDiagram-v2`、`flowchart LR|TD`。其他圖種（gantt、pie、journey…）一律不用。
+2. **不得改 theme**（`base.html` 已統一為 `default`，勿在頁面內覆寫）。
+3. **不得放進 `.demo` 內**。Mermaid 是靜態圖；互動一律走 Vanilla JS + DOM/SVG。
+4. **節點文字要短**（中文 ≤ 8 字、英文 ≤ 3 詞），長說明放 `.cap`，否則節點會被撐爆。
+5. 一樣**必須**配 `.cap`。
+
+---
+
+### 5. inline `<svg>` — 空間幾何，與需要 JS 重繪的圖
+
+**何時用**：(a) 幾何 / 座標語意（hash ring、向量空間、環狀分區）；(b) 圖需要被 demo 的 JS 即時重繪。
+
+站內範本：`drafts/consistent-hashing-handbook`（雜湊環）、`drafts/coordination-services`（鎖競態時間軸）、
+`drafts/leader-election-and-raft`（Raft 狀態機）、`drafts/data-replication-basics`（複製模擬）。
+
+規範：
+
+- 一律 `viewBox="0 0 W H"` + `style="width:100%; height:auto"`（不要寫死 px 寬）。
+- 背景 `#ffffff` 或 `#fafaf9`；文字 `#262a2f`；線條與狀態色用 `var(--border-strong)` / `var(--accent)` / `var(--ok)` / `var(--warn)` / `var(--bad)`。
+- 文字字級 **≥ 11px**（縮放後仍需可讀），字體 `var(--mono)`。
+- 加 `role="img"` 與 `<title>`，供無障礙與 CDN 失效時理解。
+- 箭頭用 `<marker>` defs 定義一次重複使用，不要用文字 `→` 冒充。
+
+---
+
+### 6. 圖表禁止事項
+
+1. **禁止用 `.tag` / `.legend` / `.seg` 的藥丸樣式冒充圖表節點。** 這三者分別是「關鍵字標籤」「狀態圖例」「互動切換器」，都不是圖形元件。
+2. **禁止同一個 class 同時承載節點與邊**（只靠虛線或灰字區分不算區分）。
+3. **禁止超過 6 個節點的 `flex-wrap` 橫排。**
+4. **禁止表達時序語意卻不畫方向**——有「先／後／回傳／逾時／失敗」的圖，必須有箭頭或明確的時間軸欄。
+5. **禁止無 `.cap` 的圖表。**
+6. **禁止把上一篇的 `.X-flow` / `.X-chip` 整塊複製過來改前綴**；先回 §0 重新選型。
+
+---
 ## 🎮 互動式演示 (Interactive Demo) 元件規格
 
-高質感的互動模擬器 (Interactive Demo) 是本專案的靈魂。我們有一套極度嚴格且統一的 UI 樣式規範。
+高質感的互動模擬器 (Interactive Demo) 是本專案的靈魂。
+
+> ⚠️ **本章分兩層，請勿混淆：**
+> - **§0 Demo Archetype** — 這篇 demo 是「哪一種形式」。這一層**要求多樣**：不同概念需要不同的互動模型。
+> - **§1 起的 UI 外殼詞彙** — `.demo` / `.seg` / `.btn` / `.status-line` / `.legend` 的統一樣式。這一層**要求一致**。
+>
+> §1 之後的範例是**外殼**，不是互動模型。**照抄外殼不等於完成設計**。
+> 先完成 §0 的選型，再回來套外殼。
+
+---
+
+### 0. Demo Archetype — 先選型，再寫 code ★本章最重要
+
+#### 0.1 六種 Archetype
+
+| # | Archetype | 核心互動 | 適合的概念 | 站內範本 |
+| :---: | :--- | :--- | :--- | :--- |
+| **A** | **時序推進**<br>Step-through | 按「下一步」走過一組固定步驟 | 本質**就是**固定順序協定的主題（2PC、TLS handshake、ICE、TCP 三向交握） | `DistributedTransactions.html`「2PC 流程」 |
+| **B** | **參數掃描**<br>Parameter sweep | 拖 slider / 改數值，結果**即時重算** | 有可調參數、且參數會改變結果的機制（watermark 延遲、W+R>N、TTL、acks、chunk size） | `drafts/stream-processing`（**全站最佳範本**） |
+| **C** | **並排對照**<br>Side-by-side | 同一組輸入同時餵給「天真做法」與「正確做法」兩個面板 | 有明確錯誤解法的主題（dual-write vs Outbox、快取穿透 vs 空值快取） | `DistributedTransactions.html`「雙寫問題 vs Outbox」 |
+| **D** | **空間視覺化**<br>Spatial | 在幾何／座標空間上點選、拖曳、增刪節點 | 有空間語意的主題（hash ring、向量空間、分區環、子網位址空間） | `drafts/consistent-hashing-handbook` |
+| **E** | **決策器**<br>Decision | 回答數個問題 → 導出選型建議與理由 | 選型類、trade-off 類、「什麼時候該用哪個」 | `DistributedTransactions.html`「選型決策器」 |
+| **F** | **拆解器**<br>Decomposer | 輸入一筆真實資料 → 逐層 / 逐 byte 拆解標註 | 有格式或編碼結構的主題（protobuf wire format、封包標頭、子網遮罩、JWT、URL） | — |
+
+同一個主題常常有不只一種可行選型。**若 A 與 B 都說得通，優先選 B**——能被使用者擾動的 demo 幾乎總是資訊量更大。
+
+#### 0.2 選型鐵律
+
+**1. 必須宣告。** `drafts/<id>/content.html` 的**第一行**寫一則 HTML 註解：
+
+```html
+<!-- demo-archetype: B｜參數掃描 — 讀者可拖動每個事件的 event-time 與 watermark 延遲，
+     即時觀察視窗歸屬、遲到判定與側輸出的變化。選 B 是因為本篇的核心是「參數如何改變判定」。 -->
+```
+
+註解需包含：**archetype 代號 + 一句話說明使用者能操作什麼 + 為何這個形式最適合這個概念**。
+
+**2. 不得與最近 3 篇撞形。** 開工前跑 `node scripts/completed-ledger.js --action get-recent --limit 3`，
+逐篇打開 `drafts/<id>/content.html` 第一行看它的 archetype 宣告。**若你想用的形式已在最近 3 篇出現過，換一個。**
+撞形時的處理順序：先回 §0.1 找第二適合的 archetype；真的只有一種形式可行，就把 demo 拆小、換切入角度（例如同樣是 A，改成從失敗路徑倒著走）。
+
+**3. Archetype A 是受限選項。** 只有在概念本質就是「一組固定且有順序的步驟」時才可用。
+自我檢查：**如果你正在寫 `if (step === 1) ... else if (step === 5)` 的巨型 dispatch，而且每個情境各抄一份敘事——
+你做的是投影片，不是模擬器。** 回到 §0.1 換一種。
+
+**4. 至少要有一個真自由度。** 使用者的操作必須改變**計算結果**，而不是切換到另一段預先寫好的旁白。
+
+> **假 demo 判準**：把所有情境的輸出字串列出來。如果它們全部都是程式碼裡的字面常數，
+> 這個 demo 就是一台播放器，不是模擬器。至少要有一個輸出是**算出來的**。
+
+#### 0.3 一篇可以有多個小 demo
+
+理想參考標的 `DistributedTransactions.html` 有 **6 個 demo、6 種不同 archetype**（光譜、流程、時序實驗室、補償鏈、並排對照、決策器）。
+
+- **兩三個各司其職的小 demo，遠優於一個塞滿多層 `.seg` 的巨型 demo。**
+- 經驗法則：**若單一 demo 需要 3 組以上 `.seg` 才講得完，那是在提示你該拆成 2 個 demo。**
+- 小 demo 可以就近放在它所解釋的那個章節，不必全部堆到文末。
+
+#### 0.4 非必備 chrome — 不要因為「上一篇有」就加
+
+以下三者**不是**本規範的元件，是某幾篇的偶然產物。除非該 archetype 真的需要，否則**不得預設加入**：
+
+| 元素 | 只在什麼情況下才加 |
+| :--- | :--- |
+| `.X-metric`「步 N / M」進度計數列 | 僅 archetype A，且步數對讀者真的有意義時 |
+| `.X-verdict` 結論判定條 | 僅當同一組操作真的會導出不同**結論**（C / E）時 |
+| `.X-wire` 事件日誌捲軸 | 僅當「訊息往返順序」本身就是教學重點時 |
+
+> **三者同時出現 = 進度條 + 旁白 + 字幕捲軸 = 播放器。** 這正是本專案要避免的觀感。
+
+---
 
 ### 1. 模擬器外殼 (`.demo`)
 
@@ -187,6 +472,10 @@
   <button data-sc="crash" aria-pressed="false">協調者掛掉</button>
 </div>
 ```
+
+> **用量上限**：單一 demo 內 `.seg` 群組建議 **≤ 2 組**。
+> 需要 3 組以上才講得完，代表這個 demo 承載了太多主題——請依 §0.3 拆成兩個 demo，
+> 而不是繼續往上疊切換器。切換器疊越多層，讀者越難知道自己正在看什麼組合。
 
 ### 3. 按鈕系列 (`.btn` / `.btn.primary`)
 
@@ -232,7 +521,24 @@
 
 ## 🚫 嚴格禁止的作法
 
+### 視覺與結構
+
 1. **禁止引入大型前端框架 (React/Vue/Svelte)** 到頁面中。
 2. **禁止使用與 Notion-like 風格衝突的高對比度配色**（例如純綠 `#00ff00`、純紅 `#ff0000`）。
 3. **絕對不要從零撰寫完整的 HTML 外殼**（例如 header、footer 等），這些會由 `generate.js` 基於 `templates/base.html` 自動組裝。
 4. **禁止在寫代碼前不思考結構**：每次產出 `content.html` 必須精準對齊 `<section id="sX">` 與雙欄 TOC 機制。
+
+### 圖表
+
+5. **禁止用 `.tag` / `.legend` / `.seg` 的藥丸樣式冒充圖表節點。**
+6. **禁止同一個 class 同時承載「節點」與「邊」**（只靠虛線或灰字區分不算區分）。
+7. **禁止超過 6 個節點的 `flex-wrap` 橫排**；時序語意一律不得用 chip row 表達。
+8. **禁止無 `<p class="cap">` 的圖表。**
+
+### 互動 Demo
+
+9. **禁止未宣告 archetype 就動手寫 demo**（`content.html` 第一行的 `<!-- demo-archetype: ... -->` 註解為必填）。
+10. **禁止與最近 3 篇使用相同的 archetype。**
+11. **禁止「腳本重播型」demo**——整個 demo 的輸出全是程式碼裡的字面常數、使用者操作只是切換播放哪一段預寫敘事。至少要有一個輸出是**算出來的**。
+12. **禁止複製上一篇的 demo 骨架再改 class 前綴。** Demo 的 CSS/JS 骨架**不是**共享資產（與圖表 CSS 相反）；每篇的互動模型必須從 §0 重新選型。
+13. **禁止把 `.X-metric`（步 N/M）、`.X-verdict`、`.X-wire` 當成必備 chrome**；三者同時出現即為「播放器」，見 §0.4。

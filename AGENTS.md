@@ -10,8 +10,8 @@
 
 建立、持續擴充並維護一份頂尖的 **System Design 學習手冊**。每一篇主題皆必須包含：
 - **深度內容**：清晰的 System Design 脈絡、面試考點、架構折衷（Trade-offs）。
-- **視覺圖表**：精美且具結構感的靜態/動態圖表。
-- **可互動演示 (Interactive Demo)**：基於 Vanilla JS 的互動模擬器。
+- **視覺圖表**：精美且具結構感的靜態/動態圖表。形式**依語意選型**，規範見 `guidelines/style-guide.md`「圖表與示意圖規範」——時序／因果用 Mermaid `sequenceDiagram` 或 grid swimlane，空間幾何用 inline `<svg>`；**禁止用 flex-wrap 的 chip row 表達流程或時序**。
+- **可互動演示 (Interactive Demo)**：基於 Vanilla JS 的互動模擬器。動筆前**必須先選 archetype**（見 style-guide「Demo Archetype」），且**不得與最近 3 篇撞形**。
 
 ---
 
@@ -57,6 +57,10 @@
    切勿在 `generate.js` 與 `remove-todo.js` 之間跑 validate——此時主題同時存在於 todo 與 completed，
    互斥檢查必然失敗，屬預期的中間狀態（CI 每次 push 都跑 validate，故 commit 快照必須互斥乾淨）。
 3. **Notion 淺色極簡基調為全站視覺底線**：禁止 Dark Mode 樣式與高對比配色，禁止引入大型前端框架。
+   > ⚠️ **「一致」只適用於視覺語彙，不適用於內容形式。** 配色、字體、`.callout` / `.demo` 外殼要一致；
+   > **圖表形式與 Demo 互動模型必須多樣**。本專案曾因混淆這兩者而發生嚴重同質化
+   > （連續 10 篇共用同一套 demo 骨架、相鄰兩篇 CSS 逐字相同率 96%）。
+   > 反覆複製上一篇的 demo 骨架或 `.X-flow` chip row，是**明確違規**，見 style-guide「嚴格禁止的作法」。
 4. **不要從零撰寫 HTML 外殼**（header/footer 等），由 `templates/base.html` + `generate.js` 自動組裝。
 5. **`drafts/` 是內容原始碼**：draft (`content.html` / `script.html`) 是產物頁面的內容真相來源，隨產物一起 commit。內容改動改 draft、模板改動改 `templates/base.html`，兩者都靠重跑 `generate.js` 產頁；不要直接手改 `books/`。
 
@@ -87,7 +91,7 @@
 | `docs/todo.json` | 待辦主題池（可含 optional `brief` 撰文指引） | 由 `topic-explorer` skill 維護（`add-topic.js --brief` 寫入；發佈後由 author 收尾移除） |
 | `docs/mindmap.json` | 全站心智圖 (DAG) | 記錄 Prerequisites / Related 關係；經 `add-topic.js` 寫入，勿手拼 |
 | `docs/completed.json` | 已完成主題 metadata | **自動維護**：發佈由 `generate.js` 寫入、**撤回**用 `remove-completed.js`；**仍禁止手動編輯本檔** |
-| `guidelines/style-guide.md` | 視覺與互動元件風格規範 | 撰稿前嚴格閱讀遵循 |
+| `guidelines/style-guide.md` | 視覺、**圖表選型**與互動元件（**Demo Archetype**）風格規範 | 撰稿前嚴格閱讀遵循 |
 | `templates/base.html` | 全站 HTML 外殼範本 (Notion 淺色版) | 嚴格讀取，不建議手動更改 |
 | `drafts/{topic-id}/` | **撰稿主要工作區（內容原始碼）** | AI 建立與寫入 content.html 和 script.html，隨產物一起提交 |
 | `books/{topic-id}/index.html` | 發佈後的最終主題網頁 | **自動生成**（由 `generate.js` 產出，勿手動編輯） |
