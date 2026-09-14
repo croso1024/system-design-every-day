@@ -1,3 +1,4 @@
+<!-- demo-archetype: A｜時序推進 — 讀者先選情境（Consumer Group Rebalance 或 acks·ISR·下線），調整指派策略或 acks／min.insync.replicas／unclean election，再按「下一步」走完固定六步劇本，觀察換手停頓、HWM 推進與拒寫／遺失。選 A 是因為兩個劇本本質都是「第三名成員加入」與「副本逐一下線」這種順序固定、且每一步的後果只有在前一步成立時才成立的事件序列。 -->
 <style>
   #kf-root {
     --kf-c: #3f6188; --kf-c-soft: #eef2f7;
@@ -20,14 +21,56 @@
   .kf-card .cl { font-family: var(--mono); font-size: 11px; color: var(--text-3); margin-bottom: 6px; letter-spacing: .04em; }
   .kf-card .cd { font-size: 12.5px; color: var(--text-2); line-height: 1.55; }
 
-  .kf-flow { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin: 10px 0 4px; font-family: var(--mono); font-size: 12px; }
-  .kf-chip { border: 1px solid var(--border-strong); border-radius: 6px; padding: 6px 10px; background: #fff; font-weight: 600; color: var(--text); }
-  .kf-chip.cli { background: var(--kf-c-soft); border-color: var(--kf-c); color: var(--kf-c); }
-  .kf-chip.node { background: var(--kf-alt-soft); border-color: var(--kf-alt); color: var(--kf-alt); }
-  .kf-chip.ok { background: var(--kf-s-soft); border-color: var(--kf-s); color: var(--kf-s); }
-  .kf-chip.op { background: var(--bg-soft); color: var(--text-3); border-style: dashed; font-weight: 500; }
-  .kf-chip.bad { background: var(--kf-bad-soft); border-color: var(--kf-bad); color: var(--kf-bad); }
-  .kf-chip.warn { background: var(--kf-w-soft); border-color: var(--kf-w); color: var(--kf-w); }
+  /* 分層／包含：topic ⊃ partition ⊃ offset 格 */
+  .kf-stack {
+    border: 1px solid var(--border-strong); border-radius: 8px;
+    background: var(--bg-soft); padding: 10px 12px; margin: 14px 0 6px;
+  }
+  .kf-stack > .sh {
+    font-family: var(--mono); font-size: 11.5px; font-weight: 700;
+    color: var(--text-2); margin-bottom: 8px; letter-spacing: .03em;
+  }
+  .kf-slayer {
+    display: flex; align-items: center; gap: 5px; flex-wrap: wrap;
+    border: 1px solid var(--border-strong); border-radius: 6px;
+    background: #fff; padding: 7px 9px; margin-bottom: 6px;
+  }
+  .kf-slayer:last-child { margin-bottom: 0; }
+  .kf-slayer .pn {
+    font-family: var(--mono); font-size: 12px; font-weight: 700;
+    color: var(--kf-alt); min-width: 26px; margin-right: 3px;
+  }
+  .kf-slayer .pe {
+    font-family: var(--mono); font-size: 11px; color: var(--text-3);
+    white-space: nowrap; margin-left: 3px;
+  }
+  .kf-off {
+    display: inline-block; font-family: var(--mono); font-size: 11px;
+    border: 1px solid var(--border); border-radius: 3px;
+    background: var(--bg-soft); color: var(--text-2); padding: 2px 7px;
+  }
+  .kf-off.head { background: var(--kf-s-soft); border-color: var(--kf-s); color: var(--kf-s); font-weight: 700; }
+
+  /* 靜態拓樸：盒是節點、箭頭是邊（鐵律 1） */
+  .kf-pipe {
+    display: flex; flex-wrap: wrap; gap: 10px;
+    align-items: stretch; justify-content: center;
+    margin: 14px 0 6px;
+  }
+  .kf-pnode {
+    border: 1px solid var(--border-strong); border-radius: 8px;
+    background: #fff; padding: 10px 12px;
+    min-width: 110px; max-width: 210px; text-align: center;
+  }
+  .kf-pnode .nn { font-family: var(--mono); font-size: 12px; font-weight: 700; color: var(--text); }
+  .kf-pnode .ns { font-size: 11px; color: var(--text-2); margin-top: 3px; line-height: 1.4; }
+  .kf-pnode .nv { font-family: var(--mono); font-size: 11.5px; color: var(--text); margin-top: 7px; line-height: 1.7; }
+  .kf-pnode.accent { border-top: 3px solid var(--accent); }
+  .kf-parr {
+    display: flex; align-items: center;
+    font-family: var(--mono); font-size: 13px; color: var(--text-3);
+    white-space: nowrap;
+  }
 
   .kf-split { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin: 12px 0; }
   @media (max-width: 640px) { .kf-split { grid-template-columns: 1fr; } }
@@ -218,14 +261,25 @@
 
   <p>Topic 是命名空間。真正的實體是 Partition：一條只追加、不可改寫的有序序列。Offset 是這條序列上的單調位址——從 0 起跳的整數，不是時間戳，也不在跨 partition 之間可比。</p>
 
-  <div class="kf-flow">
-    <span class="kf-chip cli">orders</span>
-    <span class="kf-chip op">topic</span>
-    <span class="kf-chip node">P0</span>
-    <span class="kf-chip node">P1</span>
-    <span class="kf-chip node">P2</span>
-    <span class="kf-chip op">offset 0, 1, 2…</span>
+  <div class="kf-stack">
+    <div class="sh">topic · orders — 命名空間，本身沒有順序</div>
+    <div class="kf-slayer">
+      <span class="pn">P0</span>
+      <span class="kf-off">0</span><span class="kf-off">1</span><span class="kf-off">2</span><span class="kf-off">3</span><span class="kf-off head">4</span>
+      <span class="pe">append ▸</span>
+    </div>
+    <div class="kf-slayer">
+      <span class="pn">P1</span>
+      <span class="kf-off">0</span><span class="kf-off">1</span><span class="kf-off head">2</span>
+      <span class="pe">append ▸</span>
+    </div>
+    <div class="kf-slayer">
+      <span class="pn">P2</span>
+      <span class="kf-off">0</span><span class="kf-off">1</span><span class="kf-off">2</span><span class="kf-off">3</span><span class="kf-off">4</span><span class="kf-off head">5</span>
+      <span class="pe">append ▸</span>
+    </div>
   </div>
+  <p class="cap">Topic 只是名字，有序的是每一條 partition：offset 在同一條內單調遞增、只在尾端追加（綠色格是目前的尾巴），跨條之間不可比——所以「全域順序」在這張圖上根本沒有位置可畫。</p>
 
   <p class="kf-sub">Key 怎麼落到 partition</p>
   <p>帶 key 的預設行為是 <code>hash(key) % n</code>：同一個 key 穩定進同一個 partition，於是「同一訂單的事件有序」這句話才成立。沒有 key 時，現代客戶端用 sticky partitioning——先黏在一個 partition 上把批次填滿，再換下一個——為的是批次效率，不是公平輪詢。</p>
@@ -272,13 +326,20 @@
 
   <p>每個 partition 在磁碟上是一組 <strong>Segment</strong>：到達大小或時間上限就關閉舊檔、開新的 active segment。Active segment 只在尾巴追加；較舊的 segment 變成不可變，才能被 Retention 整段刪除，或被 Compaction 重寫。旁邊還有稀疏的 offset index 與時間索引，讓「從 offset 12345 開始讀」不必掃完整條 log。</p>
 
-  <div class="kf-flow">
-    <span class="kf-chip node">00000.log</span>
-    <span class="kf-chip node">00000.index</span>
-    <span class="kf-chip op">已關閉 · 可刪 / 可壓</span>
-    <span class="kf-chip cli">00107.log</span>
-    <span class="kf-chip ok">active · append-only</span>
+  <div class="kf-pipe">
+    <div class="kf-pnode">
+      <div class="nn">00000.log</div>
+      <div class="ns">＋ 00000.index（稀疏）</div>
+      <div class="nv">已關閉 · 不可變<br>可整檔刪 / 可壓</div>
+    </div>
+    <span class="kf-parr">▸</span>
+    <div class="kf-pnode accent">
+      <div class="nn">00107.log</div>
+      <div class="ns">＋ 00107.index（稀疏）</div>
+      <div class="nv">active · append-only</div>
+    </div>
   </div>
+  <p class="cap">箭頭方向就是 base offset 遞增：只有最右邊的 active segment 在被追加，左邊已關閉且不可變，Retention 才能整檔刪除、Compaction 才能整檔重寫。index 依附在同一個 segment 上，不是另一個並列元件。</p>
 
   <p class="kf-sub">為什麼廉價磁碟夠用</p>
   <p>隨機寫會把磁碟變成延遲抖動器；Kafka 把熱路徑收成一條順序追加。寫入先進入 OS Page Cache，由作業系統決定何時刷盤（broker 的 <code>flush</code> 與 replication 是另一條耐久軸，見後文 acks／ISR）。讀取端更關鍵：broker <strong>不把訊息本體緩存在 JVM heap</strong>。熱資料本來就在 Page Cache 裡，<code>sendfile</code> 這類 zero-copy 路徑把頁面從快取直接搬到 NIC，少一次使用者態拷貝，也少一次 GC 壓力。</p>
@@ -400,12 +461,28 @@
 
   <p>同一個 <code>group.id</code> 的消費者合力消費一個 topic：Group Coordinator 把 partition 指派出去，每個 partition 最多一個主人。這不是 Queue 的 competing consumers——訊息不會因為被其中一人讀走而消失；另一個 group 可以從自己的 offset 再讀一遍。Group 提交的 offset 存在內部 topic <code>__consumer_offsets</code>，重啟後從提交點接續。</p>
 
-  <div class="kf-flow">
-    <span class="kf-chip cli">group G</span>
-    <span class="kf-chip node">C1 → P0, P1</span>
-    <span class="kf-chip node">C2 → P2</span>
-    <span class="kf-chip op">一人一區 · 可重放</span>
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>Partition</th>
+          <th>group G 的主人</th>
+          <th>group H 的主人</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr><td><code>P0</code></td><td>C1</td><td>H1</td></tr>
+        <tr><td><code>P1</code></td><td>C1</td><td>H1</td></tr>
+        <tr><td><code>P2</code></td><td>C2</td><td>H2</td></tr>
+        <tr>
+          <td class="hl">offset 記在哪</td>
+          <td class="hl"><code>__consumer_offsets</code> · G 的那份</td>
+          <td class="hl"><code>__consumer_offsets</code> · H 的那份</td>
+        </tr>
+      </tbody>
+    </table>
   </div>
+  <p class="cap">一人一區：同一個 group 內每條 partition 只有一個主人，所以消費並行度的上限就是 partition 數。可重放：換到 group H，同一批紀錄從 H 自己的 offset 再讀一遍——這才是 Kafka 與 Queue competing consumers 的分界。</p>
 
   <p class="kf-sub">什麼會觸發 Rebalance</p>
   <p>成員加入、離開、被判定死亡（<code>session.timeout.ms</code> 內沒有 heartbeat）、以及 partition 數變更。Rebalance 期間，舊指派被收回、新指派尚未生效——這段時間該 partition <strong>沒有人消費</strong>。面試要能講出這個停頓，而不是只背「自動負載均衡」。</p>
