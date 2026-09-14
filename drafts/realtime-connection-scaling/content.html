@@ -1,3 +1,4 @@
+<!-- demo-archetype: A｜時序推進 — 讀者先選四個叢集情境（跨節點路由／優雅排空／硬斷與重連風暴／連線傾斜與 rebalance）之一，再按「下一步」逐步推進，觀察四個節點的連線數與 bar、registry 條目、bus 吞吐與 fan-out p99、以及事件日誌在每一步的變化。選 A 是因為本篇最核心的對照是「同一批 32k 連線在 graceful drain 與硬斷下的兩種下場」，而那個差別（總連線數曲線幾乎一樣、重連速率與 1006 佔比差 60 倍）只有沿著時間逐步走過一次才看得出來。 -->
 <style>
   /* 本篇專屬：rtsc-* 命名空間，不覆蓋全站 base 類別 */
   #rtsc-root {
@@ -21,13 +22,41 @@
   .rtsc-card .ct { font-weight: 700; font-size: 13.5px; margin-bottom: 3px; }
   .rtsc-card .cl { font-family: var(--mono); font-size: 11px; color: var(--text-3); margin-bottom: 6px; letter-spacing: .04em; }
   .rtsc-card .cs { font-size: 12.5px; color: var(--text-2); line-height: 1.55; }
+  /* 僅存的一列 chip flow：第 4 節「訂閱聚合」（5 顆、有方向） */
   .rtsc-flow { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin: 8px 0 2px; font-family: var(--mono); font-size: 11.5px; }
   .rtsc-chip { border: 1px solid var(--border-strong); border-radius: 6px; padding: 5px 9px; background: #fff; font-weight: 600; color: var(--text); }
   .rtsc-chip.w { background: var(--rtsc-gw-soft); border-color: var(--rtsc-gw); color: var(--rtsc-gw); }
-  .rtsc-chip.m { background: var(--rtsc-ctl-soft); border-color: var(--rtsc-ctl); color: var(--rtsc-ctl); }
-  .rtsc-chip.r { background: var(--rtsc-reg-soft); border-color: var(--rtsc-reg); color: var(--rtsc-reg); }
-  .rtsc-chip.x { background: var(--rtsc-bad-soft); border-color: var(--rtsc-bad); color: var(--rtsc-bad); }
+  .rtsc-chip.n { background: var(--rtsc-bus-soft); border-color: var(--rtsc-bus); color: var(--rtsc-bus); }
   .rtsc-chip.op { background: var(--bg-soft); color: var(--text-3); border-style: dashed; font-weight: 500; }
+
+  /* 直向條列：清單 / 組成（無順序語意，不折行） */
+  .rtsc-stack { display: flex; flex-direction: column; gap: 4px; margin: 8px 0 2px; }
+  .rtsc-item { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 2px 10px;
+               border: 1px solid var(--border); border-radius: 6px; background: #fff; padding: 6px 9px; }
+  .rtsc-item .in { font-family: var(--mono); font-size: 11.5px; font-weight: 700; color: var(--text); }
+  .rtsc-item .ix { font-size: 11px; color: var(--text-3); line-height: 1.4; }
+
+  /* 職責網格：固定欄數，760px 以下退單欄 */
+  .rtsc-duty { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; margin: 8px 0 2px; }
+  @media (max-width: 760px) { .rtsc-duty { grid-template-columns: 1fr; } }
+  .rtsc-duty .du { border: 1px solid var(--border); border-radius: 6px; background: #fff; padding: 7px 9px; }
+  .rtsc-duty .dn { font-family: var(--mono); font-size: 11.5px; font-weight: 700; color: var(--text); line-height: 1.35; }
+  .rtsc-duty .dw { font-size: 11px; color: var(--text-3); margin-top: 3px; line-height: 1.4; }
+
+  /* 橫條：數量 / 比例（純 CSS 寬度百分比，不需 JS） */
+  .rtsc-skew { border: 1px solid var(--border); border-radius: var(--radius-sm); background: #fff; padding: 10px 12px; margin: 12px 0 6px; }
+  .rtsc-skew .sg { font-family: var(--mono); font-size: 10.5px; font-weight: 700; color: var(--text-3);
+                   letter-spacing: .06em; margin: 8px 0 4px; }
+  .rtsc-skew .sg:first-child { margin-top: 0; }
+  .rtsc-skew .sr { display: grid; grid-template-columns: 50px 1fr 46px; align-items: center; gap: 8px; padding: 2px 0; }
+  .rtsc-skew .sl { font-family: var(--mono); font-size: 11px; color: var(--text-2); }
+  .rtsc-skew .st { display: block; height: 12px; border-radius: 3px; background: var(--bg-soft);
+                   border: 1px solid var(--border); overflow: hidden; }
+  .rtsc-skew .st i { display: block; height: 100%; background: var(--rtsc-gw); }
+  .rtsc-skew .st i.warn { background: var(--warn); }
+  .rtsc-skew .st i.bad { background: var(--bad); }
+  .rtsc-skew .sv { font-family: var(--mono); font-size: 11px; font-weight: 700; color: var(--text); text-align: right; }
+  .rtsc-skew .sv.zero { color: var(--text-3); font-weight: 500; }
 
   /* edge / core 分層 */
   .rtsc-tiers { display: flex; flex-direction: column; gap: 8px; margin: 10px 0 4px; }
@@ -97,27 +126,27 @@
     <div class="rtsc-card w">
       <div class="ct">WebSocket 篇 · gateway 的 per-node 狀態</div>
       <div class="cl">每一條連線 × 六項</div>
-      <div class="rtsc-flow">
-        <span class="rtsc-chip w">user / device id</span>
-        <span class="rtsc-chip w">訂閱的 topic 集合</span>
-        <span class="rtsc-chip w">lastSeq / resume token</span>
-        <span class="rtsc-chip w">lastPongAt</span>
-        <span class="rtsc-chip w">心跳計時器</span>
-        <span class="rtsc-chip w">有界發送佇列</span>
+      <div class="rtsc-stack">
+        <div class="rtsc-item"><span class="in">user / device id</span><span class="ix">交握時認證得到</span></div>
+        <div class="rtsc-item"><span class="in">訂閱的 topic 集合</span><span class="ix">應用自訂的語義</span></div>
+        <div class="rtsc-item"><span class="in">lastSeq / resume token</span><span class="ix">補發缺口的依據</span></div>
+        <div class="rtsc-item"><span class="in">lastPongAt</span><span class="ix">死亡判定的輸入</span></div>
+        <div class="rtsc-item"><span class="in">心跳計時器</span><span class="ix">掛在這個行程上</span></div>
+        <div class="rtsc-item"><span class="in">有界發送佇列</span><span class="ix">佔的是本機記憶體</span></div>
       </div>
     </div>
     <div class="rtsc-card m">
       <div class="ct">MQTT 篇 · Broker 的 per-node 狀態</div>
       <div class="cl">每一個 client id / 每一棵樹 × 四項</div>
-      <div class="rtsc-flow">
-        <span class="rtsc-chip m">retained store</span>
-        <span class="rtsc-chip m">session 與離線佇列</span>
-        <span class="rtsc-chip m">inflight window</span>
-        <span class="rtsc-chip m">整棵訂閱樹</span>
+      <div class="rtsc-stack">
+        <div class="rtsc-item"><span class="in">retained store</span><span class="ix">訂閱者可能連在任何節點</span></div>
+        <div class="rtsc-item"><span class="in">session 與離線佇列</span><span class="ix">協定承諾要留住</span></div>
+        <div class="rtsc-item"><span class="in">inflight window</span><span class="ix">屬於這一條連線</span></div>
+        <div class="rtsc-item"><span class="in">整棵訂閱樹</span><span class="ix">比對 wildcard 用</span></div>
       </div>
     </div>
   </div>
-  <p class="cap">左邊是「應用自己扛的狀態」，右邊是「協定要求 Broker 扛的狀態」。<strong>來源不同、重量不同，但存放位置的性質完全一樣</strong>：都在單一行程的記憶體裡，別台讀不到、重啟不留下。<strong>不同協定，同一個結構性問題。</strong></p>
+  <p class="cap">左邊是「應用自己扛的狀態」，右邊是「協定要求 Broker 扛的狀態」。<strong>要看的不是項目內容，是兩欄的長度差</strong>——六項對四項、來源不同、重量不同，<strong>但每一項的存放位置性質完全一樣</strong>：單一行程的記憶體，別台讀不到、重啟不留下。<strong>不同協定，同一個結構性問題。</strong></p>
 
   <p>所以本篇做的事很單純：<strong>把那句話的主詞從「那一台機器」換成「一群機器」</strong>。一旦主詞變成節點集合，六個新問題會同時冒出來——訊息怎麼找到持有連線的那一台、狀態怎麼在節點之間流動、發版時幾十萬條連線往哪裡去、大家一起回來時誰先倒。這些都不是協定問題（framing 與 QoS 在 WebSocket 篇與 MQTT 篇已經寫完，本篇一律引用結論），而是<strong>架構問題</strong>。</p>
 
@@ -181,13 +210,19 @@
 
   <p>後果就是<strong>連線傾斜（connection skew）</strong>，而最常見的觸發不是流量而是<strong>發版</strong>。四台節點各三萬條連線，做一次滾動重啟：</p>
 
-  <div class="rtsc-flow">
-    <span class="rtsc-chip op">初始</span>
-    <span class="rtsc-chip">gw-1 30k</span><span class="rtsc-chip">gw-2 30k</span><span class="rtsc-chip">gw-3 30k</span><span class="rtsc-chip">gw-4 30k</span>
-    <span class="rtsc-chip op">→ 依序重啟 →</span>
-    <span class="rtsc-chip x">gw-1 58k</span><span class="rtsc-chip m">gw-2 40k</span><span class="rtsc-chip">gw-3 22k</span><span class="rtsc-chip r">gw-4 0</span>
+  <div class="rtsc-skew">
+    <div class="sg">重啟前 · 總計 120k</div>
+    <div class="sr"><span class="sl">gw-1</span><span class="st"><i style="width:50%"></i></span><span class="sv">30k</span></div>
+    <div class="sr"><span class="sl">gw-2</span><span class="st"><i style="width:50%"></i></span><span class="sv">30k</span></div>
+    <div class="sr"><span class="sl">gw-3</span><span class="st"><i style="width:50%"></i></span><span class="sv">30k</span></div>
+    <div class="sr"><span class="sl">gw-4</span><span class="st"><i style="width:50%"></i></span><span class="sv">30k</span></div>
+    <div class="sg">依序滾動重啟 gw-4 → gw-3 → gw-2 → gw-1 之後 · 總計仍是 120k</div>
+    <div class="sr"><span class="sl">gw-1</span><span class="st"><i class="bad" style="width:96.7%"></i></span><span class="sv">58k</span></div>
+    <div class="sr"><span class="sl">gw-2</span><span class="st"><i class="warn" style="width:66.7%"></i></span><span class="sv">40k</span></div>
+    <div class="sr"><span class="sl">gw-3</span><span class="st"><i style="width:36.7%"></i></span><span class="sv">22k</span></div>
+    <div class="sr"><span class="sl">gw-4</span><span class="st"><i style="width:0"></i></span><span class="sv zero">0</span></div>
   </div>
-  <p class="cap">先重啟的節點會把後面每一台釋放出來的連線都吃進去，最後重啟的那台則是空的。<strong>沒有任何人做錯事，這是「一次性決策 + 依序重啟」的算術必然</strong>。傾斜的代價很實在：gw-1 的記憶體、fan-out 展開量、GC 停頓、以及它掛掉時的爆炸半徑都是 gw-3 的兩倍以上。</p>
+  <p class="cap">兩組條的<strong>總長度完全相同</strong>——要看的是形狀不是總和。先重啟的節點會把後面每一台釋放出來的連線都吃進去，最後重啟的那台則是空的。<strong>沒有任何人做錯事，這是「一次性決策 + 依序重啟」的算術必然</strong>。傾斜的代價很實在：gw-1 的記憶體、fan-out 展開量、GC 停頓、以及它掛掉時的爆炸半徑都是 gw-3 的兩倍以上。</p>
 
   <p>三個實務對策，通常一起用：<strong>(1) 每個節點設連線數上限</strong>，滿了就讓健康檢查回不健康、把自己從 LB 摘掉（比起被 OOM kill 好太多）；<strong>(2) 主動 rebalance</strong>——超過平均值一定比例的節點，定期小批量地把連線趕走（作法就是第 5 節的 drain，只是規模小、用 <code>1013 Try Again Later</code> 讓客戶端退避久一點）；<strong>(3) 別在尖峰滾動重啟</strong>，並且在發版後把「節點連線數的 max/min 比值」當成驗收指標看一眼。</p>
 
@@ -230,17 +265,22 @@
 
   <p>核心資料結構簡單到讓人懷疑：一個從<strong>身分</strong>到<strong>節點</strong>的映射。真正的設計都在細節裡——</p>
 
-  <div class="rtsc-flow">
-    <span class="rtsc-chip r">conn:{userId}:{deviceId}</span>
-    <span class="rtsc-chip op">→</span>
-    <span class="rtsc-chip w">nodeId</span>
-    <span class="rtsc-chip w">connId</span>
-    <span class="rtsc-chip m">epoch（節點世代）</span>
-    <span class="rtsc-chip m">connectedAt</span>
-    <span class="rtsc-chip op">TTL 90s</span>
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr><th>欄位</th><th>例值</th><th>為什麼需要它</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><strong>key</strong> <code>conn:{userId}:{deviceId}</code></td><td class="hl"><code>conn:U-7731:web</code></td><td class="hl"><strong>一個 user 對多條連線</strong>是常態（手機 + 網頁 + 平板），所以 key 要帶裝置維度、或值是一個集合——否則第二台裝置上線就把第一台的路由資訊蓋掉，訊息從此只送給最後登入的那個</td></tr>
+        <tr><td><code>nodeId</code></td><td><code>gw-3</code></td><td class="hl">這張表存在的唯一理由：訊息該投到哪一個節點的 channel</td></tr>
+        <tr><td><code>connId</code></td><td><code>c-91f2</code></td><td>節點收到訊息之後，還要在自己的本地表從 connId 找到那個 socket</td></tr>
+        <tr><td><code>epoch</code>（節點世代）</td><td><code>7</code></td><td class="hl">節點每次啟動遞增的世代號，用來讓「上一世代留下的殘骸」在比對時直接失效</td></tr>
+        <tr><td><code>connectedAt</code></td><td><code>17:42:08</code></td><td>條目的生命週期是「<strong>交握完成後寫、關閉時刪、隨心跳續期</strong>」，這一欄記的是第一步發生的時刻</td></tr>
+        <tr><td><code>TTL</code></td><td><code>90s</code></td><td class="hl">續期掛在心跳上（見下一小節）；它是節點突然消失時唯一能保證垃圾被清掉的機制</td></tr>
+      </tbody>
+    </table>
   </div>
-
-  <p><strong>一個 user 對多條連線</strong>是常態（手機 + 網頁 + 平板），所以 key 要帶裝置維度、或值是一個集合——否則第二台裝置上線就把第一台的路由資訊蓋掉，訊息從此只送給最後登入的那個。<strong>寫入時機</strong>是交握完成後寫、關閉時刪、然後隨心跳續期。<strong>epoch</strong> 是節點每次啟動遞增的世代號，用來讓「上一世代留下的殘骸」在比對時直接失效。</p>
+  <p class="cap">六個欄位，每一個都對應一種故障：<strong>key 少了裝置維度會蓋掉路由、少了 <code>nodeId</code> 這張表就沒有意義、少了 <code>connId</code> 節點找不到 socket、少了 <code>epoch</code> 會讀到上一世代的殘骸、少了 TTL 則永遠清不掉突然消失的節點留下的條目。</strong></p>
 
   <div class="tbl-wrap">
     <table>
@@ -431,12 +471,23 @@
 
   <p>MQTT 篇留下的第三題，也是這一章最有實務含量的部分。完整的排空是四個步驟，順序不能換：</p>
 
-  <div class="rtsc-flow">
-    <span class="rtsc-chip op">1</span><span class="rtsc-chip w">從 LB 摘除</span>
-    <span class="rtsc-chip op">2</span><span class="rtsc-chip m">分批 + 抖動送關閉</span>
-    <span class="rtsc-chip op">3</span><span class="rtsc-chip r">確認 registry 已改指向</span>
-    <span class="rtsc-chip op">4</span><span class="rtsc-chip x">flush 與交棒後才關行程</span>
-  </div>
+  <pre class="mermaid">
+sequenceDiagram
+    participant G as gw-4
+    participant LB as LB
+    participant C as 客戶端
+    participant R as Registry
+    G->>LB: 健康檢查回不健康
+    LB-->>G: 不再送新連線
+    Note over LB,G: 既有連線照常服務
+    G->>C: 分批送 close 1012
+    C->>LB: 重連
+    LB-->>C: 導到 gw-1
+    C->>R: 條目改指向 gw-1
+    Note over G,R: 剩餘連線歸零才算排空完成
+    G->>G: flush 與交棒後退出
+</pre>
+  <p class="cap">四個步驟分屬四個角色，順序不能換。整張圖只有一處回覆需要盯著看：<strong>LB 只答應得了第一步——「不再送新連線」</strong>，它不會替你關掉既有的任何一條。第二步之後全部是 gateway 自己的工作，而第三步（registry 改指向）沒有完成就關行程，訊息會被投進一個已經沒有人的節點。</p>
 
   <p><strong>第一步</strong>是讓健康檢查回不健康、或從 target group 反註冊，目的只有一個：<strong>停止進新的連線</strong>。這裡有個普遍誤解——LB 的 connection draining／deregistration delay <strong>只保證「不再送新請求給你」，它不會幫你關掉既有的長連線</strong>；對短請求那個設定就等於排空，對長連線它只完成了四步中的第一步。</p>
 
@@ -579,28 +630,37 @@ rt_drain_remaining{node}                     # gauge：發版時盯著它歸零
     <div class="rtsc-tier dev">
       <div class="tt">裝置 / 瀏覽器</div>
       <div class="td">CLIENT</div>
-      <div class="rtsc-flow">
-        <span class="rtsc-chip">退避 + jitter（WebSocket 篇）</span><span class="rtsc-chip">lastSeq / resume token</span><span class="rtsc-chip">接收端取樣降頻</span>
+      <div class="rtsc-duty">
+        <div class="du"><div class="dn">退避 + jitter</div><div class="dw">錯開重連時刻（WebSocket 篇）</div></div>
+        <div class="du"><div class="dn">lastSeq / resume token</div><div class="dw">重連後自己指出缺口</div></div>
+        <div class="du"><div class="dn">接收端取樣降頻</div><div class="dw">瀏覽器沒有 receive backpressure</div></div>
       </div>
     </div>
     <div class="rtsc-tier edge">
       <div class="tt">Edge：接入層（就近部署、可拋棄、水平擴充）</div>
       <div class="td">GATEWAY / BROKER FRONTEND</div>
-      <div class="rtsc-flow">
-        <span class="rtsc-chip w">TLS 終止與交握 CPU</span><span class="rtsc-chip w">心跳與死亡判定</span><span class="rtsc-chip w">per-connection 佇列</span>
-        <span class="rtsc-chip w">連線層限流 / DDoS 吸收</span><span class="rtsc-chip w">訊息合併與降頻</span><span class="rtsc-chip w">地理就近（省 RTT）</span>
+      <div class="rtsc-duty">
+        <div class="du"><div class="dn">TLS 終止與交握 CPU</div><div class="dw">純 CPU，加機器就能擴</div></div>
+        <div class="du"><div class="dn">心跳與死亡判定</div><div class="dw">只有持有連線的節點算得了</div></div>
+        <div class="du"><div class="dn">per-connection 佇列</div><div class="dw">緩衝必須貼著 socket</div></div>
+        <div class="du"><div class="dn">連線層限流 / DDoS 吸收</div><div class="dw">越早擋掉越便宜</div></div>
+        <div class="du"><div class="dn">訊息合併與降頻</div><div class="dw">貼著使用者才知道能丟什麼</div></div>
+        <div class="du"><div class="dn">地理就近</div><div class="dw">省的是每一則訊息的 RTT</div></div>
       </div>
     </div>
     <div class="rtsc-tier core">
       <div class="tt">中心：真相層（不接連線，只處理語義與持久化）</div>
       <div class="td">BUS / STORE / SERVICES</div>
-      <div class="rtsc-flow">
-        <span class="rtsc-chip n">fan-out bus</span><span class="rtsc-chip n">registry 真相 / 租約</span><span class="rtsc-chip n">授權決策</span>
-        <span class="rtsc-chip n">持久化與重播（Kafka）</span><span class="rtsc-chip n">業務邏輯與全域排序</span>
+      <div class="rtsc-duty">
+        <div class="du"><div class="dn">fan-out bus</div><div class="dw">讓每個節點只收到一份</div></div>
+        <div class="du"><div class="dn">registry 真相 / 租約</div><div class="dw">要全叢集看到同一份</div></div>
+        <div class="du"><div class="dn">授權決策</div><div class="dw">不能各節點各說各話</div></div>
+        <div class="du"><div class="dn">持久化與重播（Kafka）</div><div class="dw">留存路徑與即時路徑分開</div></div>
+        <div class="du"><div class="dn">業務邏輯與全域排序</div><div class="dw">排序需要單一權威</div></div>
       </div>
     </div>
   </div>
-  <p class="cap">這張圖就是 MQTT 篇那條「MQTT 接入 → bridge → Kafka 留存」分層的一般化版本（該篇已論證，此處不重複）：<strong>WebSocket 的版本是 gateway → bus → 業務服務，形狀完全一樣</strong>。差別只在 MQTT 的 edge 層被協定要求扛更多狀態，所以它比較不「可拋棄」。</p>
+  <p class="cap">三層之間不是資料流而是<strong>責任歸屬</strong>——每一格的第二行都在回答同一個問題：它消耗的是 CPU 與延遲（下沉 edge），還是需要全域真相（留中心）。這張圖就是 MQTT 篇那條「MQTT 接入 → bridge → Kafka 留存」分層的一般化版本（該篇已論證，此處不重複）：<strong>WebSocket 的版本是 gateway → bus → 業務服務，形狀完全一樣</strong>。差別只在 MQTT 的 edge 層被協定要求扛更多狀態，所以它比較不「可拋棄」。</p>
 
   <p>跨區部署還有一條實務鐵律：<strong>連線只連最近的 edge，跨區複製的是訊息不是連線</strong>。理由是長連線跨區的成本是持續的（每一則訊息都多付一次跨區 RTT 與流量費），而訊息跨區複製的成本是一次性的（一則訊息跨區一次，再由當地 edge 展開給幾萬條連線）。把 fan-out 的展開動作留在使用者所在的區域，這是第 4 節「每個節點只複製一份」原則的地理版本。</p>
 
