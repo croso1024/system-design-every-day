@@ -1395,7 +1395,8 @@
     <!-- ===================== MAIN CONTENT ===================== -->
     <main>
       <div class="inner">
-        <style>
+        <!-- demo-archetype: B｜參數掃描 — 讀者可拖動六則事件各自的 event time 與 Watermark delay 滑桿，並切換切窗規則、allowed lateness 與太遲政策，即時重算每則事件落入哪扇窗、判為準時／遲到准入／太遲。選 B 是因為本篇的核心命題就是「delay 與 lateness 這兩個參數如何改變同一批亂序事件的判定」，參數不能動就講不清楚。 -->
+<style>
   #sp-root {
     --sp-c: #3f6188; --sp-c-soft: #eef2f7;
     --sp-s: #4d7d68; --sp-s-soft: #eef4f1;
@@ -1417,14 +1418,27 @@
   .sp-card .cl { font-family: var(--mono); font-size: 11px; color: var(--text-3); margin-bottom: 6px; letter-spacing: .04em; }
   .sp-card .cd { font-size: 12.5px; color: var(--text-2); line-height: 1.55; }
 
-  .sp-flow { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin: 10px 0 4px; font-family: var(--mono); font-size: 12px; }
-  .sp-chip { border: 1px solid var(--border-strong); border-radius: 6px; padding: 6px 10px; background: #fff; font-weight: 600; color: var(--text); }
-  .sp-chip.cli { background: var(--sp-c-soft); border-color: var(--sp-c); color: var(--sp-c); }
-  .sp-chip.node { background: var(--sp-alt-soft); border-color: var(--sp-alt); color: var(--sp-alt); }
-  .sp-chip.ok { background: var(--sp-s-soft); border-color: var(--sp-s); color: var(--sp-s); }
-  .sp-chip.op { background: var(--bg-soft); color: var(--text-3); border-style: dashed; font-weight: 500; }
-  .sp-chip.bad { background: var(--sp-bad-soft); border-color: var(--sp-bad); color: var(--sp-bad); }
-  .sp-chip.warn { background: var(--sp-w-soft); border-color: var(--sp-w); color: var(--sp-w); }
+  /* 資料流管線：盒是節點、箭頭是邊（鐵律 1） */
+  .sp-pipe {
+    display: flex; flex-wrap: wrap; gap: 10px;
+    align-items: stretch; justify-content: center;
+    margin: 14px 0 6px;
+  }
+  .sp-pnode {
+    border: 1px solid var(--border-strong); border-radius: 8px;
+    background: #fff; padding: 10px 12px;
+    min-width: 110px; max-width: 200px; text-align: center;
+  }
+  .sp-pnode .nn { font-family: var(--mono); font-size: 12px; font-weight: 700; color: var(--text); }
+  .sp-pnode .ns { font-size: 11px; color: var(--text-2); margin-top: 3px; line-height: 1.4; }
+  .sp-pnode .nv { font-family: var(--mono); font-size: 11.5px; color: var(--text); margin-top: 7px; line-height: 1.7; }
+  .sp-pnode.accent { border-top: 3px solid var(--accent); }
+  .sp-pnode.ok { border-top: 3px solid var(--ok); }
+  .sp-parr {
+    display: flex; align-items: center;
+    font-family: var(--mono); font-size: 12px; color: var(--text-3);
+    white-space: nowrap;
+  }
 
   .sp-split { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin: 12px 0; }
   @media (max-width: 640px) { .sp-split { grid-template-columns: 1fr; } }
@@ -1738,17 +1752,45 @@
   <div class="formula">[ floor(t / size) × size , floor(t / size) × size + size )</div>
   <p>Sliding 則對每個 <code>start = k × slide</code>，只要 <code>start ≤ t &lt; start + size</code> 就指派一扇。Session 沒有事先畫好的格子：把同一 key 的事件依 event time 排序，相鄰差距小於 <var>gap</var> 的收成一簇，窗為 <code>[min_et, max_et + gap)</code>。</p>
 
-  <div class="sp-flow">
-    <span class="sp-chip cli">t=2</span>
-    <span class="sp-chip cli">t=4</span>
-    <span class="sp-chip op">Tumbling 5</span>
-    <span class="sp-chip ok">[0,5)</span>
-    <span class="sp-chip cli">t=7</span>
-    <span class="sp-chip ok">[5,10)</span>
-    <span class="sp-chip op">Session gap=4</span>
-    <span class="sp-chip warn">[2, 7+4)</span>
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>事件 event time</th>
+          <th>Tumbling · size 5</th>
+          <th>Sliding · size 6 / slide 3</th>
+          <th>Session · gap 4</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><code>t=2</code></td>
+          <td><code>[0,5)</code></td>
+          <td><code>[-3,3)</code>、<code>[0,6)</code></td>
+          <td><code>[2,11)</code></td>
+        </tr>
+        <tr>
+          <td><code>t=4</code></td>
+          <td><code>[0,5)</code></td>
+          <td><code>[0,6)</code>、<code>[3,9)</code></td>
+          <td><code>[2,11)</code></td>
+        </tr>
+        <tr>
+          <td><code>t=7</code></td>
+          <td><code>[5,10)</code></td>
+          <td><code>[3,9)</code>、<code>[6,12)</code></td>
+          <td><code>[2,11)</code></td>
+        </tr>
+        <tr>
+          <td class="hl">一則進幾扇</td>
+          <td class="hl">1</td>
+          <td class="hl">2（= size / slide）</td>
+          <td class="hl">1（三則共用同一扇）</td>
+        </tr>
+      </tbody>
+    </table>
   </div>
-  <p class="cap">同一序列：Tumbling 把 2、4 與 7 拆進兩扇固定窗；Session 若 7 − 4 &lt; 4，三點併成一場會話。</p>
+  <p class="cap">同一批事件換切法就換答案：Tumbling 每則恰好一扇；Sliding 固定進 size/slide 扇（t=2 的其中一扇起點落在時間軸原點之前，仍算一扇）；Session 看相鄰間距，2→4→7 的差都小於 4，三點併成 <code>[2, 7+4)</code>。狀態量跟著這張表的格子數走。</p>
 
   <p class="sp-sub">觸發條件</p>
   <p>「窗裡有資料」不是「可以輸出」。觸發器決定何時把聚合結果送出去：</p>
@@ -2070,16 +2112,26 @@
 
   <p>一串「使用者餘額變更」事件，摺疊到每個 <code>user_id</code> 的最後值，就是一張表。把表上每一次 upsert / delete 再攤開，又變回 changelog 流。這不是兩套系統，是同一份狀態的兩種讀法：</p>
 
-  <div class="sp-flow">
-    <span class="sp-chip cli">+A=10</span>
-    <span class="sp-chip cli">+A=15</span>
-    <span class="sp-chip cli">+B=3</span>
-    <span class="sp-chip op">toTable</span>
-    <span class="sp-chip ok">A=15</span>
-    <span class="sp-chip ok">B=3</span>
-    <span class="sp-chip op">toStream</span>
-    <span class="sp-chip node">changelog</span>
+  <div class="sp-pipe">
+    <div class="sp-pnode accent">
+      <div class="nn">changelog 流</div>
+      <div class="ns">依到達序 append</div>
+      <div class="nv">+A=10<br>+A=15<br>+B=3</div>
+    </div>
+    <span class="sp-parr">──toTable──▸</span>
+    <div class="sp-pnode ok">
+      <div class="nn">表 · 每 key 現況</div>
+      <div class="ns">同 key 後寫覆蓋前寫</div>
+      <div class="nv">A=15<br>B=3</div>
+    </div>
+    <span class="sp-parr">──toStream──▸</span>
+    <div class="sp-pnode">
+      <div class="nn">changelog 流</div>
+      <div class="ns">表上每次 upsert / delete</div>
+      <div class="nv">A=15<br>B=3</div>
+    </div>
   </div>
+  <p class="cap">摺過去再攤回來，A 只剩最後一版 15——中間的 10 消失不是 duality 的 bug，是你把事實流當成了現況表。方向由箭頭承載，<code>toTable</code> 與 <code>toStream</code> 是動作，不是資料。</p>
 
   <div class="sp-split">
     <div class="sp-pane read">
