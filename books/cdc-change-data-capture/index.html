@@ -1393,7 +1393,8 @@
     <!-- ===================== MAIN CONTENT ===================== -->
     <main>
       <div class="inner">
-        <style>
+        <!-- demo-archetype: C｜並排對照 — 讀者選一種變更情境（兩次快改／刪除列／Snapshot 交界）與一種下游套用方式（天真 INSERT／依主鍵 merge），同一串變更同時餵進左側「查詢輪詢」與右側「日誌 CDC」兩條 lane，對照各自看見了什麼、倉儲多出幾列。選 C 是因為本篇的命題就是「輪詢究竟漏掉什麼」，只有把兩種擷取方式並排在同一組輸入上，那些被摺掉的中間幀才看得見。 -->
+<style>
   #cdc-root {
     --cdc-c: #3f6188; --cdc-c-soft: #eef2f7;
     --cdc-s: #4d7d68; --cdc-s-soft: #eef4f1;
@@ -1415,14 +1416,27 @@
   .cdc-card .cl { font-family: var(--mono); font-size: 11px; color: var(--text-3); margin-bottom: 6px; letter-spacing: .04em; }
   .cdc-card .cd { font-size: 12.5px; color: var(--text-2); line-height: 1.55; }
 
-  .cdc-flow { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin: 10px 0 4px; font-family: var(--mono); font-size: 12px; }
-  .cdc-chip { border: 1px solid var(--border-strong); border-radius: 6px; padding: 6px 10px; background: #fff; font-weight: 600; color: var(--text); }
-  .cdc-chip.cli { background: var(--cdc-c-soft); border-color: var(--cdc-c); color: var(--cdc-c); }
-  .cdc-chip.node { background: var(--cdc-alt-soft); border-color: var(--cdc-alt); color: var(--cdc-alt); }
-  .cdc-chip.ok { background: var(--cdc-s-soft); border-color: var(--cdc-s); color: var(--cdc-s); }
-  .cdc-chip.op { background: var(--bg-soft); color: var(--text-3); border-style: dashed; font-weight: 500; }
-  .cdc-chip.bad { background: var(--cdc-bad-soft); border-color: var(--cdc-bad); color: var(--cdc-bad); }
-  .cdc-chip.warn { background: var(--cdc-w-soft); border-color: var(--cdc-w); color: var(--cdc-w); }
+  /* 靜態拓樸圖：節點是盒、邊是箭頭，兩者不共用 class */
+  .cdc-arch-row {
+    display: flex; flex-wrap: wrap; gap: 10px;
+    align-items: stretch; justify-content: center;
+    margin: 14px 0 6px;
+  }
+  .cdc-arch-box {
+    border: 1px solid var(--border-strong); border-radius: 8px;
+    background: #fff; padding: 10px 12px;
+    min-width: 110px; max-width: 200px; text-align: center;
+  }
+  .cdc-arch-box .an { font-family: var(--mono); font-size: 12px; font-weight: 700; color: var(--text); }
+  .cdc-arch-box .as { font-size: 11px; color: var(--text-2); margin-top: 3px; line-height: 1.4; }
+  .cdc-arch-box.accent { border-top: 3px solid var(--cdc-c); }
+  .cdc-arch-box.alt    { border-top: 3px solid var(--cdc-alt); }
+  .cdc-arch-box.ok     { border-top: 3px solid var(--cdc-s); }
+  .cdc-arch-arr {
+    display: flex; align-items: center;
+    font-family: var(--mono); font-size: 13px; color: var(--text-3);
+    white-space: nowrap;
+  }
 
   .cdc-split { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin: 12px 0; }
   @media (max-width: 640px) { .cdc-split { grid-template-columns: 1fr; } }
@@ -1655,15 +1669,28 @@
 
   <p>InnoDB 提交時，同一筆交易的列變更會進 binary log。給 CDC 用，格式必須是 <strong>ROW</strong>：每一列的 before image 與 after image。STATEMENT 只記 SQL 字串，<code>NOW()</code>、<code>UUID()</code>、多列 <code>UPDATE</code> 都無法還原成穩定的列事件；MIXED 在部分語句仍會退回 STATEMENT。ROW 的代價是日誌變大，換來的是「下游看到的是列，不是一句無法重放的 SQL」。</p>
 
-  <div class="cdc-flow">
-    <span class="cdc-chip cli">COMMIT</span>
-    <span class="cdc-chip op">InnoDB redo</span>
-    <span class="cdc-chip node">binlog ROW</span>
-    <span class="cdc-chip op">before / after</span>
-    <span class="cdc-chip ok">GTID</span>
-    <span class="cdc-chip op">connector</span>
-    <span class="cdc-chip node">異質下游</span>
+  <div class="cdc-arch-row">
+    <div class="cdc-arch-box accent">
+      <div class="an">交易 COMMIT</div>
+      <div class="as">寫入路徑只有一條<br>redo 先落地</div>
+    </div>
+    <span class="cdc-arch-arr">──寫入──▸</span>
+    <div class="cdc-arch-box alt">
+      <div class="an">binlog（ROW）</div>
+      <div class="as">每列的 before / after<br>不是一句 SQL</div>
+    </div>
+    <span class="cdc-arch-arr">──讀取──▸</span>
+    <div class="cdc-arch-box ok">
+      <div class="an">CDC Connector</div>
+      <div class="as">只存位點：GTID<br>或 LSN + slot</div>
+    </div>
+    <span class="cdc-arch-arr">──投遞──▸</span>
+    <div class="cdc-arch-box">
+      <div class="an">異質下游</div>
+      <div class="as">快取 / 索引 / 倉儲<br>各自套用</div>
+    </div>
   </div>
+  <p class="cap">binlog 是為了崩潰復原就已經存在的日誌，CDC 只是它的第二個讀者——不是第二條寫入路徑。ROW 決定你看得到 before/after，GTID 決定你斷線之後接不接得回去。</p>
 
   <p class="cdc-sub">MySQL：ROW + GTID</p>
   <p>舊式位點是 <code>file + offset</code>（<code>mysql-bin.000847:194420</code>）。Failover 換了機器、檔名重編，這個座標就失效。GTID 把一筆交易標成 <code>source_id:transaction_id</code>，在新主庫上仍能回答「這筆我吃過了沒有」。CDC connector 存的就是這組座標，不是業務時間。面試若把 GTID 講成「全域單調時鐘」，後面的亂序與多源匯流會對不上——它只保證<strong>同一來源上的交易身份</strong>，讓你換主之後接得回去。</p>
