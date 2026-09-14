@@ -1,3 +1,4 @@
+<!-- demo-archetype: D｜空間視覺化 — 讀者在 2D 向量空間點畫布移動 Query ★、切換 Flat／IVF／HNSW 並拖動 nprobe／ef，即時比對 ANN 結果與全掃 ground truth 的漏檢、誤報與實際距離比較次數。選 D 是因為「近似為什麼會漏檢」只有在看得見哪些點被跳過、哪些桶沒被 probe 時才成立；參數滑桿（B 的參數掃描）是疊在這個空間上的第二個自由度。 -->
 <style>
   .vd-sketch {
     width: 100%;
@@ -29,25 +30,49 @@
   .vd-sketch tr:last-child td { border-bottom: none; }
   .vd-sketch .mono { font-family: var(--mono); font-size: 12px; }
   .vd-sketch .near { color: var(--ok); font-weight: 600; }
-  .vd-flow {
+  /* 圖表：節點是實線盒（.vd-node），邊是無框灰字箭頭（.vd-arrow），兩者不同元素 */
+  .vd-lanes { display: grid; gap: 10px; margin: 14px 0 6px; }
+  .vd-lane { display: grid; grid-template-columns: 92px 1fr; gap: 10px; align-items: center; }
+  @media (max-width: 640px) { .vd-lane { grid-template-columns: 1fr; gap: 4px; } }
+  .vd-lane .ll {
+    font-family: var(--mono);
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: .04em;
+    color: var(--text-2);
+    border-left: 3px solid var(--border-strong);
+    padding-left: 8px;
+  }
+  .vd-lane.write .ll { border-left-color: var(--accent); color: var(--accent); }
+  .vd-lane.read .ll { border-left-color: var(--ok); color: var(--ok); }
+  .vd-row {
     display: flex;
     flex-wrap: wrap;
-    gap: 8px;
-    align-items: center;
-    margin: 12px 0;
-    font-size: 13px;
+    gap: 10px;
+    align-items: stretch;
+    justify-content: center;
   }
-  .vd-flow .box {
+  .vd-node {
     border: 1px solid var(--border-strong);
     background: #ffffff;
-    border-radius: var(--radius-sm);
-    padding: 8px 10px;
-    font-family: var(--mono);
-    font-size: 12px;
+    border-radius: 8px;
+    padding: 10px 12px;
+    min-width: 110px;
+    max-width: 200px;
+    text-align: center;
   }
-  .vd-flow .arrow {
+  .vd-node .nn { font-family: var(--mono); font-size: 12px; font-weight: 700; color: var(--text); }
+  .vd-node .ns { font-size: 11px; color: var(--text-2); margin-top: 3px; line-height: 1.4; }
+  .vd-node.write { border-top: 3px solid var(--accent); }
+  .vd-node.read { border-top: 3px solid var(--ok); }
+  .vd-node.junction { border-top: 3px solid var(--warn); box-shadow: 0 0 0 3px var(--warn-soft); }
+  .vd-arrow {
+    display: flex;
+    align-items: center;
     color: var(--text-3);
     font-family: var(--mono);
+    font-size: 12px;
+    white-space: nowrap;
   }
   .vd-timeline {
     border-left: 2px solid var(--border-strong);
@@ -281,14 +306,29 @@
 
   <p>真實文件往往太長：若整本手冊只變成<strong>一個</strong>向量，查詢時只能說「這本書有點相關」，無法指出哪一段。因此要先 <strong>Chunk（切段）</strong>，讓空間裡的每個點對應可引用的片段。</p>
 
-  <div class="vd-flow" aria-label="Embedding 管線">
-    <span class="box">文件</span><span class="arrow">→</span>
-    <span class="box">Chunk</span><span class="arrow">→</span>
-    <span class="box">Embed</span><span class="arrow">→</span>
-    <span class="box">寫入索引 + metadata</span><span class="arrow">→</span>
-    <span class="box">Query Embed</span><span class="arrow">→</span>
-    <span class="box">ANN Top-K</span>
+  <div class="vd-lanes" aria-label="Embedding 管線：建索引與查詢兩條路徑">
+    <div class="vd-lane write">
+      <div class="ll">Index-time</div>
+      <div class="vd-row">
+        <div class="vd-node write"><div class="nn">文件</div><div class="ns">PDF、Wiki、工單</div></div>
+        <span class="vd-arrow">──切段──▸</span>
+        <div class="vd-node write"><div class="nn">Chunk + Embed</div><div class="ns">片段轉成 d 維向量</div></div>
+        <span class="vd-arrow">──寫入──▸</span>
+        <div class="vd-node junction"><div class="nn">索引 + metadata</div><div class="ns">向量、doc_id、tenant_id</div></div>
+      </div>
+    </div>
+    <div class="vd-lane read">
+      <div class="ll">Query-time</div>
+      <div class="vd-row">
+        <div class="vd-node read"><div class="nn">使用者問題</div><div class="ns">同一個 embedding 模型</div></div>
+        <span class="vd-arrow">──Query Embed──▸</span>
+        <div class="vd-node junction"><div class="nn">索引 + metadata</div><div class="ns">同一份索引，這次是讀</div></div>
+        <span class="vd-arrow">──ANN 近鄰──▸</span>
+        <div class="vd-node read"><div class="nn">Top-K chunk</div><div class="ns">可再 rerank，交給 LLM</div></div>
+      </div>
+    </div>
   </div>
+  <p class="cap">這是兩條各自獨立觸發的路徑：上面一條每份文件只跑一次，下面一條每次提問跑一次，兩者在索引處交會——而且必須用同一個 embedding 模型、同一維度，否則距離根本不可比。這也就是下方「換模型 = 重建世界」的具體意思：兩條路徑都得整條重跑。</p>
 
   <ol>
     <li><strong>Chunking</strong>：長文切成片段。模型內部用 <strong>token</strong>（子詞單位，可粗想成「比字元大、比句子小的計長單位」）限制長度；實務常切成約數百 token——大約半頁～一頁說明文字的量級。一頁 PDF 常見會變成數個 chunk。切太細語意破碎；切太粗一次撈回太多雜訊。邊界常留 <strong>overlap</strong>（重疊）：實務常見約 <strong>10%～20%</strong> 的長度，讓跨段關鍵句兩邊都留得到。</li>
