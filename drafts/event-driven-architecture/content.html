@@ -1,3 +1,4 @@
+<!-- demo-archetype: C｜並排對照 — 讀者選定故障情境（正常／中間崩潰／Broker 中斷／重複投遞）與消費端策略（天真 handler／冪等鍵去重表），同一筆訂單 O-1001 同時餵進左「直接雙寫」與右「Transactional Outbox」兩條泳道，逐步比對訂單狀態、主題事件與庫存數字。選 C 是因為本篇的核心命題「雙寫錯在哪」，只有把錯誤解法與正確解法放在同一組輸入下同時推進才看得見分岔點。 -->
 <style>
   #eda-root {
     --eda-c: #3f6188; --eda-c-soft: #eef2f7;
@@ -20,14 +21,24 @@
   .eda-card .cl { font-family: var(--mono); font-size: 11px; color: var(--text-3); margin-bottom: 6px; letter-spacing: .04em; }
   .eda-card .cd { font-size: 12.5px; color: var(--text-2); line-height: 1.55; }
 
-  .eda-flow { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin: 10px 0 4px; font-family: var(--mono); font-size: 12px; }
-  .eda-chip { border: 1px solid var(--border-strong); border-radius: 6px; padding: 6px 10px; background: #fff; font-weight: 600; color: var(--text); }
-  .eda-chip.cli { background: var(--eda-c-soft); border-color: var(--eda-c); color: var(--eda-c); }
-  .eda-chip.node { background: var(--eda-alt-soft); border-color: var(--eda-alt); color: var(--eda-alt); }
-  .eda-chip.ok { background: var(--eda-s-soft); border-color: var(--eda-s); color: var(--eda-s); }
-  .eda-chip.op { background: var(--bg-soft); color: var(--text-3); border-style: dashed; font-weight: 500; }
-  .eda-chip.bad { background: var(--eda-bad-soft); border-color: var(--eda-bad); color: var(--eda-bad); }
-  .eda-chip.warn { background: var(--eda-w-soft); border-color: var(--eda-w); color: var(--eda-w); }
+  /* 交易邊界 swimlane：欄＝參與者，列＝時間步，跨欄帶標示交易內／外 */
+  .eda-swim {
+    display: grid; grid-template-columns: 46px repeat(4, 1fr); gap: 1px;
+    background: var(--border); border: 1px solid var(--border);
+    border-radius: 8px; overflow: hidden; margin: 14px 0 6px;
+  }
+  .eda-swim > div { background: #fff; padding: 8px 9px; font-size: 12px; line-height: 1.5; }
+  .eda-swim .lh { background: var(--bg-soft); font-family: var(--mono); font-size: 11px; font-weight: 700; color: var(--text-2); }
+  .eda-swim .lt { background: var(--bg-soft); font-family: var(--mono); font-size: 11px; color: var(--text-3); }
+  .eda-swim .lb { grid-column: 1 / -1; font-family: var(--mono); font-size: 11px; font-weight: 700; letter-spacing: .03em; }
+  .eda-swim .lb.inside { background: var(--eda-s-soft); color: var(--eda-s); }
+  .eda-swim .lb.outside { background: var(--eda-w-soft); color: var(--eda-w); }
+  .eda-swim .lc.act { background: var(--accent-soft); }
+  .eda-swim .lc.ok { background: var(--ok-soft); }
+  @media (max-width: 720px) {
+    .eda-swim { grid-template-columns: 38px repeat(4, minmax(0, 1fr)); font-size: 11px; }
+    .eda-swim > div { padding: 6px 6px; }
+  }
 
   .eda-split { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin: 12px 0; }
   @media (max-width: 640px) { .eda-split { grid-template-columns: 1fr; } }
@@ -346,22 +357,31 @@
     </div>
   </div>
 
-  <div class="eda-flow">
-    <span class="eda-chip cli">Choreography</span>
-    <span class="eda-chip op">OrderPaid</span>
-    <span class="eda-chip node">庫存自己扣</span>
-    <span class="eda-chip op">StockReserved</span>
-    <span class="eda-chip node">出貨自己開單</span>
-  </div>
-  <div class="eda-flow">
-    <span class="eda-chip warn">Orchestration</span>
-    <span class="eda-chip op">ReserveStock</span>
-    <span class="eda-chip node">庫存</span>
-    <span class="eda-chip op">ack</span>
-    <span class="eda-chip warn">管理員</span>
-    <span class="eda-chip op">CreateShipment</span>
-    <span class="eda-chip node">出貨</span>
-  </div>
+  <pre class="mermaid">
+sequenceDiagram
+    participant P as 付款服務
+    participant T as 事件主題
+    participant I as 庫存服務
+    participant S as 出貨服務
+    P->>T: OrderPaid
+    T->>I: 訂閱送達
+    I->>T: StockReserved
+    T->>S: 訂閱送達
+    Note over I,S: 下一步由訂閱者自己決定
+  </pre>
+  <p class="cap">Choreography：沒有人握著整條鏈——每個服務只看見自己訂閱的那則事件，下一步長在訂閱關係上，中央的主題只負責轉送、不做決定。</p>
+
+  <pre class="mermaid">
+sequenceDiagram
+    participant M as 流程管理員
+    participant I as 庫存服務
+    participant S as 出貨服務
+    M->>I: ReserveStock
+    I-->>M: StockReserved
+    M->>S: CreateShipment
+    Note over M: 流程狀態集中在這裡
+  </pre>
+  <p class="cap">Orchestration：三條訊息都從管理員發出或回到管理員，它既是發起者也是回覆的收件人，所以「現在卡在哪一步」只要查它一處。</p>
 
   <p class="eda-sub">三個常被混為一談的成本</p>
   <p><strong>可觀測性。</strong> Choreography 的「這筆訂單為什麼卡在出貨前」要沿主題把相關事件撈齊，或另做關聯追蹤。沒有單一行程表。Orchestration 的管理員列就是行程表：卡在哪一步、等哪個回覆、超時幾次，打開就看見。代價是管理員成為查詢熱點，也成為部署時你必須保住的狀態。</p>
@@ -460,16 +480,38 @@
   </div>
   <p class="cap">最小可用集合。實際還會加 <code>schema_version</code>、<code>headers</code>、以及發佈失敗次數。不要在發佈器裡再回查業務表拼 payload——當時的事實已經在 <code>payload</code> 裡。</p>
 
-  <div class="eda-flow">
-    <span class="eda-chip cli">同一交易</span>
-    <span class="eda-chip ok">UPDATE orders</span>
-    <span class="eda-chip ok">INSERT outbox</span>
-    <span class="eda-chip op">COMMIT</span>
-    <span class="eda-chip node">發佈器</span>
-    <span class="eda-chip op">send</span>
-    <span class="eda-chip warn">broker</span>
-    <span class="eda-chip op">標 published</span>
+  <div class="eda-swim">
+    <div class="lh">階段</div>
+    <div class="lh">訂單服務</div>
+    <div class="lh">DB（orders + outbox）</div>
+    <div class="lh">發佈器</div>
+    <div class="lh">Broker</div>
+
+    <div class="lb inside">T1–T2｜同一筆本地交易：兩筆寫入共用一次 COMMIT</div>
+    <div class="lt">t1</div>
+    <div class="lc act">UPDATE orders<br>INSERT outbox</div>
+    <div class="lc">status=paid（未提交）<br>outbox 多一列 PENDING</div>
+    <div class="lc">—</div>
+    <div class="lc">—</div>
+    <div class="lt">t2</div>
+    <div class="lc ok">COMMIT</div>
+    <div class="lc ok">兩筆一起生效；崩潰則一起不存在</div>
+    <div class="lc">—</div>
+    <div class="lc">—</div>
+
+    <div class="lb outside">T3–T4｜交易外投遞：失敗只會重試，不會讓訂單回頭</div>
+    <div class="lt">t3</div>
+    <div class="lc">已回 200，請求結束</div>
+    <div class="lc">outbox 列仍是 published_at IS NULL</div>
+    <div class="lc act">輪詢或 CDC 撈出這列</div>
+    <div class="lc">—</div>
+    <div class="lt">t4</div>
+    <div class="lc">—</div>
+    <div class="lc">回填 published_at</div>
+    <div class="lc act">send(OrderPaid)</div>
+    <div class="lc ok">主題上出現紀錄<br>重試會再出現一次</div>
   </div>
+  <p class="cap">分界在 COMMIT：t1–t2 兩筆寫入共用一次提交，t3–t4 的投遞與標記全發生在交易外——所以主題上可能重複，但意圖不會遺失。</p>
 
   <p class="eda-sub">誰把 outbox 列變成主題上的紀錄</p>
   <p>兩種發佈器，契約相同：只讀 <code>published_at IS NULL</code> 的列，送到 broker，再標已發。</p>
