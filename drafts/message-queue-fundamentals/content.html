@@ -1,3 +1,4 @@
+<!-- demo-archetype: A｜時序推進 — 讀者先選情境（Queue vs Log ／ Visibility · DLQ），再選模型或租約長度，然後按「下一步」走過固定劇本，觀察 ACK 後能否重放、慢請求何時被重投、Poison 何時進 DLQ。選 A 是因為本篇核心是「租約到期與 ACK 的先後順序決定會不會重複投遞」，順序本身就是教學內容。 -->
 <style>
   #mq-root {
     --mq-c: #3f6188; --mq-c-soft: #eef2f7;
@@ -19,15 +20,6 @@
   .mq-card .ct { font-weight: 700; font-size: 13.5px; margin-bottom: 3px; }
   .mq-card .cl { font-family: var(--mono); font-size: 11px; color: var(--text-3); margin-bottom: 6px; letter-spacing: .04em; }
   .mq-card .cs { font-size: 12.5px; color: var(--text-2); line-height: 1.55; }
-
-  .mq-flow { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin: 10px 0 4px; font-family: var(--mono); font-size: 12px; }
-  .mq-chip { border: 1px solid var(--border-strong); border-radius: 6px; padding: 6px 10px; background: #fff; font-weight: 600; color: var(--text); }
-  .mq-chip.cli { background: var(--mq-c-soft); border-color: var(--mq-c); color: var(--mq-c); }
-  .mq-chip.node { background: var(--mq-alt-soft); border-color: var(--mq-alt); color: var(--mq-alt); }
-  .mq-chip.ok { background: var(--mq-s-soft); border-color: var(--mq-s); color: var(--mq-s); }
-  .mq-chip.op { background: var(--bg-soft); color: var(--text-3); border-style: dashed; font-weight: 500; }
-  .mq-chip.bad { background: var(--mq-bad-soft); border-color: var(--mq-bad); color: var(--mq-bad); }
-  .mq-chip.warn { background: var(--mq-w-soft); border-color: var(--mq-w); color: var(--mq-w); }
 
   .mq-split { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin: 12px 0; }
   @media (max-width: 640px) { .mq-split { grid-template-columns: 1fr; } }
@@ -215,15 +207,22 @@
 
   <p>Queue 的單位是<strong>工作</strong>，不是「大家都該看見的事實」。生產者把一則訊息放進佇列；一組 Competing Consumers 互相競爭，broker 把每一則最多交給其中一個工人。成功 ACK 之後，這則訊息從 broker 刪除——它的生命週期結束了。</p>
 
-  <div class="mq-flow">
-    <span class="mq-chip cli">Producer</span>
-    <span class="mq-chip op">enqueue</span>
-    <span class="mq-chip node">Broker Queue</span>
-    <span class="mq-chip op">deliver one-of-N</span>
-    <span class="mq-chip warn">Worker 處理</span>
-    <span class="mq-chip op">ACK</span>
-    <span class="mq-chip ok">刪除 · 無法回溯</span>
-  </div>
+  <pre class="mermaid">
+sequenceDiagram
+    participant P as Producer
+    participant B as Broker Queue
+    participant WA as Worker A
+    participant WB as Worker B
+    P->>B: enqueue(M1)
+    Note over B: depth = 1，M1 可見
+    B->>WA: deliver M1，one-of-N
+    Note over B: M1 轉不可見，租約中
+    B--xWB: 同一則不再給第二人
+    WA-->>B: ACK M1
+    Note over B: 刪除 M1，depth = 0
+    B--xWB: 晚到者拉不到歷史
+  </pre>
+  <p class="cap">ACK 是往回送的，刪除發生在 broker 端——這一刪，晚到的 Worker B 就再也看不到 M1。</p>
 
   <p>這份語意買到兩件事：</p>
   <ul>
@@ -525,23 +524,9 @@
       </tbody>
     </table>
   </div>
-  <p class="cap">「每把 key 有序」在產品裡常落成「同一分區有序」。分區怎麼映射、怎麼再平衡是 Kafka 篇的事；這裡只需記住：有序範圍愈大，可並行的工人愈少。</p>
+  <p class="cap">三列互斥，選一列就同時簽下它右邊那一格代價——沒有「既要吞吐又要全域序」的那一列。「每把 key 有序」在產品裡常落成「同一分區有序」；分區怎麼映射、怎麼再平衡是 Kafka 篇的事，這裡只需記住：有序範圍愈大，可並行的工人愈少。</p>
 
   <p>Head-of-line blocking 是全域（或單流）有序的帳單：隊頭那則訊息若處理很慢、或卡在重試，<strong>後面所有已經到達、其實可以做的訊息都得等</strong>。你用順序換來的是「M2 絕不先於 M1 生效」；你付出去的是整條流的尾延遲。Competing Consumers 把這張帳單撕掉：任何人都能拿下一則，慢請求只擋住自己，但 M2 可能先於 M1 被處理。</p>
-
-  <div class="mq-flow">
-    <span class="mq-chip ok">要吞吐</span>
-    <span class="mq-chip op">→</span>
-    <span class="mq-chip cli">Competing Consumers</span>
-    <span class="mq-chip op">放棄全域序</span>
-    <span class="mq-chip warn">要同實體有序</span>
-    <span class="mq-chip op">→</span>
-    <span class="mq-chip node">按 key 分流</span>
-    <span class="mq-chip op">接受熱 key</span>
-    <span class="mq-chip bad">要全域序</span>
-    <span class="mq-chip op">→</span>
-    <span class="mq-chip bad">單流單工人</span>
-  </div>
 
   <div class="callout warn">
     <div class="c-title"><span class="ic">陷阱</span>「我們要順序，所以只開一個消費者」卻沒定義順序的範圍</div>
