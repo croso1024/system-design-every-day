@@ -1394,7 +1394,8 @@
     <!-- ===================== MAIN CONTENT ===================== -->
     <main>
       <div class="inner">
-        <style>
+        <!-- demo-archetype: A｜時序推進 — 讀者選一個劇本（伺服器正常關閉／網路靜默中斷後重連／發送緩衝堆積），按「下一步」逐格推進，觀察 readyState 四態的移動、線上往返的 frame、未回應 Ping 數、bufferedAmount 與帶 jitter 的退避時間。選 A 是因為本篇的主角就是「一條連線從 CONNECTING 走到 CLOSED 的固定生命週期」，而 half-open 的教學重點恰恰是「狀態機停在 OPEN 不動好幾格」——那個「不動」只有沿著步驟走才看得見。 -->
+<style>
   /* 本篇專屬：wsx-* 命名空間，不覆蓋全站 base 類別 */
   #wsx-root {
     --wsx-c: #3f6188; --wsx-c-soft: #eef2f7;
@@ -1416,13 +1417,14 @@
   .wsx-card .cl { font-family: var(--mono); font-size: 11px; color: var(--text-3); margin-bottom: 6px; letter-spacing: .04em; }
   .wsx-card .cs { font-size: 12.5px; color: var(--text-2); line-height: 1.55; }
 
-  /* chips */
-  .wsx-flow { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin: 10px 0 4px; font-family: var(--mono); font-size: 12px; }
-  .wsx-chip { border: 1px solid var(--border-strong); border-radius: 6px; padding: 6px 10px; background: #fff; font-weight: 600; color: var(--text); }
-  .wsx-chip.d { background: var(--wsx-c-soft); border-color: var(--wsx-c); color: var(--wsx-c); }
-  .wsx-chip.k { background: var(--wsx-ctl-soft); border-color: var(--wsx-ctl); color: var(--wsx-ctl); }
-  .wsx-chip.x { background: var(--wsx-bad-soft); border-color: var(--wsx-bad); color: var(--wsx-bad); }
-  .wsx-chip.op { background: var(--bg-soft); color: var(--text-3); border-style: dashed; font-weight: 500; }
+  /* 直向條列：清單 / 組成（無順序語意，不折行） */
+  .wsx-stack { display: flex; flex-direction: column; gap: 4px; margin: 10px 0 4px; }
+  .wsx-item { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 2px 10px;
+              border: 1px solid var(--border); border-radius: 6px; background: #fff; padding: 6px 10px; }
+  .wsx-item .in { font-family: var(--mono); font-size: 12px; font-weight: 700; color: var(--text); }
+  .wsx-item .ix { font-size: 11px; color: var(--text-3); line-height: 1.4; }
+  .wsx-item.mul { background: var(--bg-soft); border-style: dashed; justify-content: center; }
+  .wsx-item.mul .in { color: var(--text-3); font-weight: 600; letter-spacing: .04em; }
 
   /* frame 欄位示意 */
   .wsx-bits { display: flex; flex-wrap: wrap; gap: 4px; margin: 4px 0; }
@@ -1576,17 +1578,30 @@ Sec-WebSocket-Protocol: chat.v2               # 必須是客戶端提議清單�
 
   <p><strong>RFC 8441（Extended CONNECT）</strong> 給的答案是換一個思路：不要「把整條連線換掉」，而是<strong>把單一條 stream 變成隧道</strong>。</p>
 
-  <div class="wsx-flow">
-    <span class="wsx-chip op">伺服器先宣告</span>
-    <span class="wsx-chip k">SETTINGS_ENABLE_CONNECT_PROTOCOL = 1</span>
-    <span class="wsx-chip op">客戶端才能送</span>
-    <span class="wsx-chip d">:method = CONNECT</span>
-    <span class="wsx-chip d">:protocol = websocket</span>
-    <span class="wsx-chip d">:scheme = https</span>
-    <span class="wsx-chip d">:path = /ws</span>
-    <span class="wsx-chip op">回應</span>
-    <span class="wsx-chip k">:status = 200</span>
-  </div>
+  <pre class="mermaid">
+sequenceDiagram
+    participant C as 客戶端
+    participant S as 伺服器
+    S->>C: SETTINGS 宣告能力
+    Note over C: 沒收到就不准送
+    C->>S: Extended CONNECT
+    S-->>C: status 200
+    Note over C,S: 這條 stream 之後承載 WebSocket frame
+</pre>
+  <p class="cap">三個回合的順序是強制的：<strong>伺服器沒有在 <code>SETTINGS</code> 裡宣告，客戶端連送都不准送</strong>——這是與 HTTP/1.1 交握最大的差別（那邊是客戶端先開口，伺服器只能答應或拒絕）。而且成功不再是換掉整條連線的 <code>101</code>，只是這條 stream 上的一個 <code>200</code>。</p>
+
+<pre><code># 1. 伺服器在 SETTINGS frame 裡宣告能力，缺這一行後面全部不成立
+SETTINGS_ENABLE_CONNECT_PROTOCOL = 1
+
+# 2. 客戶端送出的 Extended CONNECT：四個 pseudo-header 缺一不可
+:method   = CONNECT
+:protocol = websocket     # RFC 8441 新增，一般 CONNECT 沒有這一個
+:scheme   = https         # 必須保留
+:path     = /ws           # 必須保留——隧道另一端是「端點」不是「host:port」
+
+# 3. 成功的回應
+:status   = 200
+</code></pre>
   <p class="cap">與一般 <code>CONNECT</code>（給 HTTP proxy 建 TCP 隧道用）的差別在 <code>:protocol</code> 這個新的 pseudo-header，以及<strong>必須保留 <code>:scheme</code> 與 <code>:path</code></strong>——因為隧道的另一端不是「某個主機的某個 port」，而是「這台伺服器上的某個 WebSocket 端點」。成功的回應是 <code>200</code> 而不是 <code>101</code>；之後這條 stream 的 <code>DATA</code> frame payload 就是 WebSocket frame。</p>
 
   <p>這個設計有一個很好的副作用：WebSocket 從此<strong>共用同一條 HTTP/2 連線</strong>，不再各自佔一條 TCP。對瀏覽器來說，這解掉了 HTTP 篇提過的 per-origin 6 連線上限——在 HTTP/1.1 上開六條 WebSocket 就把整個網域的 HTTP 請求餓死了。</p>
@@ -1651,17 +1666,6 @@ Sec-WebSocket-Protocol: chat.v2               # 必須是客戶端提議清單�
   <p class="cap">最小的一個 frame 只有 <strong>2 bytes 標頭</strong>（伺服器→客戶端、payload ≤ 125 bytes）；客戶端送出時加上 4 bytes 的 masking key，最小 6 bytes。對照 HTTP 篇介紹過的 <strong>HTTP/2 固定 9-byte 標頭</strong>——兩者的設計目標不同：HTTP/2 的 frame 要攜帶 Stream ID 做多路復用，長度固定換解析簡單；WebSocket 沒有多路復用要做，於是把每個 byte 都省下來，因為它預期的負載是「每秒好幾十則的小訊息」。</p>
 
   <p class="wsx-sub">1 · opcode：資料 frame 與 control frame</p>
-
-  <div class="wsx-flow">
-    <span class="wsx-chip d">0x1 TEXT</span>
-    <span class="wsx-chip d">0x2 BINARY</span>
-    <span class="wsx-chip d">0x0 CONTINUATION</span>
-    <span class="wsx-chip op">資料 frame</span>
-    <span class="wsx-chip k">0x8 CLOSE</span>
-    <span class="wsx-chip k">0x9 PING</span>
-    <span class="wsx-chip k">0xA PONG</span>
-    <span class="wsx-chip op">control frame</span>
-  </div>
 
   <div class="tbl-wrap">
     <table>
@@ -1905,15 +1909,16 @@ function send(msg) {                         // send() 不會回 EAGAIN，只會
 
   <p>每接受一條 WebSocket 連線，伺服器就得在記憶體裡掛一份狀態：</p>
 
-  <div class="wsx-flow">
-    <span class="wsx-chip d">user / device id</span>
-    <span class="wsx-chip d">訂閱的 topic 集合</span>
-    <span class="wsx-chip d">lastSeq / resume token</span>
-    <span class="wsx-chip k">lastPongAt</span>
-    <span class="wsx-chip k">心跳計時器</span>
-    <span class="wsx-chip x">發送佇列（有界）</span>
-    <span class="wsx-chip op">× 每一條連線</span>
+  <div class="wsx-stack">
+    <div class="wsx-item"><span class="in">user / device id</span><span class="ix">交握時認證得到</span></div>
+    <div class="wsx-item"><span class="in">訂閱的 topic 集合</span><span class="ix">應用自訂的語義</span></div>
+    <div class="wsx-item"><span class="in">lastSeq / resume token</span><span class="ix">補發缺口的依據</span></div>
+    <div class="wsx-item"><span class="in">lastPongAt</span><span class="ix">死亡判定的輸入</span></div>
+    <div class="wsx-item"><span class="in">心跳計時器</span><span class="ix">掛在這個行程上</span></div>
+    <div class="wsx-item"><span class="in">發送佇列（有界）</span><span class="ix">佔的是本機記憶體</span></div>
+    <div class="wsx-item mul"><span class="in">× 每一條連線</span></div>
   </div>
+  <p class="cap">六項的來源各不相同——認證給的、應用給的、保活給的、緩衝給的——但<strong>存放位置只有一種</strong>：持有這條 socket 的那一個行程的記憶體。真正該盯著看的是最後一列的乘數：這整份清單要乘上連線數。</p>
 
   <p>單機上這完全不是問題——十萬條連線各配幾 KB 也就是幾百 MB，TCP/UDP 篇的 epoll 早就解決了「同時等很多連線」。真正的問題是這份狀態<strong>只存在於那一台機器的記憶體裡</strong>：它不能被別台機器讀到，也不會在行程重啟後留下來。一旦你要放兩台機器在負載均衡器後面，「這則訊息該送給誰」就變成「持有那條連線的是<em>哪一台</em>」——這是本篇刻意不處理的問題。</p>
 
