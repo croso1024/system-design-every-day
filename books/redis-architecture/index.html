@@ -1395,7 +1395,8 @@
     <!-- ===================== MAIN CONTENT ===================== -->
     <main>
       <div class="inner">
-        <style>
+        <!-- demo-archetype: A｜時序推進 — 讀者選「Slot 遷移」或「maxmemory 淘汰」，按「下一步」逐步重放：前者看客戶端先收 ASK（不改對照表）再收 MOVED（改表），後者在同一份工作集下比較 noeviction／allkeys-lru／allkeys-lfu／volatile-ttl 各自踢掉誰。選 A 是因為 ASK 與 MOVED 的差別本質上就是「發生在第幾步」，把順序抽掉之後兩者看起來一模一樣。 -->
+<style>
   /* 本篇專屬：ra-* 命名空間，不覆蓋全站 base 類別 */
   #ra-root {
     --ra-c: #3f6188; --ra-c-soft: #eef2f7;
@@ -1417,15 +1418,6 @@
   .ra-card .ct { font-weight: 700; font-size: 13.5px; margin-bottom: 3px; }
   .ra-card .cl { font-family: var(--mono); font-size: 11px; color: var(--text-3); margin-bottom: 6px; letter-spacing: .04em; }
   .ra-card .cs { font-size: 12.5px; color: var(--text-2); line-height: 1.55; }
-
-  .ra-flow { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin: 10px 0 4px; font-family: var(--mono); font-size: 12px; }
-  .ra-chip { border: 1px solid var(--border-strong); border-radius: 6px; padding: 6px 10px; background: #fff; font-weight: 600; color: var(--text); }
-  .ra-chip.cli { background: var(--ra-c-soft); border-color: var(--ra-c); color: var(--ra-c); }
-  .ra-chip.node { background: var(--ra-alt-soft); border-color: var(--ra-alt); color: var(--ra-alt); }
-  .ra-chip.ok { background: var(--ra-s-soft); border-color: var(--ra-s); color: var(--ra-s); }
-  .ra-chip.op { background: var(--bg-soft); color: var(--text-3); border-style: dashed; font-weight: 500; }
-  .ra-chip.bad { background: var(--ra-bad-soft); border-color: var(--ra-bad); color: var(--ra-bad); }
-  .ra-chip.warn { background: var(--ra-w-soft); border-color: var(--ra-w); color: var(--ra-w); }
 
   .ra-split { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin: 12px 0; }
   @media (max-width: 640px) { .ra-split { grid-template-columns: 1fr; } }
@@ -1596,17 +1588,14 @@
     </div>
   </div>
 
-  <div class="ra-flow">
-    <span class="ra-chip cli">Client</span>
-    <span class="ra-chip op">→</span>
-    <span class="ra-chip node">Event loop</span>
-    <span class="ra-chip op">→ 編碼後的 key</span>
-    <span class="ra-chip ok">記憶體</span>
-    <span class="ra-chip op">∥</span>
-    <span class="ra-chip warn">RDB / AOF</span>
-    <span class="ra-chip op">∥</span>
-    <span class="ra-chip node">Replica / Cluster</span>
-  </div>
+  <pre class="mermaid">
+flowchart LR
+    C["Client"] --> E["單執行緒事件迴圈"]
+    E --> M["記憶體資料結構"]
+    M -. "fork 後背景寫出" .-> P["RDB / AOF"]
+    M -. "命令流 + backlog" .-> R["Replica / Cluster"]
+  </pre>
+  <p class="cap">所有命令都穿過同一條單執行緒事件迴圈；持久化與複寫是掛在記憶體之後的兩條旁路（虛線），不在命令的關鍵路徑上——這也是為什麼一個 O(N) 命令就能卡住全部人，而 AOF rewrite 卻只在 fork 那一瞬間才痛。</p>
 
   <div class="callout accent">
     <div class="c-title"><span class="ic">座標</span>本篇不重複的四件事</div>
@@ -1865,15 +1854,16 @@
   <p>一主多從是 Redis 最常見的高可用形狀：寫進 master，replica 用非同步命令流追上。通用的同步／異步取捨與「讀到什麼」的一致性光譜，<em>資料複寫基礎</em> 已經講過。這裡只留下 Redis 專屬的三個旋鈕：<strong>PSYNC 能否部分重同步</strong>、<strong>replica lag 怎麼觀測</strong>、<strong>Sentinel 如何選主而避免腦裂</strong>。</p>
 
   <p class="ra-sub">1 · 全量 SYNC 與部分 PSYNC</p>
-  <div class="ra-flow">
-    <span class="ra-chip cli">Replica 連上</span>
-    <span class="ra-chip op">→</span>
-    <span class="ra-chip node">PSYNC offset + runid</span>
-    <span class="ra-chip op">backlog 還在？</span>
-    <span class="ra-chip ok">繼續串流</span>
-    <span class="ra-chip op">否則</span>
-    <span class="ra-chip warn">全量 RDB 傳送</span>
-  </div>
+  <pre class="mermaid">
+flowchart TD
+    A["Replica 重新連上"] --> B["送 PSYNC + offset"]
+    B --> D{"offset 還在 backlog？"}
+    D -- "是" --> E["部分重同步"]
+    D -- "否" --> F["master fork RDB"]
+    F --> G["期間寫入進 backlog"]
+    G --> E
+  </pre>
+  <p class="cap">分岔點只有一個：replica 的 replication offset 是否還落在 master 的 <code>repl_backlog</code> 窗口內。掉出窗口（長斷線、backlog 太小、master 重啟換了 runid）的帳單是 master 再 fork 一份 RDB——這才是「replica 閃斷會拖垮 master」的來源。</p>
   <p>Master 維持一份固定大小的 <code>repl_backlog</code>。Replica 短暫斷線後，若它的 replication offset 仍在 backlog 窗口內，就只補那一段（PSYNC）。窗口外——長斷線、backlog 太小、master 重啟換了 runid——就走全量：master 再 fork 一份 RDB 傳過去，期間寫入仍進 backlog，傳完再補增量。全量期間 master 的 CPU、fork、網路都是帳單；這是「為什麼 replica 閃斷會拖垮 master」的原因。</p>
 
   <p class="ra-sub">2 · 延遲觀測與寫入保護</p>
@@ -1971,21 +1961,25 @@
     <li>整槽搬完、<code>SETSLOT 7 NODE C</code>：歸屬切到 C。之後任何人問 A，得到 <code>MOVED C</code>，對照表才改。</li>
   </ul>
 
-  <div class="ra-flow">
-    <span class="ra-chip cli">GET cart:42</span>
-    <span class="ra-chip op">slot 7 → 舊表 A</span>
-    <span class="ra-chip warn">A: ASK C</span>
-    <span class="ra-chip op">ASKING + GET</span>
-    <span class="ra-chip ok">C 回值</span>
-    <span class="ra-chip op">表不變</span>
-  </div>
-  <div class="ra-flow">
-    <span class="ra-chip cli">遷移完成後再 GET</span>
-    <span class="ra-chip op">舊表仍 A</span>
-    <span class="ra-chip bad">A: MOVED C</span>
-    <span class="ra-chip op">更新表</span>
-    <span class="ra-chip ok">之後直打 C</span>
-  </div>
+  <pre class="mermaid">
+sequenceDiagram
+    participant CL as Client
+    participant A as 節點 A
+    participant C as 節點 C
+    Note over CL,C: 遷移中：A MIGRATING、C IMPORTING
+    CL->>A: GET cart:42，對照表指向 A
+    A-->>CL: ASK C
+    CL->>C: ASKING + GET
+    C-->>CL: 回值
+    Note over CL: 對照表不變，下一次仍先問 A
+    Note over CL,C: SETSLOT 7 NODE C 之後
+    CL->>A: GET cart:42，對照表仍指向 A
+    A-->>CL: MOVED C
+    CL->>C: GET cart:42
+    C-->>CL: 回值
+    Note over CL: 對照表改寫，之後直打 C
+  </pre>
+  <p class="cap">兩趟都先打到 A，差別在回程之後：<code>ASK</code> 不改對照表，下一次仍先問 A；<code>MOVED</code> 才讓客戶端把 slot 7 記到 C。所以 ASK 是「這一次借道」，MOVED 是「歸屬換人」。</p>
 
   <div class="callout warn">
     <div class="c-title"><span class="ic">陷阱</span>遷移窗口的多 key 操作與「以為 hash ring 會自動平衡」</div>
