@@ -1394,7 +1394,10 @@
     <!-- ===================== MAIN CONTENT ===================== -->
     <main>
       <div class="inner">
-        <!-- demo-archetype: C｜並排對照 — 讀者可點選線上任一個封包把它標記為遺失，同一組送出順序同時餵給 HTTP/2-over-TCP 與 HTTP/3-over-QUIC 兩條泳道，即時比較「已交付 / 扣在緩衝 / 停等中的 stream」三個數字。選 C 是因為本篇的核心命題是「同一個丟包位置，只換下面那一層，誰被卡住就完全不同」——這個差異只有並排同時推進才看得出來。 -->
+        <!-- demo-archetype: C｜並排對照（唯一 demo，第 7 節） — 讀者用四支 slider 決定「哪一個封包遺失、每條 stream 幾塊資料、RTT 多長、時間游標停在哪一刻」，
+     同一組輸入同時餵給 HTTP/2-over-TCP 與 HTTP/3-over-QUIC 兩條泳道，即時算出每條 stream 的完成時刻、被 HoL 扣住的封包數與扣住總量、
+     重傳偵測與恢復所需的往返，以及兩側平均完成時刻的差額。選 C 是因為本篇的核心命題是「同一個丟包位置、同一條鏈路，只換下面那一層，
+     誰被卡住就完全不同」——這個差異只有兩側吃同一組輸入、同時推進才看得出來。 -->
 <style>
   /* 本篇專屬：quic-* 命名空間，不覆蓋全站 base 類別 */
   #quic-root {
@@ -1439,12 +1442,44 @@
 
   /* Demo */
   .quic-ctrl { display: flex; flex-wrap: wrap; gap: 10px; margin: 10px 0 8px; align-items: center; }
-  .quic-wire { display: flex; flex-wrap: wrap; gap: 5px; margin: 8px 0 2px; }
-  .quic-pk { font-family: var(--mono); font-size: 11px; padding: 6px 8px; border-radius: 5px; border: 1px solid var(--border-strong); background: #fff; color: var(--text-2); cursor: pointer; user-select: none; transition: background .15s, border-color .15s; }
-  .quic-pk:hover { border-color: var(--accent); }
-  .quic-pk.sent { background: var(--bg-soft); }
-  .quic-pk.mark { background: var(--quic-tcp-soft); border-color: var(--quic-tcp); color: var(--quic-tcp); font-weight: 700; }
-  .quic-pk.rtx { background: var(--warn-soft); border-color: var(--warn); color: var(--warn); font-weight: 700; }
+  .qx-slider {
+    display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+    font-size: 12.5px; color: var(--text-2);
+    border: 1px solid var(--border); border-radius: var(--radius-sm);
+    padding: 6px 10px; background: var(--bg-soft);
+  }
+  .qx-slider input[type="range"] { width: 120px; accent-color: var(--accent); }
+  .qx-slider .sl { font-family: var(--mono); font-size: 11px; color: var(--text-3); letter-spacing: .04em; }
+  .qx-slider b { font-family: var(--mono); font-size: 13px; color: var(--accent); min-width: 30px; text-align: right; }
+  .qx-chart { margin: 4px 0 2px; }
+  /* SVG 甘特時間軸：顏色一律走 class，避免 presentation attribute 內的 var() */
+  .qx-chart .qx-ax { font-family: var(--mono); font-size: 11px; fill: var(--text-3); }
+  .qx-chart .qx-ax.mark { fill: var(--quic-warn); font-weight: 700; text-anchor: middle; }
+  .qx-chart .qx-tk { font-family: var(--mono); font-size: 11px; fill: var(--text-3); text-anchor: middle; }
+  .qx-chart .qx-rl { font-family: var(--mono); font-size: 11px; font-weight: 700; fill: var(--text); }
+  .qx-chart .qx-bl { font-family: var(--mono); font-size: 11px; fill: #fff; text-anchor: middle; }
+  .qx-chart .qx-axis { stroke: var(--border-strong); stroke-width: 1.5; }
+  .qx-chart .qx-grid { stroke: var(--border); stroke-width: 1; }
+  .qx-chart .qx-blk { stroke-width: 1.5; }
+  .qx-chart .qx-blk.ok { fill: var(--ok); stroke: var(--ok); }
+  .qx-chart .qx-blk.held { fill: var(--accent); stroke: var(--accent); }
+  .qx-chart .qx-blk.lost { fill: var(--bad); stroke: var(--bad); }
+  .qx-chart .qx-hold { fill: var(--accent-soft); stroke: var(--accent); stroke-width: 1; stroke-dasharray: 3 2; }
+  .qx-chart .qx-ghost { fill: none; stroke: var(--bad); stroke-width: 1.5; stroke-dasharray: 3 3; }
+  .qx-chart .qx-rtx { stroke: var(--quic-warn); stroke-width: 1.5; stroke-dasharray: 4 3; }
+  .qx-chart .qx-cursor { stroke: var(--quic-sem); stroke-width: 2; }
+  .qx-matrix { margin-top: 12px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: #fff; overflow-x: auto; }
+  .qx-mrow { display: grid; grid-template-columns: 1.5fr 1fr 1fr 1fr; gap: 8px; min-width: 460px; padding: 6px 12px; border-bottom: 1px dashed var(--border); align-items: baseline; }
+  .qx-mrow:last-child { border-bottom: none; }
+  .qx-mrow.qx-mhead { background: var(--bg-soft); border-bottom: 1px solid var(--border); }
+  .qx-mrow.qx-mhead span { font-family: var(--mono); font-size: 10.5px; letter-spacing: .05em; color: var(--text-3); text-transform: uppercase; }
+  .qx-mrow .qk { font-size: 12.5px; color: var(--text-2); }
+  .qx-mrow .qv { font-family: var(--mono); font-size: 12.5px; font-weight: 700; color: var(--text); text-align: right; }
+  .qx-mrow .qv.tcp { color: var(--quic-tcp); }
+  .qx-mrow .qv.q { color: var(--quic-q); }
+  .qx-mrow .qd { font-family: var(--mono); font-size: 12.5px; color: var(--text-3); text-align: right; }
+  .qx-mrow .qd.bad { color: var(--bad); font-weight: 700; }
+  .qx-mrow .qd.good { color: var(--ok); font-weight: 700; }
   .quic-lanes { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 10px; }
   @media (max-width: 760px) { .quic-lanes { grid-template-columns: 1fr; } }
   .quic-lane { border: 1px solid var(--border); border-radius: var(--radius-sm); background: #fff; padding: 10px 12px; }
@@ -1452,29 +1487,8 @@
   .quic-lane.q { border-top: 3px solid var(--quic-q); }
   .quic-lane .lane-head { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; font-family: var(--mono); font-size: 11px; color: var(--text-3); letter-spacing: .05em; border-bottom: 1px dashed var(--border); padding-bottom: 6px; margin-bottom: 8px; }
   .quic-lane .lane-head b { font-size: 12.5px; color: var(--text); letter-spacing: 0; }
-  .quic-srow { display: flex; align-items: center; gap: 6px; margin-bottom: 5px; }
-  .quic-srow .sl { font-family: var(--mono); font-size: 10.5px; color: var(--text-3); width: 62px; flex: none; }
-  .quic-box { flex: 1; font-family: var(--mono); font-size: 10.5px; text-align: center; padding: 5px 2px; border-radius: 4px; border: 1px solid var(--border-strong); background: #fff; color: var(--text-3); }
-  .quic-box.st-ok { background: var(--ok-soft); border-color: var(--ok); color: var(--ok); }
-  .quic-box.st-held { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); }
-  .quic-box.st-lost { background: var(--bad-soft); border-color: var(--bad); color: var(--bad); }
   .quic-note { font-size: 11.5px; color: var(--text-2); margin-top: 8px; padding-top: 7px; border-top: 1px dashed var(--border); line-height: 1.5; }
   .quic-note b { color: var(--text); }
-  .quic-mig { display: flex; flex-direction: column; gap: 6px; }
-  .quic-mig .mrow { font-family: var(--mono); font-size: 11.5px; padding: 6px 8px; border-radius: 5px; border: 1px solid var(--border); background: var(--bg-soft); color: var(--text-2); }
-  .quic-mig .mrow.on { background: var(--accent-soft); border-color: var(--accent); color: var(--text); }
-  .quic-mig .mrow.bad { background: var(--bad-soft); border-color: var(--bad); color: var(--bad); }
-  .quic-mig .mrow.ok { background: var(--ok-soft); border-color: var(--ok); color: var(--ok); }
-  .quic-panels { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 12px; }
-  @media (max-width: 640px) { .quic-panels { grid-template-columns: 1fr; } }
-  .quic-panel { border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 12px; background: #fff; }
-  .quic-panel .pt { font-size: 11px; color: var(--text-3); letter-spacing: .06em; text-transform: uppercase; font-family: var(--mono); margin-bottom: 8px; }
-  .quic-panel .prow { display: flex; justify-content: space-between; gap: 8px; font-family: var(--mono); font-size: 12px; padding: 4px 0; border-bottom: 1px dashed var(--border); }
-  .quic-panel .prow:last-child { border-bottom: none; }
-  .quic-panel .pk { color: var(--text-3); white-space: nowrap; }
-  .quic-panel .pv { color: var(--text); font-weight: 600; text-align: right; }
-  .quic-panel .pv.good { color: var(--ok); }
-  .quic-panel .pv.bad { color: var(--bad); }
 </style>
 
 <div id="quic-root">
@@ -1918,109 +1932,78 @@ $ dig +short HTTPS example.com               # RFC 9460：把「怎麼連」寫�
 
 <section id="s7">
   <div class="sec-head"><span class="sec-num">07</span><h2>互動 · TCP HoL vs QUIC stream 獨立性</h2></div>
-  <p class="sec-sub">同一批資料、同一個丟包位置，只換傳輸層：看「誰被卡住」與「換網之後誰還活著」。</p>
+  <p class="sec-sub">同一批資料、同一個洞、同一條鏈路，只換傳輸層：看兩側各條 stream 的完成時刻差多少。</p>
 
-  <p>下面的模擬器把<strong>三個 stream（A／B／C，各三塊資料）</strong>交錯送上線，兩側收到的封包順序完全相同，差別只在下面那一層是 TCP 還是 QUIC。<strong>點任何一個封包把它標記為將要遺失</strong>，再按「下一步」逐格推進，觀察兩側接收端能把多少資料交給應用。</p>
+  <p>下面的模擬器把<strong>三個 stream（A／B／C）</strong>的資料塊交錯送上線（送出順序 A1 B1 C1 A2 B2 C2 …），兩側收到的封包順序完全相同，差別只在下面那一層是 TCP 還是 QUIC。四支 slider 是這個 demo 的全部自由度：<strong>哪一個封包遺失</strong>、<strong>每條 stream 幾塊資料</strong>、<strong>RTT 多長</strong>，以及<strong>時間游標停在哪一刻</strong>。兩條泳道吃同一組輸入、同時重算。</p>
 
-  <p>第二個情境切到 <strong>connection migration</strong>：模擬使用者從 Wi-Fi 走到 4G，來源位址改變之後，兩側連線各自發生什麼事。</p>
+  <p>每一塊資料畫在它<strong>「可以交給應用」的那個時刻</strong>上：綠色＝一抵達就交付，藍色＝已經安全抵達卻被扣住（斜線帶就是它等待的那段時間），紅色＝遺失並由重傳補上（虛線框是它原本該抵達的位置）。右側的數字是那條 stream 的完成時刻。</p>
 
   <div class="demo" id="quic-demo">
     <div class="demo-bar">
       <span class="label">互動 · TCP HoL vs QUIC stream 獨立性</span>
-      <span class="label" style="text-transform:none;font-family:var(--sans);font-size:12px;color:var(--text-2)">先點一個封包標記遺失，再按「下一步」</span>
+      <span class="label" style="text-transform:none;font-family:var(--sans);font-size:12px;color:var(--text-2)">拖任一支 slider，兩側同時重算</span>
     </div>
     <div class="demo-body">
-      <div class="seg" role="group" aria-label="情境切換">
-        <button data-sc="loss" aria-pressed="true">注入丟包 · HoL 對比</button>
-        <button data-sc="mig" aria-pressed="false">切換網路 · Connection Migration</button>
-      </div>
-
       <div class="quic-ctrl">
-        <button class="btn primary" id="quic-btn-next">下一步</button>
+        <label class="qx-slider" for="quic-lost">
+          <span class="sl">遺失封包 #</span>
+          <input type="range" id="quic-lost" min="1" max="9" step="1" value="5">
+          <b id="quic-lost-val">5 · B2</b>
+        </label>
+        <label class="qx-slider" for="quic-blocks">
+          <span class="sl">每 stream 塊數</span>
+          <input type="range" id="quic-blocks" min="1" max="6" step="1" value="3">
+          <b id="quic-blocks-val">3</b>
+        </label>
+        <label class="qx-slider" for="quic-rtt">
+          <span class="sl">RTT ms</span>
+          <input type="range" id="quic-rtt" min="20" max="300" step="10" value="80">
+          <b id="quic-rtt-val">80</b>
+        </label>
+        <label class="qx-slider" for="quic-t">
+          <span class="sl">時間游標 ms</span>
+          <input type="range" id="quic-t" min="0" max="120" step="1" value="60">
+          <b id="quic-t-val">60</b>
+        </label>
         <button class="btn" id="quic-btn-reset">重置</button>
-        <div class="legend">
-          <span><i class="dot ns-idle"></i>尚未送出</span>
-          <span><i class="dot ns-ok"></i>已交付應用</span>
-          <span><i class="dot ns-wait"></i>已抵達但被扣住</span>
-          <span><i class="dot ns-bad"></i>遺失 / 重傳中</span>
+      </div>
+
+      <div class="legend">
+        <span><i class="dot ns-ok"></i>一抵達即交付</span>
+        <span><i class="dot ns-wait"></i>已抵達但被扣住</span>
+        <span><i class="dot ns-bad"></i>遺失，由重傳補上</span>
+      </div>
+
+      <div class="status-line" id="quic-status">拖動 slider 後兩側同時重算。</div>
+
+      <div class="quic-lanes">
+        <div class="quic-lane tcp">
+          <div class="lane-head"><b>HTTP/2 over TCP</b><span>單一有序位元組串流</span></div>
+          <div class="qx-chart" id="quic-chart-tcp"></div>
+          <div class="quic-note" id="quic-tcp-note">—</div>
+        </div>
+        <div class="quic-lane q">
+          <div class="lane-head"><b>HTTP/3 over QUIC</b><span>三條獨立 stream</span></div>
+          <div class="qx-chart" id="quic-chart-q"></div>
+          <div class="quic-note" id="quic-q-note">—</div>
         </div>
       </div>
 
-      <div class="status-line" id="quic-status">點一個封包標記為遺失（預設是 B2），再按「下一步」逐格推進。</div>
-
-      <div id="quic-loss-view">
-        <div class="quic-wire" id="quic-wire"></div>
-        <p class="cap">線上的送出順序（兩側完全相同）。紅色是被標記為遺失的那一個——點其他封包可以改。</p>
-
-        <div class="quic-lanes">
-          <div class="quic-lane tcp">
-            <div class="lane-head"><b>HTTP/2 over TCP</b><span id="quic-tcp-tag">單一有序位元組串流</span></div>
-            <div id="quic-tcp-rows"></div>
-            <div class="quic-note" id="quic-tcp-note">—</div>
-          </div>
-          <div class="quic-lane q">
-            <div class="lane-head"><b>HTTP/3 over QUIC</b><span id="quic-q-tag">三條獨立 stream</span></div>
-            <div id="quic-q-rows"></div>
-            <div class="quic-note" id="quic-q-note">—</div>
-          </div>
-        </div>
-
-        <div class="quic-panels">
-          <div class="quic-panel">
-            <div class="pt">TCP 側</div>
-            <div class="prow"><span class="pk">已交付應用</span><span class="pv" id="quic-m-tcp-ok">—</span></div>
-            <div class="prow"><span class="pk">扣在接收緩衝</span><span class="pv bad" id="quic-m-tcp-held">—</span></div>
-            <div class="prow"><span class="pk">停等中的 stream</span><span class="pv bad" id="quic-m-tcp-blk">—</span></div>
-          </div>
-          <div class="quic-panel">
-            <div class="pt">QUIC 側</div>
-            <div class="prow"><span class="pk">已交付應用</span><span class="pv good" id="quic-m-q-ok">—</span></div>
-            <div class="prow"><span class="pk">扣在重組緩衝</span><span class="pv" id="quic-m-q-held">—</span></div>
-            <div class="prow"><span class="pk">停等中的 stream</span><span class="pv good" id="quic-m-q-blk">—</span></div>
-          </div>
-        </div>
-      </div>
-
-      <div id="quic-mig-view" hidden>
-        <div class="quic-lanes">
-          <div class="quic-lane tcp">
-            <div class="lane-head"><b>HTTP/2 over TCP</b><span>五元組即連線</span></div>
-            <div class="quic-mig" id="quic-mig-tcp"></div>
-          </div>
-          <div class="quic-lane q">
-            <div class="lane-head"><b>HTTP/3 over QUIC</b><span>Connection ID 即連線</span></div>
-            <div class="quic-mig" id="quic-mig-q"></div>
-          </div>
-        </div>
-
-        <div class="quic-panels">
-          <div class="quic-panel">
-            <div class="pt">連線識別</div>
-            <div class="prow"><span class="pk">TCP 識別</span><span class="pv" id="quic-m-tcp-id">—</span></div>
-            <div class="prow"><span class="pk">QUIC 識別</span><span class="pv" id="quic-m-q-id">—</span></div>
-            <div class="prow"><span class="pk">目前網路</span><span class="pv" id="quic-m-net">Wi-Fi</span></div>
-          </div>
-          <div class="quic-panel">
-            <div class="pt">切網後的代價</div>
-            <div class="prow"><span class="pk">TCP 側成本</span><span class="pv bad" id="quic-m-tcp-cost">—</span></div>
-            <div class="prow"><span class="pk">QUIC 側成本</span><span class="pv good" id="quic-m-q-cost">—</span></div>
-            <div class="prow"><span class="pk">已傳輸進度</span><span class="pv" id="quic-m-progress">—</span></div>
-          </div>
-        </div>
-      </div>
+      <div class="qx-matrix" id="quic-matrix"></div>
     </div>
   </div>
 
-  <p class="cap">三個值得停下來比對的畫面：<strong>(1)</strong> 把遺失點設在 <strong>B2</strong>（第 5 個封包）並推到底——TCP 側只交付了 4 塊，後面 4 塊全部藍色（已抵達卻交不上去），三個 stream 全部停等；QUIC 側交付 7 塊，只有 B 停等。<strong>(2)</strong> 把遺失點改到 <strong>第 1 個封包 A1</strong>：TCP 側幾乎整條連線都被扣住（最極端的情況），QUIC 側依然只有 A 受影響。<strong>(3)</strong> 把遺失點改到<strong>最後一個封包</strong>：兩側幾乎沒有差別——<strong>HoL 的傷害與「洞出現得多早」成正比</strong>，這解釋了為什麼高丟包鏈路上 HTTP/2 的劣勢會被放大。</p>
+  <p class="cap">四個值得停下來比對的位置：<strong>(1)</strong> 預設（遺失 B2、每 stream 3 塊、RTT 80）——TCP 三條 stream <strong>全部</strong>拖到 120 ms 才完成，QUIC 是 A 35／B 120／C 45，平均差 <strong>53.3 ms</strong>；時間游標停在 60 ms 時，TCP 只交付了 <strong>4 塊</strong>而 QUIC 已經交了 <strong>7 塊</strong>。<strong>(2)</strong> 遺失點拖到 <strong>第 1 個封包</strong>：TCP 扣住的量衝到最大（8 塊、580 塊·ms），但平均差額反而<em>降到</em> 38.3 ms——<strong>最早的那個洞同時也擋住了 QUIC 自己那條 stream</strong>。<strong>(3)</strong> 遺失點拖到<strong>倒數第三個之後</strong>（例如第 7 個）：洞後已不足 3 個封包可觸發封包門檻，偵測退回 <strong>PTO</strong>，恢復時間由 95 ms 跳到 115 ms。<strong>(4)</strong> 遺失點拖到<strong>最後一個封包</strong>：差額歸零——<strong>HoL 的傷害與「洞出現得多早」成正比</strong>，這解釋了為什麼高丟包鏈路上 HTTP/2 的劣勢會被放大。</p>
 
   <div class="callout warn">
-    <div class="c-title"><span class="ic">說明</span>這個模型簡化了什麼，以及它跟前兩個 demo 的分工</div>
-    <p>模型只保留「有序交付」這一個變因：不畫壅塞視窗、不畫 ACK 往返時序、重傳一律視為一次成功。真實情況下重傳需要至少一個 RTT，且 TCP 與 QUIC 的壅塞控制都會同時降速——<strong>所以請把它讀成「誰被卡住」的示意，不是效能量測</strong>。<br>
+    <div class="c-title"><span class="ic">說明</span>這個模型算了什麼、沒算什麼，以及它跟前兩個 demo 的分工</div>
+    <p><strong>算的部分</strong>：封包在線上的間隔固定為 5 ms（等於假設一條固定速率的鏈路）；遺失偵測依 RFC 9002 先試<strong>封包門檻</strong>（洞之後第 3 個封包抵達即判定），不足時退回 <strong>PTO</strong>（以 1 RTT 加上 <code>max_ack_delay</code> 預設的 25 ms 估算）；重傳一律視為一次成功，抵達時刻為偵測時刻再加一個往返。交付規則就是本篇的主軸：TCP 側「前面每一個位元組都到了才交得上去」，QUIC 側「同一條 stream 內前面每一塊都到了才交得上去」。<br>
+    <strong>沒算的部分</strong>：不畫壅塞視窗、不畫 ACK 逐則往返、不模擬二次遺失，也不管兩側壅塞控制實作的差別。真實情況下丟包會讓兩側同時降速——<strong>所以請把它讀成「誰被卡住、卡多久」的示意，不是效能量測</strong>。<br>
     分工也刻意錯開：<strong>TCP/UDP 篇的 demo</strong> 看的是<em>單一連線內</em>的重傳與排序緩衝怎麼運作；<strong>HTTP 篇的 demo</strong> 比的是<em>連線數與排隊</em>（乾淨網路、不注入丟包）；<strong>本篇</strong>比的是<em>丟包時 stream 之間的阻塞關係</em>。三者相加，才是完整的圖。</p>
   </div>
 
   <div class="oneliner">
-    <b>一句話答法</b>同一個丟包位置，TCP 側所有 stream 一起停等、後續已抵達的資料全被扣在核心緩衝，QUIC 側只有遺失資料所屬的那條 stream 停等；換網時 TCP 因五元組改變必須整條重建，QUIC 靠 Connection ID 認出同一條連線，只需路徑驗證與重置壅塞控制。
+    <b>一句話答法</b>同一個丟包位置，TCP 側所有 stream 的完成時刻一起被推到重傳抵達那一刻、後續已抵達的資料全被扣在核心緩衝，QUIC 側只有遺失資料所屬的那條 stream 被推遲，另外兩條照原時刻交付；差額的大小同時取決於洞的位置與 RTT，而且洞落在最後一個封包時會收斂到零。
   </div>
 </section>
 
@@ -2172,305 +2155,358 @@ $ dig +short HTTPS example.com               # RFC 9460：把「怎麼連」寫�
 (function () {
   "use strict";
 
-  var STREAMS = ["A", "B", "C"];
-  /* 線上的送出順序：A1 B1 C1 A2 B2 C2 A3 B3 C3 */
-  var PACKETS = [];
-  (function build() {
-    for (var n = 1; n <= 3; n++) {
-      for (var s = 0; s < STREAMS.length; s++) {
-        PACKETS.push({ i: PACKETS.length + 1, s: STREAMS[s], n: n });
+  /* ---------- (1) 常數與參數表 ---------- */
+
+  var STREAM_NAMES = ["A", "B", "C"];
+  var SLOT_MS = 5;            /* 封包在線上的間隔：等於「固定速率鏈路」假設 */
+  var ACK_DELAY_MS = 25;      /* RFC 9000 max_ack_delay 預設值 */
+  var PKT_THRESHOLD = 3;      /* RFC 9002 kPacketThreshold：落後 3 個即判遺失 */
+  var MIN_BLOCKS = 1, MAX_BLOCKS = 6;
+  var MIN_RTT = 20, MAX_RTT = 300;
+  var BASELINE = { lostIdx: 5, blocks: 3, rtt: 80, t: 60 };
+
+  /* ---------- (2) compute* 純函式（不得碰 DOM） ---------- */
+
+  function clampNum(v, lo, hi, dflt) {
+    var n = Math.round(Number(v));
+    if (!isFinite(n)) n = dflt;
+    if (n < lo) n = lo;
+    if (n > hi) n = hi;
+    return n;
+  }
+
+  function round1(v) { return Math.round(v * 10) / 10; }
+  function round2(v) { return Math.round(v * 100) / 100; }
+
+  function mean(arr) {
+    var s = 0, i;
+    for (i = 0; i < arr.length; i += 1) s += arr[i];
+    return arr.length ? s / arr.length : 0;
+  }
+
+  // @probe fn       computeHol
+  // @probe baseline {"lostIdx":5,"blocks":3,"rtt":80,"t":60}
+  // @probe sweep    {"lostIdx":[1,9],"blocks":[1,6],"rtt":[20,300],"t":[0,400]}
+  function computeHol(p) {
+    p = p || {};
+    var blocks = clampNum(p.blocks, MIN_BLOCKS, MAX_BLOCKS, BASELINE.blocks);
+    var rtt = clampNum(p.rtt, MIN_RTT, MAX_RTT, BASELINE.rtt);
+    var lanes = STREAM_NAMES.length;
+    var count = lanes * blocks;                     /* 線上封包總數 */
+    var lost = clampNum(p.lostIdx, 1, count, BASELINE.lostIdx);
+
+    /* 遺失偵測：封包門檻優先，洞後已無足夠封包時退回 PTO */
+    var tailLoss = lost + PKT_THRESHOLD > count;
+    var rtxArrive = tailLoss
+      ? count * SLOT_MS + rtt + ACK_DELAY_MS
+      : (lost + PKT_THRESHOLD) * SLOT_MS + rtt;
+
+    var span = Math.max(count * SLOT_MS, rtxArrive);
+    var cursor = clampNum(p.t, 0, span, 0);
+
+    var lostLane = (lost - 1) % lanes;
+    var lostBlock = Math.floor((lost - 1) / lanes) + 1;
+
+    var rows = [];
+    var tcpDone = [], quicDone = [], cleanDone = [];
+    var tcpHeld = 0, quicHeld = 0, tcpArea = 0, quicArea = 0;
+    var tcpAtCursor = 0, quicAtCursor = 0;
+    var lane, blk, idx, arrive, tcpAt, quicAt, tcpHold, quicHold, cells, last, i;
+
+    for (lane = 0; lane < lanes; lane += 1) {
+      cells = [];
+      for (blk = 1; blk <= blocks; blk += 1) {
+        idx = (blk - 1) * lanes + lane + 1;         /* 送出序：A1 B1 C1 A2 B2 C2 … */
+        arrive = idx * SLOT_MS;
+
+        /* TCP：單一有序位元組串流，洞之後的每一塊都得等重傳補上 */
+        if (idx === lost) tcpAt = rtxArrive;
+        else if (idx > lost) tcpAt = Math.max(arrive, rtxArrive);
+        else tcpAt = arrive;
+
+        /* QUIC：有序保證只在同一條 stream 內成立 */
+        if (idx === lost) quicAt = rtxArrive;
+        else if (lane === lostLane && blk > lostBlock) quicAt = Math.max(arrive, rtxArrive);
+        else quicAt = arrive;
+
+        tcpHold = idx === lost ? 0 : tcpAt - arrive;
+        quicHold = idx === lost ? 0 : quicAt - arrive;
+        if (tcpHold > 0) { tcpHeld += 1; tcpArea += tcpHold; }
+        if (quicHold > 0) { quicHeld += 1; quicArea += quicHold; }
+        if (tcpAt <= cursor) tcpAtCursor += 1;
+        if (quicAt <= cursor) quicAtCursor += 1;
+
+        cells.push({
+          idx: idx, blk: blk, arrive: arrive,
+          tcpAt: tcpAt, quicAt: quicAt,
+          tcpHold: tcpHold, quicHold: quicHold,
+          lost: idx === lost
+        });
       }
+      rows.push({ name: STREAM_NAMES[lane], cells: cells });
+      last = cells[cells.length - 1];               /* 交付時刻對 idx 單調不減 */
+      tcpDone.push(last.tcpAt);
+      quicDone.push(last.quicAt);
+      cleanDone.push(last.arrive);
     }
-  })();
-  var TOTAL = PACKETS.length;          /* 9 */
-  var LAST_STEP = TOTAL + 2;           /* 9 個封包 + 偵測重傳 + 重傳抵達 */
 
-  var scenario = "loss";
-  var step = 0;
-  var lostIdx = 5;                     /* 預設遺失 B2 */
+    var tcpDelayed = 0, quicDelayed = 0;
+    for (i = 0; i < lanes; i += 1) {
+      if (tcpDone[i] > cleanDone[i]) tcpDelayed += 1;
+      if (quicDone[i] > cleanDone[i]) quicDelayed += 1;
+    }
 
+    var tcpMean = mean(tcpDone);
+    var quicMean = mean(quicDone);
+    var recoveryMs = rtxArrive - lost * SLOT_MS;
+
+    return {
+      blocks: blocks,
+      rtt: rtt,
+      count: count,
+      slotMs: SLOT_MS,
+      span: span,
+      cursor: cursor,
+      lost: lost,
+      lostLane: lostLane,
+      lostName: STREAM_NAMES[lostLane],
+      lostLabel: STREAM_NAMES[lostLane] + lostBlock,
+      tailLoss: tailLoss,
+      triggerIdx: tailLoss ? 0 : lost + PKT_THRESHOLD,
+      rtxArrive: rtxArrive,
+      recoveryMs: recoveryMs,
+      recoveryRtts: round2(recoveryMs / rtt),
+      rows: rows,
+      tcpDone: tcpDone,
+      quicDone: quicDone,
+      tcpMean: round1(tcpMean),
+      quicMean: round1(quicMean),
+      deltaMeanMs: round1(tcpMean - quicMean),
+      tcpHeld: tcpHeld,
+      quicHeld: quicHeld,
+      tcpAreaMs: tcpArea,
+      quicAreaMs: quicArea,
+      areaRatio: quicArea > 0 ? round2(tcpArea / quicArea) : 0,
+      tcpDelayed: tcpDelayed,
+      quicDelayed: quicDelayed,
+      tcpAtCursor: tcpAtCursor,
+      quicAtCursor: quicAtCursor
+    };
+  }
+
+  /* ---------- (3) DOM 參照 ---------- */
+
+  var demo = document.getElementById("quic-demo");
+  if (!demo) return;
+
+  var lostInput = document.getElementById("quic-lost");
+  var blocksInput = document.getElementById("quic-blocks");
+  var rttInput = document.getElementById("quic-rtt");
+  var tInput = document.getElementById("quic-t");
+  var lostVal = document.getElementById("quic-lost-val");
+  var blocksVal = document.getElementById("quic-blocks-val");
+  var rttVal = document.getElementById("quic-rtt-val");
+  var tVal = document.getElementById("quic-t-val");
   var statusEl = document.getElementById("quic-status");
-  var lossView = document.getElementById("quic-loss-view");
-  var migView = document.getElementById("quic-mig-view");
-  var wireEl = document.getElementById("quic-wire");
-  var btnNext = document.getElementById("quic-btn-next");
+  var chartTcp = document.getElementById("quic-chart-tcp");
+  var chartQuic = document.getElementById("quic-chart-q");
+  var noteTcp = document.getElementById("quic-tcp-note");
+  var noteQuic = document.getElementById("quic-q-note");
+  var matrixEl = document.getElementById("quic-matrix");
   var btnReset = document.getElementById("quic-btn-reset");
 
-  var MIG = [
-    {
-      status: "連線建立於 Wi-Fi，三個 stream 正在傳輸。兩側目前沒有差別。",
-      tcp: [
-        { t: "五元組 = (TCP, 10.0.1.7:51423, 93.184.x.x:443)", c: "on" },
-        { t: "HTTP/2 SETTINGS 已協商 · HPACK 動態表索引已到 62", c: "" },
-        { t: "傳輸中：3 個 stream，進度 60%", c: "" }
-      ],
-      q: [
-        { t: "DCID = 0x8f3a91c2（與位址無關）", c: "on" },
-        { t: "備用 CID 已由 NEW_CONNECTION_ID 預先發放", c: "" },
-        { t: "傳輸中：3 個 stream，進度 60%", c: "" }
-      ],
-      p: { tcpId: "五元組（Wi-Fi）", qId: "DCID 0x8f3a91c2", net: "Wi-Fi", tcpCost: "—", qCost: "—", prog: "TCP 60% / QUIC 60%" }
-    },
-    {
-      status: "使用者走出門：Wi-Fi 斷開，切換到 4G。來源 IP 與 port 全部改變。",
-      tcp: [
-        { t: "來源位址變成 172.20.8.3:60112 → 五元組不再匹配", c: "bad" },
-        { t: "HTTP/2 SETTINGS 已協商 · HPACK 動態表索引已到 62", c: "" },
-        { t: "傳輸中斷", c: "bad" }
-      ],
-      q: [
-        { t: "來源位址變成 172.20.8.3:60112，但 DCID 不變", c: "on" },
-        { t: "封包照樣寫 DCID = 0x8f3a91c2 送出", c: "on" },
-        { t: "傳輸暫緩，等待伺服器回應", c: "" }
-      ],
-      p: { tcpId: "五元組已失效", qId: "DCID 0x8f3a91c2（不變）", net: "4G（新位址）", tcpCost: "連線中斷", qCost: "尚未確定", prog: "TCP 60% / QUIC 60%" }
-    },
-    {
-      status: "伺服器收到來自新位址的封包。兩側的查表方式決定了結局。",
-      tcp: [
-        { t: "查五元組 → 找不到任何連線", c: "bad" },
-        { t: "回一個 RST，舊連線狀態被丟棄", c: "bad" },
-        { t: "應用層收到「連線被重置」", c: "bad" }
-      ],
-      q: [
-        { t: "查 DCID → 命中，就是原本那條連線", c: "ok" },
-        { t: "但不直接信任：送出 PATH_CHALLENGE（隨機值）", c: "on" },
-        { t: "在新路徑上等待 PATH_RESPONSE", c: "on" }
-      ],
-      p: { tcpId: "查無此連線", qId: "DCID 命中", net: "4G（新位址）", tcpCost: "RST", qCost: "路徑驗證中", prog: "TCP 60% / QUIC 60%" }
-    },
-    {
-      status: "TCP 側只能重建連線；QUIC 側完成路徑驗證，並重新探測新路徑的容量。",
-      tcp: [
-        { t: "重建：TCP 三向交握 1-RTT + TLS 交握 1-RTT", c: "bad" },
-        { t: "HTTP/2 SETTINGS 重新協商、HPACK 動態表歸零", c: "bad" },
-        { t: "已下載進度多半從頭來（除非應用自己做 Range 續傳）", c: "bad" }
-      ],
-      q: [
-        { t: "收到正確的 PATH_RESPONSE → 新路徑驗證通過", c: "ok" },
-        { t: "重置壅塞控制器與 RTT 估計（新路徑容量未知）", c: "on" },
-        { t: "stream 進度、已解析標頭全部保留", c: "ok" }
-      ],
-      p: { tcpId: "重建中", qId: "DCID 0x8f3a91c2", net: "4G（新位址）", tcpCost: "2-RTT + 狀態重來", qCost: "1 次路徑驗證", prog: "TCP 0% / QUIC 60%" }
-    },
-    {
-      status: "最後一步：QUIC 換用一個沒在網路上出現過的備用 CID，避免路徑上的觀察者把兩個位址串起來。",
-      tcp: [
-        { t: "新的五元組 = (TCP, 172.20.8.3:60112, 93.184.x.x:443)", c: "" },
-        { t: "重建完成，重新開始下載", c: "bad" },
-        { t: "總代價：2-RTT + 全部連線狀態重來", c: "bad" }
-      ],
-      q: [
-        { t: "改用備用 CID = 0x41d7be05（首次出現在網路上）", c: "ok" },
-        { t: "傳輸繼續，應用層完全無感", c: "ok" },
-        { t: "總代價：一次路徑驗證 + 壅塞控制重新探測", c: "ok" }
-      ],
-      p: { tcpId: "新五元組（新連線）", qId: "DCID 0x41d7be05", net: "4G（已驗證）", tcpCost: "2-RTT + 狀態全失", qCost: "1 次路徑驗證", prog: "TCP 0% / QUIC 60%（續傳）" }
-    }
-  ];
+  var params = {
+    lostIdx: BASELINE.lostIdx,
+    blocks: BASELINE.blocks,
+    rtt: BASELINE.rtt,
+    t: BASELINE.t
+  };
 
-  function setText(id, txt) {
-    var el = document.getElementById(id);
-    if (el) el.textContent = txt;
-  }
+  /* ---------- (4) render(state)：只讀 state 畫出來 ---------- */
 
-  function pktLabel(p) {
-    return "#" + p.i + " S-" + p.s + p.n;
-  }
+  var W = 720, LEFT = 66, RIGHT = 86, TOP = 22, ROW = 28;
 
-  /* ---------- 丟包情境 ---------- */
+  function chartSvg(state, isTcp) {
+    var plotW = W - LEFT - RIGHT;
+    var height = TOP + state.rows.length * ROW + 24;
+    var axisY = TOP + state.rows.length * ROW + 4;
+    var bw = Math.max(plotW * state.slotMs / state.span, 5);
+    var out = [];
+    var r, c, row, cell, at, hold, px, prevRight, y, done, k, tv, tx, mx;
 
-  function arrivedCount() {
-    return Math.min(step, TOTAL);
-  }
+    function X(t) { return Math.round((LEFT + (t / state.span) * plotW) * 10) / 10; }
 
-  function isFixed() {
-    return step >= TOTAL + 2;
-  }
+    out.push('<svg viewBox="0 0 ' + W + ' ' + height + '" style="width:100%;height:auto" role="img" aria-label="' +
+      (isTcp ? "TCP 側三條 stream 的交付時間軸" : "QUIC 側三條 stream 的交付時間軸") + '">');
+    out.push('<title>' + (isTcp ? "HTTP/2 over TCP" : "HTTP/3 over QUIC") + ' · 每條 stream 的交付時刻</title>');
 
-  function tcpState(p) {
-    var t = arrivedCount();
-    if (isFixed()) return "ok";
-    if (p.i === lostIdx && t >= lostIdx) return "lost";
-    if (p.i > t) return "idle";
-    var deliveredUpto = t < lostIdx ? t : lostIdx - 1;
-    return p.i <= deliveredUpto ? "ok" : "held";
-  }
-
-  function quicArrived(i) {
-    if (isFixed()) return true;
-    if (i === lostIdx) return false;
-    return i <= arrivedCount();
-  }
-
-  function quicState(p) {
-    var t = arrivedCount();
-    if (!quicArrived(p.i)) return p.i <= t ? "lost" : "idle";
-    /* 同一條 stream 內，前面每一塊都到了才算交付 */
-    for (var k = 0; k < PACKETS.length; k++) {
-      var q = PACKETS[k];
-      if (q.s === p.s && q.n < p.n && !quicArrived(q.i)) return "held";
-    }
-    return "ok";
-  }
-
-  function renderWire() {
-    var html = "";
-    var t = arrivedCount();
-    for (var k = 0; k < PACKETS.length; k++) {
-      var p = PACKETS[k];
-      var cls = "quic-pk";
-      if (p.i === lostIdx) cls += step >= TOTAL + 1 ? " rtx" : " mark";
-      else if (p.i <= t) cls += " sent";
-      html += '<span class="' + cls + '" data-pk="' + p.i + '">' + pktLabel(p) + "</span>";
-    }
-    wireEl.innerHTML = html;
-  }
-
-  function renderLane(containerId, stateFn) {
-    var html = "";
-    var blocked = {};
-    var ok = 0, held = 0;
-    for (var s = 0; s < STREAMS.length; s++) {
-      var name = STREAMS[s];
-      html += '<div class="quic-srow"><span class="sl">Stream ' + name + "</span>";
-      for (var k = 0; k < PACKETS.length; k++) {
-        var p = PACKETS[k];
-        if (p.s !== name) continue;
-        var st = stateFn(p);
-        if (st === "ok") ok++;
-        if (st === "held") held++;
-        if (st === "held" || st === "lost") blocked[name] = true;
-        var label = st === "ok" ? "交付" : st === "held" ? "扣住" : st === "lost" ? "遺失" : "—";
-        html += '<span class="quic-box st-' + st + '">' + name + p.n + " " + label + "</span>";
+    for (r = 0; r < state.rows.length; r += 1) {
+      row = state.rows[r];
+      y = TOP + r * ROW;
+      out.push('<text class="qx-ax" x="0" y="' + (y + 13) + '">Stream ' + row.name + "</text>");
+      out.push('<line class="qx-grid" x1="' + LEFT + '" y1="' + (y + 19) + '" x2="' + (LEFT + plotW) +
+        '" y2="' + (y + 19) + '"/>');
+      prevRight = LEFT;
+      for (c = 0; c < row.cells.length; c += 1) {
+        cell = row.cells[c];
+        at = isTcp ? cell.tcpAt : cell.quicAt;
+        hold = isTcp ? cell.tcpHold : cell.quicHold;
+        px = Math.max(X(at), prevRight);
+        if (hold > 0) {
+          out.push('<rect class="qx-hold" x="' + X(cell.arrive) + '" y="' + (y + 5) +
+            '" width="' + Math.max(px - X(cell.arrive), 1) + '" height="8" rx="2"/>');
+        }
+        if (cell.lost) {
+          out.push('<rect class="qx-ghost" x="' + X(cell.arrive) + '" y="' + y +
+            '" width="' + bw + '" height="18" rx="3"/>');
+        }
+        out.push('<rect class="qx-blk ' + (cell.lost ? "lost" : hold > 0 ? "held" : "ok") +
+          '" x="' + px + '" y="' + y + '" width="' + bw + '" height="18" rx="3"/>');
+        if (bw >= 15) {
+          out.push('<text class="qx-bl" x="' + (px + bw / 2) + '" y="' + (y + 13) + '">' + cell.blk + "</text>");
+        }
+        prevRight = px + bw + 1.5;
       }
-      html += "</div>";
+      done = isTcp ? state.tcpDone[r] : state.quicDone[r];
+      out.push('<text class="qx-rl" x="' + (LEFT + plotW + 8) + '" y="' + (y + 13) + '">' + done + " ms</text>");
     }
-    document.getElementById(containerId).innerHTML = html;
-    return { ok: ok, held: held, blocked: Object.keys(blocked).length };
-  }
 
-  function lossStatus() {
-    var t = arrivedCount();
-    var lp = PACKETS[lostIdx - 1];
-    if (step === 0) {
-      return "目前標記遺失的是 " + pktLabel(lp) + "。點其他封包可以改，按「下一步」開始逐格推進。";
+    /* 重傳抵達線 */
+    mx = X(state.rtxArrive);
+    out.push('<line class="qx-rtx" x1="' + mx + '" y1="' + (TOP - 6) + '" x2="' + mx + '" y2="' + axisY + '"/>');
+    tx = Math.min(Math.max(mx, LEFT + 34), LEFT + plotW - 34);
+    out.push('<text class="qx-ax mark" x="' + tx + '" y="12">重傳 ' + state.rtxArrive + " ms</text>");
+
+    /* 時間游標 */
+    out.push('<line class="qx-cursor" x1="' + X(state.cursor) + '" y1="' + (TOP - 6) +
+      '" x2="' + X(state.cursor) + '" y2="' + axisY + '"/>');
+
+    /* 時間軸與刻度 */
+    out.push('<line class="qx-axis" x1="' + LEFT + '" y1="' + axisY + '" x2="' + (LEFT + plotW) +
+      '" y2="' + axisY + '"/>');
+    for (k = 0; k <= 2; k += 1) {
+      tv = Math.round(state.span * k / 2);
+      out.push('<line class="qx-axis" x1="' + X(tv) + '" y1="' + axisY + '" x2="' + X(tv) +
+        '" y2="' + (axisY + 5) + '"/>');
+      out.push('<text class="qx-tk" x="' + X(tv) + '" y="' + (axisY + 17) + '">' + tv + "</text>");
     }
-    if (step <= TOTAL) {
-      var p = PACKETS[t - 1];
-      if (p.i === lostIdx) {
-        return pktLabel(p) + " 在路徑上遺失。從這一格開始，兩側的行為開始分岔。";
-      }
-      return pktLabel(p) + " 抵達。TCP 側只要洞還在，後面的資料一律扣在核心緩衝；QUIC 側只看它屬於哪條 stream。";
-    }
-    if (step === TOTAL + 1) {
-      return "兩側都偵測到破洞：TCP 靠重複 ACK，QUIC 靠 ACK frame 裡的 ACK Range 缺口。" +
-        pktLabel(lp) + " 重傳送出——QUIC 會用一個編號更大的新 packet 送同一份資料。";
-    }
-    return "重傳抵達。TCP 一次把緩衝裡積壓的資料全部交付（這段等待就是 HoL Blocking）；QUIC 只補上 Stream " +
-      lp.s + " 的缺口，另外兩條 stream 早就交付完畢。";
+    out.push('<text class="qx-ax" x="0" y="' + (axisY + 17) + '">ms</text>');
+    out.push("</svg>");
+    return out.join("");
   }
 
-  function renderLoss() {
-    renderWire();
-    var tcp = renderLane("quic-tcp-rows", tcpState);
-    var q = renderLane("quic-q-rows", quicState);
-
-    setText("quic-m-tcp-ok", tcp.ok + " / " + TOTAL + " 塊");
-    setText("quic-m-tcp-held", tcp.held + " 塊");
-    setText("quic-m-tcp-blk", tcp.blocked + " / 3 條");
-    setText("quic-m-q-ok", q.ok + " / " + TOTAL + " 塊");
-    setText("quic-m-q-held", q.held + " 塊");
-    setText("quic-m-q-blk", q.blocked + " / 3 條");
-
-    setText("quic-tcp-note", tcp.held > 0
-      ? "接收緩衝裡有 " + tcp.held + " 塊資料「已經安全抵達，卻交不上去」——因為 TCP 不能跳過洞，也看不見裡面有幾條 stream。"
-      : "沒有破洞，位元組串流連續交付。");
-    setText("quic-q-note", q.held > 0
-      ? "只有 Stream " + PACKETS[lostIdx - 1].s + " 在等自己的缺口；另外兩條 stream 的重組緩衝是乾淨的。"
-      : "三條 stream 各自重組，目前沒有任何一條在等。");
-
-    statusEl.textContent = lossStatus();
+  function fmtDelta(v, unit) {
+    if (v === 0) return "0";
+    return (v > 0 ? "+" : "") + v + (unit || "");
   }
 
-  /* ---------- 遷移情境 ---------- */
-
-  function renderMigRows(containerId, rows) {
-    document.getElementById(containerId).innerHTML = rows.map(function (r) {
-      return '<div class="mrow ' + r.c + '">' + r.t + "</div>";
-    }).join("");
-  }
-
-  function renderMig() {
-    var d = MIG[Math.min(step, MIG.length - 1)];
-    renderMigRows("quic-mig-tcp", d.tcp);
-    renderMigRows("quic-mig-q", d.q);
-    setText("quic-m-tcp-id", d.p.tcpId);
-    setText("quic-m-q-id", d.p.qId);
-    setText("quic-m-net", d.p.net);
-    setText("quic-m-tcp-cost", d.p.tcpCost);
-    setText("quic-m-q-cost", d.p.qCost);
-    setText("quic-m-progress", d.p.prog);
-    statusEl.textContent = d.status;
-  }
-
-  /* ---------- 共用 ---------- */
-
-  function maxStep() {
-    return scenario === "loss" ? LAST_STEP : MIG.length - 1;
-  }
-
-  function render() {
-    var isLoss = scenario === "loss";
-    lossView.hidden = !isLoss;
-    migView.hidden = isLoss;
-    if (isLoss) renderLoss(); else renderMig();
-    btnNext.disabled = step >= maxStep();
-  }
-
-  function reset() {
-    step = 0;
-    render();
-  }
-
-  function next() {
-    if (step < maxStep()) {
-      step += 1;
-      render();
-    }
-  }
-
-  wireEl.addEventListener("click", function (ev) {
-    var target = ev.target.closest ? ev.target.closest(".quic-pk") : null;
-    if (!target) return;
-    var idx = parseInt(target.getAttribute("data-pk"), 10);
-    if (!idx) return;
-    lostIdx = idx;
-    step = 0;
-    render();
-    statusEl.textContent = "已把 " + pktLabel(PACKETS[idx - 1]) +
-      " 標記為遺失。按「下一步」推進，看兩側各自有多少資料交不上去。";
-  });
-
-  Array.prototype.forEach.call(
-    document.querySelectorAll("#quic-demo .seg button"),
-    function (btn) {
-      btn.addEventListener("click", function () {
-        Array.prototype.forEach.call(
-          document.querySelectorAll("#quic-demo .seg button"),
-          function (b) { b.setAttribute("aria-pressed", "false"); }
-        );
-        btn.setAttribute("aria-pressed", "true");
-        scenario = btn.getAttribute("data-sc");
-        reset();
+  function matrixHtml(state) {
+    var lanes = state.rows.length;
+    var defs = [], i, d, out;
+    for (i = 0; i < lanes; i += 1) {
+      defs.push({
+        k: "Stream " + state.rows[i].name + " 完成時刻",
+        a: state.tcpDone[i] + " ms",
+        b: state.quicDone[i] + " ms",
+        d: round1(state.tcpDone[i] - state.quicDone[i]),
+        u: " ms"
       });
     }
-  );
+    defs.push({ k: "平均完成時刻", a: state.tcpMean + " ms", b: state.quicMean + " ms", d: state.deltaMeanMs, u: " ms" });
+    defs.push({ k: "已抵達卻交不上去", a: state.tcpHeld + " 塊", b: state.quicHeld + " 塊", d: state.tcpHeld - state.quicHeld, u: " 塊" });
+    defs.push({ k: "扣住總量", a: state.tcpAreaMs + " 塊·ms", b: state.quicAreaMs + " 塊·ms", d: state.tcpAreaMs - state.quicAreaMs, u: " 塊·ms" });
+    defs.push({ k: "被這個洞拖累的 stream", a: state.tcpDelayed + " / " + lanes + " 條", b: state.quicDelayed + " / " + lanes + " 條", d: state.tcpDelayed - state.quicDelayed, u: " 條" });
+    defs.push({ k: "t=" + state.cursor + " ms 時已交付", a: state.tcpAtCursor + " / " + state.count + " 塊", b: state.quicAtCursor + " / " + state.count + " 塊", d: state.tcpAtCursor - state.quicAtCursor, u: " 塊" });
 
-  btnNext.addEventListener("click", next);
-  btnReset.addEventListener("click", reset);
+    out = '<div class="qx-mrow qx-mhead"><span>指標</span><span>HTTP/2 over TCP</span>' +
+      "<span>HTTP/3 over QUIC</span><span>差額（TCP − QUIC）</span></div>";
+    for (i = 0; i < defs.length; i += 1) {
+      d = defs[i];
+      out += '<div class="qx-mrow"><span class="qk">' + d.k + '</span><span class="qv tcp">' + d.a +
+        '</span><span class="qv q">' + d.b + '</span><span class="qd' + (d.d > 0 ? " bad" : d.d < 0 ? " good" : "") +
+        '">' + fmtDelta(d.d, d.u) + "</span></div>";
+    }
+    return out;
+  }
 
-  reset();
+  function statusText(state) {
+    var detect = state.tailLoss
+      ? "洞之後已不足 " + PKT_THRESHOLD + " 個封包可觸發門檻，只能等 PTO（約 1 RTT + max_ack_delay）"
+      : "封包門檻——線上第 " + state.triggerIdx + " 個封包抵達時判定遺失";
+    return "遺失 " + state.lostLabel + "（線上第 " + state.lost + " / " + state.count + " 個封包）· 偵測方式：" +
+      detect + " · 重傳在 " + state.rtxArrive + " ms 抵達，恢復耗時 " + state.recoveryMs + " ms ＝ " +
+      state.recoveryRtts + " RTT。";
+  }
+
+  function tcpNoteText(state) {
+    if (state.tcpHeld === 0) {
+      return "洞之後沒有已抵達的資料，這一次位元組串流沒有被扣住——把遺失點往前拖就看得到差別。";
+    }
+    return "接收緩衝裡有 <b>" + state.tcpHeld + " 塊</b>已經安全抵達、卻交不上去，合計等了 <b>" +
+      state.tcpAreaMs + " 塊·ms</b>。TCP 不能跳過洞，也看不見裡面有幾條 stream。";
+  }
+
+  function quicNoteText(state) {
+    if (state.quicHeld === 0) {
+      return "三條 stream 各自重組，目前沒有任何一條被別人的洞擋住。";
+    }
+    return "只有 Stream <b>" + state.lostName + "</b> 在等自己的缺口（" + state.quicHeld + " 塊、" +
+      state.quicAreaMs + " 塊·ms）；另外兩條 stream 的重組緩衝是乾淨的。";
+  }
+
+  function render(state) {
+    lostInput.max = String(state.count);
+    lostInput.value = String(state.lost);
+    blocksInput.value = String(state.blocks);
+    rttInput.value = String(state.rtt);
+    tInput.max = String(state.span);
+    tInput.value = String(state.cursor);
+
+    lostVal.textContent = state.lost + " · " + state.lostLabel;
+    blocksVal.textContent = String(state.blocks);
+    rttVal.textContent = String(state.rtt);
+    tVal.textContent = String(state.cursor);
+
+    statusEl.textContent = statusText(state);
+    chartTcp.innerHTML = chartSvg(state, true);
+    chartQuic.innerHTML = chartSvg(state, false);
+    noteTcp.innerHTML = tcpNoteText(state);
+    noteQuic.innerHTML = quicNoteText(state);
+    matrixEl.innerHTML = matrixHtml(state);
+  }
+
+  /* ---------- (5) 事件綁定 ---------- */
+
+  function paint() {
+    var state = computeHol(params);
+    params.lostIdx = state.lost;      /* 夾回顯示值，讓 slider 與計算一致 */
+    params.blocks = state.blocks;
+    params.rtt = state.rtt;
+    params.t = state.cursor;
+    render(state);
+  }
+
+  function bindSlider(input, key) {
+    input.addEventListener("input", function () {
+      params[key] = parseInt(input.value, 10);
+      paint();
+    });
+  }
+
+  bindSlider(lostInput, "lostIdx");
+  bindSlider(blocksInput, "blocks");
+  bindSlider(rttInput, "rtt");
+  bindSlider(tInput, "t");
+
+  btnReset.addEventListener("click", function () {
+    params.lostIdx = BASELINE.lostIdx;
+    params.blocks = BASELINE.blocks;
+    params.rtt = BASELINE.rtt;
+    params.t = BASELINE.t;
+    paint();
+  });
+
+  paint();
 })();
 </script>
 
