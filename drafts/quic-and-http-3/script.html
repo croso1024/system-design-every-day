@@ -2,304 +2,357 @@
 (function () {
   "use strict";
 
-  var STREAMS = ["A", "B", "C"];
-  /* 線上的送出順序：A1 B1 C1 A2 B2 C2 A3 B3 C3 */
-  var PACKETS = [];
-  (function build() {
-    for (var n = 1; n <= 3; n++) {
-      for (var s = 0; s < STREAMS.length; s++) {
-        PACKETS.push({ i: PACKETS.length + 1, s: STREAMS[s], n: n });
+  /* ---------- (1) 常數與參數表 ---------- */
+
+  var STREAM_NAMES = ["A", "B", "C"];
+  var SLOT_MS = 5;            /* 封包在線上的間隔：等於「固定速率鏈路」假設 */
+  var ACK_DELAY_MS = 25;      /* RFC 9000 max_ack_delay 預設值 */
+  var PKT_THRESHOLD = 3;      /* RFC 9002 kPacketThreshold：落後 3 個即判遺失 */
+  var MIN_BLOCKS = 1, MAX_BLOCKS = 6;
+  var MIN_RTT = 20, MAX_RTT = 300;
+  var BASELINE = { lostIdx: 5, blocks: 3, rtt: 80, t: 60 };
+
+  /* ---------- (2) compute* 純函式（不得碰 DOM） ---------- */
+
+  function clampNum(v, lo, hi, dflt) {
+    var n = Math.round(Number(v));
+    if (!isFinite(n)) n = dflt;
+    if (n < lo) n = lo;
+    if (n > hi) n = hi;
+    return n;
+  }
+
+  function round1(v) { return Math.round(v * 10) / 10; }
+  function round2(v) { return Math.round(v * 100) / 100; }
+
+  function mean(arr) {
+    var s = 0, i;
+    for (i = 0; i < arr.length; i += 1) s += arr[i];
+    return arr.length ? s / arr.length : 0;
+  }
+
+  // @probe fn       computeHol
+  // @probe baseline {"lostIdx":5,"blocks":3,"rtt":80,"t":60}
+  // @probe sweep    {"lostIdx":[1,9],"blocks":[1,6],"rtt":[20,300],"t":[0,400]}
+  function computeHol(p) {
+    p = p || {};
+    var blocks = clampNum(p.blocks, MIN_BLOCKS, MAX_BLOCKS, BASELINE.blocks);
+    var rtt = clampNum(p.rtt, MIN_RTT, MAX_RTT, BASELINE.rtt);
+    var lanes = STREAM_NAMES.length;
+    var count = lanes * blocks;                     /* 線上封包總數 */
+    var lost = clampNum(p.lostIdx, 1, count, BASELINE.lostIdx);
+
+    /* 遺失偵測：封包門檻優先，洞後已無足夠封包時退回 PTO */
+    var tailLoss = lost + PKT_THRESHOLD > count;
+    var rtxArrive = tailLoss
+      ? count * SLOT_MS + rtt + ACK_DELAY_MS
+      : (lost + PKT_THRESHOLD) * SLOT_MS + rtt;
+
+    var span = Math.max(count * SLOT_MS, rtxArrive);
+    var cursor = clampNum(p.t, 0, span, 0);
+
+    var lostLane = (lost - 1) % lanes;
+    var lostBlock = Math.floor((lost - 1) / lanes) + 1;
+
+    var rows = [];
+    var tcpDone = [], quicDone = [], cleanDone = [];
+    var tcpHeld = 0, quicHeld = 0, tcpArea = 0, quicArea = 0;
+    var tcpAtCursor = 0, quicAtCursor = 0;
+    var lane, blk, idx, arrive, tcpAt, quicAt, tcpHold, quicHold, cells, last, i;
+
+    for (lane = 0; lane < lanes; lane += 1) {
+      cells = [];
+      for (blk = 1; blk <= blocks; blk += 1) {
+        idx = (blk - 1) * lanes + lane + 1;         /* 送出序：A1 B1 C1 A2 B2 C2 … */
+        arrive = idx * SLOT_MS;
+
+        /* TCP：單一有序位元組串流，洞之後的每一塊都得等重傳補上 */
+        if (idx === lost) tcpAt = rtxArrive;
+        else if (idx > lost) tcpAt = Math.max(arrive, rtxArrive);
+        else tcpAt = arrive;
+
+        /* QUIC：有序保證只在同一條 stream 內成立 */
+        if (idx === lost) quicAt = rtxArrive;
+        else if (lane === lostLane && blk > lostBlock) quicAt = Math.max(arrive, rtxArrive);
+        else quicAt = arrive;
+
+        tcpHold = idx === lost ? 0 : tcpAt - arrive;
+        quicHold = idx === lost ? 0 : quicAt - arrive;
+        if (tcpHold > 0) { tcpHeld += 1; tcpArea += tcpHold; }
+        if (quicHold > 0) { quicHeld += 1; quicArea += quicHold; }
+        if (tcpAt <= cursor) tcpAtCursor += 1;
+        if (quicAt <= cursor) quicAtCursor += 1;
+
+        cells.push({
+          idx: idx, blk: blk, arrive: arrive,
+          tcpAt: tcpAt, quicAt: quicAt,
+          tcpHold: tcpHold, quicHold: quicHold,
+          lost: idx === lost
+        });
       }
+      rows.push({ name: STREAM_NAMES[lane], cells: cells });
+      last = cells[cells.length - 1];               /* 交付時刻對 idx 單調不減 */
+      tcpDone.push(last.tcpAt);
+      quicDone.push(last.quicAt);
+      cleanDone.push(last.arrive);
     }
-  })();
-  var TOTAL = PACKETS.length;          /* 9 */
-  var LAST_STEP = TOTAL + 2;           /* 9 個封包 + 偵測重傳 + 重傳抵達 */
 
-  var scenario = "loss";
-  var step = 0;
-  var lostIdx = 5;                     /* 預設遺失 B2 */
+    var tcpDelayed = 0, quicDelayed = 0;
+    for (i = 0; i < lanes; i += 1) {
+      if (tcpDone[i] > cleanDone[i]) tcpDelayed += 1;
+      if (quicDone[i] > cleanDone[i]) quicDelayed += 1;
+    }
 
+    var tcpMean = mean(tcpDone);
+    var quicMean = mean(quicDone);
+    var recoveryMs = rtxArrive - lost * SLOT_MS;
+
+    return {
+      blocks: blocks,
+      rtt: rtt,
+      count: count,
+      slotMs: SLOT_MS,
+      span: span,
+      cursor: cursor,
+      lost: lost,
+      lostLane: lostLane,
+      lostName: STREAM_NAMES[lostLane],
+      lostLabel: STREAM_NAMES[lostLane] + lostBlock,
+      tailLoss: tailLoss,
+      triggerIdx: tailLoss ? 0 : lost + PKT_THRESHOLD,
+      rtxArrive: rtxArrive,
+      recoveryMs: recoveryMs,
+      recoveryRtts: round2(recoveryMs / rtt),
+      rows: rows,
+      tcpDone: tcpDone,
+      quicDone: quicDone,
+      tcpMean: round1(tcpMean),
+      quicMean: round1(quicMean),
+      deltaMeanMs: round1(tcpMean - quicMean),
+      tcpHeld: tcpHeld,
+      quicHeld: quicHeld,
+      tcpAreaMs: tcpArea,
+      quicAreaMs: quicArea,
+      areaRatio: quicArea > 0 ? round2(tcpArea / quicArea) : 0,
+      tcpDelayed: tcpDelayed,
+      quicDelayed: quicDelayed,
+      tcpAtCursor: tcpAtCursor,
+      quicAtCursor: quicAtCursor
+    };
+  }
+
+  /* ---------- (3) DOM 參照 ---------- */
+
+  var demo = document.getElementById("quic-demo");
+  if (!demo) return;
+
+  var lostInput = document.getElementById("quic-lost");
+  var blocksInput = document.getElementById("quic-blocks");
+  var rttInput = document.getElementById("quic-rtt");
+  var tInput = document.getElementById("quic-t");
+  var lostVal = document.getElementById("quic-lost-val");
+  var blocksVal = document.getElementById("quic-blocks-val");
+  var rttVal = document.getElementById("quic-rtt-val");
+  var tVal = document.getElementById("quic-t-val");
   var statusEl = document.getElementById("quic-status");
-  var lossView = document.getElementById("quic-loss-view");
-  var migView = document.getElementById("quic-mig-view");
-  var wireEl = document.getElementById("quic-wire");
-  var btnNext = document.getElementById("quic-btn-next");
+  var chartTcp = document.getElementById("quic-chart-tcp");
+  var chartQuic = document.getElementById("quic-chart-q");
+  var noteTcp = document.getElementById("quic-tcp-note");
+  var noteQuic = document.getElementById("quic-q-note");
+  var matrixEl = document.getElementById("quic-matrix");
   var btnReset = document.getElementById("quic-btn-reset");
 
-  var MIG = [
-    {
-      status: "連線建立於 Wi-Fi，三個 stream 正在傳輸。兩側目前沒有差別。",
-      tcp: [
-        { t: "五元組 = (TCP, 10.0.1.7:51423, 93.184.x.x:443)", c: "on" },
-        { t: "HTTP/2 SETTINGS 已協商 · HPACK 動態表索引已到 62", c: "" },
-        { t: "傳輸中：3 個 stream，進度 60%", c: "" }
-      ],
-      q: [
-        { t: "DCID = 0x8f3a91c2（與位址無關）", c: "on" },
-        { t: "備用 CID 已由 NEW_CONNECTION_ID 預先發放", c: "" },
-        { t: "傳輸中：3 個 stream，進度 60%", c: "" }
-      ],
-      p: { tcpId: "五元組（Wi-Fi）", qId: "DCID 0x8f3a91c2", net: "Wi-Fi", tcpCost: "—", qCost: "—", prog: "TCP 60% / QUIC 60%" }
-    },
-    {
-      status: "使用者走出門：Wi-Fi 斷開，切換到 4G。來源 IP 與 port 全部改變。",
-      tcp: [
-        { t: "來源位址變成 172.20.8.3:60112 → 五元組不再匹配", c: "bad" },
-        { t: "HTTP/2 SETTINGS 已協商 · HPACK 動態表索引已到 62", c: "" },
-        { t: "傳輸中斷", c: "bad" }
-      ],
-      q: [
-        { t: "來源位址變成 172.20.8.3:60112，但 DCID 不變", c: "on" },
-        { t: "封包照樣寫 DCID = 0x8f3a91c2 送出", c: "on" },
-        { t: "傳輸暫緩，等待伺服器回應", c: "" }
-      ],
-      p: { tcpId: "五元組已失效", qId: "DCID 0x8f3a91c2（不變）", net: "4G（新位址）", tcpCost: "連線中斷", qCost: "尚未確定", prog: "TCP 60% / QUIC 60%" }
-    },
-    {
-      status: "伺服器收到來自新位址的封包。兩側的查表方式決定了結局。",
-      tcp: [
-        { t: "查五元組 → 找不到任何連線", c: "bad" },
-        { t: "回一個 RST，舊連線狀態被丟棄", c: "bad" },
-        { t: "應用層收到「連線被重置」", c: "bad" }
-      ],
-      q: [
-        { t: "查 DCID → 命中，就是原本那條連線", c: "ok" },
-        { t: "但不直接信任：送出 PATH_CHALLENGE（隨機值）", c: "on" },
-        { t: "在新路徑上等待 PATH_RESPONSE", c: "on" }
-      ],
-      p: { tcpId: "查無此連線", qId: "DCID 命中", net: "4G（新位址）", tcpCost: "RST", qCost: "路徑驗證中", prog: "TCP 60% / QUIC 60%" }
-    },
-    {
-      status: "TCP 側只能重建連線；QUIC 側完成路徑驗證，並重新探測新路徑的容量。",
-      tcp: [
-        { t: "重建：TCP 三向交握 1-RTT + TLS 交握 1-RTT", c: "bad" },
-        { t: "HTTP/2 SETTINGS 重新協商、HPACK 動態表歸零", c: "bad" },
-        { t: "已下載進度多半從頭來（除非應用自己做 Range 續傳）", c: "bad" }
-      ],
-      q: [
-        { t: "收到正確的 PATH_RESPONSE → 新路徑驗證通過", c: "ok" },
-        { t: "重置壅塞控制器與 RTT 估計（新路徑容量未知）", c: "on" },
-        { t: "stream 進度、已解析標頭全部保留", c: "ok" }
-      ],
-      p: { tcpId: "重建中", qId: "DCID 0x8f3a91c2", net: "4G（新位址）", tcpCost: "2-RTT + 狀態重來", qCost: "1 次路徑驗證", prog: "TCP 0% / QUIC 60%" }
-    },
-    {
-      status: "最後一步：QUIC 換用一個沒在網路上出現過的備用 CID，避免路徑上的觀察者把兩個位址串起來。",
-      tcp: [
-        { t: "新的五元組 = (TCP, 172.20.8.3:60112, 93.184.x.x:443)", c: "" },
-        { t: "重建完成，重新開始下載", c: "bad" },
-        { t: "總代價：2-RTT + 全部連線狀態重來", c: "bad" }
-      ],
-      q: [
-        { t: "改用備用 CID = 0x41d7be05（首次出現在網路上）", c: "ok" },
-        { t: "傳輸繼續，應用層完全無感", c: "ok" },
-        { t: "總代價：一次路徑驗證 + 壅塞控制重新探測", c: "ok" }
-      ],
-      p: { tcpId: "新五元組（新連線）", qId: "DCID 0x41d7be05", net: "4G（已驗證）", tcpCost: "2-RTT + 狀態全失", qCost: "1 次路徑驗證", prog: "TCP 0% / QUIC 60%（續傳）" }
-    }
-  ];
+  var params = {
+    lostIdx: BASELINE.lostIdx,
+    blocks: BASELINE.blocks,
+    rtt: BASELINE.rtt,
+    t: BASELINE.t
+  };
 
-  function setText(id, txt) {
-    var el = document.getElementById(id);
-    if (el) el.textContent = txt;
-  }
+  /* ---------- (4) render(state)：只讀 state 畫出來 ---------- */
 
-  function pktLabel(p) {
-    return "#" + p.i + " S-" + p.s + p.n;
-  }
+  var W = 720, LEFT = 66, RIGHT = 86, TOP = 22, ROW = 28;
 
-  /* ---------- 丟包情境 ---------- */
+  function chartSvg(state, isTcp) {
+    var plotW = W - LEFT - RIGHT;
+    var height = TOP + state.rows.length * ROW + 24;
+    var axisY = TOP + state.rows.length * ROW + 4;
+    var bw = Math.max(plotW * state.slotMs / state.span, 5);
+    var out = [];
+    var r, c, row, cell, at, hold, px, prevRight, y, done, k, tv, tx, mx;
 
-  function arrivedCount() {
-    return Math.min(step, TOTAL);
-  }
+    function X(t) { return Math.round((LEFT + (t / state.span) * plotW) * 10) / 10; }
 
-  function isFixed() {
-    return step >= TOTAL + 2;
-  }
+    out.push('<svg viewBox="0 0 ' + W + ' ' + height + '" style="width:100%;height:auto" role="img" aria-label="' +
+      (isTcp ? "TCP 側三條 stream 的交付時間軸" : "QUIC 側三條 stream 的交付時間軸") + '">');
+    out.push('<title>' + (isTcp ? "HTTP/2 over TCP" : "HTTP/3 over QUIC") + ' · 每條 stream 的交付時刻</title>');
 
-  function tcpState(p) {
-    var t = arrivedCount();
-    if (isFixed()) return "ok";
-    if (p.i === lostIdx && t >= lostIdx) return "lost";
-    if (p.i > t) return "idle";
-    var deliveredUpto = t < lostIdx ? t : lostIdx - 1;
-    return p.i <= deliveredUpto ? "ok" : "held";
-  }
-
-  function quicArrived(i) {
-    if (isFixed()) return true;
-    if (i === lostIdx) return false;
-    return i <= arrivedCount();
-  }
-
-  function quicState(p) {
-    var t = arrivedCount();
-    if (!quicArrived(p.i)) return p.i <= t ? "lost" : "idle";
-    /* 同一條 stream 內，前面每一塊都到了才算交付 */
-    for (var k = 0; k < PACKETS.length; k++) {
-      var q = PACKETS[k];
-      if (q.s === p.s && q.n < p.n && !quicArrived(q.i)) return "held";
-    }
-    return "ok";
-  }
-
-  function renderWire() {
-    var html = "";
-    var t = arrivedCount();
-    for (var k = 0; k < PACKETS.length; k++) {
-      var p = PACKETS[k];
-      var cls = "quic-pk";
-      if (p.i === lostIdx) cls += step >= TOTAL + 1 ? " rtx" : " mark";
-      else if (p.i <= t) cls += " sent";
-      html += '<span class="' + cls + '" data-pk="' + p.i + '">' + pktLabel(p) + "</span>";
-    }
-    wireEl.innerHTML = html;
-  }
-
-  function renderLane(containerId, stateFn) {
-    var html = "";
-    var blocked = {};
-    var ok = 0, held = 0;
-    for (var s = 0; s < STREAMS.length; s++) {
-      var name = STREAMS[s];
-      html += '<div class="quic-srow"><span class="sl">Stream ' + name + "</span>";
-      for (var k = 0; k < PACKETS.length; k++) {
-        var p = PACKETS[k];
-        if (p.s !== name) continue;
-        var st = stateFn(p);
-        if (st === "ok") ok++;
-        if (st === "held") held++;
-        if (st === "held" || st === "lost") blocked[name] = true;
-        var label = st === "ok" ? "交付" : st === "held" ? "扣住" : st === "lost" ? "遺失" : "—";
-        html += '<span class="quic-box st-' + st + '">' + name + p.n + " " + label + "</span>";
+    for (r = 0; r < state.rows.length; r += 1) {
+      row = state.rows[r];
+      y = TOP + r * ROW;
+      out.push('<text class="qx-ax" x="0" y="' + (y + 13) + '">Stream ' + row.name + "</text>");
+      out.push('<line class="qx-grid" x1="' + LEFT + '" y1="' + (y + 19) + '" x2="' + (LEFT + plotW) +
+        '" y2="' + (y + 19) + '"/>');
+      prevRight = LEFT;
+      for (c = 0; c < row.cells.length; c += 1) {
+        cell = row.cells[c];
+        at = isTcp ? cell.tcpAt : cell.quicAt;
+        hold = isTcp ? cell.tcpHold : cell.quicHold;
+        px = Math.max(X(at), prevRight);
+        if (hold > 0) {
+          out.push('<rect class="qx-hold" x="' + X(cell.arrive) + '" y="' + (y + 5) +
+            '" width="' + Math.max(px - X(cell.arrive), 1) + '" height="8" rx="2"/>');
+        }
+        if (cell.lost) {
+          out.push('<rect class="qx-ghost" x="' + X(cell.arrive) + '" y="' + y +
+            '" width="' + bw + '" height="18" rx="3"/>');
+        }
+        out.push('<rect class="qx-blk ' + (cell.lost ? "lost" : hold > 0 ? "held" : "ok") +
+          '" x="' + px + '" y="' + y + '" width="' + bw + '" height="18" rx="3"/>');
+        if (bw >= 15) {
+          out.push('<text class="qx-bl" x="' + (px + bw / 2) + '" y="' + (y + 13) + '">' + cell.blk + "</text>");
+        }
+        prevRight = px + bw + 1.5;
       }
-      html += "</div>";
+      done = isTcp ? state.tcpDone[r] : state.quicDone[r];
+      out.push('<text class="qx-rl" x="' + (LEFT + plotW + 8) + '" y="' + (y + 13) + '">' + done + " ms</text>");
     }
-    document.getElementById(containerId).innerHTML = html;
-    return { ok: ok, held: held, blocked: Object.keys(blocked).length };
-  }
 
-  function lossStatus() {
-    var t = arrivedCount();
-    var lp = PACKETS[lostIdx - 1];
-    if (step === 0) {
-      return "目前標記遺失的是 " + pktLabel(lp) + "。點其他封包可以改，按「下一步」開始逐格推進。";
+    /* 重傳抵達線 */
+    mx = X(state.rtxArrive);
+    out.push('<line class="qx-rtx" x1="' + mx + '" y1="' + (TOP - 6) + '" x2="' + mx + '" y2="' + axisY + '"/>');
+    tx = Math.min(Math.max(mx, LEFT + 34), LEFT + plotW - 34);
+    out.push('<text class="qx-ax mark" x="' + tx + '" y="12">重傳 ' + state.rtxArrive + " ms</text>");
+
+    /* 時間游標 */
+    out.push('<line class="qx-cursor" x1="' + X(state.cursor) + '" y1="' + (TOP - 6) +
+      '" x2="' + X(state.cursor) + '" y2="' + axisY + '"/>');
+
+    /* 時間軸與刻度 */
+    out.push('<line class="qx-axis" x1="' + LEFT + '" y1="' + axisY + '" x2="' + (LEFT + plotW) +
+      '" y2="' + axisY + '"/>');
+    for (k = 0; k <= 2; k += 1) {
+      tv = Math.round(state.span * k / 2);
+      out.push('<line class="qx-axis" x1="' + X(tv) + '" y1="' + axisY + '" x2="' + X(tv) +
+        '" y2="' + (axisY + 5) + '"/>');
+      out.push('<text class="qx-tk" x="' + X(tv) + '" y="' + (axisY + 17) + '">' + tv + "</text>");
     }
-    if (step <= TOTAL) {
-      var p = PACKETS[t - 1];
-      if (p.i === lostIdx) {
-        return pktLabel(p) + " 在路徑上遺失。從這一格開始，兩側的行為開始分岔。";
-      }
-      return pktLabel(p) + " 抵達。TCP 側只要洞還在，後面的資料一律扣在核心緩衝；QUIC 側只看它屬於哪條 stream。";
-    }
-    if (step === TOTAL + 1) {
-      return "兩側都偵測到破洞：TCP 靠重複 ACK，QUIC 靠 ACK frame 裡的 ACK Range 缺口。" +
-        pktLabel(lp) + " 重傳送出——QUIC 會用一個編號更大的新 packet 送同一份資料。";
-    }
-    return "重傳抵達。TCP 一次把緩衝裡積壓的資料全部交付（這段等待就是 HoL Blocking）；QUIC 只補上 Stream " +
-      lp.s + " 的缺口，另外兩條 stream 早就交付完畢。";
+    out.push('<text class="qx-ax" x="0" y="' + (axisY + 17) + '">ms</text>');
+    out.push("</svg>");
+    return out.join("");
   }
 
-  function renderLoss() {
-    renderWire();
-    var tcp = renderLane("quic-tcp-rows", tcpState);
-    var q = renderLane("quic-q-rows", quicState);
-
-    setText("quic-m-tcp-ok", tcp.ok + " / " + TOTAL + " 塊");
-    setText("quic-m-tcp-held", tcp.held + " 塊");
-    setText("quic-m-tcp-blk", tcp.blocked + " / 3 條");
-    setText("quic-m-q-ok", q.ok + " / " + TOTAL + " 塊");
-    setText("quic-m-q-held", q.held + " 塊");
-    setText("quic-m-q-blk", q.blocked + " / 3 條");
-
-    setText("quic-tcp-note", tcp.held > 0
-      ? "接收緩衝裡有 " + tcp.held + " 塊資料「已經安全抵達，卻交不上去」——因為 TCP 不能跳過洞，也看不見裡面有幾條 stream。"
-      : "沒有破洞，位元組串流連續交付。");
-    setText("quic-q-note", q.held > 0
-      ? "只有 Stream " + PACKETS[lostIdx - 1].s + " 在等自己的缺口；另外兩條 stream 的重組緩衝是乾淨的。"
-      : "三條 stream 各自重組，目前沒有任何一條在等。");
-
-    statusEl.textContent = lossStatus();
+  function fmtDelta(v, unit) {
+    if (v === 0) return "0";
+    return (v > 0 ? "+" : "") + v + (unit || "");
   }
 
-  /* ---------- 遷移情境 ---------- */
-
-  function renderMigRows(containerId, rows) {
-    document.getElementById(containerId).innerHTML = rows.map(function (r) {
-      return '<div class="mrow ' + r.c + '">' + r.t + "</div>";
-    }).join("");
-  }
-
-  function renderMig() {
-    var d = MIG[Math.min(step, MIG.length - 1)];
-    renderMigRows("quic-mig-tcp", d.tcp);
-    renderMigRows("quic-mig-q", d.q);
-    setText("quic-m-tcp-id", d.p.tcpId);
-    setText("quic-m-q-id", d.p.qId);
-    setText("quic-m-net", d.p.net);
-    setText("quic-m-tcp-cost", d.p.tcpCost);
-    setText("quic-m-q-cost", d.p.qCost);
-    setText("quic-m-progress", d.p.prog);
-    statusEl.textContent = d.status;
-  }
-
-  /* ---------- 共用 ---------- */
-
-  function maxStep() {
-    return scenario === "loss" ? LAST_STEP : MIG.length - 1;
-  }
-
-  function render() {
-    var isLoss = scenario === "loss";
-    lossView.hidden = !isLoss;
-    migView.hidden = isLoss;
-    if (isLoss) renderLoss(); else renderMig();
-    btnNext.disabled = step >= maxStep();
-  }
-
-  function reset() {
-    step = 0;
-    render();
-  }
-
-  function next() {
-    if (step < maxStep()) {
-      step += 1;
-      render();
-    }
-  }
-
-  wireEl.addEventListener("click", function (ev) {
-    var target = ev.target.closest ? ev.target.closest(".quic-pk") : null;
-    if (!target) return;
-    var idx = parseInt(target.getAttribute("data-pk"), 10);
-    if (!idx) return;
-    lostIdx = idx;
-    step = 0;
-    render();
-    statusEl.textContent = "已把 " + pktLabel(PACKETS[idx - 1]) +
-      " 標記為遺失。按「下一步」推進，看兩側各自有多少資料交不上去。";
-  });
-
-  Array.prototype.forEach.call(
-    document.querySelectorAll("#quic-demo .seg button"),
-    function (btn) {
-      btn.addEventListener("click", function () {
-        Array.prototype.forEach.call(
-          document.querySelectorAll("#quic-demo .seg button"),
-          function (b) { b.setAttribute("aria-pressed", "false"); }
-        );
-        btn.setAttribute("aria-pressed", "true");
-        scenario = btn.getAttribute("data-sc");
-        reset();
+  function matrixHtml(state) {
+    var lanes = state.rows.length;
+    var defs = [], i, d, out;
+    for (i = 0; i < lanes; i += 1) {
+      defs.push({
+        k: "Stream " + state.rows[i].name + " 完成時刻",
+        a: state.tcpDone[i] + " ms",
+        b: state.quicDone[i] + " ms",
+        d: round1(state.tcpDone[i] - state.quicDone[i]),
+        u: " ms"
       });
     }
-  );
+    defs.push({ k: "平均完成時刻", a: state.tcpMean + " ms", b: state.quicMean + " ms", d: state.deltaMeanMs, u: " ms" });
+    defs.push({ k: "已抵達卻交不上去", a: state.tcpHeld + " 塊", b: state.quicHeld + " 塊", d: state.tcpHeld - state.quicHeld, u: " 塊" });
+    defs.push({ k: "扣住總量", a: state.tcpAreaMs + " 塊·ms", b: state.quicAreaMs + " 塊·ms", d: state.tcpAreaMs - state.quicAreaMs, u: " 塊·ms" });
+    defs.push({ k: "被這個洞拖累的 stream", a: state.tcpDelayed + " / " + lanes + " 條", b: state.quicDelayed + " / " + lanes + " 條", d: state.tcpDelayed - state.quicDelayed, u: " 條" });
+    defs.push({ k: "t=" + state.cursor + " ms 時已交付", a: state.tcpAtCursor + " / " + state.count + " 塊", b: state.quicAtCursor + " / " + state.count + " 塊", d: state.tcpAtCursor - state.quicAtCursor, u: " 塊" });
 
-  btnNext.addEventListener("click", next);
-  btnReset.addEventListener("click", reset);
+    out = '<div class="qx-mrow qx-mhead"><span>指標</span><span>HTTP/2 over TCP</span>' +
+      "<span>HTTP/3 over QUIC</span><span>差額（TCP − QUIC）</span></div>";
+    for (i = 0; i < defs.length; i += 1) {
+      d = defs[i];
+      out += '<div class="qx-mrow"><span class="qk">' + d.k + '</span><span class="qv tcp">' + d.a +
+        '</span><span class="qv q">' + d.b + '</span><span class="qd' + (d.d > 0 ? " bad" : d.d < 0 ? " good" : "") +
+        '">' + fmtDelta(d.d, d.u) + "</span></div>";
+    }
+    return out;
+  }
 
-  reset();
+  function statusText(state) {
+    var detect = state.tailLoss
+      ? "洞之後已不足 " + PKT_THRESHOLD + " 個封包可觸發門檻，只能等 PTO（約 1 RTT + max_ack_delay）"
+      : "封包門檻——線上第 " + state.triggerIdx + " 個封包抵達時判定遺失";
+    return "遺失 " + state.lostLabel + "（線上第 " + state.lost + " / " + state.count + " 個封包）· 偵測方式：" +
+      detect + " · 重傳在 " + state.rtxArrive + " ms 抵達，恢復耗時 " + state.recoveryMs + " ms ＝ " +
+      state.recoveryRtts + " RTT。";
+  }
+
+  function tcpNoteText(state) {
+    if (state.tcpHeld === 0) {
+      return "洞之後沒有已抵達的資料，這一次位元組串流沒有被扣住——把遺失點往前拖就看得到差別。";
+    }
+    return "接收緩衝裡有 <b>" + state.tcpHeld + " 塊</b>已經安全抵達、卻交不上去，合計等了 <b>" +
+      state.tcpAreaMs + " 塊·ms</b>。TCP 不能跳過洞，也看不見裡面有幾條 stream。";
+  }
+
+  function quicNoteText(state) {
+    if (state.quicHeld === 0) {
+      return "三條 stream 各自重組，目前沒有任何一條被別人的洞擋住。";
+    }
+    return "只有 Stream <b>" + state.lostName + "</b> 在等自己的缺口（" + state.quicHeld + " 塊、" +
+      state.quicAreaMs + " 塊·ms）；另外兩條 stream 的重組緩衝是乾淨的。";
+  }
+
+  function render(state) {
+    lostInput.max = String(state.count);
+    lostInput.value = String(state.lost);
+    blocksInput.value = String(state.blocks);
+    rttInput.value = String(state.rtt);
+    tInput.max = String(state.span);
+    tInput.value = String(state.cursor);
+
+    lostVal.textContent = state.lost + " · " + state.lostLabel;
+    blocksVal.textContent = String(state.blocks);
+    rttVal.textContent = String(state.rtt);
+    tVal.textContent = String(state.cursor);
+
+    statusEl.textContent = statusText(state);
+    chartTcp.innerHTML = chartSvg(state, true);
+    chartQuic.innerHTML = chartSvg(state, false);
+    noteTcp.innerHTML = tcpNoteText(state);
+    noteQuic.innerHTML = quicNoteText(state);
+    matrixEl.innerHTML = matrixHtml(state);
+  }
+
+  /* ---------- (5) 事件綁定 ---------- */
+
+  function paint() {
+    var state = computeHol(params);
+    params.lostIdx = state.lost;      /* 夾回顯示值，讓 slider 與計算一致 */
+    params.blocks = state.blocks;
+    params.rtt = state.rtt;
+    params.t = state.cursor;
+    render(state);
+  }
+
+  function bindSlider(input, key) {
+    input.addEventListener("input", function () {
+      params[key] = parseInt(input.value, 10);
+      paint();
+    });
+  }
+
+  bindSlider(lostInput, "lostIdx");
+  bindSlider(blocksInput, "blocks");
+  bindSlider(rttInput, "rtt");
+  bindSlider(tInput, "t");
+
+  btnReset.addEventListener("click", function () {
+    params.lostIdx = BASELINE.lostIdx;
+    params.blocks = BASELINE.blocks;
+    params.rtt = BASELINE.rtt;
+    params.t = BASELINE.t;
+    paint();
+  });
+
+  paint();
 })();
 </script>
