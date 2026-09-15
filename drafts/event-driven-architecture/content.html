@@ -1,4 +1,10 @@
-<!-- demo-archetype: C｜並排對照 — 讀者選定故障情境（正常／中間崩潰／Broker 中斷／重複投遞）與消費端策略（天真 handler／冪等鍵去重表），同一筆訂單 O-1001 同時餵進左「直接雙寫」與右「Transactional Outbox」兩條泳道，逐步比對訂單狀態、主題事件與庫存數字。選 C 是因為本篇的核心命題「雙寫錯在哪」，只有把錯誤解法與正確解法放在同一組輸入下同時推進才看得見分岔點。 -->
+<!-- demo-archetype: F｜拆解器（主，第 2 節）＋C｜並排對照（次，第 4 節） — 主 demo 讓讀者直接編輯一則 OrderPaid 信封的 JSON
+     與舊版契約，把它攤成逐欄台帳（角色／型別／bytes／缺席後果），並逐欄點選必填或選填，即時算出冪等鍵能不能擋住四種孿生
+     事件、這次欄位改動在四種 Registry 相容性模式下會不會被拒登、以及信封的重量帳與 thin／fat 取捨。選 F 是因為本篇最痛的
+     實務問題是事件契約設計，而契約的載體就是一筆信封——第 2 節整節的命題正是「信封裡該放什麼」，那是一筆資料的結構，不是
+     一段流程。次 demo 保留本篇的核心對照：讀者拖動故障注入點、切換雙寫的寫入順序與 broker 行為，對每一個故障點各跑一次完整
+     模擬，並排比出「直接雙寫」與「Transactional Outbox」的整條結局光譜與裂縫寬度。選 C 是因為「雙寫錯在哪」只有把錯誤解法
+     與正確解法餵同一組輸入才看得見分岔點。 -->
 <style>
   #eda-root {
     --eda-c: #3f6188; --eda-c-soft: #eef2f7;
@@ -57,136 +63,252 @@
   .eda-pane .ss { font-family: var(--mono); font-size: 11px; color: var(--text-3); margin-bottom: 8px; letter-spacing: .04em; }
   .eda-pane ul { margin: 0; padding-left: 1.15em; font-size: 13px; color: var(--text-2); line-height: 1.65; }
 
-  .eda-ctrl { display: flex; flex-wrap: wrap; gap: 10px; margin: 10px 0 8px; align-items: center; }
-  .eda-metric { display: flex; flex-wrap: wrap; gap: 14px; margin: 8px 0 4px; font-size: 13px; color: var(--text-2); }
-  .eda-ctrl[hidden], .eda-metric[hidden] { display: none; }
-  .eda-metric strong { color: var(--text); font-family: var(--mono); font-size: 12.5px; }
-  .eda-mode-hint { font-size: 12.5px; color: var(--text-2); margin: 8px 0 4px; line-height: 1.55; }
+  /* ===== demo 1 · 事件信封拆解器（巢狀欄位台帳 + bytes 量條 + 重量堆疊條） ===== */
 
-  .eda-view { display: block; }
-  .eda-view[hidden] { display: none; }
+  .evx-io { display: grid; grid-template-columns: 1.15fr 1fr; gap: 10px; margin: 4px 0 10px; }
+  @media (max-width: 720px) { .evx-io { grid-template-columns: 1fr; } }
+  .evx-field { display: flex; flex-direction: column; gap: 4px; }
+  .evx-field .fl { font-family: var(--mono); font-size: 11px; color: var(--text-3); letter-spacing: .03em; }
+  .evx-field textarea {
+    width: 100%; box-sizing: border-box; resize: vertical;
+    border: 1px solid var(--border-strong); border-radius: var(--radius-sm);
+    background: var(--code-bg); color: var(--text);
+    font-family: var(--mono); font-size: 11.5px; line-height: 1.55; padding: 8px 10px;
+  }
+  .evx-field textarea:focus { outline: 2px solid var(--accent-soft); border-color: var(--accent); }
 
-  .eda-col-label {
-    font-family: var(--mono); font-size: 10.5px; letter-spacing: .06em; text-transform: uppercase;
-    color: var(--text-3); margin: 10px 0 2px;
+  .evx-ctrl { display: flex; flex-wrap: wrap; gap: 10px 14px; align-items: center; margin: 4px 0 8px; }
+  .evx-pick { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text-2); }
+  .evx-pick .sl { font-family: var(--mono); font-size: 11px; color: var(--text-3); white-space: nowrap; }
+  .evx-pick select {
+    border: 1px solid var(--border-strong); border-radius: 6px; background: #fff;
+    font-family: var(--mono); font-size: 11.5px; padding: 4px 6px; color: var(--text); max-width: 100%;
+  }
+  .evx-err { border-left: 3px solid var(--bad); background: var(--bad-soft); }
+
+  /* 角色色票：identity / causality / payload / metadata / 結構開銷 */
+  .g-identity { background: var(--eda-c); }
+  .g-causality { background: var(--eda-alt); }
+  .g-payload { background: var(--eda-s); }
+  .g-metadata { background: var(--eda-w); }
+  .g-struct { background: var(--border-strong); }
+
+  .evx-tag {
+    display: inline-block; font-family: var(--mono); font-size: 9.5px; font-weight: 700;
+    letter-spacing: .04em; padding: 1px 5px; border-radius: 4px; margin-right: 6px;
+    border: 1px solid var(--border-strong); font-style: normal; vertical-align: 1px;
+  }
+  .evx-tag.g-identity { background: var(--eda-c-soft); border-color: var(--eda-c); color: var(--eda-c); }
+  .evx-tag.g-causality { background: var(--eda-alt-soft); border-color: var(--eda-alt); color: var(--eda-alt); }
+  .evx-tag.g-payload { background: var(--eda-s-soft); border-color: var(--eda-s); color: var(--eda-s); }
+  .evx-tag.g-metadata { background: var(--eda-w-soft); border-color: var(--eda-w); color: var(--eda-w); }
+
+  .evx-ledger {
+    display: grid; gap: 1px; margin: 10px 0 4px;
+    background: var(--border); border: 1px solid var(--border);
+    border-radius: 8px; overflow: hidden;
+  }
+  .evx-lhead, .evx-row {
+    display: grid; grid-template-columns: minmax(0, 1fr) 58px 62px 96px;
+    gap: 8px; background: #fff; padding: 6px 9px; align-items: center;
+  }
+  .evx-lhead { background: var(--bg-soft); }
+  .evx-lhead span { font-family: var(--mono); font-size: 10px; font-weight: 700; color: var(--text-3); }
+  .evx-row.t-ok { box-shadow: inset 3px 0 0 var(--ok); }
+  .evx-row.t-lock { box-shadow: inset 3px 0 0 var(--warn); }
+  .evx-row.t-bad { box-shadow: inset 3px 0 0 var(--bad); }
+  .evx-row .rp { min-width: 0; font-size: 11.5px; }
+  .evx-row .rp code { font-size: 11px; word-break: break-all; }
+  .evx-row.d1 .rp { padding-left: 18px; position: relative; }
+  .evx-row.d1 .rp::before {
+    content: ""; position: absolute; left: 6px; top: 50%; width: 7px;
+    border-top: 1px solid var(--border-strong); border-left: 1px solid var(--border-strong);
+    height: 9px; margin-top: -9px;
+  }
+  .evx-row .rw { font-family: var(--mono); font-size: 9.5px; font-style: normal; color: var(--warn); margin-left: 6px; }
+  .evx-row .rt { font-family: var(--mono); font-size: 10.5px; color: var(--text-3); }
+  .evx-row .rc { font-family: var(--mono); font-size: 10px; color: var(--text-3); }
+  .evx-row .rb { display: flex; align-items: center; gap: 6px; }
+  .evx-row .rb .tr { flex: 1; height: 6px; border-radius: 3px; background: var(--bg-soft); overflow: hidden; }
+  .evx-row .rb .tr i { display: block; height: 100%; }
+  .evx-row .rb b { font-family: var(--mono); font-size: 10.5px; color: var(--text-2); }
+  .evx-row .rn { grid-column: 1 / -1; font-size: 11px; color: var(--text-3); line-height: 1.5; }
+  @media (max-width: 640px) {
+    .evx-lhead, .evx-row { grid-template-columns: minmax(0, 1fr) 46px 56px 74px; gap: 6px; padding: 6px; }
   }
 
-  .eda-lanes { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 12px; }
-  @media (max-width: 720px) { .eda-lanes { grid-template-columns: 1fr; } }
-  .eda-lanes[hidden] { display: none; }
-
-  .eda-lane {
-    border: 1px solid var(--border); border-radius: var(--radius-sm);
-    background: #fff; padding: 12px; border-top: 3px solid var(--border-strong);
-  }
-  .eda-lane.dw { border-top-color: var(--eda-w); }
-  .eda-lane.ob { border-top-color: var(--eda-s); }
-  .eda-lane .ln { font-weight: 700; font-size: 14px; }
-  .eda-lane .ls { font-family: var(--mono); font-size: 11px; color: var(--text-3); margin: 2px 0 10px; letter-spacing: .04em; }
-
-  .eda-box {
-    border: 1.5px solid var(--border-strong); border-radius: var(--radius-sm);
-    padding: 8px 10px; background: #fff; margin-bottom: 8px;
-    transition: background .18s, border-color .18s;
-  }
-  .eda-box:last-child { margin-bottom: 0; }
-  .eda-box .bn { font-weight: 700; font-size: 13px; }
-  .eda-box .bl { font-family: var(--mono); font-size: 10.5px; color: var(--text-3); margin: 2px 0 6px; }
-  .eda-box .bv { font-family: var(--mono); font-size: 12px; color: var(--text); line-height: 1.55; }
-  .eda-box.idle { background: #fff; }
-  .eda-box.wait { background: var(--accent-soft); border-color: var(--accent); }
-  .eda-box.wait .bn { color: var(--accent); }
-  .eda-box.ok { background: var(--ok-soft); border-color: var(--ok); }
-  .eda-box.ok .bn { color: var(--ok); }
-  .eda-box.hold { background: var(--warn-soft); border-color: var(--warn); }
-  .eda-box.hold .bn { color: var(--warn); }
-  .eda-box.bad { background: var(--bad-soft); border-color: var(--bad); }
-  .eda-box.bad .bn { color: var(--bad); }
-
-  .eda-slots { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; min-height: 26px; }
-  .eda-slot {
-    font-family: var(--mono); font-size: 10.5px; font-weight: 700;
+  .evx-toggle {
+    width: 100%; cursor: pointer; font-family: var(--mono); font-size: 10.5px; font-weight: 700;
     border: 1.5px solid var(--border-strong); border-radius: 5px;
-    padding: 3px 7px; background: #fff; color: var(--text-3);
+    background: #fff; color: var(--text-2); padding: 3px 4px;
   }
-  .eda-slot.ready { background: var(--eda-c-soft); border-color: var(--eda-c); color: var(--eda-c); }
-  .eda-slot.ok { background: var(--eda-s-soft); border-color: var(--eda-s); color: var(--eda-s); }
-  .eda-slot.hold { background: var(--eda-w-soft); border-color: var(--eda-w); color: var(--eda-w); }
-  .eda-slot.lost { background: var(--eda-bad-soft); border-color: var(--eda-bad); color: var(--eda-bad); text-decoration: line-through; }
+  .evx-toggle:hover { box-shadow: 0 0 0 2px var(--accent-soft); }
+  .evx-toggle[aria-pressed="true"] { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); }
 
-  .eda-panels { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 12px; }
-  @media (max-width: 640px) { .eda-panels { grid-template-columns: 1fr; } }
-  .eda-panel { border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 12px; background: #fff; }
-  .eda-panel .pt {
-    font-size: 11px; color: var(--text-3); letter-spacing: .06em; text-transform: uppercase;
-    font-family: var(--mono); margin-bottom: 8px;
+  .evx-bar {
+    display: flex; height: 16px; margin: 12px 0 6px; overflow: hidden;
+    border: 1px solid var(--border-strong); border-radius: 4px;
   }
-  .eda-panel .prow {
-    display: flex; justify-content: space-between; gap: 8px;
-    font-family: var(--mono); font-size: 12px; padding: 4px 0;
-    border-bottom: 1px dashed var(--border);
+  .evx-bar i { display: block; height: 100%; min-width: 2px; }
+  .evx-keys { display: flex; flex-wrap: wrap; gap: 6px 16px; font-size: 11.5px; color: var(--text-2); }
+  .evx-keys b { font-family: var(--mono); color: var(--text); }
+  .evx-swatch {
+    display: inline-block; width: 9px; height: 9px; border-radius: 2px;
+    margin-right: 5px; border: 1px solid var(--border-strong);
   }
-  .eda-panel .prow:last-child { border-bottom: none; }
-  .eda-panel .pk { color: var(--text-3); white-space: nowrap; }
-  .eda-panel .pv { color: var(--text); font-weight: 600; text-align: right; word-break: break-all; }
-  .eda-panel .pv.good { color: var(--ok); }
-  .eda-panel .pv.bad { color: var(--bad); }
-  .eda-panel .pv.warn { color: var(--warn); }
 
-  .eda-wire {
-    border: 1px solid var(--border); border-radius: var(--radius-sm);
-    background: #fff; padding: 8px 10px; margin-top: 10px; max-height: 280px; overflow-y: auto;
+  .evx-missing { display: grid; gap: 4px; margin: 10px 0 2px; }
+  .evx-mrow {
+    display: flex; flex-wrap: wrap; gap: 4px 8px; align-items: baseline;
+    border: 1px solid var(--border); border-left: 3px solid var(--warn); border-radius: 4px;
+    background: var(--warn-soft); padding: 6px 8px; font-size: 11.5px; color: var(--text-2);
   }
-  .eda-row {
-    display: flex; align-items: baseline; gap: 8px;
-    font-family: var(--mono); font-size: 11.5px; padding: 4px 0;
-    border-bottom: 1px dashed var(--border);
-  }
-  .eda-row:last-child { border-bottom: none; }
-  .eda-row .ar { width: 42px; flex: none; text-align: center; color: var(--text-3); font-weight: 700; }
-  .eda-row .tg {
-    flex: none; border-radius: 4px; padding: 2px 6px; font-size: 10.5px; font-weight: 700;
-    border: 1px solid var(--border-strong); background: var(--bg-soft); color: var(--text-3);
-  }
-  .eda-row .tx { color: var(--text-2); line-height: 1.5; }
-  .eda-row.read .tg { background: var(--eda-c-soft); border-color: var(--eda-c); color: var(--eda-c); }
-  .eda-row.ok .tg { background: var(--eda-s-soft); border-color: var(--eda-s); color: var(--eda-s); }
-  .eda-row.warn .tg { background: var(--eda-w-soft); border-color: var(--eda-w); color: var(--eda-w); }
-  .eda-row.bad .tg { background: var(--eda-bad-soft); border-color: var(--eda-bad); color: var(--eda-bad); }
+  .evx-mrow.ok { border-left-color: var(--ok); background: var(--ok-soft); }
+  .evx-mrow .mn { flex: 1 1 240px; line-height: 1.5; }
+  .evx-mrow b { color: var(--text); }
 
-  .eda-verdict {
-    margin-top: 10px; padding: 10px 12px; border-radius: var(--radius-sm);
+  .evx-cards { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 12px; }
+  @media (max-width: 720px) { .evx-cards { grid-template-columns: 1fr; } }
+  #evx-card-compat { grid-column: 1 / -1; }
+  .evx-card {
+    border: 1px solid var(--border); border-top: 3px solid var(--border-strong);
+    border-radius: var(--radius-sm); background: #fff; padding: 12px;
+  }
+  .evx-card .ct { font-weight: 700; font-size: 13px; margin-bottom: 6px; }
+  .evx-card .cm { font-size: 11.5px; color: var(--text-3); line-height: 1.5; margin: 6px 0; }
+  .evx-card .cm code { font-size: 11px; }
+
+  .evx-kv {
+    display: flex; justify-content: space-between; gap: 10px; align-items: baseline;
+    font-size: 11.5px; padding: 4px 0; border-bottom: 1px dashed var(--border);
+  }
+  .evx-kv span { color: var(--text-3); white-space: nowrap; }
+  .evx-kv code, .evx-kv b { font-family: var(--mono); font-size: 11px; color: var(--text); text-align: right; word-break: break-all; }
+
+  .evx-note {
+    margin-top: 8px; padding: 7px 9px; border-radius: 5px; font-size: 11.5px; line-height: 1.55;
+    border: 1px solid var(--border); background: var(--bg-soft); color: var(--text-2);
+  }
+  .evx-note code { font-size: 11px; }
+  .evx-note.n-ok { border-left: 3px solid var(--ok); background: var(--ok-soft); color: var(--text); }
+  .evx-note.n-lock { border-left: 3px solid var(--warn); background: var(--warn-soft); color: var(--text); }
+  .evx-note.n-bad { border-left: 3px solid var(--bad); background: var(--bad-soft); color: var(--text); }
+
+  .evx-score { display: flex; justify-content: space-between; gap: 10px; align-items: baseline; margin-top: 10px; font-size: 11.5px; color: var(--text-2); }
+  .evx-score b { font-family: var(--mono); font-size: 16px; color: var(--text); white-space: nowrap; }
+  .evx-ticks { display: flex; gap: 4px; margin: 5px 0 2px; }
+  .evx-ticks i {
+    flex: 1; text-align: center; font-family: var(--mono); font-size: 11px; font-weight: 700;
+    font-style: normal; border: 1.5px solid var(--border-strong); border-radius: 4px;
+    background: #fff; color: var(--text-3); padding: 3px 0;
+  }
+  .evx-ticks i.hit { background: var(--ok-soft); border-color: var(--ok); color: var(--ok); }
+  .evx-ticks i.miss { background: var(--bad-soft); border-color: var(--bad); color: var(--bad); }
+  .evx-ticks i.cur { box-shadow: 0 0 0 2px var(--accent-soft); }
+
+  .evx-badge {
+    display: inline-block; font-family: var(--mono); font-size: 12px; font-weight: 700;
+    border: 1.5px solid var(--border-strong); border-radius: 5px;
+    padding: 4px 9px; background: #fff; color: var(--text);
+  }
+  .evx-badge.b-ok { background: var(--ok-soft); border-color: var(--ok); color: var(--ok); }
+  .evx-badge.b-lock { background: var(--warn-soft); border-color: var(--warn); color: var(--warn); }
+  .evx-badge.b-bad { background: var(--bad-soft); border-color: var(--bad); color: var(--bad); }
+
+  .evx-modes { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; margin: 10px 0 2px; }
+  .evx-modes span {
+    display: flex; align-items: baseline; justify-content: space-between; gap: 6px;
+    font-family: var(--mono); font-size: 10px; font-weight: 700; letter-spacing: .02em;
+    border: 1.5px solid var(--border-strong); border-radius: 5px;
+    padding: 4px 6px; background: #fff; color: var(--text-3);
+  }
+  .evx-modes span b { font-size: 10.5px; }
+  .evx-modes span.pass { background: var(--ok-soft); border-color: var(--ok); color: var(--ok); }
+  .evx-modes span.rej { background: var(--bad-soft); border-color: var(--bad); color: var(--bad); }
+
+  .evx-rules { display: grid; gap: 4px; margin-top: 10px; }
+  .evx-rule {
+    border: 1px solid var(--border); border-left: 3px solid var(--border-strong); border-radius: 4px;
+    background: var(--bg-soft); padding: 5px 8px; font-size: 11px; color: var(--text-2); line-height: 1.5;
+  }
+  .evx-rule code { font-size: 10.5px; }
+  .evx-rule em { font-family: var(--mono); font-size: 9.5px; font-weight: 700; font-style: normal; color: var(--text-3); margin: 0 6px; }
+  .evx-rule.t-ok { border-left-color: var(--ok); }
+  .evx-rule.t-lock { border-left-color: var(--warn); }
+  .evx-rule.t-bad { border-left-color: var(--bad); }
+
+  /* ===== demo 2 · 故障點結局光譜（每格 = 一次完整模擬的結局） ===== */
+
+  .obx-ctrl { display: flex; flex-wrap: wrap; gap: 12px 16px; align-items: center; margin: 10px 0 8px; }
+  .obx-slider { display: flex; align-items: center; gap: 8px; font-size: 12px; }
+  .obx-slider .sl { font-family: var(--mono); font-size: 11px; color: var(--text-3); white-space: nowrap; }
+  .obx-slider input[type="range"] { width: 148px; max-width: 46vw; accent-color: var(--accent); }
+  .obx-slider b { font-family: var(--mono); font-size: 11.5px; color: var(--text); min-width: 56px; }
+  .obx-pick { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text-2); }
+  .obx-pick .sl { font-family: var(--mono); font-size: 11px; color: var(--text-3); white-space: nowrap; }
+  .obx-pick select {
+    border: 1px solid var(--border-strong); border-radius: 6px; background: #fff;
+    font-family: var(--mono); font-size: 11.5px; padding: 4px 6px; color: var(--text);
+  }
+
+  .obx-wrap { overflow-x: auto; margin: 12px 0 4px; }
+  .obx-grid {
+    display: grid; grid-template-columns: 104px repeat(6, minmax(50px, 1fr)) 62px;
+    gap: 3px; min-width: 512px;
+  }
+  .obx-grid .gh { font-family: var(--mono); font-size: 10px; color: var(--text-3); text-align: center; padding: 1px 0 3px; }
+  .obx-grid .gh.cur { color: var(--accent); font-weight: 700; }
+  .obx-grid .gl { display: flex; align-items: center; font-size: 11.5px; font-weight: 700; padding-right: 4px; }
+  .obx-grid .gc {
+    border: 1.5px solid var(--border-strong); border-radius: 5px; background: #fff;
+    padding: 7px 2px; text-align: center; line-height: 1.25;
+  }
+  .obx-grid .gc b { display: block; font-size: 11.5px; font-weight: 700; }
+  .obx-grid .gc em { display: block; font-family: var(--mono); font-size: 9.5px; font-style: normal; color: var(--text-3); margin-top: 2px; }
+  .obx-grid .gc.o-ok { background: var(--ok-soft); border-color: var(--ok); }
+  .obx-grid .gc.o-ok b { color: var(--ok); }
+  .obx-grid .gc.o-idle b { color: var(--text-3); }
+  .obx-grid .gc.o-bad { background: var(--bad-soft); border-color: var(--bad); }
+  .obx-grid .gc.o-bad b { color: var(--bad); }
+  .obx-grid .gc.o-lock { background: var(--warn-soft); border-color: var(--warn); }
+  .obx-grid .gc.o-lock b { color: var(--warn); }
+  .obx-grid .gc.cur { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+  .obx-grid .gw {
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    border: 1.5px dashed var(--border-strong); border-radius: 5px; background: var(--bg-soft);
+    font-family: var(--mono); font-size: 12px; font-weight: 700; color: var(--text-2);
+  }
+  .obx-grid .gw em { font-style: normal; font-size: 9.5px; font-weight: 600; color: var(--text-3); }
+  .obx-grid .gw.ok { border-color: var(--ok); background: var(--ok-soft); color: var(--ok); }
+  .obx-grid .gw.bad { border-color: var(--bad); background: var(--bad-soft); color: var(--bad); }
+
+  .obx-facts {
+    display: grid; gap: 1px; margin: 14px 0 4px;
+    background: var(--border); border: 1px solid var(--border); border-radius: 8px; overflow: hidden;
+  }
+  .obx-fhead, .obx-frow {
+    display: grid; grid-template-columns: 100px 1fr 1fr 34px;
+    gap: 8px; background: #fff; padding: 6px 9px; align-items: baseline;
+  }
+  .obx-fhead { background: var(--bg-soft); }
+  .obx-fhead span { font-family: var(--mono); font-size: 10px; font-weight: 700; color: var(--text-3); }
+  .obx-frow .fk { font-size: 11.5px; color: var(--text-3); }
+  .obx-frow .fv { font-family: var(--mono); font-size: 11.5px; color: var(--text); line-height: 1.45; word-break: break-all; }
+  .obx-frow .fa { text-align: center; font-weight: 700; color: var(--ok); }
+  .obx-frow.diff { background: var(--bad-soft); }
+  .obx-frow.diff .fa { color: var(--bad); }
+  @media (max-width: 640px) {
+    .obx-fhead, .obx-frow { grid-template-columns: 74px 1fr 1fr 24px; gap: 6px; padding: 6px; }
+    .obx-frow .fk, .obx-frow .fv { font-size: 10.5px; }
+  }
+
+  .obx-verdict {
+    margin-top: 12px; padding: 10px 12px; border-radius: var(--radius-sm);
     border: 1px solid var(--border); background: var(--bg-soft);
-    font-size: 13px; color: var(--text-2); line-height: 1.55;
+    font-size: 12.5px; color: var(--text-2); line-height: 1.6;
   }
-  .eda-verdict.tone-ok { border-left: 3px solid var(--ok); background: var(--ok-soft); color: var(--text); }
-  .eda-verdict.tone-lock { border-left: 3px solid var(--warn); background: var(--warn-soft); color: var(--text); }
-  .eda-verdict.tone-bad { border-left: 3px solid var(--bad); background: var(--bad-soft); color: var(--text); }
-
-  .eda-matrix { display: grid; grid-template-columns: 88px repeat(3, 1fr); gap: 6px; margin: 10px 0 6px; align-items: stretch; }
-  @media (max-width: 560px) { .eda-matrix { grid-template-columns: 64px repeat(3, 1fr); } }
-  .eda-mh, .eda-ml {
-    font-family: var(--mono); font-size: 11px; font-weight: 700; color: var(--text-3);
-    display: flex; align-items: center; justify-content: center; text-align: center;
-  }
-  .eda-ml { justify-content: flex-end; padding-right: 4px; }
-  .eda-cell {
-    border: 1.5px solid var(--border-strong); border-radius: var(--radius-sm);
-    background: #fff; padding: 10px 8px; text-align: center; cursor: pointer;
-    font-family: var(--mono); font-size: 11.5px; font-weight: 700; color: var(--text);
-    transition: background .15s, border-color .15s, box-shadow .15s;
-  }
-  .eda-cell:hover { box-shadow: 0 0 0 3px var(--accent-soft); }
-  .eda-cell.sel { box-shadow: 0 0 0 2px var(--accent); }
-  .eda-cell.ok { background: var(--ok-soft); border-color: var(--ok); color: var(--ok); }
-  .eda-cell.hold { background: var(--warn-soft); border-color: var(--warn); color: var(--warn); }
-  .eda-cell.bad { background: var(--bad-soft); border-color: var(--bad); color: var(--bad); }
-  .eda-cell .cs { display: block; font-size: 10px; font-weight: 600; color: var(--text-3); margin-top: 4px; letter-spacing: .03em; }
-
-  .eda-payload {
-    border: 1px solid var(--border); border-radius: var(--radius-sm);
-    background: var(--code-bg); padding: 10px 12px; margin: 8px 0;
-    font-family: var(--mono); font-size: 12px; color: var(--text); line-height: 1.6; white-space: pre-wrap;
+  .obx-verdict.v-split { border-left: 3px solid var(--accent); background: var(--accent-soft); color: var(--text); }
+  .obx-verdict.v-bad { border-left: 3px solid var(--bad); background: var(--bad-soft); color: var(--text); }
   }
 </style>
 
@@ -314,6 +436,68 @@
   <p class="cap">沒有「事件就該帶全量」或「事件就該只帶 ID」的教條。看消費者能不能忍受回查、以及你是否真的要把事件當帳本。</p>
 
   <p>Notification 的隱藏耦合常被低估：消費者回查時，發布者可能已經走到下一狀態。「已付款」通知抵達時訂單已退款，回查看到的是 refunded。你以為在訂閱一個事實，其實在輪詢一個會變的列。Carried State 把「付款那一瞬」凍在 payload 裡，換來的是契約要一起演進。Event Sourcing 再往前一步：連「現況列」都不當真相，任何讀模型都是可丟可重建的投影。</p>
+
+  <p class="eda-sub">把一則信封攤開來看</p>
+  <p>上面三種風格的差別，落到程式裡就是「信封裡放哪幾個欄位」。下面這台拆解器把一則真的 <code>OrderPaid</code> 攤成逐欄台帳：<strong>每一欄屬於哪一類、佔幾個 byte、少了它下游會怎樣</strong>。信封與舊契約都可以直接編輯，最下面那張卡會即時算出這次欄位改動在四種 Registry 相容性模式下會不會被拒登——相容性模式本身的定義留給本篇談 Schema 演進的那一節，這裡先看「改了欄位會發生什麼」。</p>
+
+  <div class="demo" id="demo-evx">
+    <div class="demo-bar">
+      <span class="label">互動 · 事件信封拆解器</span>
+      <span class="label" style="text-transform:none;font-family:var(--sans);font-size:12px;color:var(--text-2)">改 JSON、改舊契約、點必填／選填，三張卡即時重算</span>
+    </div>
+    <div class="demo-body">
+      <div class="evx-io">
+        <label class="evx-field" for="evx-env">
+          <span class="fl">事件信封（可編輯 JSON，payload 支援一層巢狀）</span>
+          <textarea id="evx-env" rows="15" spellcheck="false" aria-label="事件信封 JSON"></textarea>
+        </label>
+        <label class="evx-field" for="evx-spec">
+          <span class="fl">舊版契約：消費者手上的 schema（每行一欄，path:type:req|opt）</span>
+          <textarea id="evx-spec" rows="15" spellcheck="false" aria-label="舊版契約"></textarea>
+        </label>
+      </div>
+
+      <div class="evx-ctrl">
+        <label class="evx-pick" for="evx-key">
+          <span class="sl">冪等鍵組成</span>
+          <select id="evx-key">
+            <option value="eventId">eventId（outbox 主鍵）</option>
+            <option value="aggVer" selected>aggregateId + eventType + version</option>
+            <option value="aggTime">aggregateId + occurredAt</option>
+            <option value="payloadHash">payload 內容雜湊</option>
+          </select>
+        </label>
+        <button class="btn" id="evx-reset">重置</button>
+      </div>
+
+      <div class="seg" role="group" aria-label="第二則事件從何而來" id="evx-seg-twin">
+        <button data-twin="redelivery" aria-pressed="false">原樣重投</button>
+        <button data-twin="republish" aria-pressed="true">上游重建信封後再送</button>
+        <button data-twin="retryNewId" aria-pressed="false">應用層重試換新 id</button>
+        <button data-twin="nextFact" aria-pressed="false">同聚合下一則事實</button>
+      </div>
+
+      <div class="legend">
+        <span><i class="dot ns-idle"></i>新舊契約一致、無演進</span>
+        <span><i class="dot ns-ok"></i>有改動、兩個方向都不破</span>
+        <span><i class="dot ns-lock"></i>破一個方向</span>
+        <span><i class="dot ns-bad"></i>兩個方向都破</span>
+      </div>
+
+      <div class="status-line" id="evx-status">載入預設信封中。</div>
+
+      <div class="evx-ledger" id="evx-ledger"></div>
+      <div id="evx-stack"></div>
+      <div class="evx-missing" id="evx-missing"></div>
+
+      <div class="evx-cards">
+        <div class="evx-card" id="evx-card-key"></div>
+        <div class="evx-card" id="evx-card-weight"></div>
+        <div class="evx-card" id="evx-card-compat"></div>
+      </div>
+    </div>
+  </div>
+  <p class="cap">三個值得停下來比對的地方：<strong>(1)</strong> 預設信封 309 bytes，但業務事實只占 31.4%——<strong>68.6% 是信封稅</strong>，這是 Carried State 的真實重量。<strong>(2)</strong> 把冪等鍵換成 <code>aggregateId + occurredAt</code>，四種孿生事件的答對數從 <strong>4/4 掉到 1/4</strong>；換成 <code>payload 內容雜湊</code>是 3/4，而且錯的那一種是「誤擋」——它會把合法的第二筆同金額付款當成重投丟掉。<strong>(3)</strong> 把台帳上七個新欄位全部點成「選填」，相容性從「只有 FORWARD 成立」變成 <strong>FULL</strong>，拒登的 Registry 模式從 2 個降到 0 個。bytes 由規範化序列化算出，與你在框裡怎麼縮排無關；「選填」在本模型裡同時代表 optional 與「有預設值」，兩者對 BACKWARD 的效果相同。</p>
 
   <div class="callout warn">
     <div class="c-title"><span class="ic">陷阱</span>把 CRUD 列變更直接當領域事件</div>
@@ -525,6 +709,59 @@ sequenceDiagram
     <p>交易 commit 之後，outbox 列就是耐久的意圖。發佈器崩潰、broker 拒收、標 published 之前再崩潰，列都還在，重試即可。主題上仍可能出現同一 <code>id</code> 兩次。Outbox 把「資料庫有、主題沒有」這條裂縫補上；「主題有兩次」交給下一節的去重表。</p>
   </div>
 
+  <p class="eda-sub">裂縫到底有多寬</p>
+  <p>上面那張 swimlane 說的是「步驟是什麼」。下面這台模擬器問的是另一個問題：<strong>在哪一步斷掉會怎樣</strong>。它對每一個故障點各跑一次完整模擬（開交易、提交、崩潰回滾、送出、重啟後補送、消費），再依最終的耐久狀態分類結局，所以你看到的不是一次播放，是<strong>整條結局光譜</strong>——雙寫的 bug 因此有了「多寬」這個量。</p>
+
+  <div class="demo" id="demo-obx">
+    <div class="demo-bar">
+      <span class="label">互動 · 故障點結局光譜</span>
+      <span class="label" style="text-transform:none;font-family:var(--sans);font-size:12px;color:var(--text-2)">拖故障點、換寫入順序與 broker 行為，兩列光譜同時重算</span>
+    </div>
+    <div class="demo-body">
+      <div class="seg" role="group" aria-label="雙寫順序" id="obx-seg-order">
+        <button data-order="dbFirst" aria-pressed="true">先寫庫再發訊息</button>
+        <button data-order="mqFirst" aria-pressed="false">先發訊息再寫庫</button>
+      </div>
+      <div class="seg" role="group" aria-label="broker 在 SEND 時的行為" id="obx-seg-broker" style="margin-top:8px">
+        <button data-broker="accept" aria-pressed="true">broker 接受</button>
+        <button data-broker="reject" aria-pressed="false">首次拒收，稍後恢復</button>
+      </div>
+
+      <div class="obx-ctrl">
+        <label class="obx-slider" for="obx-crash">
+          <span class="sl">進程消失點</span>
+          <input type="range" id="obx-crash" min="0" max="5" step="1" value="4">
+          <b id="obx-crash-val">t4 之後</b>
+        </label>
+        <label class="obx-pick" for="obx-dedup">
+          <span class="sl">消費端 handler</span>
+          <select id="obx-dedup">
+            <option value="naive" selected>天真 qty -= 2</option>
+            <option value="idem">冪等鍵 + 去重表</option>
+          </select>
+        </label>
+        <button class="btn" id="obx-reset">重置</button>
+      </div>
+
+      <div class="legend">
+        <span><i class="dot ns-ok"></i>一致</span>
+        <span><i class="dot ns-idle"></i>整筆未發生（也一致）</span>
+        <span><i class="dot ns-bad"></i>不一致：遺失／幽靈</span>
+        <span><i class="dot ns-lock"></i>重複扣量</span>
+      </div>
+
+      <div class="status-line" id="obx-status">拖動「進程消失點」，兩條泳道的結局同時重算。</div>
+
+      <div class="obx-wrap">
+        <div id="obx-spectrum"></div>
+      </div>
+
+      <div class="obx-facts" id="obx-facts"></div>
+      <div class="obx-verdict" id="obx-verdict">—</div>
+    </div>
+  </div>
+  <p class="cap">四個值得停下來比對的位置：<strong>(1)</strong> 預設（先寫庫、broker 接受、天真 handler）——雙寫只有「t2 之後」這<strong>一格</strong>不一致（裂縫 1/6），窄得剛好能通過測試、卻會在線上咬人；而 Outbox 在「t4 之後」那一格是<strong>重複扣量</strong>（送出成功、<code>published_at</code> 還沒回填就崩潰，重啟後再送一次，主題上 2 則、qty 掉到 6）。<strong>(2)</strong> handler 換成去重表：Outbox 那一格變回一致、qty 回到 8，<strong>雙寫那一列一個字都沒變</strong>——去重表補的是重複，補不了遺失。<strong>(3)</strong> 順序換成「先發訊息再寫庫」：裂縫變成 <strong>2/6</strong>，而且失敗的性質從「遺失」變成「幽靈」——兩種順序都解不了，只是裂法不同。<strong>(4)</strong> broker 改成首次拒收：雙寫的裂縫從 1/6 撐到 <strong>5/6</strong>，而 Outbox 那一列連重複格都消失了——沒送成功，就沒有東西可以重複。</p>
+
   <div class="callout warn">
     <div class="c-title"><span class="ic">陷阱</span>發佈成功後立刻 DELETE outbox 列</div>
     <p>刪了就失去「這則 id 曾經發過」的證據。發佈器在 send 成功、delete 失敗時會再送一次，消費端若只靠「outbox 還在不在」去重，對不上。保留列並寫 <code>published_at</code>，或把 id 另存已發集合，比當場刪除安全。</p>
@@ -596,6 +833,8 @@ sequenceDiagram
   <p class="sec-sub">生產者與消費者不會同一秒升級。相容性模式決定誰可以先走、誰必須等。</p>
 
   <p>Carried State 把契約變成跨團隊的 API。欄位一改，舊進程與新進程會在同一條主題上共存數小時到數週。Schema Registry 不做序列化，它做的是<strong>攔下不相容的新版本</strong>，讓這段共存期有規則可守。</p>
+
+  <p>本節這張模式表就是前面那台<em>事件信封拆解器</em>裡「相容性判定」那張卡實作的規則：它逐欄比對新舊契約，把每一項改動歸到下表的某一格，再摺疊成「哪個方向成立」。想邊讀邊試的話，回去改那則信封的欄位，看下面四種模式各自的反應。</p>
 
   <p class="eda-sub">四種相容性模式</p>
   <div class="tbl-wrap">
@@ -681,146 +920,6 @@ sequenceDiagram
 <section id="s7">
   <div class="sec-head">
     <span class="sec-num">07</span>
-    <h2>互動 · 雙寫裂縫與 Schema 矩陣</h2>
-  </div>
-  <p class="sec-sub">並排走完同一筆付款：左邊雙寫、右邊 Outbox。再切到矩陣，看新舊版本在哪一種相容性模式下能共存。</p>
-
-  <div class="demo" id="demo-eda">
-    <div class="demo-bar">
-      <span class="label">互動 · 事件如何離開交易</span>
-      <span class="label" style="text-transform:none;font-family:var(--sans);font-size:12px;color:var(--text-2)">下一步推進時序；重置回到起點</span>
-    </div>
-    <div class="demo-body">
-      <div class="seg" role="group" aria-label="演示切換" id="eda-seg-view">
-        <button data-view="outbox" aria-pressed="true">雙寫 vs Outbox</button>
-        <button data-view="schema" aria-pressed="false">Schema 相容矩陣</button>
-      </div>
-
-      <div id="eda-outbox-view" class="eda-view">
-        <div class="seg" role="group" aria-label="故障情境" id="eda-seg-fault" style="margin-top:8px">
-          <button data-fault="none" aria-pressed="true">正常路徑</button>
-          <button data-fault="midcrash" aria-pressed="false">中間崩潰</button>
-          <button data-fault="broker" aria-pressed="false">Broker 中斷</button>
-          <button data-fault="dup" aria-pressed="false">重複投遞</button>
-        </div>
-        <div class="seg" role="group" aria-label="消費端" id="eda-seg-cons" style="margin-top:8px">
-          <button data-cons="naive" aria-pressed="true">天真 handler</button>
-          <button data-cons="idem" aria-pressed="false">冪等鍵 + 去重表</button>
-        </div>
-        <p class="eda-mode-hint" id="eda-fault-hint">兩邊同時付同一筆訂單。雙寫先 commit 再 send；Outbox 把列與訊息放進同一交易，再由發佈器投遞。</p>
-      </div>
-
-      <div id="eda-schema-view" class="eda-view" hidden>
-        <div class="seg" role="group" aria-label="相容模式" id="eda-seg-compat" style="margin-top:8px">
-          <button data-compat="backward" aria-pressed="true">BACKWARD</button>
-          <button data-compat="forward" aria-pressed="false">FORWARD</button>
-          <button data-compat="full" aria-pressed="false">FULL</button>
-          <button data-compat="none" aria-pressed="false">NONE</button>
-        </div>
-        <p class="eda-mode-hint" id="eda-schema-hint">點選矩陣格子，選擇生產者與消費者版本。Registry 依模式決定「v2、v3 能不能登錄在 v1 之後」；執行期另看雙方是否解得開。</p>
-      </div>
-
-      <div class="eda-ctrl" id="eda-outbox-ctrl">
-        <button class="btn primary" id="eda-btn-next">下一步</button>
-        <button class="btn" id="eda-btn-all">走完</button>
-        <button class="btn" id="eda-btn-reset">重置</button>
-      </div>
-
-      <div class="eda-metric" id="eda-outbox-metric">
-        <span>步 <strong id="eda-m-step">0</strong> / <span id="eda-m-total">3</span></span>
-        <span>雙寫事件 <strong id="eda-m-dw">0</strong></span>
-        <span>Outbox 已發 <strong id="eda-m-ob">0</strong></span>
-        <span>庫存（雙寫） <strong id="eda-m-inv-dw">10</strong></span>
-        <span>庫存（Outbox） <strong id="eda-m-inv-ob">10</strong></span>
-      </div>
-
-      <div class="legend" id="eda-legend">
-        <span><i class="dot ns-idle"></i>待命 / 空</span>
-        <span><i class="dot ns-wait"></i>進行中</span>
-        <span><i class="dot ns-lock"></i>待發 / 凍結</span>
-        <span><i class="dot ns-ok"></i>已提交 / 已套用</span>
-        <span><i class="dot ns-bad"></i>遺失 / 雙花 / 不相容</span>
-      </div>
-
-      <div id="eda-lanes" class="eda-lanes">
-        <div class="eda-lane dw">
-          <div class="ln">直接雙寫</div>
-          <div class="ls">UPDATE commit → producer.send</div>
-          <div class="eda-box idle" id="eda-dw-order">
-            <div class="bn">orders</div>
-            <div class="bl">O-1001</div>
-            <div class="bv" id="eda-dw-order-v">status = pending</div>
-          </div>
-          <div class="eda-box idle" id="eda-dw-topic">
-            <div class="bn">topic · order.events</div>
-            <div class="bl">broker 側</div>
-            <div class="eda-slots" id="eda-dw-slots"></div>
-          </div>
-          <div class="eda-box idle" id="eda-dw-inv">
-            <div class="bn">inventory handler</div>
-            <div class="bl">SKU-A · 起始 10</div>
-            <div class="bv" id="eda-dw-inv-v">qty = 10 · 去重表空</div>
-          </div>
-        </div>
-        <div class="eda-lane ob">
-          <div class="ln">Transactional Outbox</div>
-          <div class="ls">同一交易寫列 + outbox → 發佈器</div>
-          <div class="eda-box idle" id="eda-ob-order">
-            <div class="bn">orders + outbox</div>
-            <div class="bl">同一顆資料庫</div>
-            <div class="bv" id="eda-ob-order-v">status = pending · outbox 空</div>
-          </div>
-          <div class="eda-box idle" id="eda-ob-topic">
-            <div class="bn">topic · order.events</div>
-            <div class="bl">發佈器投遞後</div>
-            <div class="eda-slots" id="eda-ob-slots"></div>
-          </div>
-          <div class="eda-box idle" id="eda-ob-inv">
-            <div class="bn">inventory handler</div>
-            <div class="bl">SKU-A · 起始 10</div>
-            <div class="bv" id="eda-ob-inv-v">qty = 10 · 去重表空</div>
-          </div>
-        </div>
-      </div>
-
-      <div id="eda-schema-board" class="eda-view" hidden>
-        <div class="eda-col-label">消費者 \ 生產者</div>
-        <div class="eda-matrix" id="eda-matrix" role="grid" aria-label="相容性矩陣"></div>
-        <div class="eda-payload" id="eda-payload">{ }</div>
-      </div>
-
-      <div class="eda-panels">
-        <div class="eda-panel">
-          <div class="pt">本步語義</div>
-          <div class="prow"><span class="pk">事件</span><span class="pv" id="eda-p-op">—</span></div>
-          <div class="prow"><span class="pk">規則</span><span class="pv" id="eda-p-rule">—</span></div>
-          <div class="prow"><span class="pk">雙寫</span><span class="pv" id="eda-p-dw">—</span></div>
-          <div class="prow"><span class="pk">Outbox</span><span class="pv" id="eda-p-ob">—</span></div>
-        </div>
-        <div class="eda-panel">
-          <div class="pt">觀測</div>
-          <div class="prow"><span class="pk">情境 / 模式</span><span class="pv" id="eda-p-model">正常路徑</span></div>
-          <div class="prow"><span class="pk">一致性</span><span class="pv" id="eda-p-consis">尚未走步</span></div>
-          <div class="prow"><span class="pk">消費</span><span class="pv" id="eda-p-handler">天真 handler</span></div>
-          <div class="prow"><span class="pk">風險</span><span class="pv" id="eda-p-risk">無</span></div>
-        </div>
-      </div>
-
-      <div class="status-line" id="eda-status">選擇情境後按「下一步」。雙寫與 Outbox 並排走同一筆 O-1001。</div>
-      <div class="eda-verdict" id="eda-verdict">判定尚未產生——走完一輪後會對照兩邊的訂單、主題與庫存。</div>
-      <div class="eda-wire" id="eda-wire" aria-label="事件日誌"></div>
-    </div>
-  </div>
-  <p class="cap">中間崩潰與 Broker 中斷時，雙寫的「訂單已付、主題沒有事件」是事故；Outbox 重試後追上是保護。重複投遞時，去重表擋下第二筆也是保護（判定偏綠）；天真 handler 把庫存扣兩次才是事故。</p>
-
-  <div class="oneliner">
-    <b>一句話答法</b>雙寫在兩個提交中間裂開；Outbox 留下耐久意圖。重複投遞用去重表當保護，不要把重試當故障。
-  </div>
-</section>
-
-<section id="s8">
-  <div class="sec-head">
-    <span class="sec-num">08</span>
     <h2>面試折衷與邊界</h2>
   </div>
   <p class="sec-sub">先答事件帶多少、流程誰指揮、訊息怎麼離開交易。補償理論、broker 內部、視窗運算各有自己的篇。</p>
