@@ -1378,8 +1378,7 @@
         <a href="#s4"><span class="n">04</span>雙寫問題與 Transactional Outbox</a>
         <a href="#s5"><span class="n">05</span>消費端：把 at-least-once 收成效果一次</a>
         <a href="#s6"><span class="n">06</span>Schema 演進與相容性</a>
-        <a href="#s7"><span class="n">07</span>互動 · 雙寫裂縫與 Schema 矩陣</a>
-        <a href="#s8"><span class="n">08</span>面試折衷與邊界</a>
+        <a href="#s7"><span class="n">07</span>面試折衷與邊界</a>
       </div>
     </nav>
     <button class="btn toc-reopen" type="button" aria-expanded="true" aria-controls="toc-panel"
@@ -1394,7 +1393,13 @@
     <!-- ===================== MAIN CONTENT ===================== -->
     <main>
       <div class="inner">
-        <!-- demo-archetype: C｜並排對照 — 讀者選定故障情境（正常／中間崩潰／Broker 中斷／重複投遞）與消費端策略（天真 handler／冪等鍵去重表），同一筆訂單 O-1001 同時餵進左「直接雙寫」與右「Transactional Outbox」兩條泳道，逐步比對訂單狀態、主題事件與庫存數字。選 C 是因為本篇的核心命題「雙寫錯在哪」，只有把錯誤解法與正確解法放在同一組輸入下同時推進才看得見分岔點。 -->
+        <!-- demo-archetype: F｜拆解器（主，第 2 節）＋C｜並排對照（次，第 4 節） — 主 demo 讓讀者直接編輯一則 OrderPaid 信封的 JSON
+     與舊版契約，把它攤成逐欄台帳（角色／型別／bytes／缺席後果），並逐欄點選必填或選填，即時算出冪等鍵能不能擋住四種孿生
+     事件、這次欄位改動在四種 Registry 相容性模式下會不會被拒登、以及信封的重量帳與 thin／fat 取捨。選 F 是因為本篇最痛的
+     實務問題是事件契約設計，而契約的載體就是一筆信封——第 2 節整節的命題正是「信封裡該放什麼」，那是一筆資料的結構，不是
+     一段流程。次 demo 保留本篇的核心對照：讀者拖動故障注入點、切換雙寫的寫入順序與 broker 行為，對每一個故障點各跑一次完整
+     模擬，並排比出「直接雙寫」與「Transactional Outbox」的整條結局光譜與裂縫寬度。選 C 是因為「雙寫錯在哪」只有把錯誤解法
+     與正確解法餵同一組輸入才看得見分岔點。 -->
 <style>
   #eda-root {
     --eda-c: #3f6188; --eda-c-soft: #eef2f7;
@@ -1453,136 +1458,252 @@
   .eda-pane .ss { font-family: var(--mono); font-size: 11px; color: var(--text-3); margin-bottom: 8px; letter-spacing: .04em; }
   .eda-pane ul { margin: 0; padding-left: 1.15em; font-size: 13px; color: var(--text-2); line-height: 1.65; }
 
-  .eda-ctrl { display: flex; flex-wrap: wrap; gap: 10px; margin: 10px 0 8px; align-items: center; }
-  .eda-metric { display: flex; flex-wrap: wrap; gap: 14px; margin: 8px 0 4px; font-size: 13px; color: var(--text-2); }
-  .eda-ctrl[hidden], .eda-metric[hidden] { display: none; }
-  .eda-metric strong { color: var(--text); font-family: var(--mono); font-size: 12.5px; }
-  .eda-mode-hint { font-size: 12.5px; color: var(--text-2); margin: 8px 0 4px; line-height: 1.55; }
+  /* ===== demo 1 · 事件信封拆解器（巢狀欄位台帳 + bytes 量條 + 重量堆疊條） ===== */
 
-  .eda-view { display: block; }
-  .eda-view[hidden] { display: none; }
+  .evx-io { display: grid; grid-template-columns: 1.15fr 1fr; gap: 10px; margin: 4px 0 10px; }
+  @media (max-width: 720px) { .evx-io { grid-template-columns: 1fr; } }
+  .evx-field { display: flex; flex-direction: column; gap: 4px; }
+  .evx-field .fl { font-family: var(--mono); font-size: 11px; color: var(--text-3); letter-spacing: .03em; }
+  .evx-field textarea {
+    width: 100%; box-sizing: border-box; resize: vertical;
+    border: 1px solid var(--border-strong); border-radius: var(--radius-sm);
+    background: var(--code-bg); color: var(--text);
+    font-family: var(--mono); font-size: 11.5px; line-height: 1.55; padding: 8px 10px;
+  }
+  .evx-field textarea:focus { outline: 2px solid var(--accent-soft); border-color: var(--accent); }
 
-  .eda-col-label {
-    font-family: var(--mono); font-size: 10.5px; letter-spacing: .06em; text-transform: uppercase;
-    color: var(--text-3); margin: 10px 0 2px;
+  .evx-ctrl { display: flex; flex-wrap: wrap; gap: 10px 14px; align-items: center; margin: 4px 0 8px; }
+  .evx-pick { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text-2); }
+  .evx-pick .sl { font-family: var(--mono); font-size: 11px; color: var(--text-3); white-space: nowrap; }
+  .evx-pick select {
+    border: 1px solid var(--border-strong); border-radius: 6px; background: #fff;
+    font-family: var(--mono); font-size: 11.5px; padding: 4px 6px; color: var(--text); max-width: 100%;
+  }
+  .evx-err { border-left: 3px solid var(--bad); background: var(--bad-soft); }
+
+  /* 角色色票：identity / causality / payload / metadata / 結構開銷 */
+  .g-identity { background: var(--eda-c); }
+  .g-causality { background: var(--eda-alt); }
+  .g-payload { background: var(--eda-s); }
+  .g-metadata { background: var(--eda-w); }
+  .g-struct { background: var(--border-strong); }
+
+  .evx-tag {
+    display: inline-block; font-family: var(--mono); font-size: 9.5px; font-weight: 700;
+    letter-spacing: .04em; padding: 1px 5px; border-radius: 4px; margin-right: 6px;
+    border: 1px solid var(--border-strong); font-style: normal; vertical-align: 1px;
+  }
+  .evx-tag.g-identity { background: var(--eda-c-soft); border-color: var(--eda-c); color: var(--eda-c); }
+  .evx-tag.g-causality { background: var(--eda-alt-soft); border-color: var(--eda-alt); color: var(--eda-alt); }
+  .evx-tag.g-payload { background: var(--eda-s-soft); border-color: var(--eda-s); color: var(--eda-s); }
+  .evx-tag.g-metadata { background: var(--eda-w-soft); border-color: var(--eda-w); color: var(--eda-w); }
+
+  .evx-ledger {
+    display: grid; gap: 1px; margin: 10px 0 4px;
+    background: var(--border); border: 1px solid var(--border);
+    border-radius: 8px; overflow: hidden;
+  }
+  .evx-lhead, .evx-row {
+    display: grid; grid-template-columns: minmax(0, 1fr) 58px 62px 96px;
+    gap: 8px; background: #fff; padding: 6px 9px; align-items: center;
+  }
+  .evx-lhead { background: var(--bg-soft); }
+  .evx-lhead span { font-family: var(--mono); font-size: 10px; font-weight: 700; color: var(--text-3); }
+  .evx-row.t-ok { box-shadow: inset 3px 0 0 var(--ok); }
+  .evx-row.t-lock { box-shadow: inset 3px 0 0 var(--warn); }
+  .evx-row.t-bad { box-shadow: inset 3px 0 0 var(--bad); }
+  .evx-row .rp { min-width: 0; font-size: 11.5px; }
+  .evx-row .rp code { font-size: 11px; word-break: break-all; }
+  .evx-row.d1 .rp { padding-left: 18px; position: relative; }
+  .evx-row.d1 .rp::before {
+    content: ""; position: absolute; left: 6px; top: 50%; width: 7px;
+    border-top: 1px solid var(--border-strong); border-left: 1px solid var(--border-strong);
+    height: 9px; margin-top: -9px;
+  }
+  .evx-row .rw { font-family: var(--mono); font-size: 9.5px; font-style: normal; color: var(--warn); margin-left: 6px; }
+  .evx-row .rt { font-family: var(--mono); font-size: 10.5px; color: var(--text-3); }
+  .evx-row .rc { font-family: var(--mono); font-size: 10px; color: var(--text-3); }
+  .evx-row .rb { display: flex; align-items: center; gap: 6px; }
+  .evx-row .rb .tr { flex: 1; height: 6px; border-radius: 3px; background: var(--bg-soft); overflow: hidden; }
+  .evx-row .rb .tr i { display: block; height: 100%; }
+  .evx-row .rb b { font-family: var(--mono); font-size: 10.5px; color: var(--text-2); }
+  .evx-row .rn { grid-column: 1 / -1; font-size: 11px; color: var(--text-3); line-height: 1.5; }
+  @media (max-width: 640px) {
+    .evx-lhead, .evx-row { grid-template-columns: minmax(0, 1fr) 46px 56px 74px; gap: 6px; padding: 6px; }
   }
 
-  .eda-lanes { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 12px; }
-  @media (max-width: 720px) { .eda-lanes { grid-template-columns: 1fr; } }
-  .eda-lanes[hidden] { display: none; }
-
-  .eda-lane {
-    border: 1px solid var(--border); border-radius: var(--radius-sm);
-    background: #fff; padding: 12px; border-top: 3px solid var(--border-strong);
-  }
-  .eda-lane.dw { border-top-color: var(--eda-w); }
-  .eda-lane.ob { border-top-color: var(--eda-s); }
-  .eda-lane .ln { font-weight: 700; font-size: 14px; }
-  .eda-lane .ls { font-family: var(--mono); font-size: 11px; color: var(--text-3); margin: 2px 0 10px; letter-spacing: .04em; }
-
-  .eda-box {
-    border: 1.5px solid var(--border-strong); border-radius: var(--radius-sm);
-    padding: 8px 10px; background: #fff; margin-bottom: 8px;
-    transition: background .18s, border-color .18s;
-  }
-  .eda-box:last-child { margin-bottom: 0; }
-  .eda-box .bn { font-weight: 700; font-size: 13px; }
-  .eda-box .bl { font-family: var(--mono); font-size: 10.5px; color: var(--text-3); margin: 2px 0 6px; }
-  .eda-box .bv { font-family: var(--mono); font-size: 12px; color: var(--text); line-height: 1.55; }
-  .eda-box.idle { background: #fff; }
-  .eda-box.wait { background: var(--accent-soft); border-color: var(--accent); }
-  .eda-box.wait .bn { color: var(--accent); }
-  .eda-box.ok { background: var(--ok-soft); border-color: var(--ok); }
-  .eda-box.ok .bn { color: var(--ok); }
-  .eda-box.hold { background: var(--warn-soft); border-color: var(--warn); }
-  .eda-box.hold .bn { color: var(--warn); }
-  .eda-box.bad { background: var(--bad-soft); border-color: var(--bad); }
-  .eda-box.bad .bn { color: var(--bad); }
-
-  .eda-slots { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; min-height: 26px; }
-  .eda-slot {
-    font-family: var(--mono); font-size: 10.5px; font-weight: 700;
+  .evx-toggle {
+    width: 100%; cursor: pointer; font-family: var(--mono); font-size: 10.5px; font-weight: 700;
     border: 1.5px solid var(--border-strong); border-radius: 5px;
-    padding: 3px 7px; background: #fff; color: var(--text-3);
+    background: #fff; color: var(--text-2); padding: 3px 4px;
   }
-  .eda-slot.ready { background: var(--eda-c-soft); border-color: var(--eda-c); color: var(--eda-c); }
-  .eda-slot.ok { background: var(--eda-s-soft); border-color: var(--eda-s); color: var(--eda-s); }
-  .eda-slot.hold { background: var(--eda-w-soft); border-color: var(--eda-w); color: var(--eda-w); }
-  .eda-slot.lost { background: var(--eda-bad-soft); border-color: var(--eda-bad); color: var(--eda-bad); text-decoration: line-through; }
+  .evx-toggle:hover { box-shadow: 0 0 0 2px var(--accent-soft); }
+  .evx-toggle[aria-pressed="true"] { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); }
 
-  .eda-panels { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 12px; }
-  @media (max-width: 640px) { .eda-panels { grid-template-columns: 1fr; } }
-  .eda-panel { border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 12px; background: #fff; }
-  .eda-panel .pt {
-    font-size: 11px; color: var(--text-3); letter-spacing: .06em; text-transform: uppercase;
-    font-family: var(--mono); margin-bottom: 8px;
+  .evx-bar {
+    display: flex; height: 16px; margin: 12px 0 6px; overflow: hidden;
+    border: 1px solid var(--border-strong); border-radius: 4px;
   }
-  .eda-panel .prow {
-    display: flex; justify-content: space-between; gap: 8px;
-    font-family: var(--mono); font-size: 12px; padding: 4px 0;
-    border-bottom: 1px dashed var(--border);
+  .evx-bar i { display: block; height: 100%; min-width: 2px; }
+  .evx-keys { display: flex; flex-wrap: wrap; gap: 6px 16px; font-size: 11.5px; color: var(--text-2); }
+  .evx-keys b { font-family: var(--mono); color: var(--text); }
+  .evx-swatch {
+    display: inline-block; width: 9px; height: 9px; border-radius: 2px;
+    margin-right: 5px; border: 1px solid var(--border-strong);
   }
-  .eda-panel .prow:last-child { border-bottom: none; }
-  .eda-panel .pk { color: var(--text-3); white-space: nowrap; }
-  .eda-panel .pv { color: var(--text); font-weight: 600; text-align: right; word-break: break-all; }
-  .eda-panel .pv.good { color: var(--ok); }
-  .eda-panel .pv.bad { color: var(--bad); }
-  .eda-panel .pv.warn { color: var(--warn); }
 
-  .eda-wire {
-    border: 1px solid var(--border); border-radius: var(--radius-sm);
-    background: #fff; padding: 8px 10px; margin-top: 10px; max-height: 280px; overflow-y: auto;
+  .evx-missing { display: grid; gap: 4px; margin: 10px 0 2px; }
+  .evx-mrow {
+    display: flex; flex-wrap: wrap; gap: 4px 8px; align-items: baseline;
+    border: 1px solid var(--border); border-left: 3px solid var(--warn); border-radius: 4px;
+    background: var(--warn-soft); padding: 6px 8px; font-size: 11.5px; color: var(--text-2);
   }
-  .eda-row {
-    display: flex; align-items: baseline; gap: 8px;
-    font-family: var(--mono); font-size: 11.5px; padding: 4px 0;
-    border-bottom: 1px dashed var(--border);
-  }
-  .eda-row:last-child { border-bottom: none; }
-  .eda-row .ar { width: 42px; flex: none; text-align: center; color: var(--text-3); font-weight: 700; }
-  .eda-row .tg {
-    flex: none; border-radius: 4px; padding: 2px 6px; font-size: 10.5px; font-weight: 700;
-    border: 1px solid var(--border-strong); background: var(--bg-soft); color: var(--text-3);
-  }
-  .eda-row .tx { color: var(--text-2); line-height: 1.5; }
-  .eda-row.read .tg { background: var(--eda-c-soft); border-color: var(--eda-c); color: var(--eda-c); }
-  .eda-row.ok .tg { background: var(--eda-s-soft); border-color: var(--eda-s); color: var(--eda-s); }
-  .eda-row.warn .tg { background: var(--eda-w-soft); border-color: var(--eda-w); color: var(--eda-w); }
-  .eda-row.bad .tg { background: var(--eda-bad-soft); border-color: var(--eda-bad); color: var(--eda-bad); }
+  .evx-mrow.ok { border-left-color: var(--ok); background: var(--ok-soft); }
+  .evx-mrow .mn { flex: 1 1 240px; line-height: 1.5; }
+  .evx-mrow b { color: var(--text); }
 
-  .eda-verdict {
-    margin-top: 10px; padding: 10px 12px; border-radius: var(--radius-sm);
+  .evx-cards { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 12px; }
+  @media (max-width: 720px) { .evx-cards { grid-template-columns: 1fr; } }
+  #evx-card-compat { grid-column: 1 / -1; }
+  .evx-card {
+    border: 1px solid var(--border); border-top: 3px solid var(--border-strong);
+    border-radius: var(--radius-sm); background: #fff; padding: 12px;
+  }
+  .evx-card .ct { font-weight: 700; font-size: 13px; margin-bottom: 6px; }
+  .evx-card .cm { font-size: 11.5px; color: var(--text-3); line-height: 1.5; margin: 6px 0; }
+  .evx-card .cm code { font-size: 11px; }
+
+  .evx-kv {
+    display: flex; justify-content: space-between; gap: 10px; align-items: baseline;
+    font-size: 11.5px; padding: 4px 0; border-bottom: 1px dashed var(--border);
+  }
+  .evx-kv span { color: var(--text-3); white-space: nowrap; }
+  .evx-kv code, .evx-kv b { font-family: var(--mono); font-size: 11px; color: var(--text); text-align: right; word-break: break-all; }
+
+  .evx-note {
+    margin-top: 8px; padding: 7px 9px; border-radius: 5px; font-size: 11.5px; line-height: 1.55;
+    border: 1px solid var(--border); background: var(--bg-soft); color: var(--text-2);
+  }
+  .evx-note code { font-size: 11px; }
+  .evx-note.n-ok { border-left: 3px solid var(--ok); background: var(--ok-soft); color: var(--text); }
+  .evx-note.n-lock { border-left: 3px solid var(--warn); background: var(--warn-soft); color: var(--text); }
+  .evx-note.n-bad { border-left: 3px solid var(--bad); background: var(--bad-soft); color: var(--text); }
+
+  .evx-score { display: flex; justify-content: space-between; gap: 10px; align-items: baseline; margin-top: 10px; font-size: 11.5px; color: var(--text-2); }
+  .evx-score b { font-family: var(--mono); font-size: 16px; color: var(--text); white-space: nowrap; }
+  .evx-ticks { display: flex; gap: 4px; margin: 5px 0 2px; }
+  .evx-ticks i {
+    flex: 1; text-align: center; font-family: var(--mono); font-size: 11px; font-weight: 700;
+    font-style: normal; border: 1.5px solid var(--border-strong); border-radius: 4px;
+    background: #fff; color: var(--text-3); padding: 3px 0;
+  }
+  .evx-ticks i.hit { background: var(--ok-soft); border-color: var(--ok); color: var(--ok); }
+  .evx-ticks i.miss { background: var(--bad-soft); border-color: var(--bad); color: var(--bad); }
+  .evx-ticks i.cur { box-shadow: 0 0 0 2px var(--accent-soft); }
+
+  .evx-badge {
+    display: inline-block; font-family: var(--mono); font-size: 12px; font-weight: 700;
+    border: 1.5px solid var(--border-strong); border-radius: 5px;
+    padding: 4px 9px; background: #fff; color: var(--text);
+  }
+  .evx-badge.b-ok { background: var(--ok-soft); border-color: var(--ok); color: var(--ok); }
+  .evx-badge.b-lock { background: var(--warn-soft); border-color: var(--warn); color: var(--warn); }
+  .evx-badge.b-bad { background: var(--bad-soft); border-color: var(--bad); color: var(--bad); }
+
+  .evx-modes { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; margin: 10px 0 2px; }
+  .evx-modes span {
+    display: flex; align-items: baseline; justify-content: space-between; gap: 6px;
+    font-family: var(--mono); font-size: 10px; font-weight: 700; letter-spacing: .02em;
+    border: 1.5px solid var(--border-strong); border-radius: 5px;
+    padding: 4px 6px; background: #fff; color: var(--text-3);
+  }
+  .evx-modes span b { font-size: 10.5px; }
+  .evx-modes span.pass { background: var(--ok-soft); border-color: var(--ok); color: var(--ok); }
+  .evx-modes span.rej { background: var(--bad-soft); border-color: var(--bad); color: var(--bad); }
+
+  .evx-rules { display: grid; gap: 4px; margin-top: 10px; }
+  .evx-rule {
+    border: 1px solid var(--border); border-left: 3px solid var(--border-strong); border-radius: 4px;
+    background: var(--bg-soft); padding: 5px 8px; font-size: 11px; color: var(--text-2); line-height: 1.5;
+  }
+  .evx-rule code { font-size: 10.5px; }
+  .evx-rule em { font-family: var(--mono); font-size: 9.5px; font-weight: 700; font-style: normal; color: var(--text-3); margin: 0 6px; }
+  .evx-rule.t-ok { border-left-color: var(--ok); }
+  .evx-rule.t-lock { border-left-color: var(--warn); }
+  .evx-rule.t-bad { border-left-color: var(--bad); }
+
+  /* ===== demo 2 · 故障點結局光譜（每格 = 一次完整模擬的結局） ===== */
+
+  .obx-ctrl { display: flex; flex-wrap: wrap; gap: 12px 16px; align-items: center; margin: 10px 0 8px; }
+  .obx-slider { display: flex; align-items: center; gap: 8px; font-size: 12px; }
+  .obx-slider .sl { font-family: var(--mono); font-size: 11px; color: var(--text-3); white-space: nowrap; }
+  .obx-slider input[type="range"] { width: 148px; max-width: 46vw; accent-color: var(--accent); }
+  .obx-slider b { font-family: var(--mono); font-size: 11.5px; color: var(--text); min-width: 56px; }
+  .obx-pick { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text-2); }
+  .obx-pick .sl { font-family: var(--mono); font-size: 11px; color: var(--text-3); white-space: nowrap; }
+  .obx-pick select {
+    border: 1px solid var(--border-strong); border-radius: 6px; background: #fff;
+    font-family: var(--mono); font-size: 11.5px; padding: 4px 6px; color: var(--text);
+  }
+
+  .obx-wrap { overflow-x: auto; margin: 12px 0 4px; }
+  .obx-grid {
+    display: grid; grid-template-columns: 104px repeat(6, minmax(50px, 1fr)) 62px;
+    gap: 3px; min-width: 512px;
+  }
+  .obx-grid .gh { font-family: var(--mono); font-size: 10px; color: var(--text-3); text-align: center; padding: 1px 0 3px; }
+  .obx-grid .gh.cur { color: var(--accent); font-weight: 700; }
+  .obx-grid .gl { display: flex; align-items: center; font-size: 11.5px; font-weight: 700; padding-right: 4px; }
+  .obx-grid .gc {
+    border: 1.5px solid var(--border-strong); border-radius: 5px; background: #fff;
+    padding: 7px 2px; text-align: center; line-height: 1.25;
+  }
+  .obx-grid .gc b { display: block; font-size: 11.5px; font-weight: 700; }
+  .obx-grid .gc em { display: block; font-family: var(--mono); font-size: 9.5px; font-style: normal; color: var(--text-3); margin-top: 2px; }
+  .obx-grid .gc.o-ok { background: var(--ok-soft); border-color: var(--ok); }
+  .obx-grid .gc.o-ok b { color: var(--ok); }
+  .obx-grid .gc.o-idle b { color: var(--text-3); }
+  .obx-grid .gc.o-bad { background: var(--bad-soft); border-color: var(--bad); }
+  .obx-grid .gc.o-bad b { color: var(--bad); }
+  .obx-grid .gc.o-lock { background: var(--warn-soft); border-color: var(--warn); }
+  .obx-grid .gc.o-lock b { color: var(--warn); }
+  .obx-grid .gc.cur { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+  .obx-grid .gw {
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    border: 1.5px dashed var(--border-strong); border-radius: 5px; background: var(--bg-soft);
+    font-family: var(--mono); font-size: 12px; font-weight: 700; color: var(--text-2);
+  }
+  .obx-grid .gw em { font-style: normal; font-size: 9.5px; font-weight: 600; color: var(--text-3); }
+  .obx-grid .gw.ok { border-color: var(--ok); background: var(--ok-soft); color: var(--ok); }
+  .obx-grid .gw.bad { border-color: var(--bad); background: var(--bad-soft); color: var(--bad); }
+
+  .obx-facts {
+    display: grid; gap: 1px; margin: 14px 0 4px;
+    background: var(--border); border: 1px solid var(--border); border-radius: 8px; overflow: hidden;
+  }
+  .obx-fhead, .obx-frow {
+    display: grid; grid-template-columns: 100px 1fr 1fr 34px;
+    gap: 8px; background: #fff; padding: 6px 9px; align-items: baseline;
+  }
+  .obx-fhead { background: var(--bg-soft); }
+  .obx-fhead span { font-family: var(--mono); font-size: 10px; font-weight: 700; color: var(--text-3); }
+  .obx-frow .fk { font-size: 11.5px; color: var(--text-3); }
+  .obx-frow .fv { font-family: var(--mono); font-size: 11.5px; color: var(--text); line-height: 1.45; word-break: break-all; }
+  .obx-frow .fa { text-align: center; font-weight: 700; color: var(--ok); }
+  .obx-frow.diff { background: var(--bad-soft); }
+  .obx-frow.diff .fa { color: var(--bad); }
+  @media (max-width: 640px) {
+    .obx-fhead, .obx-frow { grid-template-columns: 74px 1fr 1fr 24px; gap: 6px; padding: 6px; }
+    .obx-frow .fk, .obx-frow .fv { font-size: 10.5px; }
+  }
+
+  .obx-verdict {
+    margin-top: 12px; padding: 10px 12px; border-radius: var(--radius-sm);
     border: 1px solid var(--border); background: var(--bg-soft);
-    font-size: 13px; color: var(--text-2); line-height: 1.55;
+    font-size: 12.5px; color: var(--text-2); line-height: 1.6;
   }
-  .eda-verdict.tone-ok { border-left: 3px solid var(--ok); background: var(--ok-soft); color: var(--text); }
-  .eda-verdict.tone-lock { border-left: 3px solid var(--warn); background: var(--warn-soft); color: var(--text); }
-  .eda-verdict.tone-bad { border-left: 3px solid var(--bad); background: var(--bad-soft); color: var(--text); }
-
-  .eda-matrix { display: grid; grid-template-columns: 88px repeat(3, 1fr); gap: 6px; margin: 10px 0 6px; align-items: stretch; }
-  @media (max-width: 560px) { .eda-matrix { grid-template-columns: 64px repeat(3, 1fr); } }
-  .eda-mh, .eda-ml {
-    font-family: var(--mono); font-size: 11px; font-weight: 700; color: var(--text-3);
-    display: flex; align-items: center; justify-content: center; text-align: center;
-  }
-  .eda-ml { justify-content: flex-end; padding-right: 4px; }
-  .eda-cell {
-    border: 1.5px solid var(--border-strong); border-radius: var(--radius-sm);
-    background: #fff; padding: 10px 8px; text-align: center; cursor: pointer;
-    font-family: var(--mono); font-size: 11.5px; font-weight: 700; color: var(--text);
-    transition: background .15s, border-color .15s, box-shadow .15s;
-  }
-  .eda-cell:hover { box-shadow: 0 0 0 3px var(--accent-soft); }
-  .eda-cell.sel { box-shadow: 0 0 0 2px var(--accent); }
-  .eda-cell.ok { background: var(--ok-soft); border-color: var(--ok); color: var(--ok); }
-  .eda-cell.hold { background: var(--warn-soft); border-color: var(--warn); color: var(--warn); }
-  .eda-cell.bad { background: var(--bad-soft); border-color: var(--bad); color: var(--bad); }
-  .eda-cell .cs { display: block; font-size: 10px; font-weight: 600; color: var(--text-3); margin-top: 4px; letter-spacing: .03em; }
-
-  .eda-payload {
-    border: 1px solid var(--border); border-radius: var(--radius-sm);
-    background: var(--code-bg); padding: 10px 12px; margin: 8px 0;
-    font-family: var(--mono); font-size: 12px; color: var(--text); line-height: 1.6; white-space: pre-wrap;
+  .obx-verdict.v-split { border-left: 3px solid var(--accent); background: var(--accent-soft); color: var(--text); }
+  .obx-verdict.v-bad { border-left: 3px solid var(--bad); background: var(--bad-soft); color: var(--text); }
   }
 </style>
 
@@ -1710,6 +1831,68 @@
   <p class="cap">沒有「事件就該帶全量」或「事件就該只帶 ID」的教條。看消費者能不能忍受回查、以及你是否真的要把事件當帳本。</p>
 
   <p>Notification 的隱藏耦合常被低估：消費者回查時，發布者可能已經走到下一狀態。「已付款」通知抵達時訂單已退款，回查看到的是 refunded。你以為在訂閱一個事實，其實在輪詢一個會變的列。Carried State 把「付款那一瞬」凍在 payload 裡，換來的是契約要一起演進。Event Sourcing 再往前一步：連「現況列」都不當真相，任何讀模型都是可丟可重建的投影。</p>
+
+  <p class="eda-sub">把一則信封攤開來看</p>
+  <p>上面三種風格的差別，落到程式裡就是「信封裡放哪幾個欄位」。下面這台拆解器把一則真的 <code>OrderPaid</code> 攤成逐欄台帳：<strong>每一欄屬於哪一類、佔幾個 byte、少了它下游會怎樣</strong>。信封與舊契約都可以直接編輯，最下面那張卡會即時算出這次欄位改動在四種 Registry 相容性模式下會不會被拒登——相容性模式本身的定義留給本篇談 Schema 演進的那一節，這裡先看「改了欄位會發生什麼」。</p>
+
+  <div class="demo" id="demo-evx">
+    <div class="demo-bar">
+      <span class="label">互動 · 事件信封拆解器</span>
+      <span class="label" style="text-transform:none;font-family:var(--sans);font-size:12px;color:var(--text-2)">改 JSON、改舊契約、點必填／選填，三張卡即時重算</span>
+    </div>
+    <div class="demo-body">
+      <div class="evx-io">
+        <label class="evx-field" for="evx-env">
+          <span class="fl">事件信封（可編輯 JSON，payload 支援一層巢狀）</span>
+          <textarea id="evx-env" rows="15" spellcheck="false" aria-label="事件信封 JSON"></textarea>
+        </label>
+        <label class="evx-field" for="evx-spec">
+          <span class="fl">舊版契約：消費者手上的 schema（每行一欄，path:type:req|opt）</span>
+          <textarea id="evx-spec" rows="15" spellcheck="false" aria-label="舊版契約"></textarea>
+        </label>
+      </div>
+
+      <div class="evx-ctrl">
+        <label class="evx-pick" for="evx-key">
+          <span class="sl">冪等鍵組成</span>
+          <select id="evx-key">
+            <option value="eventId">eventId（outbox 主鍵）</option>
+            <option value="aggVer" selected>aggregateId + eventType + version</option>
+            <option value="aggTime">aggregateId + occurredAt</option>
+            <option value="payloadHash">payload 內容雜湊</option>
+          </select>
+        </label>
+        <button class="btn" id="evx-reset">重置</button>
+      </div>
+
+      <div class="seg" role="group" aria-label="第二則事件從何而來" id="evx-seg-twin">
+        <button data-twin="redelivery" aria-pressed="false">原樣重投</button>
+        <button data-twin="republish" aria-pressed="true">上游重建信封後再送</button>
+        <button data-twin="retryNewId" aria-pressed="false">應用層重試換新 id</button>
+        <button data-twin="nextFact" aria-pressed="false">同聚合下一則事實</button>
+      </div>
+
+      <div class="legend">
+        <span><i class="dot ns-idle"></i>新舊契約一致、無演進</span>
+        <span><i class="dot ns-ok"></i>有改動、兩個方向都不破</span>
+        <span><i class="dot ns-lock"></i>破一個方向</span>
+        <span><i class="dot ns-bad"></i>兩個方向都破</span>
+      </div>
+
+      <div class="status-line" id="evx-status">載入預設信封中。</div>
+
+      <div class="evx-ledger" id="evx-ledger"></div>
+      <div id="evx-stack"></div>
+      <div class="evx-missing" id="evx-missing"></div>
+
+      <div class="evx-cards">
+        <div class="evx-card" id="evx-card-key"></div>
+        <div class="evx-card" id="evx-card-weight"></div>
+        <div class="evx-card" id="evx-card-compat"></div>
+      </div>
+    </div>
+  </div>
+  <p class="cap">三個值得停下來比對的地方：<strong>(1)</strong> 預設信封 309 bytes，但業務事實只占 31.4%——<strong>68.6% 是信封稅</strong>，這是 Carried State 的真實重量。<strong>(2)</strong> 把冪等鍵換成 <code>aggregateId + occurredAt</code>，四種孿生事件的答對數從 <strong>4/4 掉到 1/4</strong>；換成 <code>payload 內容雜湊</code>是 3/4，而且錯的那一種是「誤擋」——它會把合法的第二筆同金額付款當成重投丟掉。<strong>(3)</strong> 把台帳上七個新欄位全部點成「選填」，相容性從「只有 FORWARD 成立」變成 <strong>FULL</strong>，拒登的 Registry 模式從 2 個降到 0 個。bytes 由規範化序列化算出，與你在框裡怎麼縮排無關；「選填」在本模型裡同時代表 optional 與「有預設值」，兩者對 BACKWARD 的效果相同。</p>
 
   <div class="callout warn">
     <div class="c-title"><span class="ic">陷阱</span>把 CRUD 列變更直接當領域事件</div>
@@ -1921,6 +2104,59 @@ sequenceDiagram
     <p>交易 commit 之後，outbox 列就是耐久的意圖。發佈器崩潰、broker 拒收、標 published 之前再崩潰，列都還在，重試即可。主題上仍可能出現同一 <code>id</code> 兩次。Outbox 把「資料庫有、主題沒有」這條裂縫補上；「主題有兩次」交給下一節的去重表。</p>
   </div>
 
+  <p class="eda-sub">裂縫到底有多寬</p>
+  <p>上面那張 swimlane 說的是「步驟是什麼」。下面這台模擬器問的是另一個問題：<strong>在哪一步斷掉會怎樣</strong>。它對每一個故障點各跑一次完整模擬（開交易、提交、崩潰回滾、送出、重啟後補送、消費），再依最終的耐久狀態分類結局，所以你看到的不是一次播放，是<strong>整條結局光譜</strong>——雙寫的 bug 因此有了「多寬」這個量。</p>
+
+  <div class="demo" id="demo-obx">
+    <div class="demo-bar">
+      <span class="label">互動 · 故障點結局光譜</span>
+      <span class="label" style="text-transform:none;font-family:var(--sans);font-size:12px;color:var(--text-2)">拖故障點、換寫入順序與 broker 行為，兩列光譜同時重算</span>
+    </div>
+    <div class="demo-body">
+      <div class="seg" role="group" aria-label="雙寫順序" id="obx-seg-order">
+        <button data-order="dbFirst" aria-pressed="true">先寫庫再發訊息</button>
+        <button data-order="mqFirst" aria-pressed="false">先發訊息再寫庫</button>
+      </div>
+      <div class="seg" role="group" aria-label="broker 在 SEND 時的行為" id="obx-seg-broker" style="margin-top:8px">
+        <button data-broker="accept" aria-pressed="true">broker 接受</button>
+        <button data-broker="reject" aria-pressed="false">首次拒收，稍後恢復</button>
+      </div>
+
+      <div class="obx-ctrl">
+        <label class="obx-slider" for="obx-crash">
+          <span class="sl">進程消失點</span>
+          <input type="range" id="obx-crash" min="0" max="5" step="1" value="4">
+          <b id="obx-crash-val">t4 之後</b>
+        </label>
+        <label class="obx-pick" for="obx-dedup">
+          <span class="sl">消費端 handler</span>
+          <select id="obx-dedup">
+            <option value="naive" selected>天真 qty -= 2</option>
+            <option value="idem">冪等鍵 + 去重表</option>
+          </select>
+        </label>
+        <button class="btn" id="obx-reset">重置</button>
+      </div>
+
+      <div class="legend">
+        <span><i class="dot ns-ok"></i>一致</span>
+        <span><i class="dot ns-idle"></i>整筆未發生（也一致）</span>
+        <span><i class="dot ns-bad"></i>不一致：遺失／幽靈</span>
+        <span><i class="dot ns-lock"></i>重複扣量</span>
+      </div>
+
+      <div class="status-line" id="obx-status">拖動「進程消失點」，兩條泳道的結局同時重算。</div>
+
+      <div class="obx-wrap">
+        <div id="obx-spectrum"></div>
+      </div>
+
+      <div class="obx-facts" id="obx-facts"></div>
+      <div class="obx-verdict" id="obx-verdict">—</div>
+    </div>
+  </div>
+  <p class="cap">四個值得停下來比對的位置：<strong>(1)</strong> 預設（先寫庫、broker 接受、天真 handler）——雙寫只有「t2 之後」這<strong>一格</strong>不一致（裂縫 1/6），窄得剛好能通過測試、卻會在線上咬人；而 Outbox 在「t4 之後」那一格是<strong>重複扣量</strong>（送出成功、<code>published_at</code> 還沒回填就崩潰，重啟後再送一次，主題上 2 則、qty 掉到 6）。<strong>(2)</strong> handler 換成去重表：Outbox 那一格變回一致、qty 回到 8，<strong>雙寫那一列一個字都沒變</strong>——去重表補的是重複，補不了遺失。<strong>(3)</strong> 順序換成「先發訊息再寫庫」：裂縫變成 <strong>2/6</strong>，而且失敗的性質從「遺失」變成「幽靈」——兩種順序都解不了，只是裂法不同。<strong>(4)</strong> broker 改成首次拒收：雙寫的裂縫從 1/6 撐到 <strong>5/6</strong>，而 Outbox 那一列連重複格都消失了——沒送成功，就沒有東西可以重複。</p>
+
   <div class="callout warn">
     <div class="c-title"><span class="ic">陷阱</span>發佈成功後立刻 DELETE outbox 列</div>
     <p>刪了就失去「這則 id 曾經發過」的證據。發佈器在 send 成功、delete 失敗時會再送一次，消費端若只靠「outbox 還在不在」去重，對不上。保留列並寫 <code>published_at</code>，或把 id 另存已發集合，比當場刪除安全。</p>
@@ -1992,6 +2228,8 @@ sequenceDiagram
   <p class="sec-sub">生產者與消費者不會同一秒升級。相容性模式決定誰可以先走、誰必須等。</p>
 
   <p>Carried State 把契約變成跨團隊的 API。欄位一改，舊進程與新進程會在同一條主題上共存數小時到數週。Schema Registry 不做序列化，它做的是<strong>攔下不相容的新版本</strong>，讓這段共存期有規則可守。</p>
+
+  <p>本節這張模式表就是前面那台<em>事件信封拆解器</em>裡「相容性判定」那張卡實作的規則：它逐欄比對新舊契約，把每一項改動歸到下表的某一格，再摺疊成「哪個方向成立」。想邊讀邊試的話，回去改那則信封的欄位，看下面四種模式各自的反應。</p>
 
   <p class="eda-sub">四種相容性模式</p>
   <div class="tbl-wrap">
@@ -2077,146 +2315,6 @@ sequenceDiagram
 <section id="s7">
   <div class="sec-head">
     <span class="sec-num">07</span>
-    <h2>互動 · 雙寫裂縫與 Schema 矩陣</h2>
-  </div>
-  <p class="sec-sub">並排走完同一筆付款：左邊雙寫、右邊 Outbox。再切到矩陣，看新舊版本在哪一種相容性模式下能共存。</p>
-
-  <div class="demo" id="demo-eda">
-    <div class="demo-bar">
-      <span class="label">互動 · 事件如何離開交易</span>
-      <span class="label" style="text-transform:none;font-family:var(--sans);font-size:12px;color:var(--text-2)">下一步推進時序；重置回到起點</span>
-    </div>
-    <div class="demo-body">
-      <div class="seg" role="group" aria-label="演示切換" id="eda-seg-view">
-        <button data-view="outbox" aria-pressed="true">雙寫 vs Outbox</button>
-        <button data-view="schema" aria-pressed="false">Schema 相容矩陣</button>
-      </div>
-
-      <div id="eda-outbox-view" class="eda-view">
-        <div class="seg" role="group" aria-label="故障情境" id="eda-seg-fault" style="margin-top:8px">
-          <button data-fault="none" aria-pressed="true">正常路徑</button>
-          <button data-fault="midcrash" aria-pressed="false">中間崩潰</button>
-          <button data-fault="broker" aria-pressed="false">Broker 中斷</button>
-          <button data-fault="dup" aria-pressed="false">重複投遞</button>
-        </div>
-        <div class="seg" role="group" aria-label="消費端" id="eda-seg-cons" style="margin-top:8px">
-          <button data-cons="naive" aria-pressed="true">天真 handler</button>
-          <button data-cons="idem" aria-pressed="false">冪等鍵 + 去重表</button>
-        </div>
-        <p class="eda-mode-hint" id="eda-fault-hint">兩邊同時付同一筆訂單。雙寫先 commit 再 send；Outbox 把列與訊息放進同一交易，再由發佈器投遞。</p>
-      </div>
-
-      <div id="eda-schema-view" class="eda-view" hidden>
-        <div class="seg" role="group" aria-label="相容模式" id="eda-seg-compat" style="margin-top:8px">
-          <button data-compat="backward" aria-pressed="true">BACKWARD</button>
-          <button data-compat="forward" aria-pressed="false">FORWARD</button>
-          <button data-compat="full" aria-pressed="false">FULL</button>
-          <button data-compat="none" aria-pressed="false">NONE</button>
-        </div>
-        <p class="eda-mode-hint" id="eda-schema-hint">點選矩陣格子，選擇生產者與消費者版本。Registry 依模式決定「v2、v3 能不能登錄在 v1 之後」；執行期另看雙方是否解得開。</p>
-      </div>
-
-      <div class="eda-ctrl" id="eda-outbox-ctrl">
-        <button class="btn primary" id="eda-btn-next">下一步</button>
-        <button class="btn" id="eda-btn-all">走完</button>
-        <button class="btn" id="eda-btn-reset">重置</button>
-      </div>
-
-      <div class="eda-metric" id="eda-outbox-metric">
-        <span>步 <strong id="eda-m-step">0</strong> / <span id="eda-m-total">3</span></span>
-        <span>雙寫事件 <strong id="eda-m-dw">0</strong></span>
-        <span>Outbox 已發 <strong id="eda-m-ob">0</strong></span>
-        <span>庫存（雙寫） <strong id="eda-m-inv-dw">10</strong></span>
-        <span>庫存（Outbox） <strong id="eda-m-inv-ob">10</strong></span>
-      </div>
-
-      <div class="legend" id="eda-legend">
-        <span><i class="dot ns-idle"></i>待命 / 空</span>
-        <span><i class="dot ns-wait"></i>進行中</span>
-        <span><i class="dot ns-lock"></i>待發 / 凍結</span>
-        <span><i class="dot ns-ok"></i>已提交 / 已套用</span>
-        <span><i class="dot ns-bad"></i>遺失 / 雙花 / 不相容</span>
-      </div>
-
-      <div id="eda-lanes" class="eda-lanes">
-        <div class="eda-lane dw">
-          <div class="ln">直接雙寫</div>
-          <div class="ls">UPDATE commit → producer.send</div>
-          <div class="eda-box idle" id="eda-dw-order">
-            <div class="bn">orders</div>
-            <div class="bl">O-1001</div>
-            <div class="bv" id="eda-dw-order-v">status = pending</div>
-          </div>
-          <div class="eda-box idle" id="eda-dw-topic">
-            <div class="bn">topic · order.events</div>
-            <div class="bl">broker 側</div>
-            <div class="eda-slots" id="eda-dw-slots"></div>
-          </div>
-          <div class="eda-box idle" id="eda-dw-inv">
-            <div class="bn">inventory handler</div>
-            <div class="bl">SKU-A · 起始 10</div>
-            <div class="bv" id="eda-dw-inv-v">qty = 10 · 去重表空</div>
-          </div>
-        </div>
-        <div class="eda-lane ob">
-          <div class="ln">Transactional Outbox</div>
-          <div class="ls">同一交易寫列 + outbox → 發佈器</div>
-          <div class="eda-box idle" id="eda-ob-order">
-            <div class="bn">orders + outbox</div>
-            <div class="bl">同一顆資料庫</div>
-            <div class="bv" id="eda-ob-order-v">status = pending · outbox 空</div>
-          </div>
-          <div class="eda-box idle" id="eda-ob-topic">
-            <div class="bn">topic · order.events</div>
-            <div class="bl">發佈器投遞後</div>
-            <div class="eda-slots" id="eda-ob-slots"></div>
-          </div>
-          <div class="eda-box idle" id="eda-ob-inv">
-            <div class="bn">inventory handler</div>
-            <div class="bl">SKU-A · 起始 10</div>
-            <div class="bv" id="eda-ob-inv-v">qty = 10 · 去重表空</div>
-          </div>
-        </div>
-      </div>
-
-      <div id="eda-schema-board" class="eda-view" hidden>
-        <div class="eda-col-label">消費者 \ 生產者</div>
-        <div class="eda-matrix" id="eda-matrix" role="grid" aria-label="相容性矩陣"></div>
-        <div class="eda-payload" id="eda-payload">{ }</div>
-      </div>
-
-      <div class="eda-panels">
-        <div class="eda-panel">
-          <div class="pt">本步語義</div>
-          <div class="prow"><span class="pk">事件</span><span class="pv" id="eda-p-op">—</span></div>
-          <div class="prow"><span class="pk">規則</span><span class="pv" id="eda-p-rule">—</span></div>
-          <div class="prow"><span class="pk">雙寫</span><span class="pv" id="eda-p-dw">—</span></div>
-          <div class="prow"><span class="pk">Outbox</span><span class="pv" id="eda-p-ob">—</span></div>
-        </div>
-        <div class="eda-panel">
-          <div class="pt">觀測</div>
-          <div class="prow"><span class="pk">情境 / 模式</span><span class="pv" id="eda-p-model">正常路徑</span></div>
-          <div class="prow"><span class="pk">一致性</span><span class="pv" id="eda-p-consis">尚未走步</span></div>
-          <div class="prow"><span class="pk">消費</span><span class="pv" id="eda-p-handler">天真 handler</span></div>
-          <div class="prow"><span class="pk">風險</span><span class="pv" id="eda-p-risk">無</span></div>
-        </div>
-      </div>
-
-      <div class="status-line" id="eda-status">選擇情境後按「下一步」。雙寫與 Outbox 並排走同一筆 O-1001。</div>
-      <div class="eda-verdict" id="eda-verdict">判定尚未產生——走完一輪後會對照兩邊的訂單、主題與庫存。</div>
-      <div class="eda-wire" id="eda-wire" aria-label="事件日誌"></div>
-    </div>
-  </div>
-  <p class="cap">中間崩潰與 Broker 中斷時，雙寫的「訂單已付、主題沒有事件」是事故；Outbox 重試後追上是保護。重複投遞時，去重表擋下第二筆也是保護（判定偏綠）；天真 handler 把庫存扣兩次才是事故。</p>
-
-  <div class="oneliner">
-    <b>一句話答法</b>雙寫在兩個提交中間裂開；Outbox 留下耐久意圖。重複投遞用去重表當保護，不要把重試當故障。
-  </div>
-</section>
-
-<section id="s8">
-  <div class="sec-head">
-    <span class="sec-num">08</span>
     <h2>面試折衷與邊界</h2>
   </div>
   <p class="sec-sub">先答事件帶多少、流程誰指揮、訊息怎麼離開交易。補償理論、broker 內部、視窗運算各有自己的篇。</p>
@@ -2364,729 +2462,1180 @@ sequenceDiagram
 (function () {
   "use strict";
 
-  var demo = document.getElementById("demo-eda");
-  if (!demo) return;
+  /* ==================================================================
+     (1) 常數與參數表
+     ================================================================== */
 
-  var FAULT_HINT = {
-    none: "兩邊同時付同一筆訂單。雙寫先 commit 再 send；Outbox 把列與訊息放進同一交易，再由發佈器投遞。",
-    midcrash: "兩邊都已把訂單標成 paid。下一步在 send 前崩潰：雙寫沒有耐久意圖，Outbox 列還在。",
-    broker: "send 當下 broker 拒收。雙寫的 HTTP 已結束，不會自動再送；Outbox 列保持 PENDING，broker 恢復後重試。",
-    dup: "兩邊都成功發出 evt-1。第二次投遞同一 id：天真 handler 再扣一次庫存，去重表則拒絕重做。"
+  /* ---------- demo 1：事件信封拆解器 ---------- */
+
+  /* 名稱 → 角色。這是查表（設計說明第 5 欄已申報）。
+     算出來的是：各角色的欄位數與 bytes 小計、以及「不在信封慣例名單」的頂層欄位數。 */
+  var ROLE_OF = {
+    eventId: "identity", id: "identity", messageId: "identity", idempotencyKey: "identity",
+    aggregateType: "causality", aggregateId: "causality", eventType: "causality",
+    version: "causality", sequence: "causality", occurredAt: "causality",
+    causationId: "causality", correlationId: "causality",
+    traceparent: "metadata", tracestate: "metadata", schemaVersion: "metadata",
+    contentType: "metadata", source: "metadata", producer: "metadata",
+    headers: "metadata", partitionKey: "metadata"
+  };
+  var ROLE_ORDER = ["identity", "causality", "payload", "metadata"];
+  var ROLE_TAG = { identity: "ID", causality: "CAUSE", payload: "DATA", metadata: "META" };
+  var ROLE_NAME = {
+    identity: "識別這一則",
+    causality: "因果與位置",
+    payload: "業務事實",
+    metadata: "傳輸與可觀測"
   };
 
-  var FAULT_LABEL = {
-    none: "正常路徑",
-    midcrash: "中間崩潰",
-    broker: "Broker 中斷",
-    dup: "重複投遞"
+  /* 缺席後果的句子模板（常數）。算出來的是「哪些欄位缺席」這個集合，
+     以及缺席造成的數字後果（keyScore 下降、回查欄位數上升）。 */
+  var MISSING_NOTE = {
+    eventId: "去重表沒有鍵可插入 —— at-least-once 的重投會把副作用做第二次。",
+    eventType: "消費者無法路由，複合冪等鍵也少一段。",
+    aggregateId: "無法定位這則事實屬於哪一個聚合；分區鍵與按聚合重放都失去依據。",
+    version: "亂序擋不住 —— 舊版本會覆寫新版本；複合冪等鍵同時退化。",
+    occurredAt: "只剩處理時間可用，遲到判定與時間旅行都算不出來。",
+    traceparent: "跨服務追蹤在此斷鏈，事故時對不上上游那一次請求。",
+    schemaVersion: "解碼端只能猜契約版本。"
+  };
+  var MISSING_BY_ROLE = {
+    identity: "少了識別欄，去重與重試都沒有依據。",
+    causality: "少了因果／位置欄，順序與歸屬的判斷失去依據。",
+    payload: "消費者少了這一格事實，只能回頭查發布者。",
+    metadata: "傳輸與可觀測性的線索缺一段。"
   };
 
-  var COMPAT_HINT = {
-    backward: "BACKWARD：新消費者必須讀得懂舊資料。消費者先升級。v1→v2 可登錄；v3 改名會被拒。",
-    forward: "FORWARD：舊消費者必須讀得懂新資料。生產者先升級。前提是舊程式忽略未知欄位。v3 仍會被拒。",
-    full: "FULL：兩個方向都要成立，共存順序任意。只放行加可選欄位這類窄門；v3 被拒。",
-    none: "NONE：Registry 不擋登錄。v3 能上線，執行期再由解碼器爆掉——這不是寬容，是把檢查推遲到半夜。"
+  /* 冪等鍵組成。"@payloadHash" 是特例：對 payload 子樹做穩定序列化後雜湊。 */
+  var KEY_PARTS = {
+    eventId: ["eventId"],
+    aggVer: ["aggregateId", "eventType", "version"],
+    aggTime: ["aggregateId", "occurredAt"],
+    payloadHash: ["@payloadHash"]
+  };
+  var KEY_LABEL = {
+    eventId: "eventId（outbox 主鍵）",
+    aggVer: "aggregateId + eventType + version",
+    aggTime: "aggregateId + occurredAt",
+    payloadHash: "payload 內容雜湊"
   };
 
-  var VERSIONS = ["v1", "v2", "v3"];
+  /* 四種孿生事件。sameFact 是模型前提（不是輸出）：
+     前三種是「同一個業務事實又來了一次」，第四種是「另一個真的事實」。 */
+  var TWINS = ["redelivery", "republish", "retryNewId", "nextFact"];
+  var TWIN_LABEL = {
+    redelivery: "原樣重投",
+    republish: "上游重建信封後再送",
+    retryNewId: "應用層重試換新 id",
+    nextFact: "同聚合下一則事實"
+  };
+  var TWIN_DETAIL = {
+    redelivery: "broker 重投同一則位元組，信封一個欄位都沒變。",
+    republish: "沿用同一個 eventId，但 occurredAt 與 traceparent 重新產生。",
+    retryNewId: "上游換了新的 eventId，聚合、版本與 payload 完全相同。",
+    nextFact: "換新 eventId、version + 1、payload 相同（同金額再付一筆），occurredAt 落在同一毫秒。"
+  };
+  var TWIN_SAME_FACT = {
+    redelivery: true, republish: true, retryNewId: true, nextFact: false
+  };
+  var DEDUP_VERDICT = {
+    blockOk: "正確去重：同一個事實被擋下，副作用只發生一次。",
+    passBad: "漏網：同一個事實拿到兩把不同的鍵，下游的副作用會做第二次。",
+    blockBad: "誤擋：兩個不同的事實共用一把鍵，真事件被去重表丟掉。",
+    passOk: "正確放行：不同的事實拿到不同的鍵，第二則照樣被處理。",
+    noKey: "這個信封組不出鍵：所選組成的每一段都缺席，去重表無從下手。"
+  };
+  var DEDUP_TONE = { blockOk: "ok", passOk: "ok", passBad: "bad", blockBad: "bad", noKey: "bad" };
 
-  var PAYLOAD = {
-    v1: '{ "eventId": "evt-1", "orderId": "O-1001", "amount": 80 }',
-    v2: '{ "eventId": "evt-1", "orderId": "O-1001", "amount": 80, "currency": "TWD" }',
-    v3: '{ "eventId": "evt-1", "orderId": "O-1001", "amountCents": 8000, "currency": "TWD" }'
+  var COMPAT_NAME = {
+    IDENTICAL: "無演進",
+    FULL: "FULL 成立",
+    BACKWARD: "只有 BACKWARD 成立",
+    FORWARD: "只有 FORWARD 成立",
+    BREAKING: "兩個方向都破"
+  };
+  var COMPAT_ORDER = {
+    IDENTICAL: "沒有演進可審，共存順序無所謂。",
+    FULL: "任意順序：生產者與消費者誰先升級都安全。",
+    BACKWARD: "消費者先升級 —— 新消費者讀得懂舊資料，但舊消費者讀不懂新資料。",
+    FORWARD: "生產者先升級 —— 舊消費者讀得懂新資料，但新消費者讀不懂舊資料。",
+    BREAKING: "沒有安全順序：改成「加新欄、留舊欄、兩段發佈」。"
+  };
+  var COMPAT_TONE = {
+    IDENTICAL: "", FULL: "ok", BACKWARD: "lock", FORWARD: "lock", BREAKING: "bad"
+  };
+  var REGISTRY_MODES = ["BACKWARD", "FORWARD", "FULL", "NONE"];
+
+  var TYPE_ALIAS = {
+    int: "number", integer: "number", long: "number", float: "number", double: "number",
+    decimal: "number", num: "number", bool: "boolean", str: "string", text: "string",
+    uuid: "string", timestamp: "string", ts: "string", map: "object", obj: "object"
   };
 
-  var view = "outbox";
-  var fault = "none";
-  var consMode = "naive";
-  var compat = "backward";
-  var prodVer = "v2";
-  var consVer = "v1";
-  var step = 0;
-  var wire = [];
-  var panel = {
-    op: "—",
-    rule: "—",
-    dw: "—",
-    ob: "—",
-    model: "正常路徑",
-    consis: "尚未走步",
-    handler: "天真 handler",
-    risk: "無",
-    consisCls: "",
-    riskCls: ""
+  var FAT_PAYLOAD_PCT = 25;      /* 不被此消費者讀取的業務欄位佔比超過此值 → 判為偏 fat */
+  var BASE_EXPECT = ["eventId", "eventType", "aggregateId"];   /* 信封基本盤 */
+
+  var DEFAULT_ENVELOPE = {
+    eventId: "evt-9f31c0",
+    eventType: "OrderPaid",
+    aggregateType: "Order",
+    aggregateId: "O-1001",
+    version: 7,
+    occurredAt: "2026-03-04T11:22:33.481Z",
+    payload: { sku: "SKU-A", qty: 2, amount: 80, currency: "TWD", buyerNote: "請下午三點後配送" },
+    traceparent: "00-4bf92f-00f067aa0ba9-01",
+    schemaVersion: 2
   };
-  var verdict = { text: "判定尚未產生——走完一輪後會對照兩邊的訂單、主題與庫存。", tone: "" };
-  var statusText = "選擇情境後按「下一步」。雙寫與 Outbox 並排走同一筆 O-1001。";
-  var dw = null;
-  var ob = null;
+  var DEFAULT_OLD_SPEC = [
+    "eventId:string:req",
+    "eventType:string:req",
+    "aggregateId:string:req",
+    "payload.sku:string:req",
+    "payload.qty:number:req",
+    "payload.amount:number:req"
+  ];
 
-  var statusEl = document.getElementById("eda-status");
-  var verdictEl = document.getElementById("eda-verdict");
-  var wireEl = document.getElementById("eda-wire");
-  var outboxView = document.getElementById("eda-outbox-view");
-  var schemaView = document.getElementById("eda-schema-view");
-  var schemaBoard = document.getElementById("eda-schema-board");
-  var lanesEl = document.getElementById("eda-lanes");
-  var outboxCtrl = document.getElementById("eda-outbox-ctrl");
-  var outboxMetric = document.getElementById("eda-outbox-metric");
-  var btnNext = document.getElementById("eda-btn-next");
-  var btnAll = document.getElementById("eda-btn-all");
-  var btnReset = document.getElementById("eda-btn-reset");
+  /* ---------- demo 2：雙寫 vs Outbox ---------- */
 
-  function el(id) {
-    return document.getElementById(id);
-  }
+  var INV_START = 10;            /* SKU-A 起始可用量 */
+  var QTY_PER_EVENT = 2;         /* 一則 OrderPaid 扣的量 */
+  var CRASH_POINTS = 6;          /* 0 = 不崩潰，1..5 = t1..t5 之後 */
 
-  function esc(s) {
-    return String(s)
-      .replace(/&/g, "&amp;")
-      .replace(/</g, "&lt;")
-      .replace(/>/g, "&gt;")
-      .replace(/"/g, "&quot;");
-  }
+  /* 三張指令序列 = 模型定義（不是輸出）。共用一條 5 tick 的時鐘，
+     與第 4 節上方那張交易邊界 swimlane 對齊。 */
+  var PROGRAM = {
+    dbFirst: ["OPEN_ORDER", "COMMIT", "SEND", "RETURN", "IDLE"],
+    mqFirst: ["SEND", "OPEN_ORDER", "COMMIT", "RETURN", "IDLE"],
+    outbox: ["OPEN_BOTH", "COMMIT", "POLL", "SEND", "MARK"]
+  };
+  var TICK_LABEL = {
+    dbFirst: ["UPDATE orders（未提交）", "COMMIT", "SEND evt", "回應 200", "—（已結束）"],
+    mqFirst: ["SEND evt", "UPDATE orders（未提交）", "COMMIT", "回應 200", "—（已結束）"],
+    outbox: ["UPDATE orders + INSERT outbox（未提交）", "COMMIT（兩筆一起生效）",
+      "發佈器撈出 published_at IS NULL", "SEND evt", "回填 published_at"]
+  };
+  var CRASH_LABEL = ["不崩潰", "t1 之後", "t2 之後", "t3 之後", "t4 之後", "t5 之後"];
+  var OUTCOME = {
+    ok: { short: "一致", tone: "ok", text: "訂單已付、主題有事件、效果一次" },
+    none: { short: "未發生", tone: "idle", text: "交易回滾，整筆付款沒有發生 —— 也是一致的" },
+    lost: { short: "遺失", tone: "bad", text: "訂單已付、主題沒有事件 —— 下游永遠不會知道" },
+    ghost: { short: "幽靈", tone: "bad", text: "主題有事件、訂單仍 pending —— 下游扣了不存在的付款" },
+    dup: { short: "重複", tone: "lock", text: "同一則被套用兩次 —— 庫存被扣了兩份" }
+  };
+  var LANE_NAME = { dual: "直接雙寫", outbox: "Transactional Outbox" };
+  var ORDER_NAME = { dbFirst: "先寫庫再發訊息", mqFirst: "先發訊息再寫庫" };
+  var BROKER_NAME = { accept: "broker 接受", reject: "首次拒收，稍後恢復" };
+  var HANDLER_NAME = { naive: "天真 qty -= 2", idem: "冪等鍵 + 去重表" };
 
-  function setSeg(rootId, attr, value) {
-    var root = document.getElementById(rootId);
-    if (!root) return;
-    var buttons = root.querySelectorAll("button");
-    for (var i = 0; i < buttons.length; i += 1) {
-      buttons[i].setAttribute("aria-pressed", buttons[i].getAttribute(attr) === value ? "true" : "false");
+  /* ==================================================================
+     (2) compute* 純函式 —— 不得出現 document / DOM 任何 API
+     ================================================================== */
+
+  function utf8Len(s) {
+    var n = 0, i, c;
+    s = String(s);
+    for (i = 0; i < s.length; i += 1) {
+      c = s.charCodeAt(i);
+      if (c < 0x80) n += 1;
+      else if (c < 0x800) n += 2;
+      else if (c >= 0xd800 && c <= 0xdbff) { n += 4; i += 1; }
+      else n += 3;
     }
+    return n;
   }
 
-  function logRow(kind, tag, text) {
-    wire.push({ kind: kind, tag: tag, text: text, step: step });
+  function fnv1a(s) {
+    var h = 0x811c9dc5, i, c;
+    s = String(s);
+    for (i = 0; i < s.length; i += 1) {
+      c = s.charCodeAt(i);
+      h ^= c & 0xff;
+      h += (h << 1) + (h << 4) + (h << 7) + (h << 8) + (h << 24);
+      h = h >>> 0;
+      if (c > 0xff) {
+        h ^= (c >>> 8) & 0xff;
+        h += (h << 1) + (h << 4) + (h << 7) + (h << 8) + (h << 24);
+        h = h >>> 0;
+      }
+    }
+    return ("0000000" + h.toString(16)).slice(-8);
   }
 
-  function freshLane() {
+  function jsonType(v) {
+    if (v === null) return "null";
+    if (Object.prototype.toString.call(v) === "[object Array]") return "array";
+    return typeof v;
+  }
+
+  function isPlainObject(v) {
+    return v !== null && typeof v === "object" && jsonType(v) !== "array";
+  }
+
+  function has(obj, k) {
+    return obj !== null && typeof obj === "object" && Object.prototype.hasOwnProperty.call(obj, k);
+  }
+
+  /* 穩定序列化：鍵排序後輸出，讓「內容雜湊」不受鍵順序影響。 */
+  function stableStringify(v) {
+    var keys, i, parts;
+    if (v === null || typeof v !== "object") return JSON.stringify(v);
+    if (jsonType(v) === "array") {
+      parts = [];
+      for (i = 0; i < v.length; i += 1) parts.push(stableStringify(v[i]));
+      return "[" + parts.join(",") + "]";
+    }
+    keys = Object.keys(v).sort();
+    parts = [];
+    for (i = 0; i < keys.length; i += 1) {
+      parts.push(JSON.stringify(keys[i]) + ":" + stableStringify(v[keys[i]]));
+    }
+    return "{" + parts.join(",") + "}";
+  }
+
+  function normType(t) {
+    t = String(t == null ? "" : t).trim().toLowerCase();
+    if (!t) return "string";
+    return TYPE_ALIAS[t] || t;
+  }
+
+  /* 把信封攤平成台帳的列：頂層一層 + payload / data 容器內一層。
+     容器自成一列（marked container），它的子欄位縮排為 depth 1。 */
+  function flattenEnvelope(env) {
+    var rows = [], keys = Object.keys(env), i, j, k, v, subKeys, sk, sv, role;
+    for (i = 0; i < keys.length; i += 1) {
+      k = keys[i];
+      v = env[k];
+      if ((k === "payload" || k === "data") && isPlainObject(v)) {
+        rows.push({
+          path: k, key: k, depth: 0, container: true, type: "object",
+          role: "payload", offConvention: false,
+          bytes: utf8Len(JSON.stringify(k)) + 1 + 2,
+          preview: "{ … }"
+        });
+        subKeys = Object.keys(v);
+        for (j = 0; j < subKeys.length; j += 1) {
+          sk = subKeys[j];
+          sv = v[sk];
+          rows.push({
+            path: k + "." + sk, key: sk, depth: 1, container: false, type: jsonType(sv),
+            role: "payload", offConvention: false,
+            bytes: utf8Len(JSON.stringify(sk)) + 1 + utf8Len(JSON.stringify(sv)),
+            preview: JSON.stringify(sv)
+          });
+        }
+        continue;
+      }
+      role = ROLE_OF[k];
+      rows.push({
+        path: k, key: k, depth: 0, container: false, type: jsonType(v),
+        role: role || "payload", offConvention: !role,
+        bytes: utf8Len(JSON.stringify(k)) + 1 + utf8Len(JSON.stringify(v)),
+        preview: JSON.stringify(v)
+      });
+    }
+    return rows;
+  }
+
+  function parseSpec(src) {
+    var lines, out = [], i, t, cut, path, rest, bits;
+    if (jsonType(src) === "array") lines = src.slice();
+    else lines = String(src == null ? "" : src).split(/\r?\n/);
+    for (i = 0; i < lines.length; i += 1) {
+      t = String(lines[i]).trim();
+      if (!t || t.charAt(0) === "#") continue;
+      cut = t.indexOf(":");
+      path = cut < 0 ? t : t.slice(0, cut);
+      rest = cut < 0 ? "" : t.slice(cut + 1);
+      bits = rest.split(":");
+      path = path.trim();
+      if (!path) continue;
+      out.push({
+        path: path,
+        type: normType(bits[0]),
+        req: String(bits[1] == null ? "req" : bits[1]).trim().toLowerCase().indexOf("opt") !== 0
+      });
+    }
+    return out;
+  }
+
+  function pluck(env, path) {
+    var parts = String(path).split("."), cur = env, i;
+    for (i = 0; i < parts.length; i += 1) {
+      if (!has(cur, parts[i])) return undefined;
+      cur = cur[parts[i]];
+    }
+    return cur;
+  }
+
+  function buildKey(env, mode) {
+    var parts = KEY_PARTS[mode] || KEY_PARTS.eventId,
+      out = [], missing = [], i, p, v;
+    for (i = 0; i < parts.length; i += 1) {
+      p = parts[i];
+      if (p === "@payloadHash") {
+        v = has(env, "payload") ? env.payload : (has(env, "data") ? env.data : undefined);
+        if (v === undefined || v === null) { missing.push("payload"); out.push("∅"); }
+        else out.push("h:" + fnv1a(stableStringify(v)));
+        continue;
+      }
+      v = pluck(env, p);
+      if (v === undefined || v === null) { missing.push(p); out.push("∅"); }
+      else out.push(String(v));
+    }
     return {
-      order: "pending",
-      outbox: null,
-      events: [],
-      inv: 10,
-      seen: false,
-      applied: 0,
-      crashed: false,
-      brokerDown: false
+      key: out.join(" | "),
+      parts: parts,
+      missing: missing,
+      degenerate: missing.length === parts.length
     };
   }
 
-  function totalSteps() {
-    return fault === "none" ? 3 : 4;
+  function shiftTime(v, ms) {
+    var t;
+    if (typeof v === "number") return v + ms;
+    t = Date.parse(String(v));
+    if (isFinite(t)) return new Date(t + ms).toISOString();
+    return String(v) + "+" + ms + "ms";
   }
 
-  function resetRun() {
-    step = 0;
-    wire = [];
-    dw = freshLane();
-    ob = freshLane();
-    panel.op = "—";
-    panel.rule = "—";
-    panel.dw = "待寫入";
-    panel.ob = "待寫入";
-    panel.model = FAULT_LABEL[fault];
-    panel.consis = "尚未走步";
-    panel.handler = consMode === "idem" ? "冪等去重" : "天真 handler";
-    panel.risk = "無";
-    panel.consisCls = "";
-    panel.riskCls = "";
-    verdict = { text: "判定尚未產生——走完一輪後會對照兩邊的訂單、主題與庫存。", tone: "" };
-    statusText = FAULT_HINT[fault];
+  function newTrace(v) {
+    var parts = String(v).split("-");
+    if (parts.length >= 3) { parts[2] = fnv1a(parts[2] + "b"); return parts.join("-"); }
+    return fnv1a(String(v));
   }
 
-  function consume(lane, name) {
-    if (lane.events.length === 0) {
-      logRow("warn", name, "主題是空的，handler 無事件可套用。");
-      return "無事件";
-    }
-    if (consMode === "idem" && lane.seen) {
-      logRow("ok", name, "evt-1 已在去重表。插入衝突，整筆 rollback，庫存維持 " + lane.inv + "。這是保護。");
-      return "去重命中";
-    }
-    lane.inv -= 2;
-    lane.applied += 1;
-    lane.seen = true;
-    logRow(lane.applied > 1 ? "bad" : "ok", name, "套用 OrderPaid：SKU-A qty " + (lane.inv + 2) + " → " + lane.inv + "。");
-    return lane.applied > 1 ? "重複扣量" : "扣量 10→8";
+  function nextId(v) {
+    if (typeof v === "number") return v + 1;
+    return String(v) + "-b";
   }
 
-  function applyOutboxStep() {
-    var dwR;
-    var obR;
-    if (fault === "none") {
-      if (step === 1) {
-        dw.order = "paid";
-        ob.order = "paid";
-        ob.outbox = "pending";
-        panel.op = "本地提交";
-        panel.rule = "雙寫只 commit 訂單；Outbox 同交易寫入待發列";
-        panel.dw = "paid · 尚無意圖列";
-        panel.ob = "paid + outbox PENDING";
-        logRow("read", "雙寫", "UPDATE orders SET status=paid 已 commit。");
-        logRow("ok", "Outbox", "同一交易寫入 orders=paid 與 outbox(evt-1)。");
-        statusText = "兩邊訂單都已付款。雙寫還沒 send；Outbox 列等發佈器。";
-      } else if (step === 2) {
-        dw.events.push("evt-1");
-        ob.events.push("evt-1");
-        ob.outbox = "sent";
-        panel.op = "發佈";
-        panel.rule = "雙寫現場 send；Outbox 由發佈器讀 PENDING 再 send";
-        panel.dw = "主題有 evt-1";
-        panel.ob = "發佈器標 published";
-        logRow("read", "雙寫", "producer.send(OrderPaid evt-1) 成功。");
-        logRow("ok", "Outbox", "發佈器投遞 evt-1，published_at 已填。");
-        statusText = "兩邊主題都有 evt-1。下一步讓庫存 handler 消費。";
-      } else if (step === 3) {
-        dwR = consume(dw, "雙寫消費");
-        obR = consume(ob, "Outbox 消費");
-        panel.op = "消費";
-        panel.rule = "同一則 OrderPaid，qty -= 2";
-        panel.dw = dwR;
-        panel.ob = obR;
-        statusText = "兩邊庫存都是 8，訂單與事件對得上。";
-      }
-    } else if (fault === "midcrash") {
-      if (step === 1) {
-        dw.order = "paid";
-        ob.order = "paid";
-        ob.outbox = "pending";
-        panel.op = "本地提交";
-        panel.rule = "崩潰將發生在 send 之前";
-        panel.dw = "paid · 尚未 send";
-        panel.ob = "paid + outbox PENDING";
-        logRow("read", "雙寫", "訂單已 commit 為 paid。");
-        logRow("ok", "Outbox", "訂單與 outbox 同交易 commit。");
-        statusText = "下一步注入崩潰：雙寫的 send 還沒發生。";
-      } else if (step === 2) {
-        dw.crashed = true;
-        panel.op = "崩潰";
-        panel.rule = "進程在兩個提交中間被殺";
-        panel.dw = "paid · 意圖遺失";
-        panel.ob = "PENDING 列仍在";
-        logRow("bad", "雙寫", "send 前崩潰。沒有第二個系統記得這則 OrderPaid。");
-        logRow("warn", "Outbox", "發佈器還沒跑。outbox 列與訂單一起留下。");
-        statusText = "雙寫已經裂開。Outbox 仍握著耐久意圖。";
-      } else if (step === 3) {
-        dw.crashed = false;
-        ob.events.push("evt-1");
-        ob.outbox = "sent";
-        panel.op = "恢復";
-        panel.rule = "雙寫沒有可重試的意圖；Outbox 重掃 PENDING";
-        panel.dw = "主題仍空";
-        panel.ob = "補送 evt-1";
-        logRow("bad", "雙寫", "重啟後無 outbox 可掃，也不會重做已回 200 的那次請求。");
-        logRow("ok", "Outbox", "發佈器找到 evt-1，投遞成功。");
-        statusText = "Outbox 補上主題；雙寫的庫存將永遠聽不到這筆付款。";
-      } else if (step === 4) {
-        dwR = consume(dw, "雙寫消費");
-        obR = consume(ob, "Outbox 消費");
-        panel.op = "消費";
-        panel.rule = "有事件才扣庫存";
-        panel.dw = dwR;
-        panel.ob = obR;
-        statusText = "雙寫：訂單 paid、庫存 10。Outbox：訂單 paid、庫存 8。";
-      }
-    } else if (fault === "broker") {
-      if (step === 1) {
-        dw.order = "paid";
-        ob.order = "paid";
-        ob.outbox = "pending";
-        panel.op = "本地提交";
-        panel.rule = "下一步 broker 拒收";
-        panel.dw = "paid · 準備 send";
-        panel.ob = "paid + outbox PENDING";
-        logRow("read", "雙寫", "訂單已 commit。");
-        logRow("ok", "Outbox", "訂單與 outbox 已 commit。");
-        statusText = "兩邊都已提交。下一步 send 會撞上 broker 中斷。";
-      } else if (step === 2) {
-        dw.brokerDown = true;
-        ob.brokerDown = true;
-        panel.op = "Broker 拒收";
-        panel.rule = "雙寫的請求結束即放棄；Outbox 列保持 PENDING";
-        panel.dw = "send 失敗 · 無重試句柄";
-        panel.ob = "PENDING 留下";
-        logRow("bad", "雙寫", "producer.send 丟例外。呼叫端已拿 200，沒有背景重試。");
-        logRow("warn", "Outbox", "發佈器 send 失敗，published_at 仍是 NULL。");
-        statusText = "broker 恢復後，只有 Outbox 還知道該再送一次。";
-      } else if (step === 3) {
-        dw.brokerDown = false;
-        ob.brokerDown = false;
-        ob.events.push("evt-1");
-        ob.outbox = "sent";
-        panel.op = "Broker 恢復";
-        panel.rule = "只重試耐久意圖";
-        panel.dw = "仍然沒有事件";
-        panel.ob = "重試成功";
-        logRow("bad", "雙寫", "沒有待發紀錄，恢復也不會憑空補送。");
-        logRow("ok", "Outbox", "發佈器重試 evt-1，broker 接受。");
-        statusText = "Outbox 追上主題。雙寫這側的付款成為靜默缺口。";
-      } else if (step === 4) {
-        dwR = consume(dw, "雙寫消費");
-        obR = consume(ob, "Outbox 消費");
-        panel.op = "消費";
-        panel.rule = "有事件才扣庫存";
-        panel.dw = dwR;
-        panel.ob = obR;
-        statusText = "雙寫庫存仍 10；Outbox 庫存 8。拒收本身不是事故，沒有可重試意圖才是。";
-      }
-    } else if (fault === "dup") {
-      if (step === 1) {
-        dw.order = "paid";
-        ob.order = "paid";
-        ob.outbox = "pending";
-        panel.op = "本地提交";
-        panel.rule = "先走到兩邊都有事件";
-        panel.dw = "paid";
-        panel.ob = "paid + PENDING";
-        logRow("read", "雙寫", "訂單 commit。");
-        logRow("ok", "Outbox", "訂單與 outbox commit。");
-        statusText = "下一步兩邊都發佈成功。";
-      } else if (step === 2) {
-        dw.events.push("evt-1");
-        ob.events.push("evt-1");
-        ob.outbox = "sent";
-        panel.op = "發佈";
-        panel.rule = "at-least-once：同一 id 稍後會再來一次";
-        panel.dw = "主題 evt-1";
-        panel.ob = "主題 evt-1";
-        logRow("ok", "雙寫", "send 成功。");
-        logRow("ok", "Outbox", "發佈器投遞成功。");
-        statusText = "下一步第一次消費。再下一步重投同一則。";
-      } else if (step === 3) {
-        dwR = consume(dw, "雙寫消費");
-        obR = consume(ob, "Outbox 消費");
-        panel.op = "第一次消費";
-        panel.rule = consMode === "idem" ? "插入去重表並扣量" : "直接 qty -= 2";
-        panel.dw = dwR;
-        panel.ob = obR;
-        statusText = "兩邊庫存都是 8。下一步 broker 重投 evt-1。";
-      } else if (step === 4) {
-        dwR = consume(dw, "雙寫重投");
-        obR = consume(ob, "Outbox 重投");
-        panel.op = "重複投遞";
-        panel.rule = consMode === "idem" ? "唯一鍵衝突 = 保護成功" : "再扣一次 = 雙花";
-        panel.dw = dwR;
-        panel.ob = obR;
-        statusText = consMode === "idem"
-          ? "去重表擋住第二筆，庫存維持 8。"
-          : "兩邊庫存都被扣到 6。重複投遞變成雙花。";
-      }
-    }
-    finishPanel();
+  function idFieldOf(env) {
+    var names = ["eventId", "id", "messageId", "idempotencyKey"], i;
+    for (i = 0; i < names.length; i += 1) if (has(env, names[i])) return names[i];
+    return null;
   }
 
-  function finishPanel() {
-    var dwGap = dw.order === "paid" && dw.events.length === 0;
-    var dwDouble = dw.applied > 1;
-    var obGap = ob.order === "paid" && ob.events.length === 0;
-    var obDouble = ob.applied > 1;
-    var bothOk = dw.order === "paid" && ob.order === "paid" && dw.events.length > 0 && ob.events.length > 0 && dw.inv === 8 && ob.inv === 8 && dw.applied === 1 && ob.applied === 1;
-
-    if (step === 0) {
-      panel.consis = "尚未走步";
-      panel.consisCls = "";
-      panel.risk = "無";
-      panel.riskCls = "";
-      verdict = { text: "判定尚未產生——走完一輪後會對照兩邊的訂單、主題與庫存。", tone: "" };
-      return;
+  /* 孿生事件全部由讀者自己那筆信封「變換」而來，不是另一段寫死的資料。 */
+  function makeTwin(env, mode) {
+    var t = JSON.parse(JSON.stringify(env)), idf = idFieldOf(t);
+    if (mode === "redelivery") return t;
+    if (mode === "republish") {
+      if (has(t, "occurredAt")) t.occurredAt = shiftTime(t.occurredAt, 1500);
+      if (has(t, "traceparent")) t.traceparent = newTrace(t.traceparent);
+      return t;
     }
-
-    if (step < totalSteps()) {
-      if (dwGap && !obGap) {
-        panel.consis = "雙寫已裂、Outbox 未裂";
-        panel.consisCls = "warn";
-        panel.risk = "雙寫意圖可能遺失";
-        panel.riskCls = "warn";
-        verdict = { text: "中間態：雙寫只剩訂單列，Outbox 仍握著待發列。繼續走完才看最終對照。", tone: "lock" };
-      } else if (dw.brokerDown) {
-        panel.consis = "發送失敗";
-        panel.consisCls = "warn";
-        panel.risk = "看有沒有可重試意圖";
-        panel.riskCls = "warn";
-        verdict = { text: "Broker 拒收。判定先不要下：看恢復之後誰還能再送。", tone: "lock" };
-      } else {
-        panel.consis = "進行中";
-        panel.consisCls = "";
-        panel.risk = "無";
-        panel.riskCls = "";
-        verdict = { text: "還沒走完。最終一致性要看到消費之後的庫存。", tone: "" };
-      }
-      return;
+    if (mode === "retryNewId") {
+      if (idf) t[idf] = nextId(t[idf]);
+      if (has(t, "occurredAt")) t.occurredAt = shiftTime(t.occurredAt, 1500);
+      if (has(t, "traceparent")) t.traceparent = newTrace(t.traceparent);
+      return t;
     }
-
-    if (fault === "dup" && consMode === "naive") {
-      panel.consis = "雙花";
-      panel.consisCls = "bad";
-      panel.risk = "同一付款扣兩次庫存";
-      panel.riskCls = "bad";
-      verdict = {
-        text: "重複投遞被天真 handler 做成兩次扣量（10→8→6）。這是事故。Outbox 不能替你消這次雙花——去重表才行。",
-        tone: "bad"
-      };
-      return;
+    /* nextFact：同聚合的下一則事實。occurredAt 與 payload 刻意不動
+       （同一毫秒、同金額的併發寫入），只換 id 與 version。 */
+    if (idf) t[idf] = nextId(t[idf]);
+    if (typeof t.version === "number") t.version += 1;
+    else if (typeof t.version === "string" && /^\d+$/.test(t.version)) {
+      t.version = String(Number(t.version) + 1);
     }
-    if (fault === "dup" && consMode === "idem") {
-      panel.consis = "效果一次";
-      panel.consisCls = "good";
-      panel.risk = "無（去重是保護）";
-      panel.riskCls = "good";
-      verdict = {
-        text: "第二筆 evt-1 撞上唯一鍵，庫存維持 8。重投被擋是保護成功，不要把衝突當成消費失敗去重試到爆。",
-        tone: "ok"
-      };
-      return;
-    }
-    if (dwGap || dwDouble) {
-      panel.consis = "雙寫不一致";
-      panel.consisCls = "bad";
-      panel.risk = dwGap ? "付款事件遺失" : "雙花";
-      panel.riskCls = "bad";
-      verdict = {
-        text: "雙寫事故：訂單已 paid，主題沒有事件，庫存仍是 10。Outbox 用同一筆交易留下意圖，恢復後補送並扣到 8——那一側是保護，不是運氣。",
-        tone: "bad"
-      };
-      return;
-    }
-    if (bothOk) {
-      panel.consis = "兩邊最終一致";
-      panel.consisCls = "good";
-      panel.risk = "無";
-      panel.riskCls = "";
-      verdict = {
-        text: "正常路徑下兩邊都走到 paid + evt-1 + 庫存 8。雙寫的問題不在快樂路徑，而在中間崩潰與拒收之後沒有第二份意圖。",
-        tone: "ok"
-      };
-      return;
-    }
-    panel.consis = "對照完成";
-    panel.consisCls = "";
-    panel.risk = obGap ? "Outbox 也沒發出" : "見日誌";
-    panel.riskCls = obGap ? "bad" : "";
-    verdict = { text: "走完一輪。對照兩邊的訂單、主題與庫存。", tone: "" };
+    if (has(t, "traceparent")) t.traceparent = newTrace(t.traceparent);
+    return t;
   }
 
-  function boxTone(kind, lane) {
-    if (kind === "order") {
-      if (lane.crashed && lane.order === "paid") return "hold";
-      if (lane.order === "paid") return "ok";
-      return "idle";
-    }
-    if (kind === "topic") {
-      if (lane.brokerDown) return "bad";
-      if (lane.events.length) return "ok";
-      if (lane.order === "paid") return "hold";
-      return "idle";
-    }
-    if (kind === "inv") {
-      if (lane.applied > 1) return "bad";
-      if (lane.applied === 1) return "ok";
-      if (lane.order === "paid" && lane.events.length === 0) return "hold";
-      return "idle";
-    }
-    return "idle";
+  function judgeDedup(equal, sameFact, degenerate) {
+    if (degenerate) return "noKey";
+    if (equal) return sameFact ? "blockOk" : "blockBad";
+    return sameFact ? "passBad" : "passOk";
   }
 
-  function renderSlots(node, events, emptyLabel) {
-    if (!node) return;
-    if (!events.length) {
-      node.innerHTML = '<span class="eda-slot">' + esc(emptyLabel) + "</span>";
-      return;
-    }
-    node.innerHTML = events.map(function (id) {
-      return '<span class="eda-slot ok">' + esc(id) + "</span>";
-    }).join("");
-  }
-
-  function setBox(id, tone) {
-    var node = el(id);
-    if (!node) return;
-    node.className = "eda-box " + tone;
-  }
-
-  function decodePair(p, c) {
-    if (p === c) {
-      return { ok: true, tone: "ok", label: "相同版本", detail: "契約一致，解碼無轉換。" };
-    }
-    if (p === "v2" && c === "v1") {
-      return { ok: true, tone: "hold", label: "忽略未知欄", detail: "舊消費者略過 currency。FORWARD 的執行期前提。" };
-    }
-    if (p === "v1" && c === "v2") {
-      return { ok: true, tone: "hold", label: "填預設", detail: "新消費者讀舊資料，currency 預設 TWD。BACKWARD 成立。" };
-    }
-    if (p === "v3") {
-      return { ok: false, tone: "bad", label: "缺 amount", detail: "v1/v2 消費者找不到 amount，v3 把它改名成 amountCents。" };
-    }
-    if (c === "v3") {
-      return { ok: false, tone: "bad", label: "缺 amountCents", detail: "新消費者是必填 amountCents，舊資料沒有這個欄位。" };
-    }
-    return { ok: false, tone: "bad", label: "不相容", detail: "無法解碼。" };
-  }
-
-  function registryAccept(mode, from, to) {
-    if (from === to) return true;
-    if (mode === "none") return true;
-    var upgrade = from + ">" + to;
-    if (upgrade === "v1>v2" || upgrade === "v2>v1") {
-      if (mode === "backward" || mode === "forward" || mode === "full") return true;
-    }
-    return false;
-  }
-
-  function schemaNarrate() {
-    var dec = decodePair(prodVer, consVer);
-    var newer = prodVer > consVer ? prodVer : consVer;
-    var older = prodVer > consVer ? consVer : prodVer;
-    var accepted = registryAccept(compat, older, newer);
-    var modeLabel = compat.toUpperCase();
-
-    panel.op = dec.label;
-    panel.rule = dec.detail;
-    panel.dw = "生產者 " + prodVer;
-    panel.ob = "消費者 " + consVer;
-    panel.model = modeLabel;
-    panel.handler = "解碼 " + consVer;
-    panel.consis = dec.ok ? "執行期可讀" : "執行期失敗";
-    panel.consisCls = dec.ok ? "good" : "bad";
-    if (prodVer === consVer) {
-      panel.risk = "無";
-      panel.riskCls = "";
-    } else if (accepted && dec.ok) {
-      panel.risk = modeLabel + " 放行此演進";
-      panel.riskCls = "good";
-    } else if (!accepted && dec.ok) {
-      panel.risk = modeLabel + " 不會擋、但也不保證另一方向";
-      panel.riskCls = "warn";
-    } else if (compat === "none") {
-      panel.risk = "NONE 放行登錄，執行期仍爆";
-      panel.riskCls = "bad";
-    } else {
-      panel.risk = modeLabel + " 應拒登 v3";
-      panel.riskCls = "bad";
-    }
-
-    statusText = COMPAT_HINT[compat];
-    if (prodVer === consVer) {
-      verdict = { text: prodVer + " 對 " + consVer + "：同一契約。Registry 無演進可審。", tone: "ok" };
-    } else if (dec.ok && accepted) {
-      verdict = {
-        text: "執行期解得開，且 " + modeLabel + " 允許 " + older + " → " + newer + "。加可選欄位、忽略未知欄位，是這段共存能活下來的原因。",
-        tone: "ok"
-      };
-    } else if (dec.ok && !accepted) {
-      verdict = {
-        text: "這一對執行期剛好解得開，但 " + modeLabel + " 管的是另一個方向。選錯模式會放行你還沒準備好的升級順序。",
-        tone: "lock"
-      };
-    } else if (compat === "none") {
-      verdict = {
-        text: "v3 改名破壞兩個方向。NONE 讓它登錄成功，舊進程會在反序列化時失敗——拒登才是保護，放行是把事故推遲。",
-        tone: "bad"
-      };
-    } else {
-      verdict = {
-        text: "改名不是演進：v3 與 v1/v2 兩個方向都解不開。" + modeLabel + " 在登錄時拒絕，是保護成功。",
-        tone: "bad"
-      };
-    }
-  }
-
-  function renderMatrix() {
-    var root = el("eda-matrix");
-    if (!root) return;
-    var html = '<div class="eda-mh"></div>';
-    VERSIONS.forEach(function (p) {
-      html += '<div class="eda-mh">產 ' + p + "</div>";
-    });
-    VERSIONS.forEach(function (c) {
-      html += '<div class="eda-ml">消 ' + c + "</div>";
-      VERSIONS.forEach(function (p) {
-        var dec = decodePair(p, c);
-        var sel = p === prodVer && c === consVer ? " sel" : "";
-        html += '<button type="button" class="eda-cell ' + dec.tone + sel + '" data-prod="' + p + '" data-cons="' + c + '">' +
-          esc(dec.label) + '<span class="cs">' + p + " → " + c + "</span></button>";
+  /* 拿當前鍵組成對全部 4 種孿生各跑一遍，數答對幾種。 */
+  function scoreKey(env, mode) {
+    var base = buildKey(env, mode), rows = [], score = 0, i, tw, tk, eq, same, v;
+    for (i = 0; i < TWINS.length; i += 1) {
+      tw = TWINS[i];
+      tk = buildKey(makeTwin(env, tw), mode);
+      eq = base.key === tk.key;
+      same = TWIN_SAME_FACT[tw];
+      v = judgeDedup(eq, same, base.degenerate);
+      if (v === "blockOk" || v === "passOk") score += 1;
+      rows.push({
+        twin: tw, label: TWIN_LABEL[tw], twinKey: tk.key,
+        equal: eq, sameFact: same, verdict: v, correct: v === "blockOk" || v === "passOk"
       });
+    }
+    return { base: base, rows: rows, score: score, total: TWINS.length };
+  }
+
+  /* 相容性規則引擎。逐路徑分類，每一條規則直接回報它破哪個方向：
+     bb = 破 BACKWARD（新消費者讀不懂舊資料）、bf = 破 FORWARD（舊消費者讀不懂新資料）。 */
+  function classify(oldF, newF) {
+    if (!oldF && newF) {
+      if (newF.req) return { rule: "ADD_REQ", bb: true, bf: false, text: "新增必填欄，無預設" };
+      return { rule: "ADD_OPT", bb: false, bf: false, text: "新增選填欄（可缺或有預設）" };
+    }
+    if (oldF && !newF) {
+      if (oldF.req) return { rule: "DROP_REQ", bb: false, bf: true, text: "移除必填欄" };
+      return { rule: "DROP_OPT", bb: false, bf: false, text: "移除選填欄" };
+    }
+    if (oldF.type !== newF.type) {
+      return { rule: "TYPE", bb: true, bf: true, text: "型別由 " + oldF.type + " 變成 " + newF.type };
+    }
+    if (!oldF.req && newF.req) return { rule: "TIGHTEN", bb: true, bf: false, text: "舊選填 → 新必填" };
+    if (oldF.req && !newF.req) return { rule: "RELAX", bb: false, bf: true, text: "舊必填 → 新選填" };
+    return { rule: "SAME", bb: false, bf: false, text: "兩邊都有、型別與必填一致" };
+  }
+
+  function parentOf(path) {
+    var i = String(path).lastIndexOf(".");
+    return i < 0 ? "" : String(path).slice(0, i);
+  }
+
+  function computeCompat(newSpec, oldSpec) {
+    var oldMap = {}, newMap = {}, order = [], seen = {}, changes = [], i, j, p, c,
+      bb = false, bf = false, tally = {}, verdict, dropReq = [], addReq = [],
+      pairs = [], usedAdd = {},
+      renameHint = null, semanticBlind = 0, modes = [], rejects = 0, evolved = 0;
+
+    for (i = 0; i < oldSpec.length; i += 1) {
+      oldMap[oldSpec[i].path] = oldSpec[i];
+      if (!seen[oldSpec[i].path]) { seen[oldSpec[i].path] = 1; order.push(oldSpec[i].path); }
+    }
+    for (i = 0; i < newSpec.length; i += 1) {
+      newMap[newSpec[i].path] = newSpec[i];
+      if (!seen[newSpec[i].path]) { seen[newSpec[i].path] = 1; order.push(newSpec[i].path); }
+    }
+
+    for (i = 0; i < order.length; i += 1) {
+      p = order[i];
+      c = classify(oldMap[p] || null, newMap[p] || null);
+      tally[c.rule] = (tally[c.rule] || 0) + 1;
+      if (c.bb) bb = true;
+      if (c.bf) bf = true;
+      if (c.rule !== "SAME") evolved += 1;
+      if (c.rule === "DROP_REQ") dropReq.push({ path: p, type: oldMap[p].type });
+      if (c.rule === "ADD_REQ") addReq.push({ path: p, type: newMap[p].type });
+      if (c.rule === "SAME" && newMap[p].req) semanticBlind += 1;
+      changes.push({
+        path: p, rule: c.rule, text: c.text, bb: c.bb, bf: c.bf,
+        tone: c.bb && c.bf ? "bad" : (c.bb || c.bf ? "lock" : (c.rule === "SAME" ? "" : "ok"))
+      });
+    }
+
+    if (evolved === 0) verdict = "IDENTICAL";
+    else if (bb && bf) verdict = "BREAKING";
+    else if (bb) verdict = "FORWARD";
+    else if (bf) verdict = "BACKWARD";
+    else verdict = "FULL";
+
+    /* 不宣稱能偵測改名：把「掉一個必填欄」與「同一層、同型別的新增必填欄」配成候選對，
+       純粹是提示。判定本身仍然只由 DROP_REQ + ADD_REQ 兩條規則疊加得出。 */
+    for (i = 0; i < dropReq.length; i += 1) {
+      for (j = 0; j < addReq.length; j += 1) {
+        if (usedAdd[j]) continue;
+        if (addReq[j].type === dropReq[i].type &&
+            parentOf(addReq[j].path) === parentOf(dropReq[i].path)) {
+          usedAdd[j] = 1;
+          pairs.push(dropReq[i].path + " → " + addReq[j].path);
+          break;
+        }
+      }
+    }
+    if (pairs.length) renameHint = pairs.join("、");
+
+    for (i = 0; i < REGISTRY_MODES.length; i += 1) {
+      p = REGISTRY_MODES[i];
+      c = (p === "BACKWARD" && bb) || (p === "FORWARD" && bf) || (p === "FULL" && (bb || bf));
+      if (c) rejects += 1;
+      modes.push({ mode: p, reject: !!c });
+    }
+
+    return {
+      verdict: verdict, verdictName: COMPAT_NAME[verdict], tone: COMPAT_TONE[verdict],
+      upgradeOrder: COMPAT_ORDER[verdict],
+      bb: bb, bf: bf, changes: changes, tally: tally, evolved: evolved,
+      modes: modes, registryRejects: rejects,
+      renameHint: renameHint, semanticBlind: semanticBlind
+    };
+  }
+
+  // @probe fn       computeEnvelope
+  // @probe baseline {"envelope":{"eventId":"evt-9f31c0","eventType":"OrderPaid","aggregateType":"Order","aggregateId":"O-1001","version":7,"occurredAt":"2026-03-04T11:22:33.481Z","payload":{"sku":"SKU-A","qty":2,"amount":80,"currency":"TWD","buyerNote":"請下午三點後配送"},"traceparent":"00-4bf92f-00f067aa0ba9-01","schemaVersion":2},"oldSpec":["eventId:string:req","eventType:string:req","aggregateId:string:req","payload.sku:string:req","payload.qty:number:req","payload.amount:number:req"],"optional":[],"dedupKey":"aggVer","twin":"republish"}
+  // @probe sweep    {"envelope":[{"eventId":"evt-9f31c0","eventType":"OrderPaid","aggregateId":"O-1001"},{"eventId":"evt-9f31c0","eventType":"OrderPaid","aggregateType":"Order","aggregateId":"O-1001","version":7,"occurredAt":"2026-03-04T11:22:33.481Z","payload":{"sku":"SKU-A","qty":2,"amount":80,"currency":"TWD","buyerNote":"請下午三點後配送"},"traceparent":"00-4bf92f-00f067aa0ba9-01","schemaVersion":2}],"oldSpec":[["eventId:string:req","payload.discountCode:string:req"],["eventId:string:req","eventType:string:req","aggregateId:string:req","payload.sku:string:req","payload.qty:number:req","payload.amount:number:req","payload.currency:string:req"]],"optional":[[],["aggregateType","version","occurredAt","traceparent","schemaVersion","payload.currency","payload.buyerNote"]],"dedupKey":["aggTime","aggVer"],"twin":["retryNewId","nextFact"]}
+  function computeEnvelope(p) {
+    p = p || {};
+    var env, i, rows, optSet = {}, opt, mode, twinMode, canonical, envelopeBytes,
+      rowBytes = 0, bytesByRole = {}, roleCounts = {}, offConvention = 0,
+      leaf = {}, newSpec = [], oldSpec, compat, key, twin, twinKey, twinEqual,
+      sameFact, dedupVerdict, scored, missingNotes = [], expect = {}, specPaths = {},
+      refetch = [], unreadBytes = 0, unreadPayloadBytes = 0, payloadBytes = 0,
+      structBytes, r, note, ruleByPath = {}, thinFat, thinFatText, stack = [];
+
+    /* --- 解析輸入（純函式內防禦，斷言器會餵極簡物件） --- */
+    if (typeof p.envelope === "string") {
+      try { env = JSON.parse(p.envelope); }
+      catch (e) { return { ok: false, parseError: String(e && e.message ? e.message : e) }; }
+    } else {
+      env = p.envelope;
+    }
+    if (!isPlainObject(env)) {
+      return { ok: false, parseError: "信封必須是一個 JSON 物件（最外層要是 { }）。" };
+    }
+
+    opt = jsonType(p.optional) === "array" ? p.optional : [];
+    for (i = 0; i < opt.length; i += 1) optSet[String(opt[i])] = 1;
+    mode = KEY_PARTS[p.dedupKey] ? p.dedupKey : "aggVer";
+    twinMode = TWIN_SAME_FACT[p.twin] === undefined ? "republish" : p.twin;
+
+    /* --- 逐欄拆解 --- */
+    rows = flattenEnvelope(env);
+    canonical = JSON.stringify(env);
+    envelopeBytes = utf8Len(canonical);
+    for (i = 0; i < ROLE_ORDER.length; i += 1) { bytesByRole[ROLE_ORDER[i]] = 0; roleCounts[ROLE_ORDER[i]] = 0; }
+    for (i = 0; i < rows.length; i += 1) {
+      r = rows[i];
+      rowBytes += r.bytes;
+      bytesByRole[r.role] += r.bytes;
+      if (!r.container) roleCounts[r.role] += 1;
+      if (r.offConvention) offConvention += 1;
+      if (!r.container) {
+        leaf[r.path] = r;
+        newSpec.push({ path: r.path, type: r.type, req: !optSet[r.path] });
+      }
+    }
+    payloadBytes = bytesByRole.payload;
+    structBytes = envelopeBytes - rowBytes;
+    if (structBytes < 0) structBytes = 0;
+
+    /* --- 相容性 --- */
+    oldSpec = parseSpec(p.oldSpec == null ? DEFAULT_OLD_SPEC : p.oldSpec);
+    compat = computeCompat(newSpec, oldSpec);
+    for (i = 0; i < compat.changes.length; i += 1) ruleByPath[compat.changes[i].path] = compat.changes[i];
+    for (i = 0; i < oldSpec.length; i += 1) specPaths[oldSpec[i].path] = oldSpec[i];
+
+    for (i = 0; i < rows.length; i += 1) {
+      r = rows[i];
+      r.change = r.container ? null : (ruleByPath[r.path] || null);
+      r.req = r.container ? null : !optSet[r.path];
+      r.inOldSpec = r.container ? null : !!specPaths[r.path];
+      r.tone = r.change ? r.change.tone : "";
+      if (!r.container && !specPaths[r.path]) {
+        unreadBytes += r.bytes;
+        if (r.role === "payload") unreadPayloadBytes += r.bytes;
+      }
+    }
+
+    /* --- 冪等鍵與去重 --- */
+    scored = scoreKey(env, mode);
+    key = scored.base;
+    twin = makeTwin(env, twinMode);
+    twinKey = buildKey(twin, mode);
+    twinEqual = key.key === twinKey.key;
+    sameFact = TWIN_SAME_FACT[twinMode];
+    dedupVerdict = judgeDedup(twinEqual, sameFact, key.degenerate);
+
+    /* --- 缺席的欄位：舊契約必填 ∪ 鍵組成 ∪ 信封基本盤 --- */
+    for (i = 0; i < oldSpec.length; i += 1) if (oldSpec[i].req) expect[oldSpec[i].path] = "oldSpec";
+    for (i = 0; i < key.parts.length; i += 1) {
+      if (key.parts[i] !== "@payloadHash") expect[key.parts[i]] = expect[key.parts[i]] || "key";
+    }
+    for (i = 0; i < BASE_EXPECT.length; i += 1) expect[BASE_EXPECT[i]] = expect[BASE_EXPECT[i]] || "base";
+    Object.keys(expect).forEach(function (path) {
+      var why = expect[path], role, impact = [];
+      if (leaf[path]) return;
+      if (path === "payload" && (has(env, "payload") || has(env, "data"))) return;
+      role = ROLE_OF[path] || "payload";
+      note = MISSING_NOTE[path] || MISSING_BY_ROLE[role];
+      if (specPaths[path] && specPaths[path].req) { impact.push("舊消費者必填讀不到 → 每則事件得回查發布者"); }
+      if (key.missing.indexOf(path) >= 0) { impact.push("所選冪等鍵少了這一段，鍵當場退化"); }
+      missingNotes.push({ path: path, why: why, role: role, note: note, impact: impact.join("；") });
+      if (specPaths[path] && specPaths[path].req) refetch.push(path);
     });
-    root.innerHTML = html;
-    var payload = el("eda-payload");
-    if (payload) {
-      payload.textContent = "生產者 " + prodVer + " 寫出：\n" + PAYLOAD[prodVer] +
-        "\n\n消費者 " + consVer + "：" + decodePair(prodVer, consVer).detail;
+
+    /* --- 重量帳 --- */
+    if (refetch.length > 0) {
+      thinFat = "thin";
+      thinFatText = "偏 thin：此消費者有 " + refetch.length +
+        " 個必填欄不在信封裡，每則事件都得回頭查發布者一次 —— 那是 Notification 風格的耦合成本。";
+    } else if (envelopeBytes > 0 && unreadPayloadBytes * 100 / envelopeBytes >= FAT_PAYLOAD_PCT) {
+      thinFat = "fat";
+      thinFatText = "偏 fat：信封裡有 " + unreadPayloadBytes + " bytes 的業務欄位此消費者根本不讀（占 " +
+        Math.round(unreadPayloadBytes * 100 / envelopeBytes) + "%）—— 多帶的每一欄，之後都得一起演進。";
+    } else {
+      thinFat = "fit";
+      thinFatText = "剛好覆蓋：此消費者要的欄位全在信封裡。它讀不到的 " + unreadBytes +
+        " bytes 之中只有 " + unreadPayloadBytes + " 是業務欄位，其餘 " +
+        (unreadBytes - unreadPayloadBytes) + " bytes 是識別、因果與傳輸欄位 —— 那是信封稅，不是多帶的事實。";
+    }
+
+    for (i = 0; i < ROLE_ORDER.length; i += 1) {
+      stack.push({
+        role: ROLE_ORDER[i], name: ROLE_NAME[ROLE_ORDER[i]], tag: ROLE_TAG[ROLE_ORDER[i]],
+        bytes: bytesByRole[ROLE_ORDER[i]], count: roleCounts[ROLE_ORDER[i]],
+        pct: envelopeBytes ? Math.round(bytesByRole[ROLE_ORDER[i]] * 1000 / envelopeBytes) / 10 : 0
+      });
+    }
+    stack.push({
+      role: "struct", name: "結構開銷（括號與逗號）", tag: "{ }",
+      bytes: structBytes, count: 0,
+      pct: envelopeBytes ? Math.round(structBytes * 1000 / envelopeBytes) / 10 : 0
+    });
+
+    return {
+      ok: true, parseError: null,
+      rows: rows, rowCount: rows.length, leafCount: newSpec.length,
+      envelopeBytes: envelopeBytes, rowBytes: rowBytes, structBytes: structBytes,
+      bytesByRole: bytesByRole, roleCounts: roleCounts, payloadBytes: payloadBytes,
+      overheadPct: envelopeBytes ? Math.round((envelopeBytes - payloadBytes) * 1000 / envelopeBytes) / 10 : 0,
+      offConvention: offConvention, stack: stack,
+      key: {
+        mode: mode, label: KEY_LABEL[mode], parts: key.parts, keyString: key.key,
+        missing: key.missing, degenerate: key.degenerate
+      },
+      twin: {
+        mode: twinMode, label: TWIN_LABEL[twinMode], detail: TWIN_DETAIL[twinMode],
+        keyString: twinKey.key, equal: twinEqual, sameFact: sameFact,
+        verdict: dedupVerdict, verdictText: DEDUP_VERDICT[dedupVerdict], tone: DEDUP_TONE[dedupVerdict]
+      },
+      keyMatrix: scored.rows, keyScore: scored.score, keyTotal: scored.total,
+      compat: compat,
+      weight: {
+        refetch: refetch.length, refetchPaths: refetch,
+        unreadBytes: unreadBytes, unreadPayloadBytes: unreadPayloadBytes,
+        unreadPct: envelopeBytes ? Math.round(unreadBytes * 1000 / envelopeBytes) / 10 : 0,
+        thinFat: thinFat, thinFatText: thinFatText
+      },
+      missingNotes: missingNotes,
+      summary: "台帳 " + rows.length + " 列、" + envelopeBytes + " bytes；冪等鍵 " +
+        (key.degenerate ? "組不出來" : key.key) + "（4 種孿生答對 " + scored.score + "／4）；" +
+        "相容性 " + COMPAT_NAME[compat.verdict] + "，4 個 Registry 模式有 " + compat.registryRejects + " 個會拒登。"
+    };
+  }
+
+  /* ---------- demo 2 ---------- */
+
+  function runLane(kind, order, crashAt, brokerReject, dedup) {
+    var prog = kind === "outbox" ? PROGRAM.outbox : PROGRAM[order] || PROGRAM.dbFirst,
+      orders = "pending", outbox = null, topic = 0, tx = null,
+      lastSendOk = false, rejectUsed = false, crashed = false,
+      attempts = 0, guard = 0, applied = 0, dedupHits = 0, seen = false,
+      i, op, inv, outcome;
+
+    function send() {
+      attempts += 1;
+      if (brokerReject && !rejectUsed) { rejectUsed = true; return false; }
+      topic += 1;
+      return true;
+    }
+
+    for (i = 0; i < prog.length; i += 1) {
+      op = prog[i];
+      if (op === "OPEN_ORDER") tx = { orders: "paid", outbox: null };
+      else if (op === "OPEN_BOTH") tx = { orders: "paid", outbox: "pending" };
+      else if (op === "COMMIT") {
+        if (tx) {
+          orders = tx.orders;
+          if (tx.outbox) outbox = tx.outbox;
+          tx = null;
+        }
+      } else if (op === "SEND") lastSendOk = send();
+      else if (op === "POLL") { /* 只是讀出 published_at IS NULL 的列，無狀態變更 */ }
+      else if (op === "MARK") { if (outbox === "pending" && lastSendOk) outbox = "published"; }
+      if (crashAt === i + 1) { crashed = true; break; }
+    }
+
+    /* 崩潰 → 未提交的寫入一起消失（雙寫與 Outbox 同一條規則） */
+    tx = null;
+
+    /* 恢復階段：Outbox 的發佈器重掃 PENDING 並重試；雙寫沒有可掃的意圖。 */
+    if (kind === "outbox") {
+      while (outbox === "pending" && guard < 4) {
+        guard += 1;
+        if (send()) outbox = "published";
+      }
+    }
+
+    /* 消費階段：handler 套用主題上的每一則 */
+    for (i = 0; i < topic; i += 1) {
+      if (dedup && seen) { dedupHits += 1; continue; }
+      applied += 1;
+      seen = true;
+    }
+    inv = INV_START - QTY_PER_EVENT * applied;
+
+    if (orders === "paid" && topic === 0) outcome = "lost";
+    else if (orders !== "paid" && topic > 0) outcome = "ghost";
+    else if (applied >= 2) outcome = "dup";
+    else if (orders === "paid" && applied === 1) outcome = "ok";
+    else outcome = "none";
+
+    return {
+      orders: orders, outbox: outbox, topic: topic, applied: applied,
+      dedupHits: dedupHits, inv: inv, outcome: outcome, crashed: crashed,
+      attempts: attempts,
+      short: OUTCOME[outcome].short, tone: OUTCOME[outcome].tone, text: OUTCOME[outcome].text
+    };
+  }
+
+  function stripOf(kind, order, brokerReject, dedup) {
+    var cells = [], counts = { ok: 0, none: 0, lost: 0, ghost: 0, dup: 0 }, i, st, tickList;
+    tickList = kind === "outbox" ? TICK_LABEL.outbox : TICK_LABEL[order] || TICK_LABEL.dbFirst;
+    for (i = 0; i < CRASH_POINTS; i += 1) {
+      st = runLane(kind, order, i, brokerReject, dedup);
+      counts[st.outcome] += 1;
+      cells.push({
+        point: i, label: CRASH_LABEL[i], tick: i === 0 ? "完整跑完" : tickList[i - 1],
+        outcome: st.outcome, short: st.short, tone: st.tone, inv: st.inv, topic: st.topic
+      });
+    }
+    return {
+      kind: kind, name: LANE_NAME[kind], cells: cells, counts: counts,
+      unsafe: counts.lost + counts.ghost,
+      unsafePct: Math.round((counts.lost + counts.ghost) * 1000 / CRASH_POINTS) / 10,
+      safe: counts.ok + counts.none
+    };
+  }
+
+  // @probe fn       computeDualWrite
+  // @probe baseline {"crashAt":4,"order":"dbFirst","broker":"accept","dedup":false}
+  // @probe sweep    {"crashAt":[2,4],"order":["dbFirst","mqFirst"],"broker":["accept","reject"],"dedup":[false,true]}
+  function computeDualWrite(p) {
+    p = p || {};
+    var order = PROGRAM[p.order] ? p.order : "dbFirst",
+      brokerReject = p.broker === "reject",
+      dedup = p.dedup === true || p.dedup === "idem",
+      crashAt = Math.round(Number(p.crashAt)),
+      dual, ob, dualNow, obNow, i, divergeTick = null, rowsOut = [], verdict, status;
+
+    if (!isFinite(crashAt)) crashAt = 0;
+    if (crashAt < 0) crashAt = 0;
+    if (crashAt > CRASH_POINTS - 1) crashAt = CRASH_POINTS - 1;
+
+    dual = stripOf("dual", order, brokerReject, dedup);
+    ob = stripOf("outbox", order, brokerReject, dedup);
+
+    for (i = 0; i < CRASH_POINTS; i += 1) {
+      if (dual.cells[i].outcome !== ob.cells[i].outcome) { divergeTick = i; break; }
+    }
+
+    dualNow = runLane("dual", order, crashAt, brokerReject, dedup);
+    obNow = runLane("outbox", order, crashAt, brokerReject, dedup);
+
+    function row(label, a, b) {
+      return { label: label, dual: a, outbox: b, agree: String(a) === String(b) };
+    }
+    rowsOut.push(row("orders 列", "status = " + dualNow.orders, "status = " + obNow.orders));
+    rowsOut.push(row("outbox 列", "沒有這張表", obNow.outbox === null ? "沒有列" :
+      (obNow.outbox === "pending" ? "PENDING（published_at IS NULL）" : "published_at 已回填")));
+    rowsOut.push(row("主題上的則數", String(dualNow.topic), String(obNow.topic)));
+    rowsOut.push(row("handler 套用次數", String(dualNow.applied), String(obNow.applied)));
+    rowsOut.push(row("去重表擋下", String(dualNow.dedupHits), String(obNow.dedupHits)));
+    rowsOut.push(row("SKU-A 可用量", "qty = " + dualNow.inv, "qty = " + obNow.inv));
+    rowsOut.push(row("最終結局", dualNow.short + "：" + dualNow.text, obNow.short + "：" + obNow.text));
+
+    verdict = "雙寫（" + ORDER_NAME[order] + "）在 " + CRASH_POINTS + " 個故障點中有 " +
+      dual.unsafe + " 個結局不一致（裂縫寬度 " + dual.unsafePct + "%，其中遺失 " +
+      dual.counts.lost + "、幽靈 " + dual.counts.ghost + "）；Outbox 是 " + ob.unsafe +
+      " 個（" + ob.unsafePct + "%）。" +
+      (divergeTick === null
+        ? "這組設定下兩條泳道的結局完全一致。"
+        : "最早分岔在「" + CRASH_LABEL[divergeTick] + "」。") +
+      "Outbox 這一側仍有 " + ob.counts.dup + " 個故障點會重複扣量" +
+      (dedup ? "（去重表已開）" : "（去重表關閉）") +
+      "——Outbox 補的是遺失，去重表補的是重複，缺一不可。";
+
+    status = "故障點「" + CRASH_LABEL[crashAt] + "」：雙寫 " + dualNow.short +
+      "（主題 " + dualNow.topic + " 則、qty " + dualNow.inv + "）／Outbox " + obNow.short +
+      "（主題 " + obNow.topic + " 則、qty " + obNow.inv + "）。";
+
+    return {
+      crashAt: crashAt, crashLabel: CRASH_LABEL[crashAt], points: CRASH_POINTS,
+      order: order, orderName: ORDER_NAME[order],
+      broker: brokerReject ? "reject" : "accept", brokerName: BROKER_NAME[brokerReject ? "reject" : "accept"],
+      dedup: dedup, handlerName: HANDLER_NAME[dedup ? "idem" : "naive"],
+      lanes: [dual, ob],
+      dual: dual, outbox: ob,
+      cursor: { dual: dualNow, outbox: obNow, agree: dualNow.outcome === obNow.outcome },
+      divergeTick: divergeTick,
+      divergeLabel: divergeTick === null ? "無分岔" : CRASH_LABEL[divergeTick],
+      factRows: rowsOut, verdict: verdict, status: status
+    };
+  }
+
+  /* ==================================================================
+     (3) DOM 參照
+     ================================================================== */
+
+  var evxDemo = document.getElementById("demo-evx");
+  var obxDemo = document.getElementById("demo-obx");
+  if (!evxDemo && !obxDemo) return;
+
+  var evxEnv = document.getElementById("evx-env");
+  var evxSpec = document.getElementById("evx-spec");
+  var evxKeySel = document.getElementById("evx-key");
+  var evxSegTwin = document.getElementById("evx-seg-twin");
+  var evxStatus = document.getElementById("evx-status");
+  var evxLedger = document.getElementById("evx-ledger");
+  var evxStack = document.getElementById("evx-stack");
+  var evxMissing = document.getElementById("evx-missing");
+  var evxCardKey = document.getElementById("evx-card-key");
+  var evxCardCompat = document.getElementById("evx-card-compat");
+  var evxCardWeight = document.getElementById("evx-card-weight");
+  var evxReset = document.getElementById("evx-reset");
+
+  var obxSegOrder = document.getElementById("obx-seg-order");
+  var obxSegBroker = document.getElementById("obx-seg-broker");
+  var obxCrash = document.getElementById("obx-crash");
+  var obxCrashVal = document.getElementById("obx-crash-val");
+  var obxDedup = document.getElementById("obx-dedup");
+  var obxStatus = document.getElementById("obx-status");
+  var obxSpectrum = document.getElementById("obx-spectrum");
+  var obxFacts = document.getElementById("obx-facts");
+  var obxVerdict = document.getElementById("obx-verdict");
+  var obxReset = document.getElementById("obx-reset");
+
+  var evxState = { optional: {}, dedupKey: "aggVer", twin: "republish", last: null };
+  var obxState = { crashAt: 4, order: "dbFirst", broker: "accept", dedup: false };
+
+  function esc(s) {
+    return String(s)
+      .replace(/&/g, "&amp;").replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+  }
+
+  function pressGroup(root, attr, value) {
+    if (!root) return;
+    var btns = root.querySelectorAll("button"), i;
+    for (i = 0; i < btns.length; i += 1) {
+      btns[i].setAttribute("aria-pressed", btns[i].getAttribute(attr) === value ? "true" : "false");
     }
   }
 
-  function renderWire() {
-    if (!wireEl) return;
-    if (!wire.length) {
-      wireEl.innerHTML = '<div class="eda-row"><span class="tx">尚無日誌。</span></div>';
+  /* ==================================================================
+     (4) render —— 只讀 compute 回傳的 state 畫出來
+     ================================================================== */
+
+  function renderEnvelope(s) {
+    var html, i, r, m, c, maxBytes = 1;
+
+    if (!s.ok) {
+      evxStatus.textContent = "JSON 解析失敗：" + s.parseError + "（下方維持上一次解得開的結果）";
+      evxStatus.className = "status-line evx-err";
       return;
     }
-    wireEl.innerHTML = wire.map(function (row) {
-      return '<div class="eda-row ' + row.kind + '">' +
-        '<span class="ar">' + row.step + "</span>" +
-        '<span class="tg">' + esc(row.tag) + "</span>" +
-        '<span class="tx">' + esc(row.text) + "</span></div>";
-    }).join("");
-    wireEl.scrollTop = wireEl.scrollHeight;
-  }
+    evxStatus.textContent = s.summary;
+    evxStatus.className = "status-line";
 
-  function paintOutbox() {
-    el("eda-fault-hint").textContent = FAULT_HINT[fault];
-    el("eda-m-step").textContent = String(step);
-    el("eda-m-total").textContent = String(totalSteps());
-    el("eda-m-dw").textContent = String(dw.events.length);
-    el("eda-m-ob").textContent = String(ob.events.length);
-    el("eda-m-inv-dw").textContent = String(dw.inv);
-    el("eda-m-inv-ob").textContent = String(ob.inv);
+    for (i = 0; i < s.rows.length; i += 1) if (s.rows[i].bytes > maxBytes) maxBytes = s.rows[i].bytes;
 
-    setBox("eda-dw-order", boxTone("order", dw));
-    setBox("eda-dw-topic", boxTone("topic", dw));
-    setBox("eda-dw-inv", boxTone("inv", dw));
-    setBox("eda-ob-order", boxTone("order", ob));
-    setBox("eda-ob-topic", boxTone("topic", ob));
-    setBox("eda-ob-inv", boxTone("inv", ob));
+    html = '<div class="evx-lhead"><span>欄位路徑</span><span>型別</span><span>契約</span><span>bytes</span></div>';
+    for (i = 0; i < s.rows.length; i += 1) {
+      r = s.rows[i];
+      html += '<div class="evx-row' + (r.depth ? " d1" : "") + (r.tone ? " t-" + r.tone : "") + '">' +
+        '<div class="rp"><i class="evx-tag g-' + r.role + '">' + ROLE_TAG[r.role] + "</i>" +
+        "<code>" + esc(r.path) + "</code>" +
+        (r.offConvention ? '<em class="rw">不在信封慣例名單</em>' : "") + "</div>" +
+        '<div class="rt">' + esc(r.type) + "</div>" +
+        '<div class="rr">' + (r.container
+          ? '<span class="rc">容器</span>'
+          : '<button type="button" class="evx-toggle" data-path="' + esc(r.path) +
+            '" aria-pressed="' + (r.req ? "false" : "true") + '">' +
+            (r.req ? "必填" : "選填") + "</button>") + "</div>" +
+        '<div class="rb"><span class="tr"><i class="g-' + r.role + '" style="width:' +
+        Math.max(4, Math.round(r.bytes * 100 / maxBytes)) + '%"></i></span><b>' + r.bytes + "</b></div>" +
+        '<div class="rn">' + esc(ROLE_NAME[r.role]) +
+        (r.change ? "｜" + esc(r.change.rule) + "：" + esc(r.change.text) +
+          (r.change.bb || r.change.bf
+            ? "（破 " + (r.change.bb ? "BACKWARD" : "") + (r.change.bb && r.change.bf ? " 與 " : "") +
+              (r.change.bf ? "FORWARD" : "") + "）"
+            : "")
+          : "") +
+        (r.container ? "｜下方縮排列是它的內層" : "") +
+        '</div></div>';
+    }
+    evxLedger.innerHTML = html;
 
-    var dwOut = dw.crashed ? "（崩潰，send 未發生）" : "";
-    var obOut = ob.outbox === "pending" ? "outbox PENDING" : ob.outbox === "sent" ? "outbox published" : "outbox 空";
-    el("eda-dw-order-v").textContent = "status = " + dw.order + dwOut;
-    el("eda-ob-order-v").textContent = "status = " + ob.order + " · " + obOut;
+    html = "";
+    for (i = 0; i < s.stack.length; i += 1) {
+      if (s.stack[i].bytes <= 0) continue;
+      html += '<i class="g-' + s.stack[i].role + '" style="flex:' + s.stack[i].bytes +
+        '" title="' + esc(s.stack[i].name + " " + s.stack[i].bytes + " bytes") + '"></i>';
+    }
+    html = '<div class="evx-bar">' + html + "</div>";
+    html += '<div class="evx-keys">';
+    for (i = 0; i < s.stack.length; i += 1) {
+      html += '<span><i class="evx-swatch g-' + s.stack[i].role + '"></i>' +
+        esc(s.stack[i].name) + " <b>" + s.stack[i].bytes + " B</b>" +
+        (s.stack[i].count ? "（" + s.stack[i].count + " 欄）" : "") +
+        " · " + s.stack[i].pct + "%</span>";
+    }
+    html += "</div>";
+    evxStack.innerHTML = html;
 
-    renderSlots(el("eda-dw-slots"), dw.events, dw.brokerDown ? "broker down" : "（空）");
-    renderSlots(el("eda-ob-slots"), ob.events, ob.brokerDown ? "broker down" : "（空）");
-
-    var dwDedup = consMode === "idem" ? (dw.seen ? "去重表有 evt-1" : "去重表空") : "無去重表";
-    var obDedup = consMode === "idem" ? (ob.seen ? "去重表有 evt-1" : "去重表空") : "無去重表";
-    el("eda-dw-inv-v").textContent = "qty = " + dw.inv + " · " + dwDedup;
-    el("eda-ob-inv-v").textContent = "qty = " + ob.inv + " · " + obDedup;
-
-    btnNext.disabled = step >= totalSteps();
-    btnAll.disabled = step >= totalSteps();
-  }
-
-  function paintPanel() {
-    el("eda-p-op").textContent = panel.op;
-    el("eda-p-rule").textContent = panel.rule;
-    el("eda-p-dw").textContent = panel.dw;
-    el("eda-p-ob").textContent = panel.ob;
-    el("eda-p-model").textContent = panel.model;
-    el("eda-p-handler").textContent = panel.handler;
-    var consis = el("eda-p-consis");
-    var risk = el("eda-p-risk");
-    consis.textContent = panel.consis;
-    risk.textContent = panel.risk;
-    consis.className = "pv" + (panel.consisCls ? " " + panel.consisCls : "");
-    risk.className = "pv" + (panel.riskCls ? " " + panel.riskCls : "");
-    statusEl.textContent = statusText;
-    verdictEl.textContent = verdict.text;
-    verdictEl.className = "eda-verdict" + (verdict.tone ? " tone-" + verdict.tone : "");
-    renderWire();
-  }
-
-  function paint() {
-    var isOut = view === "outbox";
-    outboxView.hidden = !isOut;
-    schemaView.hidden = isOut;
-    schemaBoard.hidden = isOut;
-    lanesEl.hidden = !isOut;
-    outboxCtrl.hidden = !isOut;
-    outboxMetric.hidden = !isOut;
-
-    if (isOut) {
-      paintOutbox();
+    if (s.missingNotes.length === 0) {
+      evxMissing.innerHTML = '<div class="evx-mrow ok">預期欄位全部到齊：舊契約的必填欄、所選冪等鍵的每一段、' +
+        "以及 eventId／eventType／aggregateId 這三個信封基本盤都在。</div>";
     } else {
-      el("eda-schema-hint").textContent = COMPAT_HINT[compat];
-      schemaNarrate();
-      renderMatrix();
+      html = "";
+      for (i = 0; i < s.missingNotes.length; i += 1) {
+        m = s.missingNotes[i];
+        html += '<div class="evx-mrow"><code>' + esc(m.path) + "</code>" +
+          '<span class="mn">' + esc(m.note) +
+          (m.impact ? " <b>" + esc(m.impact) + "</b>" : "") + "</span></div>";
+      }
+      evxMissing.innerHTML = html;
     }
-    paintPanel();
-  }
 
-  function onNext() {
-    if (view !== "outbox") return;
-    if (step >= totalSteps()) return;
-    step += 1;
-    applyOutboxStep();
-    paint();
-  }
-
-  function onAll() {
-    if (view !== "outbox") return;
-    while (step < totalSteps()) {
-      step += 1;
-      applyOutboxStep();
+    /* 卡一：冪等鍵 */
+    html = '<div class="ct">冪等鍵與去重判定</div>' +
+      '<div class="cm">組成 <code>' + esc(s.key.label) + "</code></div>" +
+      '<div class="evx-kv"><span>這一則</span><code>' + esc(s.key.keyString) + "</code></div>" +
+      '<div class="evx-kv"><span>' + esc(s.twin.label) + '</span><code>' + esc(s.twin.keyString) + "</code></div>" +
+      '<div class="evx-note' + (s.twin.tone ? " n-" + s.twin.tone : "") + '">' +
+      (s.twin.equal ? "兩把鍵相同" : "兩把鍵不同") + "，而這兩則" +
+      (s.twin.sameFact ? "是同一個事實" : "是兩個不同的事實") + " → " + esc(s.twin.verdictText) + "</div>" +
+      '<div class="cm">' + esc(s.twin.detail) + "</div>" +
+      '<div class="evx-score"><span>這個鍵組成在 4 種孿生事件下答對</span>' +
+      '<b>' + s.keyScore + " / " + s.keyTotal + "</b></div>" +
+      '<div class="evx-ticks">';
+    for (i = 0; i < s.keyMatrix.length; i += 1) {
+      c = s.keyMatrix[i];
+      html += '<i class="' + (c.correct ? "hit" : "miss") + (c.twin === s.twin.mode ? " cur" : "") +
+        '" title="' + esc(c.label + "：" + DEDUP_VERDICT[c.verdict]) + '">' +
+        (c.correct ? "✓" : "✗") + "</i>";
     }
-    paint();
+    html += "</div>";
+    if (s.key.degenerate) {
+      html += '<div class="evx-note n-bad">所選組成的每一段都缺席，這個信封組不出冪等鍵。</div>';
+    } else if (s.key.missing.length) {
+      html += '<div class="evx-note n-lock">缺 <code>' + esc(s.key.missing.join("、")) +
+        "</code>，鍵已退化成剩下的那幾段。</div>";
+    }
+    evxCardKey.innerHTML = html;
+
+    /* 卡二：相容性 */
+    html = '<div class="ct">相容性判定</div>' +
+      '<div class="evx-badge' + (s.compat.tone ? " b-" + s.compat.tone : "") + '">' +
+      esc(s.compat.verdictName) + "</div>" +
+      '<div class="cm">' + esc(s.compat.upgradeOrder) + "</div>" +
+      '<div class="evx-modes">';
+    for (i = 0; i < s.compat.modes.length; i += 1) {
+      html += '<span class="' + (s.compat.modes[i].reject ? "rej" : "pass") + '">' +
+        esc(s.compat.modes[i].mode) + "<b>" + (s.compat.modes[i].reject ? "拒登" : "放行") + "</b></span>";
+    }
+    html += "</div>" +
+      '<div class="evx-score"><span>4 個 Registry 模式會拒絕這次演進的個數</span><b>' +
+      s.compat.registryRejects + " / 4</b></div>" +
+      '<div class="evx-rules">';
+    for (i = 0; i < s.compat.changes.length; i += 1) {
+      c = s.compat.changes[i];
+      if (c.rule === "SAME") continue;
+      html += '<div class="evx-rule' + (c.tone ? " t-" + c.tone : "") + '"><code>' + esc(c.path) +
+        '</code><em>' + esc(c.rule) + "</em><span>" + esc(c.text) +
+        (c.bb || c.bf ? "｜破 " + (c.bb ? "BACKWARD" : "") + (c.bb && c.bf ? " 與 " : "") +
+          (c.bf ? "FORWARD" : "") : "｜兩個方向都不破") + "</span></div>";
+    }
+    if (s.compat.evolved === 0) {
+      html += '<div class="evx-rule">新舊契約逐欄一致，沒有演進可審。</div>';
+    }
+    html += "</div>";
+    if (s.compat.renameHint) {
+      html += '<div class="evx-note n-bad">有必填欄被移除，同一層又出現同型別的新必填欄（<code>' +
+        esc(s.compat.renameHint) + "</code>）—— 這看起來是改名，不是演進。" +
+        "本模型不宣稱能偵測改名：判定仍然只由 DROP_REQ 與 ADD_REQ 兩條規則疊加得出，" +
+        "兩個方向都破是那個疊加的結果，這一句只是提示。</div>";
+    }
+    if (s.compat.semanticBlind > 0) {
+      html += '<div class="evx-note">同名同型的必填欄位有 <b>' + s.compat.semanticBlind +
+        "</b> 個。這些欄位若原地改語意（同一個 amount 先表示元、後表示分），Registry 與這個模型都看不見。</div>";
+    }
+    evxCardCompat.innerHTML = html;
+
+    /* 卡三：重量帳 */
+    html = '<div class="ct">重量帳與 thin／fat</div>' +
+      '<div class="evx-kv"><span>信封（規範化序列化後）</span><b>' + s.envelopeBytes + " bytes</b></div>" +
+      '<div class="evx-kv"><span>業務內容以外的占比</span><b>' + s.overheadPct + "%</b></div>" +
+      '<div class="evx-kv"><span>舊消費者必填但信封沒帶</span><b>' + s.weight.refetch + " 欄</b></div>" +
+      '<div class="evx-kv"><span>舊契約看不到的欄位</span><b>' + s.weight.unreadBytes +
+      " bytes（" + s.weight.unreadPct + "%）</b></div>" +
+      '<div class="evx-kv"><span>其中屬於業務欄位</span><b>' + s.weight.unreadPayloadBytes + " bytes</b></div>" +
+      '<div class="evx-note n-' + (s.weight.thinFat === "fit" ? "ok" : "lock") + '">' +
+      esc(s.weight.thinFatText) + "</div>";
+    if (s.weight.refetch > 0) {
+      html += '<div class="cm">要回查的欄位：<code>' + esc(s.weight.refetchPaths.join("、")) + "</code></div>";
+    }
+    if (s.offConvention > 0) {
+      html += '<div class="evx-note">有 <b>' + s.offConvention +
+        "</b> 個頂層欄位不在信封慣例名單裡，已當成業務欄位計入。業務欄位漏在信封層，" +
+        "下游會分不清哪些是契約、哪些是傳輸細節。</div>";
+    }
+    evxCardWeight.innerHTML = html;
   }
 
-  function bindSeg(rootId, attr, apply) {
-    var root = document.getElementById(rootId);
-    if (!root) return;
-    root.addEventListener("click", function (ev) {
-      var btn = ev.target.closest("button");
-      if (!btn || !root.contains(btn)) return;
-      var value = btn.getAttribute(attr);
-      if (value == null) return;
-      apply(value);
+  function paintEnvelope() {
+    var s = computeEnvelope({
+      envelope: evxEnv ? evxEnv.value : DEFAULT_ENVELOPE,
+      oldSpec: evxSpec ? evxSpec.value : DEFAULT_OLD_SPEC,
+      optional: Object.keys(evxState.optional),
+      dedupKey: evxState.dedupKey,
+      twin: evxState.twin
     });
+    if (s.ok) evxState.last = s;
+    renderEnvelope(s.ok ? s : { ok: false, parseError: s.parseError });
+    if (!s.ok && evxState.last) {
+      /* 保留上一次解得開的畫面，只把狀態列換成錯誤訊息 */
+      evxStatus.textContent = "JSON 解析失敗：" + s.parseError + "（下方維持上一次解得開的結果）";
+      evxStatus.className = "status-line evx-err";
+    }
   }
 
-  bindSeg("eda-seg-view", "data-view", function (value) {
-    view = value;
-    setSeg("eda-seg-view", "data-view", view);
-    if (view === "outbox") {
-      resetRun();
-    } else {
-      wire = [];
-      panel.handler = "消費者 " + consVer;
+  function renderDualWrite(s) {
+    var html, i, j, lane, c, r;
+
+    obxStatus.textContent = s.status;
+    obxCrashVal.textContent = s.crashLabel;
+
+    html = '<div class="obx-grid"><div class="gh"></div>';
+    for (i = 0; i < s.points; i += 1) {
+      html += '<div class="gh' + (i === s.crashAt ? " cur" : "") + '">' + esc(CRASH_LABEL[i]) + "</div>";
     }
-    paint();
-  });
-
-  bindSeg("eda-seg-fault", "data-fault", function (value) {
-    fault = value;
-    setSeg("eda-seg-fault", "data-fault", fault);
-    resetRun();
-    paint();
-  });
-
-  bindSeg("eda-seg-cons", "data-cons", function (value) {
-    consMode = value;
-    setSeg("eda-seg-cons", "data-cons", consMode);
-    resetRun();
-    paint();
-  });
-
-  bindSeg("eda-seg-compat", "data-compat", function (value) {
-    compat = value;
-    setSeg("eda-seg-compat", "data-compat", compat);
-    paint();
-  });
-
-  el("eda-matrix").addEventListener("click", function (ev) {
-    var btn = ev.target.closest("button[data-prod]");
-    if (!btn) return;
-    prodVer = btn.getAttribute("data-prod");
-    consVer = btn.getAttribute("data-cons");
-    paint();
-  });
-
-  btnNext.addEventListener("click", onNext);
-  btnAll.addEventListener("click", onAll);
-  btnReset.addEventListener("click", function () {
-    if (view === "outbox") {
-      resetRun();
-    } else {
-      prodVer = "v2";
-      consVer = "v1";
-      compat = "backward";
-      setSeg("eda-seg-compat", "data-compat", compat);
-      wire = [];
+    html += '<div class="gh">裂縫</div>';
+    for (j = 0; j < s.lanes.length; j += 1) {
+      lane = s.lanes[j];
+      html += '<div class="gl">' + esc(lane.name) + "</div>";
+      for (i = 0; i < lane.cells.length; i += 1) {
+        c = lane.cells[i];
+        html += '<div class="gc o-' + c.tone + (i === s.crashAt ? " cur" : "") +
+          '" title="' + esc(c.label + "｜" + c.tick + "｜主題 " + c.topic + " 則、qty " + c.inv) + '">' +
+          '<b>' + esc(c.short) + "</b><em>qty " + c.inv + "</em></div>";
+      }
+      html += '<div class="gw' + (lane.unsafe ? " bad" : " ok") + '">' + lane.unsafe + " / " +
+        s.points + "<em>" + lane.unsafePct + "%</em></div>";
     }
-    paint();
-  });
+    html += "</div>";
+    obxSpectrum.innerHTML = html;
 
-  resetRun();
-  paint();
+    html = '<div class="obx-fhead"><span>耐久事實</span><span>直接雙寫</span><span>Transactional Outbox</span><span>一致？</span></div>';
+    for (i = 0; i < s.factRows.length; i += 1) {
+      r = s.factRows[i];
+      html += '<div class="obx-frow' + (r.agree ? "" : " diff") + '">' +
+        '<span class="fk">' + esc(r.label) + "</span>" +
+        '<span class="fv">' + esc(r.dual) + "</span>" +
+        '<span class="fv">' + esc(r.outbox) + "</span>" +
+        '<span class="fa">' + (r.agree ? "✓" : "✗") + "</span></div>";
+    }
+    obxFacts.innerHTML = html;
+
+    obxVerdict.textContent = s.verdict;
+    obxVerdict.className = "obx-verdict" +
+      (s.dual.unsafe > s.outbox.unsafe ? " v-split" : (s.dual.unsafe ? " v-bad" : ""));
+  }
+
+  function paintDualWrite() {
+    renderDualWrite(computeDualWrite({
+      crashAt: obxState.crashAt,
+      order: obxState.order,
+      broker: obxState.broker,
+      dedup: obxState.dedup
+    }));
+  }
+
+  /* ==================================================================
+     (5) 事件綁定
+     ================================================================== */
+
+  function resetEnvelope() {
+    evxState.optional = {};
+    evxState.dedupKey = "aggVer";
+    evxState.twin = "republish";
+    if (evxEnv) evxEnv.value = JSON.stringify(DEFAULT_ENVELOPE, null, 2);
+    if (evxSpec) evxSpec.value = DEFAULT_OLD_SPEC.join("\n");
+    if (evxKeySel) evxKeySel.value = evxState.dedupKey;
+    pressGroup(evxSegTwin, "data-twin", evxState.twin);
+    paintEnvelope();
+  }
+
+  if (evxDemo && evxEnv && evxSpec && evxLedger) {
+    evxEnv.addEventListener("input", paintEnvelope);
+    evxSpec.addEventListener("input", paintEnvelope);
+
+    if (evxKeySel) {
+      evxKeySel.addEventListener("change", function () {
+        evxState.dedupKey = evxKeySel.value;
+        paintEnvelope();
+      });
+    }
+
+    if (evxSegTwin) {
+      evxSegTwin.addEventListener("click", function (ev) {
+        var btn = ev.target && ev.target.closest ? ev.target.closest("button[data-twin]") : null;
+        if (!btn || !evxSegTwin.contains(btn)) return;
+        evxState.twin = btn.getAttribute("data-twin");
+        pressGroup(evxSegTwin, "data-twin", evxState.twin);
+        paintEnvelope();
+      });
+    }
+
+    evxLedger.addEventListener("click", function (ev) {
+      var btn = ev.target && ev.target.closest ? ev.target.closest("button[data-path]") : null;
+      var path;
+      if (!btn || !evxLedger.contains(btn)) return;
+      path = btn.getAttribute("data-path");
+      if (evxState.optional[path]) delete evxState.optional[path];
+      else evxState.optional[path] = 1;
+      paintEnvelope();
+    });
+
+    if (evxReset) evxReset.addEventListener("click", resetEnvelope);
+    resetEnvelope();
+  }
+
+  function resetDualWrite() {
+    obxState.crashAt = 4;
+    obxState.order = "dbFirst";
+    obxState.broker = "accept";
+    obxState.dedup = false;
+    if (obxCrash) obxCrash.value = "4";
+    if (obxDedup) obxDedup.value = "naive";
+    pressGroup(obxSegOrder, "data-order", obxState.order);
+    pressGroup(obxSegBroker, "data-broker", obxState.broker);
+    paintDualWrite();
+  }
+
+  if (obxDemo && obxSpectrum && obxCrash) {
+    obxCrash.addEventListener("input", function () {
+      obxState.crashAt = Number(obxCrash.value);
+      paintDualWrite();
+    });
+
+    if (obxDedup) {
+      obxDedup.addEventListener("change", function () {
+        obxState.dedup = obxDedup.value === "idem";
+        paintDualWrite();
+      });
+    }
+
+    if (obxSegOrder) {
+      obxSegOrder.addEventListener("click", function (ev) {
+        var btn = ev.target && ev.target.closest ? ev.target.closest("button[data-order]") : null;
+        if (!btn || !obxSegOrder.contains(btn)) return;
+        obxState.order = btn.getAttribute("data-order");
+        pressGroup(obxSegOrder, "data-order", obxState.order);
+        paintDualWrite();
+      });
+    }
+
+    if (obxSegBroker) {
+      obxSegBroker.addEventListener("click", function (ev) {
+        var btn = ev.target && ev.target.closest ? ev.target.closest("button[data-broker]") : null;
+        if (!btn || !obxSegBroker.contains(btn)) return;
+        obxState.broker = btn.getAttribute("data-broker");
+        pressGroup(obxSegBroker, "data-broker", obxState.broker);
+        paintDualWrite();
+      });
+    }
+
+    if (obxReset) obxReset.addEventListener("click", resetDualWrite);
+    resetDualWrite();
+  }
 })();
 </script>
 
