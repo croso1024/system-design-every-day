@@ -1,4 +1,7 @@
-<!-- demo-archetype: C｜並排對照 — 讀者選一種變更情境（兩次快改／刪除列／Snapshot 交界）與一種下游套用方式（天真 INSERT／依主鍵 merge），同一串變更同時餵進左側「查詢輪詢」與右側「日誌 CDC」兩條 lane，對照各自看見了什麼、倉儲多出幾列。選 C 是因為本篇的命題就是「輪詢究竟漏掉什麼」，只有把兩種擷取方式並排在同一組輸入上，那些被摺掉的中間幀才看得見。 -->
+<!-- demo-archetype: C｜並排對照（主，第 7 節）＋B｜參數掃描（次，第 4 節） — 主 demo 讓讀者拖動輪詢間隔、寫入節奏與刪除時間點，
+     在同一條變更時間軸上算出輪詢摺掉幾幀、DELETE 蒸發幾幀、兩側倉儲各剩幾列與幾列是幽靈；次 demo 讓讀者拖 offset commit 間隔
+     與崩潰位置，算出重放筆數、位點遺失時要重跑幾列 snapshot、三種去重策略各留下幾列。選 C 是因為本篇的命題就是「輪詢究竟漏掉
+     什麼」，只有把兩種擷取方式並排在同一組輸入上，那些被摺掉的中間幀才看得見。 -->
 <style>
   #cdc-root {
     --cdc-c: #3f6188; --cdc-c-soft: #eef2f7;
@@ -60,115 +63,83 @@
   .cdc-pane .ss { font-family: var(--mono); font-size: 11px; color: var(--text-3); margin-bottom: 8px; letter-spacing: .04em; }
   .cdc-pane ul { margin: 0; padding-left: 1.15em; font-size: 13px; color: var(--text-2); line-height: 1.65; }
 
-  .cdc-ctrl { display: flex; flex-wrap: wrap; gap: 10px; margin: 10px 0 8px; align-items: center; }
-  .cdc-metric { display: flex; flex-wrap: wrap; gap: 14px; margin: 8px 0 4px; font-size: 13px; color: var(--text-2); }
-  .cdc-ctrl[hidden], .cdc-metric[hidden] { display: none; }
-  .cdc-metric strong { color: var(--text); font-family: var(--mono); font-size: 12.5px; }
-  .cdc-mode-hint { font-size: 12.5px; color: var(--text-2); margin: 8px 0 4px; line-height: 1.55; }
-
-  .cdc-view { display: block; }
-  .cdc-view[hidden] { display: none; }
-
-  .cdc-col-label {
-    font-family: var(--mono); font-size: 10.5px; letter-spacing: .06em; text-transform: uppercase;
-    color: var(--text-3); margin: 10px 0 2px;
-  }
-
-  .cdc-lanes { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 12px; }
-  @media (max-width: 720px) { .cdc-lanes { grid-template-columns: 1fr; } }
-  .cdc-lanes[hidden] { display: none; }
-
-  .cdc-lane {
+  /* 旋鈕列：兩個 demo 共用的控制列樣式（與 .cdc-sub 同級的本篇工具 class，非 demo 骨架） */
+  .cdc-knobs { display: flex; flex-wrap: wrap; gap: 10px; margin: 4px 0 10px; align-items: center; }
+  .cdc-knob {
+    display: inline-flex; align-items: center; gap: 8px;
     border: 1px solid var(--border); border-radius: var(--radius-sm);
-    background: #fff; padding: 12px; border-top: 3px solid var(--border-strong);
+    padding: 6px 10px; background: var(--bg-soft);
   }
-  .cdc-lane.poll { border-top-color: var(--cdc-w); }
-  .cdc-lane.log { border-top-color: var(--cdc-s); }
-  .cdc-lane .ln { font-weight: 700; font-size: 14px; }
-  .cdc-lane .ls { font-family: var(--mono); font-size: 11px; color: var(--text-3); margin: 2px 0 10px; letter-spacing: .04em; }
+  .cdc-knob input[type="range"] { width: 116px; accent-color: var(--accent); }
+  .cdc-knob .kk { font-family: var(--mono); font-size: 11px; color: var(--text-3); letter-spacing: .04em; }
+  .cdc-knob b { font-family: var(--mono); font-size: 13px; color: var(--accent); min-width: 60px; text-align: right; }
 
-  .cdc-pipe { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-top: 12px; }
-  @media (max-width: 720px) { .cdc-pipe { grid-template-columns: 1fr; } }
-  .cdc-pipe[hidden] { display: none; }
-
-  .cdc-box {
-    border: 1.5px solid var(--border-strong); border-radius: var(--radius-sm);
-    padding: 8px 10px; background: #fff; margin-bottom: 8px;
-    transition: background .18s, border-color .18s;
-  }
-  .cdc-box:last-child { margin-bottom: 0; }
-  .cdc-box .bn { font-weight: 700; font-size: 13px; }
-  .cdc-box .bl { font-family: var(--mono); font-size: 10.5px; color: var(--text-3); margin: 2px 0 6px; }
-  .cdc-box .bv { font-family: var(--mono); font-size: 12px; color: var(--text); line-height: 1.55; }
-  .cdc-box.idle { background: #fff; }
-  .cdc-box.wait { background: var(--accent-soft); border-color: var(--accent); }
-  .cdc-box.wait .bn { color: var(--accent); }
-  .cdc-box.ok { background: var(--ok-soft); border-color: var(--ok); }
-  .cdc-box.ok .bn { color: var(--ok); }
-  .cdc-box.hold { background: var(--warn-soft); border-color: var(--warn); }
-  .cdc-box.hold .bn { color: var(--warn); }
-  .cdc-box.bad { background: var(--bad-soft); border-color: var(--bad); }
-  .cdc-box.bad .bn { color: var(--bad); }
-
-  .cdc-slots { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; min-height: 26px; }
-  .cdc-slot {
-    font-family: var(--mono); font-size: 10.5px; font-weight: 700;
-    border: 1.5px solid var(--border-strong); border-radius: 5px;
-    padding: 3px 7px; background: #fff; color: var(--text-3);
-  }
-  .cdc-slot.ready { background: var(--cdc-c-soft); border-color: var(--cdc-c); color: var(--cdc-c); }
-  .cdc-slot.ok { background: var(--cdc-s-soft); border-color: var(--cdc-s); color: var(--cdc-s); }
-  .cdc-slot.hold { background: var(--cdc-w-soft); border-color: var(--cdc-w); color: var(--cdc-w); }
-  .cdc-slot.lost { background: var(--cdc-bad-soft); border-color: var(--cdc-bad); color: var(--cdc-bad); text-decoration: line-through; }
-
-  .cdc-panels { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 12px; }
-  @media (max-width: 640px) { .cdc-panels { grid-template-columns: 1fr; } }
-  .cdc-panel { border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 12px; background: #fff; }
-  .cdc-panel .pt {
-    font-size: 11px; color: var(--text-3); letter-spacing: .06em; text-transform: uppercase;
-    font-family: var(--mono); margin-bottom: 8px;
-  }
-  .cdc-panel .prow {
-    display: flex; justify-content: space-between; gap: 8px;
-    font-family: var(--mono); font-size: 12px; padding: 4px 0;
-    border-bottom: 1px dashed var(--border);
-  }
-  .cdc-panel .prow:last-child { border-bottom: none; }
-  .cdc-panel .pk { color: var(--text-3); white-space: nowrap; }
-  .cdc-panel .pv { color: var(--text); font-weight: 600; text-align: right; word-break: break-all; }
-  .cdc-panel .pv.good { color: var(--ok); }
-  .cdc-panel .pv.bad { color: var(--bad); }
-  .cdc-panel .pv.warn { color: var(--warn); }
-
-  .cdc-wire {
+  /* ── demo 1（C｜並排對照）：變更幀可見性軸 ＋ 倉儲最終狀態 diff 表 ── */
+  .cvz-canvas {
     border: 1px solid var(--border); border-radius: var(--radius-sm);
-    background: #fff; padding: 8px 10px; margin-top: 10px; max-height: 280px; overflow-y: auto;
+    background: #fff; padding: 8px 6px 4px; margin-top: 10px;
   }
-  .cdc-row {
-    display: flex; align-items: baseline; gap: 8px;
-    font-family: var(--mono); font-size: 11.5px; padding: 4px 0;
-    border-bottom: 1px dashed var(--border);
+  .cvz-wrap { overflow-x: auto; margin-top: 10px; }
+  .cvz-diff { width: 100%; min-width: 480px; border-collapse: collapse; }
+  .cvz-diff th, .cvz-diff td { border: 1px solid var(--border); padding: 6px 9px; text-align: left; vertical-align: top; }
+  .cvz-diff th {
+    background: var(--bg-soft); font-family: var(--mono); font-size: 11px;
+    letter-spacing: .04em; color: var(--text-2); font-weight: 700; white-space: nowrap;
   }
-  .cdc-row:last-child { border-bottom: none; }
-  .cdc-row .ar { width: 42px; flex: none; text-align: center; color: var(--text-3); font-weight: 700; }
-  .cdc-row .tg {
-    flex: none; border-radius: 4px; padding: 2px 6px; font-size: 10.5px; font-weight: 700;
-    border: 1px solid var(--border-strong); background: var(--bg-soft); color: var(--text-3);
-  }
-  .cdc-row .tx { color: var(--text-2); line-height: 1.5; }
-  .cdc-row.read .tg { background: var(--cdc-c-soft); border-color: var(--cdc-c); color: var(--cdc-c); }
-  .cdc-row.ok .tg { background: var(--cdc-s-soft); border-color: var(--cdc-s); color: var(--cdc-s); }
-  .cdc-row.warn .tg { background: var(--cdc-w-soft); border-color: var(--cdc-w); color: var(--cdc-w); }
-  .cdc-row.bad .tg { background: var(--cdc-bad-soft); border-color: var(--cdc-bad); color: var(--cdc-bad); }
-
-  .cdc-verdict {
+  .cvz-diff td { font-family: var(--mono); font-size: 12px; color: var(--text); }
+  .cvz-diff td.note { font-family: var(--sans); font-size: 12px; color: var(--text-2); }
+  .cvz-diff td.note.ghost { color: var(--bad); }
+  .cvz-diff td.note.lag { color: var(--warn); }
+  .cvz-diff tr.tot td { background: var(--bg-soft); font-weight: 700; }
+  .cvz-verdict {
     margin-top: 10px; padding: 10px 12px; border-radius: var(--radius-sm);
-    border: 1px solid var(--border); background: var(--bg-soft);
-    font-size: 13px; color: var(--text-2); line-height: 1.55;
+    border: 1px solid var(--border); border-left-width: 3px;
+    background: var(--bg-soft); font-size: 13px; line-height: 1.6; color: var(--text);
   }
-  .cdc-verdict.tone-ok { border-left: 3px solid var(--ok); background: var(--ok-soft); color: var(--text); }
-  .cdc-verdict.tone-lock { border-left: 3px solid var(--warn); background: var(--warn-soft); color: var(--text); }
-  .cdc-verdict.tone-bad { border-left: 3px solid var(--bad); background: var(--bad-soft); color: var(--text); }
+  .cvz-verdict.v-ok   { border-left-color: var(--ok);   background: var(--ok-soft); }
+  .cvz-verdict.v-warn { border-left-color: var(--warn); background: var(--warn-soft); }
+  .cvz-verdict.v-bad  { border-left-color: var(--bad);  background: var(--bad-soft); }
+
+  /* ── demo 2（B｜參數掃描）：位點尺 ＋ 反向取捨橫條 ── */
+  .rsm-ruler {
+    border: 1px solid var(--border); border-radius: var(--radius-sm);
+    background: #fff; padding: 12px 12px 8px; margin-top: 10px;
+  }
+  .rsm-crash { position: relative; height: 16px; margin-bottom: 2px; }
+  .rsm-crash span {
+    position: absolute; top: 0; transform: translateX(-50%); white-space: nowrap;
+    font-family: var(--mono); font-size: 10.5px; font-weight: 700; color: var(--cdc-bad);
+  }
+  .rsm-crash span.re { transform: translateX(-100%); }
+  .rsm-track { display: flex; height: 26px; border: 1px solid var(--border-strong); border-radius: 5px; overflow: hidden; }
+  .rsm-seg {
+    display: flex; align-items: center; justify-content: center; min-width: 0; overflow: hidden;
+    font-family: var(--mono); font-size: 10.5px; font-weight: 700; white-space: nowrap;
+  }
+  .rsm-seg.snap   { background: var(--cdc-c-soft);   color: var(--cdc-c);   box-shadow: inset -1px 0 0 var(--cdc-c); }
+  .rsm-seg.done   { background: var(--cdc-s-soft);   color: var(--cdc-s); }
+  .rsm-seg.replay { background: var(--cdc-w-soft);   color: var(--cdc-w);   box-shadow: inset 1px 0 0 var(--cdc-w); }
+  .rsm-seg.pend   { background: var(--bg-soft);      color: var(--text-3);  box-shadow: inset 1px 0 0 var(--border-strong); }
+  .rsm-scale { position: relative; height: 20px; margin-top: 3px; }
+  .rsm-scale .tk { position: absolute; top: 0; width: 1px; height: 5px; background: var(--border-strong); }
+  .rsm-scale .tl {
+    position: absolute; top: 6px; transform: translateX(-50%);
+    font-family: var(--mono); font-size: 10px; color: var(--text-3);
+  }
+  .rsm-gl {
+    font-family: var(--mono); font-size: 10.5px; letter-spacing: .06em; text-transform: uppercase;
+    color: var(--text-3); margin: 12px 0 5px;
+  }
+  .rsm-bar { display: grid; grid-template-columns: 140px 1fr 78px; gap: 8px; align-items: center; margin-bottom: 5px; }
+  .rsm-bar .rl { font-size: 12px; color: var(--text-2); }
+  .rsm-bar .rt { height: 14px; background: var(--bg-soft); border: 1px solid var(--border); border-radius: 3px; overflow: hidden; }
+  .rsm-bar .rf { height: 100%; min-width: 0; }
+  .rsm-bar .rf.w { background: var(--cdc-w-soft);   border-right: 2px solid var(--cdc-w); }
+  .rsm-bar .rf.c { background: var(--cdc-c-soft);   border-right: 2px solid var(--cdc-c); }
+  .rsm-bar .rf.d { background: var(--cdc-bad-soft); border-right: 2px solid var(--cdc-bad); }
+  .rsm-bar .rf.s { background: var(--cdc-s-soft);   border-right: 2px solid var(--cdc-s); }
+  .rsm-bar .rn { font-family: var(--mono); font-size: 12px; color: var(--text); text-align: right; white-space: nowrap; }
+  @media (max-width: 640px) { .rsm-bar { grid-template-columns: 104px 1fr 66px; } }
 </style>
 
 <div id="cdc-root">
@@ -413,6 +384,60 @@
   </div>
   <p class="cap">Connector 的 offset 與 Postgres slot、MySQL binlog retention 是三個獨立的時鐘。任一個被回收或卡住，另外兩個救不了。</p>
 
+  <div class="demo" id="demo-cdc-resume">
+    <div class="demo-bar">
+      <span class="label">互動 · 崩潰後要重放幾筆</span>
+      <span class="label" style="text-transform:none;font-family:var(--sans);font-size:12px;color:var(--text-2)">拖 commit 間隔與崩潰位置，重放量與 offset 寫入次數反向伸縮</span>
+    </div>
+    <div class="demo-body">
+      <div class="cdc-knobs">
+        <label class="cdc-knob" for="rsm-total">
+          <span class="kk">已產生交易</span>
+          <input type="range" id="rsm-total" min="10" max="200" step="10" value="60">
+          <b id="rsm-total-v">60 筆</b>
+        </label>
+        <label class="cdc-knob" for="rsm-every">
+          <span class="kk">commit 間隔</span>
+          <input type="range" id="rsm-every" min="1" max="50" step="1" value="10">
+          <b id="rsm-every-v">每 10 筆</b>
+        </label>
+        <label class="cdc-knob" for="rsm-crash">
+          <span class="kk">崩潰在第</span>
+          <input type="range" id="rsm-crash" min="0" max="200" step="1" value="43">
+          <b id="rsm-crash-v">43 筆</b>
+        </label>
+        <button class="btn" id="rsm-reset">重置</button>
+      </div>
+
+      <div class="seg" role="group" aria-label="位點存放位置" id="rsm-seg-store">
+        <button data-store="durable" aria-pressed="true">耐久位點</button>
+        <button data-store="memory" aria-pressed="false">只靠記憶體</button>
+      </div>
+
+      <div class="status-line" id="rsm-status">拖動旋鈕即時重算。</div>
+
+      <div class="legend">
+        <span><i class="dot ns-ok"></i>已 commit，不會再送</span>
+        <span><i class="dot ns-lock"></i>已投遞未 commit → 會重放</span>
+        <span><i class="dot ns-idle"></i>崩潰後還沒消費</span>
+        <span><i class="dot ns-wait"></i>被迫重跑的 Snapshot</span>
+      </div>
+
+      <div class="rsm-ruler">
+        <div class="rsm-crash" id="rsm-ptr"></div>
+        <div class="rsm-track" id="rsm-track"></div>
+        <div class="rsm-scale" id="rsm-ticks"></div>
+      </div>
+      <p class="cap">尺上唯一會「再送一次」的是橘色那段——它的長度就是 commit 間隔欠下的債。刻痕是每一次 offset commit 的位置：刻痕愈密，橘段愈短，但寫入次數愈多。</p>
+
+      <div class="rsm-gl">commit 間隔的兩端代價</div>
+      <div id="rsm-trade"></div>
+      <div class="rsm-gl">同一串投遞，三種去重策略留下幾列</div>
+      <div id="rsm-dedup"></div>
+      <p class="cap">關鍵在中間那條：<code>(pk, LSN)</code> unique insert 擋得住同一事件重放，卻擋不住 Snapshot 的 <code>r</code> 與串流的 <code>c</code>——它們位點不同，只有按主鍵 merge 摺得掉。</p>
+    </div>
+  </div>
+
   <div class="callout warn">
     <div class="c-title"><span class="ic">陷阱</span>把 Snapshot 重跑當成「清乾淨重來」</div>
     <p>下游若是 append-only 倉儲，再做一次 Snapshot 會把現況列再插入一次。回填必須帶去重或 merge-by-pk，否則歷史會加倍。快取還好——SET 是冪等的；搜尋索引的 DELETE 若沒跟著來，重跑 Snapshot 也清不掉已經從來源消失的文件。</p>
@@ -544,173 +569,63 @@
 <section id="s7">
   <div class="sec-head">
     <span class="sec-num">07</span>
-    <h2>互動 · 輪詢盲點與日誌傳播</h2>
+    <h2>互動 · 輪詢摺掉了哪幾幀</h2>
   </div>
-  <p class="sec-sub">同一串訂單變更，左邊靠 <code>updated_at</code> 輪詢、右邊讀 binlog。再切到時間軸，看一筆 UPDATE 從 GTID 走到快取失效與索引更新。</p>
+  <p class="sec-sub">同一串訂單變更，左手是 <code>updated_at</code> 輪詢、右手是 binlog。三支滑桿一動，兩側各自看得到幾幀、倉儲各剩幾列，全部重算。</p>
 
-  <div class="demo" id="demo-cdc">
+  <p>兩列訂單交錯寫入同一張表：<code>O-1001</code> 一路走完狀態鏈，<code>O-1002</code> 走到一半被硬刪。日誌型 CDC 會為每一筆變更留下一幀 ROW 事件；查詢輪詢只在醒來那一刻讀「現況」。把輪詢間隔拖大，被摺掉的幀與延遲會一起長大；拖到最小，摺疊會歸零——但硬刪那一幀不會。</p>
+
+  <div class="demo" id="demo-cdc-capture">
     <div class="demo-bar">
-      <span class="label">互動 · 變更如何離開資料庫</span>
-      <span class="label" style="text-transform:none;font-family:var(--sans);font-size:12px;color:var(--text-2)">下一步推進時序；重置回到起點</span>
+      <span class="label">互動 · 變更幀的可見性</span>
+      <span class="label" style="text-transform:none;font-family:var(--sans);font-size:12px;color:var(--text-2)">拖動三支滑桿，同一串變更即時重算兩側看得到什麼</span>
     </div>
     <div class="demo-body">
-      <div class="seg" role="group" aria-label="演示切換" id="cdc-seg-view">
-        <button data-view="capture" aria-pressed="true">輪詢 vs 日誌</button>
-        <button data-view="propagate" aria-pressed="false">傳播時間軸</button>
+      <div class="cdc-knobs">
+        <label class="cdc-knob" for="cvz-poll">
+          <span class="kk">輪詢間隔</span>
+          <input type="range" id="cvz-poll" min="200" max="4000" step="200" value="1200">
+          <b id="cvz-poll-v">1200 ms</b>
+        </label>
+        <label class="cdc-knob" for="cvz-gap">
+          <span class="kk">寫入節奏</span>
+          <input type="range" id="cvz-gap" min="100" max="1200" step="50" value="200">
+          <b id="cvz-gap-v">200 ms</b>
+        </label>
+        <label class="cdc-knob" for="cvz-del">
+          <span class="kk">刪除時間點</span>
+          <input type="range" id="cvz-del" min="0" max="4000" step="100" value="2500">
+          <b id="cvz-del-v">2500 ms</b>
+        </label>
+        <button class="btn" id="cvz-reset">重置</button>
       </div>
 
-      <div id="cdc-capture-view" class="cdc-view">
-        <div class="seg" role="group" aria-label="變更情境" id="cdc-seg-scene" style="margin-top:8px">
-          <button data-scene="burst" aria-pressed="true">兩次快改</button>
-          <button data-scene="delete" aria-pressed="false">刪除列</button>
-          <button data-scene="snap" aria-pressed="false">Snapshot 交界</button>
-        </div>
-        <div class="seg" role="group" aria-label="下游套用" id="cdc-seg-cons" style="margin-top:8px">
-          <button data-cons="naive" aria-pressed="true">天真 INSERT</button>
-          <button data-cons="idem" aria-pressed="false">依主鍵 merge</button>
-        </div>
-        <p class="cdc-mode-hint" id="cdc-scene-hint">同一輪詢間隔內 INSERT 後連改兩次。輪詢只看到最後一幀；日誌留下每一次 before / after。</p>
+      <div class="seg" role="group" aria-label="下游套用方式" id="cvz-seg-mode">
+        <button data-mode="naive" aria-pressed="false">天真 INSERT</button>
+        <button data-mode="merge" aria-pressed="true">依主鍵 merge</button>
       </div>
 
-      <div id="cdc-propagate-view" class="cdc-view" hidden>
-        <div class="seg" role="group" aria-label="傳播情境" id="cdc-seg-prop" style="margin-top:8px">
-          <button data-prop="live" aria-pressed="true">即時跟上</button>
-          <button data-prop="paused" aria-pressed="false">Connector 暫停</button>
-        </div>
-        <p class="cdc-mode-hint" id="cdc-prop-hint">一筆 UPDATE 從 ROW 事件走到快取 DEL 與索引 upsert。每一步都有可見延遲，但位點會前進。</p>
+      <div class="status-line" id="cvz-status">拖動旋鈕即時重算。</div>
+
+      <div class="legend">
+        <span><i class="dot ns-ok"></i>日誌留下的幀 / 輪詢看見的幀</span>
+        <span><i class="dot ns-lock"></i>被摺疊（灰虛線，永遠讀不到）</span>
+        <span><i class="dot ns-bad"></i>刪除後蒸發</span>
+        <span><i class="dot ns-wait"></i>輪詢時刻</span>
       </div>
 
-      <div class="cdc-ctrl" id="cdc-ctrl">
-        <button class="btn primary" id="cdc-btn-next">下一步</button>
-        <button class="btn" id="cdc-btn-all">走完</button>
-        <button class="btn" id="cdc-btn-reset">重置</button>
-      </div>
+      <div class="cvz-canvas" id="cvz-canvas"></div>
+      <p class="cap">兩帶共用同一條 <code>t</code> 軸：上帶是日誌留下的每一幀，下帶是同一組幀在輪詢眼裡的樣子——灰虛線那些還在原位，只是永遠不會被讀到。括號上的「−N」就是那一拍摺掉幾幀。把刪除關掉，摺疊數會<strong>上升</strong>：那些被刪除截掉的寫入，本來也是會被摺的幀。</p>
 
-      <div class="cdc-metric" id="cdc-metric">
-        <span>步 <strong id="cdc-m-step">0</strong> / <span id="cdc-m-total">4</span></span>
-        <span id="cdc-ml-1">輪詢捕捉 <strong id="cdc-m-poll">0</strong></span>
-        <span id="cdc-ml-2">日誌事件 <strong id="cdc-m-log">0</strong></span>
-        <span id="cdc-ml-3">掃描成本 <strong id="cdc-m-scan">0</strong></span>
-        <span id="cdc-ml-4">倉儲列（輪詢 / 日誌） <strong id="cdc-m-wh">0 / 0</strong></span>
-      </div>
+      <div class="cvz-wrap"><table class="cvz-diff" id="cvz-diff"></table></div>
+      <p class="cap">最後一列是總計。<strong>幽靈</strong>＝來源已刪、輪詢倉儲還留著；<strong>從未見過</strong>＝整條列的生命週期落進同一個輪詢區間，輪詢連它存在過都不知道。這兩個數字不會同時大於零。</p>
 
-      <div class="legend" id="cdc-legend">
-        <span><i class="dot ns-idle"></i>待命 / 空</span>
-        <span><i class="dot ns-wait"></i>傳輸中</span>
-        <span><i class="dot ns-lock"></i>等待 poll / slot 堆積</span>
-        <span><i class="dot ns-ok"></i>已捕捉 / 已套用</span>
-        <span><i class="dot ns-bad"></i>漏事件 / 幽靈資料</span>
-      </div>
-
-      <div id="cdc-lanes" class="cdc-lanes">
-        <div class="cdc-lane poll">
-          <div class="ln">查詢輪詢</div>
-          <div class="ls">WHERE updated_at &gt; cursor</div>
-          <div class="cdc-box idle" id="cdc-p-table">
-            <div class="bn">orders（來源表）</div>
-            <div class="bl">O-1001 · 與右側同一列</div>
-            <div class="bv" id="cdc-p-table-v">（空）</div>
-          </div>
-          <div class="cdc-box idle" id="cdc-p-cur">
-            <div class="bn">poll cursor</div>
-            <div class="bl">上次掃到的 updated_at</div>
-            <div class="bv" id="cdc-p-cur-v">cursor = 0 · 尚未掃描</div>
-          </div>
-          <div class="cdc-box idle" id="cdc-p-cap">
-            <div class="bn">捕捉到的變更</div>
-            <div class="bl">每次 poll 最多一幀現況</div>
-            <div class="cdc-slots" id="cdc-p-slots"></div>
-          </div>
-          <div class="cdc-box idle" id="cdc-p-down">
-            <div class="bn">快取 / 索引 / 倉儲</div>
-            <div class="bl">輪詢路徑下游</div>
-            <div class="bv" id="cdc-p-down-v">cache — · index — · rows 0</div>
-          </div>
-        </div>
-        <div class="cdc-lane log">
-          <div class="ln">日誌型 CDC</div>
-          <div class="ls">binlog ROW + GTID / LSN</div>
-          <div class="cdc-box idle" id="cdc-l-table">
-            <div class="bn">orders（來源表）</div>
-            <div class="bl">O-1001 · 與左側同一列</div>
-            <div class="bv" id="cdc-l-table-v">（空）</div>
-          </div>
-          <div class="cdc-box idle" id="cdc-l-log">
-            <div class="bn">binlog</div>
-            <div class="bl">每一筆 COMMIT 一則 ROW</div>
-            <div class="cdc-slots" id="cdc-l-slots"></div>
-          </div>
-          <div class="cdc-box idle" id="cdc-l-cap">
-            <div class="bn">connector 輸出</div>
-            <div class="bl">c / u / d / r + LSN</div>
-            <div class="cdc-slots" id="cdc-l-out"></div>
-          </div>
-          <div class="cdc-box idle" id="cdc-l-down">
-            <div class="bn">快取 / 索引 / 倉儲</div>
-            <div class="bl">日誌路徑下游</div>
-            <div class="bv" id="cdc-l-down-v">cache — · index — · rows 0</div>
-          </div>
-        </div>
-      </div>
-
-      <div id="cdc-pipe" class="cdc-pipe" hidden>
-        <div class="cdc-box idle" id="cdc-x-write">
-          <div class="bn">Writer</div>
-          <div class="bl">應用交易</div>
-          <div class="bv" id="cdc-x-write-v">待命</div>
-        </div>
-        <div class="cdc-box idle" id="cdc-x-bin">
-          <div class="bn">binlog ROW</div>
-          <div class="bl">GTID 位點</div>
-          <div class="bv" id="cdc-x-bin-v">（空）</div>
-        </div>
-        <div class="cdc-box idle" id="cdc-x-conn">
-          <div class="bn">Debezium connector</div>
-          <div class="bl">offset / slot</div>
-          <div class="bv" id="cdc-x-conn-v">待命</div>
-        </div>
-        <div class="cdc-box idle" id="cdc-x-topic">
-          <div class="bn">topic · db.orders</div>
-          <div class="bl">envelope 事件</div>
-          <div class="cdc-slots" id="cdc-x-slots"></div>
-        </div>
-        <div class="cdc-box idle" id="cdc-x-cache">
-          <div class="bn">Cache</div>
-          <div class="bl">失效，不是 write-through</div>
-          <div class="bv" id="cdc-x-cache-v">key order:O-1001 仍在</div>
-        </div>
-        <div class="cdc-box idle" id="cdc-x-idx">
-          <div class="bn">Search index</div>
-          <div class="bl">依 PK upsert / delete</div>
-          <div class="bv" id="cdc-x-idx-v">文件 = paid / 80</div>
-        </div>
-      </div>
-
-      <div class="cdc-panels" id="cdc-panels">
-        <div class="cdc-panel">
-          <div class="pt">判定面板</div>
-          <div class="prow"><span class="pk">情境</span><span class="pv" id="cdc-f-scene">兩次快改</span></div>
-          <div class="prow"><span class="pk">來源表</span><span class="pv" id="cdc-f-table">（空）</span></div>
-          <div class="prow"><span class="pk">輪詢漏了什麼</span><span class="pv" id="cdc-f-miss">尚未走步</span></div>
-          <div class="prow"><span class="pk">日誌完整性</span><span class="pv" id="cdc-f-log">尚未走步</span></div>
-        </div>
-        <div class="cdc-panel">
-          <div class="pt">下游對照</div>
-          <div class="prow"><span class="pk">套用模式</span><span class="pv" id="cdc-f-cons">天真套用</span></div>
-          <div class="prow"><span class="pk">輪詢下游</span><span class="pv" id="cdc-f-pd">尚未套用</span></div>
-          <div class="prow"><span class="pk">日誌下游</span><span class="pv" id="cdc-f-ld">尚未套用</span></div>
-          <div class="prow"><span class="pk">風險</span><span class="pv" id="cdc-f-risk">無</span></div>
-        </div>
-      </div>
-
-      <div class="cdc-col-label">事件紀錄</div>
-      <div class="cdc-wire" id="cdc-wire"></div>
-      <div class="cdc-verdict" id="cdc-verdict">判定尚未產生——走完一輪後會對照輪詢與日誌各自看見的變更。</div>
+      <div class="cvz-verdict" id="cvz-verdict"></div>
     </div>
   </div>
 
   <div class="oneliner">
-    <b>一句話答法</b>同一串變更，輪詢摺成最後一幀且看不見刪除；日誌留下每一次 ROW。Snapshot 交界的重複用主鍵 merge 擋住，是保護不是事故。
+    <b>一句話答法</b>同一串變更，輪詢把一個週期內的多幀摺成最後一幀，而硬刪那一幀根本不會出現；把間隔調小只能救摺疊與延遲，救不了刪除。這是形式差異，不是調參問題。
   </div>
 </section>
 

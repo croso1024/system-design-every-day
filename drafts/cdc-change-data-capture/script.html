@@ -2,682 +2,710 @@
 (function () {
   "use strict";
 
-  var demo = document.getElementById("demo-cdc");
-  if (!demo) return;
+  /* ════════════ (1) 常數與參數表 ════════════ */
 
-  var SCENE_HINT = {
-    burst: "同一輪詢間隔內 INSERT 後連改兩次。輪詢只看到最後一幀；日誌留下每一次 before / after。",
-    delete: "寫入後硬刪。輪詢掃不到已消失的列；日誌有 DELETE + before image，索引才能清掉幽靈文件。",
-    snap: "Snapshot 先送 op=r，串流又重放同一主鍵。天真 INSERT 會讓倉儲加倍；依主鍵 merge 是拒登保護。"
+  /* demo 1：變更幀可見性 */
+  var HORIZON_MS = 4000;                /* 觀察窗口長度 */
+  var CONNECTOR_LAG_MS = 40;            /* 日誌側端到端延遲；與輪詢間隔無關，這正是本篇要講的事 */
+  var STATUS_CHAIN = ["pending", "paid", "packed", "shipped", "delivered"];
+  var BASE_AMOUNT = 80;
+  var AMOUNT_STEP = 10;
+  var PK_A = "O-1001";                  /* 一路走完狀態鏈、不被刪的那列 */
+  var PK_B = "O-1002";                  /* 走到一半被硬刪的那列 */
+  var MAX_DRAW_FRAMES = 44;             /* 只影響繪製，不影響統計 */
+  var CAP_BASE = {
+    pollMs: 1200, writeGapMs: 200, deleteAtMs: 2500, mode: "merge"
   };
 
-  var SCENE_LABEL = {
-    burst: "兩次快改",
-    delete: "刪除列",
-    snap: "Snapshot 交界"
+  /* demo 2：位點與續讀 */
+  var TABLE_ROWS = 25;                  /* 來源表實體數上界 */
+  var WAL_PER_TXN_KB = 96;
+  var RES_BASE = {
+    txnTotal: 60, commitEvery: 10, crashAtTxn: 43, durable: true
   };
 
-  var PROP_HINT = {
-    live: "一筆 UPDATE 從 ROW 事件走到快取 DEL 與索引 upsert。每一步都有可見延遲，但位點會前進。",
-    paused: "Connector 停住、slot 不確認 LSN。WAL 堆積是保護游標的代價；恢復後追上，中間窗口是最終一致。"
-  };
+  /* SVG 幾何 */
+  var SVG_W = 720, SVG_H = 182;
+  var PLOT_X0 = 82, PLOT_W = 622;
+  var LOG_A_Y = 20, LOG_B_Y = 40, POLL_A_Y = 78, POLL_B_Y = 116;
+  var ROW_H = 16, FRAME_W = 7;
+  var BR_A_Y = 104, BR_B_Y = 142;
+  var TICK_Y0 = 16, AXIS_Y = 158, MS_Y = 172;
 
-  var view = "capture";
-  var scene = "burst";
-  var consMode = "naive";
-  var propScene = "live";
-  var step = 0;
-  var wire = [];
-  var st = null;
-
-  var statusEl = document.getElementById("cdc-scene-hint");
-  var propHintEl = document.getElementById("cdc-prop-hint");
-  var verdictEl = document.getElementById("cdc-verdict");
-  var wireEl = document.getElementById("cdc-wire");
-  var captureView = document.getElementById("cdc-capture-view");
-  var propagateView = document.getElementById("cdc-propagate-view");
-  var lanesEl = document.getElementById("cdc-lanes");
-  var pipeEl = document.getElementById("cdc-pipe");
-  var btnNext = document.getElementById("cdc-btn-next");
-  var btnAll = document.getElementById("cdc-btn-all");
-  var btnReset = document.getElementById("cdc-btn-reset");
-
-  function el(id) {
-    return document.getElementById(id);
+  function clampNum(v, lo, hi, dflt) {
+    var n = typeof v === "number" ? v : parseFloat(v);
+    if (!isFinite(n)) n = dflt;
+    if (n < lo) n = lo;
+    if (n > hi) n = hi;
+    return n;
   }
+
+  /* ════════════ (2) compute* 純函式（不得碰 DOM） ════════════ */
+
+  // @probe fn       computeCapture
+  // @probe baseline {"pollMs":1200,"writeGapMs":200,"deleteAtMs":2500,"mode":"merge"}
+  // @probe sweep    {"pollMs":[200,4000],"writeGapMs":[100,1200],"deleteAtMs":[0,1000],"mode":["naive","merge"]}
+  function computeCapture(p) {
+    p = p || {};
+    var pollMs = clampNum(p.pollMs, 200, 4000, CAP_BASE.pollMs);
+    var writeGapMs = clampNum(p.writeGapMs, 100, 1200, CAP_BASE.writeGapMs);
+    var deleteReq = clampNum(p.deleteAtMs, 0, HORIZON_MS, CAP_BASE.deleteAtMs);
+    var mode = p.mode === "naive" ? "naive" : "merge";
+    var i, j, n, pk;
+
+    /* 變更序列：t = n × writeGapMs，兩列交錯佔用奇偶 slot */
+    var slotCount = Math.floor(HORIZON_MS / writeGapMs);
+    var slots = [];
+    for (n = 1; n <= slotCount; n++) {
+      slots.push({ pk: n % 2 === 1 ? PK_A : PK_B, t: n * writeGapMs });
+    }
+
+    /* 0 是明確的「不刪除」哨符；>0 也只有在該列當時已經存在時才生效 */
+    var deleteAt = 0;
+    if (deleteReq > 0) {
+      for (i = 0; i < slots.length; i++) {
+        if (slots[i].pk === PK_B && slots[i].t < deleteReq) { deleteAt = deleteReq; break; }
+      }
+    }
+
+    var writes = [];
+    var kseq = {};
+    for (i = 0; i < slots.length; i++) {
+      if (deleteAt && slots[i].pk === PK_B && slots[i].t >= deleteAt) continue;
+      var k = kseq[slots[i].pk] || 0;
+      writes.push({
+        pk: slots[i].pk,
+        t: slots[i].t,
+        op: k === 0 ? "c" : "u",
+        status: STATUS_CHAIN[Math.min(k, STATUS_CHAIN.length - 1)],
+        amount: BASE_AMOUNT + AMOUNT_STEP * k
+      });
+      kseq[slots[i].pk] = k + 1;
+    }
+    if (deleteAt) writes.push({ pk: PK_B, t: deleteAt, op: "d", status: "—", amount: 0 });
+    writes.sort(function (a, b) {
+      if (a.t !== b.t) return a.t - b.t;
+      return (a.op === "d" ? 1 : 0) - (b.op === "d" ? 1 : 0);
+    });
+
+    var pkOrder = [PK_A, PK_B];
+    var everPks = [];
+    for (j = 0; j < pkOrder.length; j++) {
+      for (i = 0; i < writes.length; i++) {
+        if (writes[i].pk === pkOrder[j]) { everPks.push(pkOrder[j]); break; }
+      }
+    }
+
+    /* 輪詢：末拍 clamp 到 HORIZON，保證每一筆 write 都落在某個區間內。
+       游標語意 cursor ← max(updated_at in batch)，本批為空則不動。 */
+    var pollCount = Math.ceil(HORIZON_MS / pollMs);
+    var polls = [];
+    var cursor = 0;
+    var alive = {};
+    var wi = 0;
+    var seenPk = {};
+    var pollRowByPk = {};
+    var stalledPolls = 0;
+    for (n = 1; n <= pollCount; n++) {
+      var at = Math.min(n * pollMs, HORIZON_MS);
+      var cBefore = cursor;
+      while (wi < writes.length && writes[wi].t <= at) {
+        var w = writes[wi];
+        if (w.op === "d") delete alive[w.pk];
+        else alive[w.pk] = { status: w.status, amount: w.amount, updatedAt: w.t };
+        wi++;
+      }
+      var batch = [];
+      var aliveUp = {};
+      for (j = 0; j < pkOrder.length; j++) {
+        pk = pkOrder[j];
+        aliveUp[pk] = alive[pk] ? alive[pk].updatedAt : null;
+        if (alive[pk] && alive[pk].updatedAt > cBefore) {
+          batch.push({ pk: pk, status: alive[pk].status, amount: alive[pk].amount, updatedAt: alive[pk].updatedAt });
+        }
+      }
+      var maxUp = cursor;
+      for (j = 0; j < batch.length; j++) if (batch[j].updatedAt > maxUp) maxUp = batch[j].updatedAt;
+      if (batch.length) cursor = maxUp; else stalledPolls++;
+      for (j = 0; j < batch.length; j++) {
+        seenPk[batch[j].pk] = true;
+        pollRowByPk[batch[j].pk] = { status: batch[j].status, amount: batch[j].amount, updatedAt: batch[j].updatedAt };
+      }
+      polls.push({ at: at, cursorBefore: cBefore, cursorAfter: cursor, rows: batch.length, aliveUp: aliveUp });
+    }
+
+    /* 逐筆分類：seen / folded / evaporated。三者加總恆等於 logFrames。 */
+    var frames = [];
+    var seenFrames = 0, foldedFrames = 0, evaporatedFrames = 0;
+    var framesByPk = {}, seenByPk = {};
+    var latSum = 0, latN = 0, latWorst = 0;
+    var groupMap = {}, groups = [];
+    for (i = 0; i < writes.length; i++) {
+      var fw = writes[i];
+      var pi = 0;
+      while (pi < polls.length && polls[pi].at < fw.t) pi++;
+      var cls, pollAt = null;
+      if (pi >= polls.length) {
+        cls = "folded";
+      } else {
+        var pl = polls[pi];
+        pollAt = pl.at;
+        var up = pl.aliveUp[fw.pk];
+        if (up === null || up === undefined) cls = "evaporated";
+        else if (up === fw.t && up > pl.cursorBefore) cls = "seen";
+        else cls = "folded";
+      }
+      if (cls === "seen") { seenFrames++; seenByPk[fw.pk] = (seenByPk[fw.pk] || 0) + 1; }
+      else if (cls === "folded") foldedFrames++;
+      else evaporatedFrames++;
+      framesByPk[fw.pk] = (framesByPk[fw.pk] || 0) + 1;
+      if (cls !== "evaporated" && pollAt !== null) {
+        var lat = pollAt - fw.t;
+        latSum += lat; latN++;
+        if (lat > latWorst) latWorst = lat;
+      }
+      frames.push({
+        pk: fw.pk, t: fw.t, op: fw.op, status: fw.status, amount: fw.amount,
+        cls: cls, pollIdx: pi, pollAt: pollAt
+      });
+
+      var key = pi + "|" + fw.pk;
+      if (!groupMap[key]) {
+        groupMap[key] = {
+          pk: fw.pk, pollIdx: pi, pollAt: pollAt,
+          minT: fw.t, maxT: fw.t, seen: 0, folded: 0, evaporated: 0
+        };
+        groups.push(groupMap[key]);
+      }
+      var g = groupMap[key];
+      if (fw.t < g.minT) g.minT = fw.t;
+      if (fw.t > g.maxT) g.maxT = fw.t;
+      g[cls]++;
+    }
+
+    var logFrames = writes.length;
+    var pollAvgLatencyMs = latN ? Math.round(latSum / latN) : 0;
+    var pollIdealAvgMs = Math.round(pollMs / 2);
+    var latencyRatio = Math.round(pollAvgLatencyMs / CONNECTOR_LAG_MS * 10) / 10;
+
+    /* 倉儲最終狀態 */
+    var finalAlive = {};
+    for (i = 0; i < writes.length; i++) {
+      if (writes[i].op === "d") delete finalAlive[writes[i].pk];
+      else finalAlive[writes[i].pk] = { status: writes[i].status, amount: writes[i].amount };
+    }
+    var aliveCount = 0, ghostRows = 0, invisibleRows = 0, seenPkCount = 0;
+    for (j = 0; j < everPks.length; j++) {
+      pk = everPks[j];
+      if (finalAlive[pk]) aliveCount++;
+      if (seenPk[pk]) seenPkCount++; else invisibleRows++;
+      if (seenPk[pk] && !finalAlive[pk]) ghostRows++;
+    }
+    var pollRows = mode === "naive" ? seenFrames : seenPkCount;
+    var logRows = mode === "naive" ? logFrames : aliveCount;
+
+    /* 倉儲最終狀態 diff */
+    var diff = [];
+    for (j = 0; j < everPks.length; j++) {
+      pk = everPks[j];
+      var srcTxt = finalAlive[pk] ? finalAlive[pk].status + " / " + finalAlive[pk].amount : "已從來源刪除";
+      var pollTxt, logTxt, note, noteCls;
+      if (mode === "merge") {
+        pollTxt = seenPk[pk] ? pollRowByPk[pk].status + " / " + pollRowByPk[pk].amount : "（無此列）";
+        logTxt = finalAlive[pk] ? finalAlive[pk].status + " / " + finalAlive[pk].amount : "（已移除）";
+        if (!seenPk[pk]) { note = "輪詢從未見過這列"; noteCls = "ghost"; }
+        else if (!finalAlive[pk]) { note = "幽靈列：來源沒了，輪詢倉儲還在"; noteCls = "ghost"; }
+        else if (pollRowByPk[pk].status !== finalAlive[pk].status ||
+                 pollRowByPk[pk].amount !== finalAlive[pk].amount) { note = "落後一拍"; noteCls = "lag"; }
+        else { note = "現況一致（中間幀仍已遺失）"; noteCls = ""; }
+      } else {
+        var fc = framesByPk[pk] || 0, sc = seenByPk[pk] || 0;
+        pollTxt = sc + " 列";
+        logTxt = fc + " 列";
+        if (fc > sc) { note = "輪詢少了 " + (fc - sc) + " 列歷史"; noteCls = "ghost"; }
+        else { note = "歷史筆數相同"; noteCls = ""; }
+      }
+      diff.push({ pk: pk, src: srcTxt, poll: pollTxt, log: logTxt, note: note, noteCls: noteCls });
+    }
+
+    /* 判定分支由算出來的值選；句中每個數字都是計算結果 */
+    var verdictKey;
+    if (invisibleRows > 0) verdictKey = "invisible";
+    else if (evaporatedFrames > 0) verdictKey = "ghost";
+    else if (foldedFrames > 0) verdictKey = "folded";
+    else verdictKey = "aligned";
+
+    return {
+      pollMs: pollMs, writeGapMs: writeGapMs, deleteAt: deleteAt, deleteReq: deleteReq, mode: mode,
+      logFrames: logFrames, seenFrames: seenFrames, foldedFrames: foldedFrames,
+      evaporatedFrames: evaporatedFrames, pollCount: pollCount, stalledPolls: stalledPolls,
+      pollAvgLatencyMs: pollAvgLatencyMs, pollWorstLatencyMs: latWorst,
+      pollIdealAvgMs: pollIdealAvgMs, logLatencyMs: CONNECTOR_LAG_MS, latencyRatio: latencyRatio,
+      pollRows: pollRows, logRows: logRows, ghostRows: ghostRows, invisibleRows: invisibleRows,
+      aliveCount: aliveCount, verdictKey: verdictKey,
+      frames: frames, polls: polls, groups: groups, diff: diff,
+      cursorEnd: cursor, horizon: HORIZON_MS, drawLimit: MAX_DRAW_FRAMES
+    };
+  }
+
+  // @probe fn       computeResume
+  // @probe baseline {"txnTotal":60,"commitEvery":10,"crashAtTxn":43,"durable":true}
+  // @probe sweep    {"txnTotal":[10,200],"commitEvery":[1,50],"crashAtTxn":[1,59],"durable":[false,true]}
+  function computeResume(p) {
+    p = p || {};
+    var txnTotal = clampNum(p.txnTotal, 10, 200, RES_BASE.txnTotal);
+    var commitEvery = clampNum(p.commitEvery, 1, 50, RES_BASE.commitEvery);
+    var crashReq = clampNum(p.crashAtTxn, 0, 200, RES_BASE.crashAtTxn);
+    var durable = p.durable === false ? false : true;
+
+    /* 0 是「不崩潰」哨符；超過已產生的交易數一律夾到 txnTotal */
+    var crashed = crashReq > 0;
+    var crashAt = crashed ? Math.min(crashReq, txnTotal) : 0;
+    var consumed = crashed ? crashAt : txnTotal;
+
+    var lastCommit = Math.floor(consumed / commitEvery) * commitEvery;
+    var offsetLost = !durable && crashed;          /* 只有「記憶體 + 真的崩了」才會丟位點 */
+    var committedOffset = offsetLost ? 0 : lastCommit;
+    var offsetWrites = Math.floor(consumed / commitEvery);
+    var resumeFrom = crashed ? committedOffset + 1 : consumed + 1;
+    var replayCount = crashed ? consumed - committedOffset : 0;
+    var worstCaseReplay = commitEvery - 1;
+
+    var entityCount = Math.min(txnTotal, TABLE_ROWS);
+    var snapshotNeeded = offsetLost;
+    var snapshotRows = snapshotNeeded ? entityCount : 0;
+
+    var duplicateEvents = replayCount + snapshotRows;
+    var deliveredTotal = txnTotal + duplicateEvents;
+    var dupRatePct = deliveredTotal ? Math.round(duplicateEvents / deliveredTotal * 1000) / 10 : 0;
+
+    /* (pk, LSN) unique insert 擋得住同一事件重放，擋不住 snapshot 的 r 與串流的 c——位點不同 */
+    var rowsIfNaive = deliveredTotal;
+    var rowsIfLsnKey = txnTotal + snapshotRows;
+    var rowsIfPkMerge = entityCount;
+    var walHeldKb = (txnTotal - committedOffset) * WAL_PER_TXN_KB;
+
+    var segs = [];
+    var scale = snapshotRows + txnTotal;
+    if (snapshotRows > 0) segs.push({ kind: "snap", count: snapshotRows, label: "snapshot " + snapshotRows });
+    if (committedOffset > 0) segs.push({ kind: "done", count: committedOffset, label: "已 commit " + committedOffset });
+    if (replayCount > 0) segs.push({ kind: "replay", count: replayCount, label: "重放 " + replayCount });
+    var pending = txnTotal - consumed;
+    if (pending > 0) segs.push({ kind: "pend", count: pending, label: "未消費 " + pending });
+    for (var i = 0; i < segs.length; i++) {
+      segs[i].pct = Math.round(segs[i].count / scale * 1000) / 10;
+    }
+    var crashPct = scale ? Math.round((snapshotRows + consumed) / scale * 1000) / 10 : 0;
+
+    var tickStep = commitEvery;
+    var tickCount = Math.floor(txnTotal / commitEvery);
+    while (tickCount > 24) { tickStep *= 2; tickCount = Math.floor(txnTotal / tickStep); }
+
+    var trade = [
+      { key: "replay", label: "重放筆數", cls: "w", value: replayCount, unit: " 筆" },
+      { key: "writes", label: "offset 寫入次數", cls: "c", value: offsetWrites, unit: " 次" }
+    ];
+    var tradeMax = Math.max(replayCount, offsetWrites, worstCaseReplay, 1);
+    for (i = 0; i < trade.length; i++) trade[i].pct = Math.round(trade[i].value / tradeMax * 1000) / 10;
+
+    var dedup = [
+      { key: "naive", label: "天真 INSERT", cls: "d", value: rowsIfNaive },
+      { key: "lsn", label: "(pk, LSN) unique", cls: "w", value: rowsIfLsnKey },
+      { key: "merge", label: "按主鍵 merge", cls: "s", value: rowsIfPkMerge }
+    ];
+    var dedupMax = Math.max(rowsIfNaive, rowsIfLsnKey, rowsIfPkMerge, 1);
+    for (i = 0; i < dedup.length; i++) dedup[i].pct = Math.round(dedup[i].value / dedupMax * 1000) / 10;
+
+    var verdictKey;
+    if (snapshotNeeded) verdictKey = "lost";
+    else if (replayCount > 0) verdictKey = "replay";
+    else verdictKey = "clean";
+
+    return {
+      txnTotal: txnTotal, commitEvery: commitEvery, crashAt: crashAt, crashed: crashed, durable: durable,
+      consumed: consumed, committedOffset: committedOffset, resumeFrom: resumeFrom,
+      replayCount: replayCount, worstCaseReplay: worstCaseReplay, offsetWrites: offsetWrites,
+      snapshotNeeded: snapshotNeeded, snapshotRows: snapshotRows, entityCount: entityCount,
+      duplicateEvents: duplicateEvents, deliveredTotal: deliveredTotal, dupRatePct: dupRatePct,
+      rowsIfNaive: rowsIfNaive, rowsIfLsnKey: rowsIfLsnKey, rowsIfPkMerge: rowsIfPkMerge,
+      walHeldKb: walHeldKb, pendingTxns: pending,
+      segs: segs, scale: scale, crashPct: crashPct, tickStep: tickStep, tickCount: tickCount,
+      trade: trade, dedup: dedup, verdictKey: verdictKey
+    };
+  }
+
+  /* ════════════ (3) DOM 參照 ════════════ */
+
+  var capShell = document.getElementById("demo-cdc-capture");
+  var resShell = document.getElementById("demo-cdc-resume");
+  if (!capShell && !resShell) return;
+
+  var capIn = {};
+  var capOut = {};
+  if (capShell) {
+    capIn.poll = document.getElementById("cvz-poll");
+    capIn.gap = document.getElementById("cvz-gap");
+    capIn.del = document.getElementById("cvz-del");
+    capIn.segMode = document.getElementById("cvz-seg-mode");
+    capIn.reset = document.getElementById("cvz-reset");
+    capOut.pollV = document.getElementById("cvz-poll-v");
+    capOut.gapV = document.getElementById("cvz-gap-v");
+    capOut.delV = document.getElementById("cvz-del-v");
+    capOut.status = document.getElementById("cvz-status");
+    capOut.canvas = document.getElementById("cvz-canvas");
+    capOut.diff = document.getElementById("cvz-diff");
+    capOut.verdict = document.getElementById("cvz-verdict");
+  }
+
+  var resIn = {};
+  var resOut = {};
+  if (resShell) {
+    resIn.total = document.getElementById("rsm-total");
+    resIn.every = document.getElementById("rsm-every");
+    resIn.crash = document.getElementById("rsm-crash");
+    resIn.segStore = document.getElementById("rsm-seg-store");
+    resIn.reset = document.getElementById("rsm-reset");
+    resOut.totalV = document.getElementById("rsm-total-v");
+    resOut.everyV = document.getElementById("rsm-every-v");
+    resOut.crashV = document.getElementById("rsm-crash-v");
+    resOut.status = document.getElementById("rsm-status");
+    resOut.ptr = document.getElementById("rsm-ptr");
+    resOut.track = document.getElementById("rsm-track");
+    resOut.ticks = document.getElementById("rsm-ticks");
+    resOut.trade = document.getElementById("rsm-trade");
+    resOut.dedup = document.getElementById("rsm-dedup");
+  }
+
+  var capMode = CAP_BASE.mode;
+  var resDurable = RES_BASE.durable;
+
+  /* ════════════ (4) render（只讀 compute 的結果畫出來） ════════════ */
 
   function esc(s) {
     return String(s)
-      .replace(/&/g, "&amp;")
-      .replace(/</g, "&lt;")
-      .replace(/>/g, "&gt;")
-      .replace(/"/g, "&quot;");
+      .replace(/&/g, "&amp;").replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;").replace(/"/g, "&quot;");
   }
 
-  function setPressed(groupId, attr, value) {
-    var group = el(groupId);
+  function pressGroup(group, attr, value) {
     if (!group) return;
-    var buttons = group.querySelectorAll("button");
-    for (var i = 0; i < buttons.length; i++) {
-      var btn = buttons[i];
-      btn.setAttribute("aria-pressed", btn.getAttribute(attr) === value ? "true" : "false");
+    var btns = group.querySelectorAll("button");
+    for (var i = 0; i < btns.length; i++) {
+      btns[i].setAttribute("aria-pressed", btns[i].getAttribute(attr) === value ? "true" : "false");
     }
   }
 
-  function setBox(id, tone) {
-    var box = el(id);
-    if (!box) return;
-    box.className = "cdc-box " + (tone || "idle");
+  var OP_FILL = { c: "var(--cdc-c-soft)", u: "var(--cdc-s-soft)", d: "var(--cdc-bad-soft)" };
+  var OP_LINE = { c: "var(--cdc-c)", u: "var(--cdc-s)", d: "var(--cdc-bad)" };
+
+  function frameX(t) {
+    return PLOT_X0 + t / HORIZON_MS * PLOT_W;
   }
 
-  function tableText(row) {
-    if (!row) return "（空）";
-    return "status=" + row.status + " · amount=" + row.amount + " · ver=" + row.ver + " · ts=" + row.ts;
-  }
+  function buildSvg(r) {
+    var out = [];
+    var i, x, f, g;
+    out.push('<svg viewBox="0 0 ' + SVG_W + ' ' + SVG_H + '" style="width:100%;height:auto" role="img">');
+    out.push('<title>同一條時間軸上，日誌 CDC 留下的每一幀與輪詢實際看得到的那幾幀</title>');
+    out.push('<defs><marker id="cvz-ah" viewBox="0 0 8 8" refX="6" refY="4" markerWidth="6" markerHeight="6" orient="auto">' +
+      '<path d="M0 0 L8 4 L0 8 z" fill="var(--text-3)"/></marker></defs>');
+    out.push('<rect x="0" y="0" width="' + SVG_W + '" height="' + SVG_H + '" fill="#fff"/>');
 
-  function slotHtml(items) {
-    if (!items || !items.length) {
-      return "<span class=\"cdc-slot\">（空）</span>";
+    /* 輪詢時刻的垂直虛線 */
+    var labelEvery = r.pollCount > 10 ? 2 : 1;
+    for (i = 0; i < r.polls.length; i++) {
+      x = frameX(r.polls[i].at).toFixed(1);
+      out.push('<line x1="' + x + '" y1="' + TICK_Y0 + '" x2="' + x + '" y2="' + AXIS_Y +
+        '" stroke="var(--accent)" stroke-width="1" stroke-dasharray="3 3" opacity="0.55"/>');
+      if (i % labelEvery === 0) {
+        out.push('<text x="' + x + '" y="' + (AXIS_Y + 12) + '" font-family="var(--mono)" font-size="11" fill="var(--accent)" text-anchor="middle">#' + (i + 1) + '</text>');
+      }
     }
-    return items.map(function (it) {
-      return "<span class=\"cdc-slot " + it.cls + "\">" + esc(it.text) + "</span>";
-    }).join("");
-  }
 
-  function pushWire(kind, tag, text) {
-    wire.push({ kind: kind, tag: tag, text: text, t: wire.length + 1 });
-  }
-
-  function applyDown(side, ev) {
-    var idem = consMode === "idem";
-    var key = ev.pk + ":" + ev.lsn;
-    var seen = side.seen;
-    var pks = side.pks;
-    var down = side.down;
-
-    if (idem && seen[key]) {
-      down.last = "拒登重放 " + ev.op + "@lsn" + ev.lsn;
-      down.protect += 1;
-      return "protect";
+    /* 兩帶的列底 */
+    var rows = [
+      { y: LOG_A_Y, pk: PK_A }, { y: LOG_B_Y, pk: PK_B },
+      { y: POLL_A_Y, pk: PK_A }, { y: POLL_B_Y, pk: PK_B }
+    ];
+    for (i = 0; i < rows.length; i++) {
+      out.push('<rect x="' + PLOT_X0 + '" y="' + rows[i].y + '" width="' + PLOT_W + '" height="' + ROW_H +
+        '" fill="#fafaf9" stroke="var(--border)" stroke-width="1"/>');
+      out.push('<text x="' + (PLOT_X0 - 6) + '" y="' + (rows[i].y + 12) +
+        '" font-family="var(--mono)" font-size="11" fill="var(--text-3)" text-anchor="end">' + esc(rows[i].pk) + '</text>');
     }
-    seen[key] = true;
 
-    if (ev.op === "d") {
-      down.cache = "MISS";
-      down.index = "（已刪）";
-      if (idem) {
-        if (pks[ev.pk]) down.rows = Math.max(0, down.rows - 1);
-        delete pks[ev.pk];
+    /* 帶標題 */
+    out.push('<text x="6" y="' + (LOG_A_Y - 6) + '" font-family="var(--mono)" font-size="11" fill="var(--cdc-s)" font-weight="700">日誌 CDC · ' + r.logFrames + ' 幀</text>');
+    out.push('<text x="6" y="' + (POLL_A_Y - 6) + '" font-family="var(--mono)" font-size="11" fill="var(--cdc-w)" font-weight="700">查詢輪詢 · 看見 ' + r.seenFrames + ' 幀</text>');
+
+    /* 幀 */
+    var drawn = Math.min(r.frames.length, r.drawLimit);
+    for (i = 0; i < drawn; i++) {
+      f = r.frames[i];
+      x = frameX(f.t) - FRAME_W / 2;
+      var logY = f.pk === PK_A ? LOG_A_Y : LOG_B_Y;
+      var pollY = f.pk === PK_A ? POLL_A_Y : POLL_B_Y;
+      out.push('<rect x="' + x.toFixed(1) + '" y="' + logY + '" width="' + FRAME_W + '" height="' + ROW_H +
+        '" fill="' + OP_FILL[f.op] + '" stroke="' + OP_LINE[f.op] + '" stroke-width="1.4"/>');
+      if (f.cls === "seen") {
+        out.push('<rect x="' + x.toFixed(1) + '" y="' + pollY + '" width="' + FRAME_W + '" height="' + ROW_H +
+          '" fill="var(--cdc-w-soft)" stroke="var(--cdc-w)" stroke-width="1.8"/>');
+      } else if (f.cls === "folded") {
+        out.push('<rect x="' + x.toFixed(1) + '" y="' + pollY + '" width="' + FRAME_W + '" height="' + ROW_H +
+          '" fill="none" stroke="var(--border-strong)" stroke-width="1" stroke-dasharray="2 2"/>');
       } else {
-        down.rows += 1;
-      }
-      down.last = "DELETE 已套用";
-      return "delete";
-    }
-
-    down.cache = ev.status + "/" + ev.amount;
-    down.index = ev.status + "/" + ev.amount;
-    if (idem && pks[ev.pk]) {
-      down.last = "merge " + ev.op + " → " + ev.status + "/" + ev.amount;
-      down.protect += 1;
-      pks[ev.pk] = ev.lsn;
-      return "protect";
-    }
-    pks[ev.pk] = ev.lsn;
-    down.rows += 1;
-    down.last = ev.op + " → " + ev.status + "/" + ev.amount;
-    return "apply";
-  }
-
-  function totals() {
-    if (view === "propagate") return st.propTotal;
-    if (scene === "burst") return 5;
-    if (scene === "delete") return 5;
-    return 5;
-  }
-
-  function freshCapture() {
-    var row = null;
-    if (scene === "snap") {
-      row = { status: "paid", amount: 80, ver: 1, ts: 4 };
-    }
-    return {
-      row: row,
-      t: scene === "snap" ? 4 : 0,
-      lsn: scene === "snap" ? 10 : 0,
-      pollCursor: 0,
-      scan: 0,
-      pollSlots: [],
-      logSlots: [],
-      outSlots: [],
-      poll: { seen: {}, pks: {}, down: { cache: "—", index: "—", rows: 0, protect: 0, last: "尚未套用" } },
-      log: { seen: {}, pks: {}, down: { cache: "—", index: "—", rows: 0, protect: 0, last: "尚未套用" } },
-      miss: "尚未走步",
-      logOk: "尚未走步",
-      risk: "無",
-      riskCls: "",
-      missCls: "",
-      logCls: "",
-      pdCls: "",
-      ldCls: "",
-      verdict: { text: "判定尚未產生——走完一輪後會對照輪詢與日誌各自看見的變更。", tone: "" },
-      pTone: { table: "idle", cur: "idle", cap: "idle", down: "idle" },
-      lTone: { table: "idle", log: "idle", cap: "idle", down: "idle" }
-    };
-  }
-
-  function freshProp() {
-    return {
-      writer: { tone: "idle", text: "待命" },
-      bin: { tone: "idle", text: "（空）" },
-      conn: { tone: "idle", text: "待命" },
-      topic: [],
-      cache: { tone: "idle", text: "key order:O-1001 仍在（舊值 paid/80）" },
-      idx: { tone: "idle", text: "文件 = paid / 80" },
-      offset: 0,
-      wal: 1,
-      lag: 0,
-      miss: "尚未走步",
-      logOk: "尚未走步",
-      risk: "無",
-      riskCls: "",
-      missCls: "",
-      logCls: "",
-      verdict: { text: "判定尚未產生——走完傳播鏈後會標出延遲窗口與 slot 行為。", tone: "" },
-      propTotal: propScene === "paused" ? 5 : 5
-    };
-  }
-
-  function downLine(side) {
-    return "cache " + side.down.cache + " · index " + side.down.index + " · rows " + side.down.rows +
-      (side.down.protect ? " · 拒登 " + side.down.protect : "");
-  }
-
-  function runCaptureStep() {
-    var row;
-    if (scene === "burst") {
-      if (step === 1) {
-        st.t = 1;
-        st.lsn = 1;
-        st.row = { status: "pending", amount: 80, ver: 1, ts: 1 };
-        st.logSlots.push({ cls: "ready", text: "c@1 pending/80" });
-        st.outSlots.push({ cls: "ok", text: "c lsn=1" });
-        applyDown(st.log, { pk: "O-1001", lsn: 1, op: "c", status: "pending", amount: 80 });
-        st.pTone.table = "wait";
-        st.lTone.table = "wait";
-        st.lTone.log = "wait";
-        st.lTone.cap = "ok";
-        st.lTone.down = "ok";
-        st.pTone.cur = "hold";
-        pushWire("ok", "INSERT", "COMMIT pending/80 · GTID 1:1 · 輪詢仍等下一拍");
-        st.miss = "中間態尚未發生";
-        st.logOk = "已捕捉 CREATE";
-        st.logCls = "good";
-      } else if (step === 2) {
-        st.t = 2;
-        st.lsn = 2;
-        st.row = { status: "paid", amount: 80, ver: 2, ts: 2 };
-        st.logSlots.push({ cls: "ready", text: "u@2 paid/80" });
-        st.outSlots.push({ cls: "ok", text: "u lsn=2" });
-        applyDown(st.log, { pk: "O-1001", lsn: 2, op: "u", status: "paid", amount: 80 });
-        st.lTone.table = "wait";
-        pushWire("ok", "UPDATE", "paid/80 · 仍在同一 poll 窗口");
-        st.miss = "pending 已被摺進尚未發生的 poll";
-        st.missCls = "warn";
-        st.logOk = "CREATE + UPDATE";
-      } else if (step === 3) {
-        st.t = 3;
-        st.lsn = 3;
-        st.row = { status: "shipped", amount: 80, ver: 3, ts: 3 };
-        st.logSlots.push({ cls: "ready", text: "u@3 shipped/80" });
-        st.outSlots.push({ cls: "ok", text: "u lsn=3" });
-        applyDown(st.log, { pk: "O-1001", lsn: 3, op: "u", status: "shipped", amount: 80 });
-        pushWire("warn", "UPDATE", "shipped/80 · 第三次變更，poll 還沒收");
-        st.miss = "pending、paid 兩幀已從現況消失";
-        st.missCls = "warn";
-        st.logOk = "三次 ROW 齊";
-        st.risk = "輪詢即將丟失中間態";
-        st.riskCls = "warn";
-      } else if (step === 4) {
-        st.t = 10;
-        st.scan += 1;
-        st.pollCursor = 3;
-        st.pollSlots.push({ cls: "hold", text: "upsert shipped/80" });
-        applyDown(st.poll, { pk: "O-1001", lsn: 3, op: "u", status: "shipped", amount: 80 });
-        st.pTone.cur = "ok";
-        st.pTone.cap = "hold";
-        st.pTone.down = "hold";
-        pushWire("warn", "POLL", "updated_at>0 → 一列 shipped。掃描成本 +1，看不到 pending/paid");
-        st.miss = "漏掉 pending、paid 兩次變更";
-        st.missCls = "bad";
-        st.logOk = "三次 ROW 完整";
-        st.logCls = "good";
-        st.risk = "中間觸發（發券、風控）不會被叫醒";
-        st.riskCls = "bad";
-      } else if (step === 5) {
-        st.pTone.table = "ok";
-        st.lTone.table = "ok";
-        st.verdict = {
-          text: "兩邊最終列都是 shipped/80，所以「現況一致」成立。但輪詢把三次變更摺成一幀，依賴付款瞬間的下游永遠不會跑。日誌留下 c/u/u；天真 INSERT 會讓倉儲變成三列，依主鍵 merge 才摺回一列。",
-          tone: "tone-bad"
-        };
-        pushWire("bad", "判定", "最終列碰巧相同 ≠ 變更都被看見");
-      }
-    } else if (scene === "delete") {
-      if (step === 1) {
-        st.t = 1;
-        st.lsn = 1;
-        st.row = { status: "pending", amount: 80, ver: 1, ts: 1 };
-        st.logSlots.push({ cls: "ready", text: "c@1 pending/80" });
-        st.outSlots.push({ cls: "ok", text: "c lsn=1" });
-        applyDown(st.log, { pk: "O-1001", lsn: 1, op: "c", status: "pending", amount: 80 });
-        applyDown(st.poll, { pk: "O-1001", lsn: 1, op: "c", status: "pending", amount: 80 });
-        st.pollSlots.push({ cls: "hold", text: "upsert pending/80" });
-        st.pollCursor = 1;
-        st.scan += 1;
-        st.pTone.table = "wait";
-        st.lTone.table = "wait";
-        st.lTone.log = "ok";
-        st.lTone.cap = "ok";
-        st.lTone.down = "ok";
-        st.pTone.cur = "ok";
-        st.pTone.cap = "hold";
-        st.pTone.down = "hold";
-        pushWire("ok", "INSERT", "第一拍兩邊都看到 pending（輪詢幸運地趕上一幀）");
-        st.miss = "尚無刪除";
-        st.logOk = "已捕捉 CREATE";
-        st.logCls = "good";
-      } else if (step === 2) {
-        st.t = 2;
-        st.lsn = 2;
-        st.row = { status: "paid", amount: 80, ver: 2, ts: 2 };
-        st.logSlots.push({ cls: "ready", text: "u@2 paid/80" });
-        st.outSlots.push({ cls: "ok", text: "u lsn=2" });
-        applyDown(st.log, { pk: "O-1001", lsn: 2, op: "u", status: "paid", amount: 80 });
-        pushWire("ok", "UPDATE", "paid/80 進入 binlog；下一拍才輪到 poll");
-        st.logOk = "CREATE + UPDATE";
-      } else if (step === 3) {
-        st.t = 3;
-        st.lsn = 3;
-        st.row = null;
-        st.logSlots.push({ cls: "lost", text: "d@3 paid/80" });
-        st.outSlots.push({ cls: "ok", text: "d lsn=3" });
-        applyDown(st.log, { pk: "O-1001", lsn: 3, op: "d", status: "paid", amount: 80 });
-        st.lTone.table = "hold";
-        st.lTone.down = "ok";
-        pushWire("warn", "DELETE", "列消失。日誌帶 before image；輪詢已無此 PK");
-        st.miss = "硬刪對 updated_at 查詢隱形";
-        st.missCls = "warn";
-        st.logOk = "含 DELETE 事件";
-        st.logCls = "good";
-      } else if (step === 4) {
-        st.t = 10;
-        st.scan += 1;
-        st.pTone.cur = "hold";
-        st.pTone.cap = "bad";
-        st.pTone.down = "bad";
-        pushWire("bad", "POLL", "WHERE updated_at>1 → 零列。cursor 不前進到刪除，快取/索引仍停在 pending");
-        st.miss = "DELETE 蒸發；下游留下幽靈文件";
-        st.missCls = "bad";
-        st.risk = "索引搜得到已刪訂單";
-        st.riskCls = "bad";
-        st.poll.down.last = "本拍無列可 upsert";
-      } else if (step === 5) {
-        st.verdict = {
-          text: "日誌路徑 cache=MISS、index 已刪，這是正確的失效。輪詢路徑仍停在第一拍的 pending：硬刪沒有 updated_at，對帳前幽靈文件會一直被搜到。軟刪只是把這個問題假裝成 UPDATE。",
-          tone: "tone-bad"
-        };
-        pushWire("bad", "判定", "硬刪是輪詢的死角，不是間隔設太長");
-      }
-    } else if (scene === "snap") {
-      if (step === 1) {
-        st.lsn = 11;
-        row = { pk: "O-1001", lsn: 11, op: "r", status: "paid", amount: 80 };
-        st.logSlots.push({ cls: "ready", text: "r@11 paid/80" });
-        st.outSlots.push({ cls: "ok", text: "r lsn=11" });
-        applyDown(st.log, row);
-        applyDown(st.poll, row);
-        st.pollSlots.push({ cls: "hold", text: "snapshot paid/80" });
-        st.scan += 1;
-        st.pTone.table = "wait";
-        st.lTone.table = "wait";
-        st.lTone.log = "wait";
-        st.lTone.cap = "ok";
-        st.pTone.cur = "ok";
-        st.pTone.cap = "hold";
-        st.pTone.down = "ok";
-        st.lTone.down = "ok";
-        pushWire("read", "SNAP", "一致快照讀到 paid/80，兩邊各發 op=r");
-        st.miss = "輪詢路徑把 Snapshot 當一次 upsert";
-        st.logOk = "read 事件已送";
-        st.logCls = "good";
-      } else if (step === 2) {
-        st.lsn = 10;
-        row = { pk: "O-1001", lsn: 10, op: "c", status: "paid", amount: 80 };
-        st.logSlots.push({ cls: "hold", text: "c@10 paid/80" });
-        st.outSlots.push({ cls: "hold", text: "c lsn=10" });
-        var logHit = applyDown(st.log, row);
-        var pollHit = applyDown(st.poll, { pk: "O-1001", lsn: 10, op: "c", status: "paid", amount: 80 });
-        st.pollSlots.push({ cls: consMode === "idem" ? "ok" : "lost", text: consMode === "idem" ? "merge c@10" : "再插入 paid/80" });
-        if (consMode === "idem") {
-          st.lTone.down = "ok";
-          st.pTone.down = "ok";
-          st.risk = "merge 擋下交界重放";
-          st.riskCls = "good";
-          pushWire("ok", "重放", "串流低水位重送 CREATE（另一個 LSN）。依主鍵 merge 原地更新，倉儲列數不變——這是保護。");
-          st.logOk = "r + merge 後的 c";
-        } else {
-          st.lTone.down = "hold";
-          st.pTone.down = "bad";
-          st.risk = "倉儲列加倍";
-          st.riskCls = "bad";
-          pushWire("bad", "重放", "同一主鍵再 INSERT 一次。天真倉儲 rows+1，不是新事實");
-          st.logOk = "r + 重複 c（未 merge）";
-          st.logCls = "warn";
-        }
-        st.miss = pollHit === "protect" ? "輪詢側也 merge 了重複" : "輪詢側把重放當成新列";
-        st.missCls = pollHit === "protect" ? "good" : "bad";
-      } else if (step === 3) {
-        st.t = 5;
-        st.lsn = 12;
-        st.row = { status: "paid", amount: 100, ver: 2, ts: 5 };
-        st.logSlots.push({ cls: "ready", text: "u@12 paid/100" });
-        st.outSlots.push({ cls: "ok", text: "u lsn=12" });
-        applyDown(st.log, { pk: "O-1001", lsn: 12, op: "u", status: "paid", amount: 100 });
-        st.lTone.table = "ok";
-        st.pTone.table = "ok";
-        pushWire("ok", "UPDATE", "快照窗口內的金額變更 paid/100，只走日誌");
-        st.logOk = consMode === "idem" ? "r + 拒登 + u" : "r + 重複 c + u";
-      } else if (step === 4) {
-        st.scan += 1;
-        st.pollCursor = 5;
-        st.pollSlots.push({ cls: "hold", text: "upsert paid/100" });
-        applyDown(st.poll, { pk: "O-1001", lsn: 12, op: "u", status: "paid", amount: 100 });
-        st.pTone.cap = "hold";
-        pushWire("warn", "POLL", "現況已是 100。輪詢補上終點，但交界那次重複仍留在倉儲列數裡");
-        st.miss = consMode === "idem" ? "終點追上，重複已被擋" : "終點追上，歷史多一列";
-        st.missCls = consMode === "idem" ? "" : "warn";
-      } else if (step === 5) {
-        if (consMode === "idem") {
-          st.verdict = {
-            text: "Snapshot 與串流重疊是預期的 at-least-once。依主鍵 merge 把第二次寫入收成原地更新——這是保護，不是損壞。同一事件重放才用 (pk, LSN) unique insert；交界處的 r 與 c 位點不同，要靠主鍵摺疊。",
-            tone: "tone-ok"
-          };
-          st.risk = "無（merge 保護）";
-          st.riskCls = "good";
-          pushWire("ok", "判定", "交界重複被摺進同一列，不是資料損壞");
-        } else {
-          st.verdict = {
-            text: "同一主鍵被 Snapshot 與串流各寫一次，倉儲列數大於真實實體。重跑 Snapshot 當「清乾淨重來」會再加倍。回填必須 merge-by-pk，不能盲目 INSERT。",
-            tone: "tone-bad"
-          };
-          st.risk = "回填會再加倍";
-          st.riskCls = "bad";
-          pushWire("bad", "判定", "天真套用把交界重放當成新事實");
-        }
+        var cx = frameX(f.t), cy = pollY + ROW_H / 2;
+        out.push('<path d="M' + (cx - 4).toFixed(1) + ' ' + (cy - 4) + ' L' + (cx + 4).toFixed(1) + ' ' + (cy + 4) +
+          ' M' + (cx + 4).toFixed(1) + ' ' + (cy - 4) + ' L' + (cx - 4).toFixed(1) + ' ' + (cy + 4) +
+          '" stroke="var(--cdc-bad)" stroke-width="1.8"/>');
       }
     }
+    if (r.frames.length > drawn) {
+      out.push('<text x="' + (PLOT_X0 + PLOT_W) + '" y="' + (LOG_B_Y + 30) +
+        '" font-family="var(--mono)" font-size="11" fill="var(--text-3)" text-anchor="end">+' + (r.frames.length - drawn) + ' 幀未繪出</text>');
+    }
+
+    /* 摺疊 / 蒸發括號：每一個 (輪詢, 主鍵) 群組一條 */
+    for (i = 0; i < r.groups.length; i++) {
+      g = r.groups[i];
+      if (!g.folded && !g.evaporated) continue;
+      if (g.pollAt === null) continue;
+      var rowY = g.pk === PK_A ? POLL_A_Y : POLL_B_Y;
+      var brY = g.pk === PK_A ? BR_A_Y : BR_B_Y;
+      var x0 = frameX(g.minT), x1 = frameX(g.pollAt);
+      var bad = g.evaporated > 0;
+      var color = bad ? "var(--cdc-bad)" : "var(--text-3)";
+      out.push('<path d="M' + x0.toFixed(1) + ' ' + (rowY + ROW_H) + ' L' + x0.toFixed(1) + ' ' + brY +
+        ' L' + x1.toFixed(1) + ' ' + brY + ' L' + x1.toFixed(1) + ' ' + (rowY + ROW_H) +
+        '" fill="none" stroke="' + color + '" stroke-width="1"' + (bad ? ' stroke-dasharray="3 2"' : '') + '/>');
+      var span = x1 - x0;
+      var n = bad ? g.evaporated : g.folded;
+      var txt = bad ? (span > 74 ? "−" + n + " 蒸發" : "−" + n) : (span > 56 ? "−" + n + " 幀" : "−" + n);
+      out.push('<text x="' + ((x0 + x1) / 2).toFixed(1) + '" y="' + (brY - 3) +
+        '" font-family="var(--mono)" font-size="11" fill="' + color + '" text-anchor="middle">' + txt + '</text>');
+    }
+
+    /* t 軸 */
+    out.push('<line x1="' + PLOT_X0 + '" y1="' + AXIS_Y + '" x2="' + (PLOT_X0 + PLOT_W + 8) + '" y2="' + AXIS_Y +
+      '" stroke="var(--border-strong)" stroke-width="1" marker-end="url(#cvz-ah)"/>');
+    for (i = 0; i <= 4; i++) {
+      var tv = i * 1000;
+      x = frameX(tv).toFixed(1);
+      out.push('<line x1="' + x + '" y1="' + AXIS_Y + '" x2="' + x + '" y2="' + (AXIS_Y + 4) + '" stroke="var(--border-strong)" stroke-width="1"/>');
+      out.push('<text x="' + x + '" y="' + (MS_Y + 8) + '" font-family="var(--mono)" font-size="11" fill="var(--text-3)" text-anchor="middle">' + tv + '</text>');
+    }
+    out.push('<text x="6" y="' + (MS_Y + 8) + '" font-family="var(--mono)" font-size="11" fill="var(--text-3)">t (ms)</text>');
+    out.push('</svg>');
+    return out.join("");
   }
 
-  function runPropStep() {
-    if (propScene === "live") {
-      if (step === 1) {
-        st.writer = { tone: "wait", text: "UPDATE paid/80 → shipped/80 · 交易中" };
-        pushWire("read", "APP", "應用送出 UPDATE，尚未 COMMIT");
-        st.miss = "來源尚未耐久";
-        st.logOk = "binlog 還是舊位點";
-      } else if (step === 2) {
-        st.writer = { tone: "ok", text: "COMMIT shipped/80" };
-        st.bin = { tone: "wait", text: "ROW u · GTID 1:5 · before paid/80 → after shipped/80" };
-        pushWire("ok", "BINLOG", "ROW 事件落地。複寫與 CDC 讀的是同一則");
-        st.logOk = "GTID 1:5 可被第二個讀者消費";
-        st.logCls = "good";
-        st.miss = "下游仍是舊值";
-        st.missCls = "warn";
-      } else if (step === 3) {
-        st.bin = { tone: "ok", text: "ROW u · GTID 1:5 已讀" };
-        st.conn = { tone: "wait", text: "讀取 GTID 1:5 · offset 未提交" };
-        st.lag = 1;
-        pushWire("read", "CONN", "connector dump binlog，envelope 尚未進主題");
-      } else if (step === 4) {
-        st.conn = { tone: "ok", text: "offset=1:5 已提交 · slot flush" };
-        st.topic = [{ cls: "ok", text: "u shipped/80" }];
-        st.cache = { tone: "wait", text: "收到事件，準備 DEL" };
-        st.lag = 2;
-        pushWire("ok", "TOPIC", "db.orders 追加 envelope；快取還持有舊 key");
-        st.miss = "快取窗口：commit 已過、DEL 未到";
-        st.missCls = "warn";
-        st.risk = "讀到過期 paid/80";
-        st.riskCls = "warn";
-      } else if (step === 5) {
-        st.cache = { tone: "ok", text: "DEL order:O-1001 · 下次讀回源" };
-        st.idx = { tone: "ok", text: "upsert shipped/80" };
-        st.lag = 3;
-        st.wal = 1;
-        st.verdict = {
-          text: "傳播鏈走完：快取被失效、索引依主鍵 upsert。延遲 = commit 到下游寫入的尾延遲，不是「即時」。CDC 觸發的是失效與重建，不是把 binlog 當 write-through。",
-          tone: "tone-ok"
-        };
-        st.miss = "窗口已關閉";
-        st.missCls = "good";
-        st.logOk = "位點與下游都到 shipped";
-        st.logCls = "good";
-        st.risk = "無";
-        st.riskCls = "";
-        pushWire("ok", "DOWN", "cache DEL + index upsert。最終一致收斂");
-      }
+  function capVerdict(r) {
+    var tone, txt;
+    /* 摺疊子句：摺疊為 0 時不得沿用「中間態遺失」的說法 */
+    var foldClause = r.foldedFrames > 0
+      ? "輪詢摺掉 " + r.foldedFrames + " 幀，依賴付款那一瞬的下游永遠不會被叫醒"
+      : "摺疊是 0——寫入節奏比輪詢還慢，每個區間內每列至多被改一次";
+    if (r.verdictKey === "invisible") {
+      tone = "v-bad";
+      txt = "輪詢間隔 " + r.pollMs + "ms 之下，" + PK_B + " 的整段生命週期（CREATE 到 DELETE）落進同一個輪詢區間，" +
+        "輪詢連它存在過都不知道。這一組參數摺掉 " + r.foldedFrames + " 幀、蒸發 " + r.evaporatedFrames + " 幀；" +
+        (r.pollRows === r.logRows
+          ? "而兩側倉儲都是 " + r.logRows + " 列——列數對上了，那一列卻從頭到尾沒進過倉儲。列數相同不等於事實正確。"
+          : "輪詢倉儲 " + r.pollRows + " 列、日誌倉儲 " + r.logRows + " 列，差距就是輪詢沒看到的那些事實。");
+    } else if (r.verdictKey === "ghost") {
+      tone = "v-bad";
+      txt = "兩側最終列都追上了現況，所以「現況一致」成立。但" + foldClause +
+        "；硬刪之後 updated_at 查詢掃不到那列，蒸發 " + r.evaporatedFrames +
+        " 幀，輪詢倉儲留下 " + r.ghostRows + " 列幽靈。" +
+        (r.foldedFrames > 0
+          ? "把間隔拖到 200ms，摺疊會歸零——蒸發不會。"
+          : "摺疊已經歸零，蒸發沒有跟著歸零：這一項與間隔無關，只有把刪除時間點拖到最左邊才會消失。");
+    } else if (r.verdictKey === "folded") {
+      tone = "v-warn";
+      txt = "沒有硬刪，輪詢的問題只剩延遲與摺疊：" + r.foldedFrames + " 幀被摺進 " + r.seenFrames +
+        " 次讀取，平均延遲 " + r.pollAvgLatencyMs + "ms（理論參照 " + r.pollIdealAvgMs + "ms）。" +
+        "只有在這個區域裡，「把輪詢間隔調小」才真的是解法。";
     } else {
-      if (step === 1) {
-        st.writer = { tone: "ok", text: "COMMIT shipped/80" };
-        st.bin = { tone: "hold", text: "ROW u · GTID 1:5 等待讀者" };
-        pushWire("ok", "COMMIT", "來源已耐久。connector 這一拍被暫停");
-        st.miss = "下游完全沒動";
-        st.missCls = "warn";
-        st.logOk = "事件在 WAL / binlog 裡";
-        st.logCls = "good";
-      } else if (step === 2) {
-        st.conn = { tone: "hold", text: "暫停 · confirmed_flush 停在 1:4" };
-        st.wal = 4;
-        st.lag = 8;
-        pushWire("warn", "SLOT", "slot 不前進，WAL 不能回收。這是續讀的代價");
-        st.risk = "磁碟開始膨脹";
-        st.riskCls = "warn";
-      } else if (step === 3) {
-        st.wal = 12;
-        st.lag = 20;
-        st.conn = { tone: "bad", text: "仍暫停 · WAL 檔增加到 12" };
-        pushWire("bad", "GROW", "沒人看的 CDC slot 比落後 replica 更危險：常常沒有延遲告警");
-        st.risk = "WAL 堆到磁碟滿";
-        st.riskCls = "bad";
-        st.miss = "快取/索引仍是 paid/80";
-        st.missCls = "bad";
-      } else if (step === 4) {
-        st.conn = { tone: "wait", text: "恢復 · 從 1:4 catch-up 到 1:5" };
-        st.topic = [{ cls: "ok", text: "u shipped/80" }];
-        st.wal = 3;
-        st.lag = 4;
-        pushWire("read", "RESUME", "位點還在，事件沒丟。追的是延遲，不是資料");
-        st.risk = "窗口尚未關";
-        st.riskCls = "warn";
-      } else if (step === 5) {
-        st.conn = { tone: "ok", text: "offset=1:5 · WAL 回收到 1" };
-        st.wal = 1;
-        st.lag = 3;
-        st.cache = { tone: "ok", text: "DEL order:O-1001" };
-        st.idx = { tone: "ok", text: "upsert shipped/80" };
-        st.bin = { tone: "ok", text: "ROW u · GTID 1:5 已消費" };
-        st.verdict = {
-          text: "暫停期間下游讀到的是舊值，這是最終一致而不是丟失。真正的事故是 slot 一直停、WAL 把磁碟吃滿——確認 flush 與 binlog expire 是運維時鐘，不是業務時鐘。",
-          tone: "tone-lock"
-        };
-        st.miss = "已追上";
-        st.missCls = "good";
-        st.logOk = "同一則 ROW，延後送達";
-        st.logCls = "good";
-        st.risk = "曾有磁碟膨脹窗口";
-        st.riskCls = "warn";
-        pushWire("ok", "判定", "能追上 ≠ 中間窗口可當真相；slot 不消費才是事故");
+      tone = "v-ok";
+      txt = "這組參數下每個輪詢區間內每列至多被改一次，摺疊與蒸發都是 0：輪詢看見的 " + r.seenFrames +
+        " 幀與日誌的 " + r.logFrames + " 幀相同。這是輪詢唯一夠用的區域——寫入比輪詢更慢，而且沒有硬刪。" +
+        "代價換到另一邊：這組設定要打主庫 " + r.pollCount + " 次，日誌側只是同一份日誌的第二個讀者" +
+        (r.pollAvgLatencyMs > 0 ? "；而且平均還是晚 " + r.pollAvgLatencyMs + "ms 才看到。" : "。");
+    }
+    return { tone: tone, text: txt };
+  }
+
+  function renderCapture(r) {
+    capOut.pollV.textContent = r.pollMs + " ms";
+    capOut.gapV.textContent = r.writeGapMs + " ms";
+    capOut.delV.textContent = r.deleteReq === 0 ? "不刪除" : (r.deleteAt === 0 ? r.deleteReq + " ms（無列可刪）" : r.deleteAt + " ms");
+
+    /* 延遲為 0 表示每一筆變更都恰好落在輪詢時刻上，此時不報「幾倍」 */
+    var latClause = r.pollAvgLatencyMs > 0
+      ? "平均延遲 " + r.pollAvgLatencyMs + "ms（理論 ~" + r.pollIdealAvgMs + "ms，日誌側 " +
+        r.logLatencyMs + "ms 的 " + r.latencyRatio + " 倍），最壞 " + r.pollWorstLatencyMs + "ms。"
+      : "每一筆變更都恰好落在輪詢時刻上，延遲讀數為 0（理論 ~" + r.pollIdealAvgMs +
+        "ms；日誌側固定 " + r.logLatencyMs + "ms）。";
+    capOut.status.textContent =
+      "輪詢間隔 " + r.pollMs + "ms → " + r.pollCount + " 次掃描" +
+      (r.stalledPolls ? "（其中 " + r.stalledPolls + " 拍零列、游標卡住）" : "") +
+      "；日誌 " + r.logFrames + " 幀，輪詢只看見 " + r.seenFrames +
+      " 幀（摺疊 " + r.foldedFrames + "、蒸發 " + r.evaporatedFrames + "）。" + latClause;
+
+    capOut.canvas.innerHTML = buildSvg(r);
+
+    var h = ['<thead><tr><th>主鍵</th><th>來源實況</th><th>輪詢倉儲</th><th>日誌倉儲</th><th>判定</th></tr></thead><tbody>'];
+    for (var i = 0; i < r.diff.length; i++) {
+      var d = r.diff[i];
+      h.push('<tr><td>' + esc(d.pk) + '</td><td>' + esc(d.src) + '</td><td>' + esc(d.poll) +
+        '</td><td>' + esc(d.log) + '</td><td class="note' + (d.noteCls ? " " + d.noteCls : "") + '">' + esc(d.note) + '</td></tr>');
+    }
+    h.push('<tr class="tot"><td>合計</td><td>存活 ' + r.aliveCount + ' 列</td><td>' + r.pollRows +
+      ' 列</td><td>' + r.logRows + ' 列</td><td class="note' + (r.ghostRows || r.invisibleRows ? " ghost" : "") +
+      '">' + (r.mode === "merge"
+        ? "幽靈 " + r.ghostRows + " · 從未見過 " + r.invisibleRows
+        : "append-only：輪詢少 " + (r.logFrames - r.seenFrames) + " 列歷史 · 從未見過 " + r.invisibleRows) +
+      '</td></tr>');
+    h.push('</tbody>');
+    capOut.diff.innerHTML = h.join("");
+
+    var v = capVerdict(r);
+    capOut.verdict.className = "cvz-verdict " + v.tone;
+    capOut.verdict.textContent = v.text;
+  }
+
+  function barHtml(items, unit) {
+    var h = [];
+    for (var i = 0; i < items.length; i++) {
+      var it = items[i];
+      h.push('<div class="rsm-bar"><span class="rl">' + esc(it.label) +
+        '</span><span class="rt"><span class="rf ' + it.cls + '" style="width:' + it.pct + '%"></span></span>' +
+        '<span class="rn">' + it.value + (it.unit || unit || "") + '</span></div>');
+    }
+    return h.join("");
+  }
+
+  function resVerdict(r) {
+    if (r.verdictKey === "lost") {
+      return "位點只在記憶體裡，崩潰即遺失：必須從第 1 筆重讀並重跑 " + r.snapshotRows +
+        " 列全量 Snapshot，下游共收 " + r.deliveredTotal + " 則、重複率 " + r.dupRatePct +
+        "%。這裡的重複有兩種——" + r.replayCount + " 筆是同一事件重放（(pk, LSN) 擋得住），" +
+        r.snapshotRows + " 列是 Snapshot 的 r 事件（位點不同，只有主鍵 merge 擋得住）。";
+    }
+    if (r.verdictKey === "replay") {
+      return "耐久位點：崩潰在第 " + r.crashAt + " 筆，最後 commit 在 " + r.committedOffset +
+        " → 從第 " + r.resumeFrom + " 筆續讀、重放 " + r.replayCount + " 筆（此 commit 間隔的上界是 " +
+        r.worstCaseReplay + " 筆）。代價的另一端是 " + r.offsetWrites + " 次 offset 寫入。" +
+        "下游共收 " + r.deliveredTotal + " 則、重複率 " + r.dupRatePct +
+        "%；崩潰當下未確認位點擋住 " + r.walHeldKb + " KB WAL。";
+    }
+    var why;
+    if (!r.crashed) why = "沒有崩潰，已消費 " + r.consumed + " 筆、位點停在 " + r.committedOffset + "。";
+    else if (r.commitEvery === 1) why = "每一筆都 commit，位點永遠與已投遞的量對齊，所以崩潰在第 " + r.crashAt + " 筆也沒有債要還。";
+    else why = "commit 間隔恰好讓第 " + r.crashAt + " 筆落在 commit 邊界上，位點與已投遞的量對齊。";
+    return "這一組沒有重放：" + why + "未確認位點擋住 " + r.walHeldKb + " KB WAL；" + r.offsetWrites +
+      " 次 offset 寫入是為此付的價（上限就是消費筆數）。按主鍵 merge 之後倉儲是 " + r.rowsIfPkMerge + " 列。";
+  }
+
+  function renderResume(r) {
+    resOut.totalV.textContent = r.txnTotal + " 筆";
+    resOut.everyV.textContent = "每 " + r.commitEvery + " 筆";
+    resOut.crashV.textContent = r.crashed ? r.crashAt + " 筆" : "不崩潰";
+
+    resOut.status.textContent = resVerdict(r);
+
+    /* 指針靠近右緣時改成右對齊，避免文字被切掉 */
+    resOut.ptr.innerHTML = r.crashed
+      ? '<span class="' + (r.crashPct > 86 ? "re" : "") + '" style="left:' + r.crashPct + '%">▼ crash @#' + r.crashAt + '</span>'
+      : '<span class="re" style="left:100%;color:var(--cdc-s)">▼ 全部消費完，位點停在 ' + r.committedOffset + '</span>';
+
+    var h = [];
+    for (var i = 0; i < r.segs.length; i++) {
+      var s = r.segs[i];
+      h.push('<span class="rsm-seg ' + s.kind + '" style="width:' + s.pct + '%">' +
+        (s.pct > 13 ? esc(s.label) : (s.pct > 6 ? s.count : "")) + '</span>');
+    }
+    resOut.track.innerHTML = h.join("");
+
+    var tk = [];
+    for (i = 1; i <= r.tickCount; i++) {
+      var pct = (r.snapshotRows + i * r.tickStep) / r.scale * 100;
+      if (pct > 100) break;
+      tk.push('<i class="tk" style="left:' + pct.toFixed(2) + '%"></i>');
+      if (r.tickCount <= 12 || i % 2 === 0) {
+        tk.push('<span class="tl" style="left:' + pct.toFixed(2) + '%">' + (i * r.tickStep) + '</span>');
       }
     }
+    resOut.ticks.innerHTML = tk.join("");
+
+    resOut.trade.innerHTML = barHtml(r.trade, "");
+    resOut.dedup.innerHTML = barHtml(r.dedup, " 列");
   }
 
-  function paintCapture() {
-    var table = tableText(st.row);
-    el("cdc-p-table-v").textContent = table;
-    el("cdc-l-table-v").textContent = table;
-    el("cdc-p-cur-v").textContent = "cursor = " + st.pollCursor + " · 掃描 " + st.scan + " 次";
-    el("cdc-p-slots").innerHTML = slotHtml(st.pollSlots);
-    el("cdc-l-slots").innerHTML = slotHtml(st.logSlots);
-    el("cdc-l-out").innerHTML = slotHtml(st.outSlots);
-    el("cdc-p-down-v").textContent = downLine(st.poll);
-    el("cdc-l-down-v").textContent = downLine(st.log);
+  /* ════════════ (5) 事件綁定 ════════════ */
 
-    setBox("cdc-p-table", st.pTone.table);
-    setBox("cdc-p-cur", st.pTone.cur);
-    setBox("cdc-p-cap", st.pTone.cap);
-    setBox("cdc-p-down", st.pTone.down);
-    setBox("cdc-l-table", st.lTone.table);
-    setBox("cdc-l-log", st.lTone.log);
-    setBox("cdc-l-cap", st.lTone.cap);
-    setBox("cdc-l-down", st.lTone.down);
-
-    el("cdc-f-scene").textContent = SCENE_LABEL[scene];
-    el("cdc-f-table").textContent = table;
-    el("cdc-f-miss").textContent = st.miss;
-    el("cdc-f-miss").className = "pv" + (st.missCls ? " " + st.missCls : "");
-    el("cdc-f-log").textContent = st.logOk;
-    el("cdc-f-log").className = "pv" + (st.logCls ? " " + st.logCls : "");
-    el("cdc-f-cons").textContent = consMode === "idem" ? "依主鍵 merge" : "天真 INSERT";
-    el("cdc-ml-1").innerHTML = "輪詢捕捉 <strong id=\"cdc-m-poll\">" + st.pollSlots.length + "</strong>";
-    el("cdc-ml-2").innerHTML = "日誌事件 <strong id=\"cdc-m-log\">" + st.logSlots.length + "</strong>";
-    el("cdc-ml-3").innerHTML = "掃描成本 <strong id=\"cdc-m-scan\">" + st.scan + "</strong>";
-    el("cdc-ml-4").innerHTML = "倉儲列（輪詢 / 日誌） <strong id=\"cdc-m-wh\">" + st.poll.down.rows + " / " + st.log.down.rows + "</strong>";
-    el("cdc-f-pd").textContent = st.poll.down.last;
-    el("cdc-f-pd").className = "pv" + (st.pdCls ? " " + st.pdCls : "");
-    el("cdc-f-ld").textContent = st.log.down.last;
-    el("cdc-f-ld").className = "pv" + (st.ldCls ? " " + st.ldCls : "");
-    el("cdc-f-risk").textContent = st.risk;
-    el("cdc-f-risk").className = "pv" + (st.riskCls ? " " + st.riskCls : "");
+  function runCapture() {
+    renderCapture(computeCapture({
+      pollMs: parseInt(capIn.poll.value, 10),
+      writeGapMs: parseInt(capIn.gap.value, 10),
+      deleteAtMs: parseInt(capIn.del.value, 10),
+      mode: capMode
+    }));
   }
 
-  function paintProp() {
-    el("cdc-x-write-v").textContent = st.writer.text;
-    el("cdc-x-bin-v").textContent = st.bin.text;
-    el("cdc-x-conn-v").textContent = st.conn.text;
-    el("cdc-x-slots").innerHTML = slotHtml(st.topic);
-    el("cdc-x-cache-v").textContent = st.cache.text;
-    el("cdc-x-idx-v").textContent = st.idx.text;
-    setBox("cdc-x-write", st.writer.tone);
-    setBox("cdc-x-bin", st.bin.tone);
-    setBox("cdc-x-conn", st.conn.tone);
-    setBox("cdc-x-topic", st.topic.length ? "ok" : "idle");
-    setBox("cdc-x-cache", st.cache.tone);
-    setBox("cdc-x-idx", st.idx.tone);
-
-    el("cdc-ml-1").innerHTML = "WAL 檔 <strong id=\"cdc-m-poll\">" + st.wal + "</strong>";
-    el("cdc-ml-2").innerHTML = "位點 <strong id=\"cdc-m-log\">" + (st.topic.length ? "1:5" : "1:4") + "</strong>";
-    el("cdc-ml-3").innerHTML = "可見延遲 <strong id=\"cdc-m-scan\">" + st.lag + "</strong>";
-    el("cdc-ml-4").innerHTML = "slot 狀態 <strong id=\"cdc-m-wh\">" + (propScene === "paused" && step > 0 && step < 5 ? "落後" : "跟上") + "</strong>";
-
-    el("cdc-f-scene").textContent = propScene === "paused" ? "Connector 暫停" : "即時跟上";
-    el("cdc-f-table").textContent = step === 0 ? "paid/80（舊）" : "shipped/80";
-    el("cdc-f-miss").textContent = st.miss;
-    el("cdc-f-miss").className = "pv" + (st.missCls ? " " + st.missCls : "");
-    el("cdc-f-log").textContent = st.logOk;
-    el("cdc-f-log").className = "pv" + (st.logCls ? " " + st.logCls : "");
-    el("cdc-f-cons").textContent = "失效 + upsert";
-    el("cdc-f-pd").textContent = st.cache.text;
-    el("cdc-f-ld").textContent = st.idx.text;
-    el("cdc-f-risk").textContent = st.risk;
-    el("cdc-f-risk").className = "pv" + (st.riskCls ? " " + st.riskCls : "");
+  function runResume() {
+    renderResume(computeResume({
+      txnTotal: parseInt(resIn.total.value, 10),
+      commitEvery: parseInt(resIn.every.value, 10),
+      crashAtTxn: parseInt(resIn.crash.value, 10),
+      durable: resDurable
+    }));
   }
 
-  function paintWire() {
-    if (!wire.length) {
-      wireEl.innerHTML = "<div class=\"cdc-row\"><span class=\"ar\">·</span><span class=\"tg\">READY</span><span class=\"tx\">按「下一步」開始。</span></div>";
-      return;
-    }
-    wireEl.innerHTML = wire.map(function (row) {
-      return "<div class=\"cdc-row " + row.kind + "\"><span class=\"ar\">" + row.t +
-        "</span><span class=\"tg\">" + esc(row.tag) + "</span><span class=\"tx\">" + esc(row.text) + "</span></div>";
-    }).join("");
-    wireEl.scrollTop = wireEl.scrollHeight;
-  }
-
-  function paint() {
-    el("cdc-m-step").textContent = String(step);
-    el("cdc-m-total").textContent = String(totals());
-    captureView.hidden = view !== "capture";
-    propagateView.hidden = view !== "propagate";
-    lanesEl.hidden = view !== "capture";
-    pipeEl.hidden = view !== "propagate";
-
-    if (view === "capture") {
-      statusEl.textContent = SCENE_HINT[scene];
-      paintCapture();
-    } else {
-      propHintEl.textContent = PROP_HINT[propScene];
-      paintProp();
-    }
-    paintWire();
-    verdictEl.className = "cdc-verdict" + (st.verdict.tone ? " " + st.verdict.tone : "");
-    verdictEl.textContent = st.verdict.text;
-    btnNext.disabled = step >= totals();
-  }
-
-  function reset() {
-    step = 0;
-    wire = [];
-    if (view === "capture") st = freshCapture();
-    else st = freshProp();
-    paint();
-  }
-
-  function next() {
-    if (step >= totals()) return;
-    step += 1;
-    if (view === "capture") runCaptureStep();
-    else runPropStep();
-    paint();
-  }
-
-  function bindSeg(id, attr, onChange) {
-    var group = el(id);
-    if (!group) return;
-    group.addEventListener("click", function (ev) {
+  if (capShell) {
+    capIn.poll.addEventListener("input", runCapture);
+    capIn.gap.addEventListener("input", runCapture);
+    capIn.del.addEventListener("input", runCapture);
+    capIn.segMode.addEventListener("click", function (ev) {
       var btn = ev.target.closest("button");
-      if (!btn || !btn.hasAttribute(attr)) return;
-      onChange(btn.getAttribute(attr));
+      if (!btn || !btn.hasAttribute("data-mode")) return;
+      capMode = btn.getAttribute("data-mode");
+      pressGroup(capIn.segMode, "data-mode", capMode);
+      runCapture();
     });
+    capIn.reset.addEventListener("click", function () {
+      capIn.poll.value = CAP_BASE.pollMs;
+      capIn.gap.value = CAP_BASE.writeGapMs;
+      capIn.del.value = CAP_BASE.deleteAtMs;
+      capMode = CAP_BASE.mode;
+      pressGroup(capIn.segMode, "data-mode", capMode);
+      runCapture();
+    });
+    pressGroup(capIn.segMode, "data-mode", capMode);
+    runCapture();
   }
 
-  bindSeg("cdc-seg-view", "data-view", function (v) {
-    view = v;
-    setPressed("cdc-seg-view", "data-view", view);
-    reset();
-  });
-  bindSeg("cdc-seg-scene", "data-scene", function (v) {
-    scene = v;
-    setPressed("cdc-seg-scene", "data-scene", scene);
-    reset();
-  });
-  bindSeg("cdc-seg-cons", "data-cons", function (v) {
-    consMode = v;
-    setPressed("cdc-seg-cons", "data-cons", consMode);
-    reset();
-  });
-  bindSeg("cdc-seg-prop", "data-prop", function (v) {
-    propScene = v;
-    setPressed("cdc-seg-prop", "data-prop", propScene);
-    reset();
-  });
-
-  btnNext.addEventListener("click", next);
-  btnAll.addEventListener("click", function () {
-    while (step < totals()) next();
-  });
-  btnReset.addEventListener("click", reset);
-
-  reset();
+  if (resShell) {
+    resIn.total.addEventListener("input", runResume);
+    resIn.every.addEventListener("input", runResume);
+    resIn.crash.addEventListener("input", runResume);
+    resIn.segStore.addEventListener("click", function (ev) {
+      var btn = ev.target.closest("button");
+      if (!btn || !btn.hasAttribute("data-store")) return;
+      resDurable = btn.getAttribute("data-store") !== "memory";
+      pressGroup(resIn.segStore, "data-store", resDurable ? "durable" : "memory");
+      runResume();
+    });
+    resIn.reset.addEventListener("click", function () {
+      resIn.total.value = RES_BASE.txnTotal;
+      resIn.every.value = RES_BASE.commitEvery;
+      resIn.crash.value = RES_BASE.crashAtTxn;
+      resDurable = RES_BASE.durable;
+      pressGroup(resIn.segStore, "data-store", "durable");
+      runResume();
+    });
+    pressGroup(resIn.segStore, "data-store", resDurable ? "durable" : "memory");
+    runResume();
+  }
 })();
 </script>
