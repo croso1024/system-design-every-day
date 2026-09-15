@@ -1379,8 +1379,7 @@
         <a href="#s5"><span class="n">05</span>Consumer Group 與 Rebalance</a>
         <a href="#s6"><span class="n">06</span>ISR、min.insync.replicas 與 unclean election</a>
         <a href="#s7"><span class="n">07</span>Retention 與 Log Compaction</a>
-        <a href="#s8"><span class="n">08</span>互動 · Rebalance 與 ISR 耐久</a>
-        <a href="#s9"><span class="n">09</span>面試折衷與邊界</a>
+        <a href="#s8"><span class="n">08</span>面試折衷與邊界</a>
       </div>
     </nav>
     <button class="btn toc-reopen" type="button" aria-expanded="true" aria-controls="toc-panel"
@@ -1395,7 +1394,12 @@
     <!-- ===================== MAIN CONTENT ===================== -->
     <main>
       <div class="inner">
-        <!-- demo-archetype: A｜時序推進 — 讀者先選情境（Consumer Group Rebalance 或 acks·ISR·下線），調整指派策略或 acks／min.insync.replicas／unclean election，再按「下一步」走完固定六步劇本，觀察換手停頓、HWM 推進與拒寫／遺失。選 A 是因為兩個劇本本質都是「第三名成員加入」與「副本逐一下線」這種順序固定、且每一步的後果只有在前一步成立時才成立的事件序列。 -->
+        <!-- demo-archetype: E｜決策器（主，第 6 節「ISR、min.insync.replicas 與 unclean election」）＋B｜參數掃描（次，第 5 節「Consumer Group 與 Rebalance」）
+     E：讀者調 acks／min.insync.replicas／replication factor／unclean election 四顆旋鈕，再加「同時掛掉幾台 broker」，
+     即時算出可否寫入、已 ack 的訊息會不會遺失（在哪一種故障序列下）、能容忍幾台故障而不失可用性、能容忍幾台而不遺失資料，
+     並由判定集合推導建議設定與理由。選 E 是因為本節的命題是「這組設定在什麼故障下會出事」——那是一個判定問題，不是一段流程。
+     B：讀者調 partition 數／consumer 數／指派策略（Eager RangeAssignor／Sticky／Cooperative Sticky）／成員加入或離開，
+     真的跑三套 assignor 演算法，算出指派表、換手條數、停頓條數與消費並行度上限。選 B 是因為三種策略的真正差別是兩個數字，不是一段敘事。 -->
 <style>
   #kf-root {
     --kf-c: #3f6188; --kf-c-soft: #eef2f7;
@@ -1484,126 +1488,205 @@
   .kf-pane .ss { font-family: var(--mono); font-size: 11px; color: var(--text-3); margin-bottom: 8px; letter-spacing: .04em; }
   .kf-pane ul { margin: 0; padding-left: 1.15em; font-size: 13px; color: var(--text-2); line-height: 1.65; }
 
-  .kf-ctrl { display: flex; flex-wrap: wrap; gap: 10px; margin: 10px 0 8px; align-items: center; }
-  .kf-metric { display: flex; flex-wrap: wrap; gap: 14px; margin: 8px 0 4px; font-size: 13px; color: var(--text-2); }
-  .kf-metric strong { color: var(--text); font-family: var(--mono); font-size: 12.5px; }
-
-  .kf-mode-hint { font-size: 12.5px; color: var(--text-2); margin: 8px 0 4px; line-height: 1.55; }
-
-  .kf-view { display: block; }
-  .kf-view[hidden] { display: none; }
-
-  .kf-parts { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin: 12px 0 6px; }
-  @media (max-width: 720px) { .kf-parts { grid-template-columns: 1fr; } }
-  .kf-parts[hidden] { display: none; }
-
-  .kf-part {
-    border: 1.5px solid var(--border-strong); border-radius: var(--radius-sm);
-    padding: 10px 10px 8px; background: #fff;
-    transition: background .18s, border-color .18s, box-shadow .18s;
+  /* ── demo 1（E｜durability 決策器）前綴 kd- ───────────────────────── */
+  .kd-ctrl { display: flex; flex-wrap: wrap; gap: 9px 14px; align-items: center; margin: 10px 0 0; }
+  .kd-sl {
+    display: inline-flex; align-items: center; gap: 7px;
+    border: 1px solid var(--border-strong); border-radius: 20px;
+    background: #fff; padding: 5px 12px 5px 11px;
   }
-  .kf-part .an { font-weight: 700; font-size: 13px; }
-  .kf-part .al { font-family: var(--mono); font-size: 10.5px; color: var(--text-3); margin-top: 2px; }
-  .kf-part .ah { font-size: 11.5px; color: var(--text-2); margin-top: 4px; min-height: 1.4em; }
-  .kf-part.idle { background: #fff; }
-  .kf-part.wait { background: var(--accent-soft); border-color: var(--accent); }
-  .kf-part.wait .an { color: var(--accent); }
-  .kf-part.ok { background: var(--ok-soft); border-color: var(--ok); }
-  .kf-part.ok .an { color: var(--ok); }
-  .kf-part.hold { background: var(--warn-soft); border-color: var(--warn); }
-  .kf-part.hold .an { color: var(--warn); }
-  .kf-part.bad { background: var(--bad-soft); border-color: var(--bad); }
-  .kf-part.bad .an { color: var(--bad); }
-
-  .kf-slots { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 8px; min-height: 28px; }
-  .kf-slot {
-    font-family: var(--mono); font-size: 10.5px; font-weight: 700;
-    border: 1.5px solid var(--border-strong); border-radius: 5px;
-    padding: 4px 7px; background: #fff; color: var(--text-3);
+  .kd-sl input[type="range"] { width: 112px; accent-color: var(--accent); }
+  .kd-sl .sn { font-family: var(--mono); font-size: 11px; color: var(--text-3); letter-spacing: .04em; white-space: nowrap; }
+  .kd-sl b { font-family: var(--mono); font-size: 13px; color: var(--accent); min-width: 15px; text-align: right; }
+  .kd-ck {
+    display: inline-flex; align-items: center; gap: 7px; cursor: pointer;
+    border: 1px solid var(--border-strong); border-radius: 20px;
+    background: #fff; padding: 6px 13px;
+    font-family: var(--mono); font-size: 11px; color: var(--text-2);
   }
-  .kf-slot.ready { background: var(--kf-c-soft); border-color: var(--kf-c); color: var(--kf-c); }
-  .kf-slot.ok { background: var(--kf-s-soft); border-color: var(--kf-s); color: var(--kf-s); }
-  .kf-slot.hold { background: var(--kf-w-soft); border-color: var(--kf-w); color: var(--kf-w); }
-  .kf-slot.lost { background: var(--kf-bad-soft); border-color: var(--kf-bad); color: var(--kf-bad); text-decoration: line-through; }
-
-  .kf-actors { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin: 12px 0 6px; }
-  @media (max-width: 720px) { .kf-actors { grid-template-columns: 1fr; } }
-  .kf-actors[hidden] { display: none; }
-
-  .kf-node {
-    border: 1.5px solid var(--border-strong); border-radius: var(--radius-sm);
-    padding: 10px 10px 8px; background: #fff;
-    transition: background .18s, border-color .18s, box-shadow .18s;
-  }
-  .kf-node .an { font-weight: 700; font-size: 13px; }
-  .kf-node .al { font-family: var(--mono); font-size: 10.5px; color: var(--text-3); margin-top: 2px; }
-  .kf-node .av { font-family: var(--mono); font-size: 12.5px; font-weight: 700; margin-top: 8px; color: var(--text); word-break: break-all; }
-  .kf-node .ah { font-size: 11.5px; color: var(--text-2); margin-top: 4px; min-height: 1.4em; }
-  .kf-node.idle { background: #fff; }
-  .kf-node.ok { background: var(--ok-soft); border-color: var(--ok); }
-  .kf-node.ok .an { color: var(--ok); }
-  .kf-node.wait { background: var(--accent-soft); border-color: var(--accent); }
-  .kf-node.wait .an { color: var(--accent); }
-  .kf-node.hold { background: var(--warn-soft); border-color: var(--warn); }
-  .kf-node.hold .an { color: var(--warn); }
-  .kf-node.bad { background: var(--bad-soft); border-color: var(--bad); }
-  .kf-node.bad .an { color: var(--bad); }
-  .kf-node.coord { border-style: dashed; }
-  .kf-node.down { opacity: .55; background: var(--bg-soft); }
-
-  .kf-col-label {
+  .kd-ck input { accent-color: var(--kf-bad); }
+  .kd-lab {
     font-family: var(--mono); font-size: 10.5px; letter-spacing: .06em; text-transform: uppercase;
-    color: var(--text-3); margin: 10px 0 2px;
+    color: var(--text-3); margin: 14px 0 2px;
   }
 
-  .kf-panels { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 12px; }
-  @media (max-width: 640px) { .kf-panels { grid-template-columns: 1fr; } }
-  .kf-panel { border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 12px; background: #fff; }
-  .kf-panel .pt {
-    font-size: 11px; color: var(--text-3); letter-spacing: .06em; text-transform: uppercase;
-    font-family: var(--mono); margin-bottom: 8px;
+  /* 結論條：E 型的產出就是它，刻意給它最大的視覺權重 */
+  .kd-verdict {
+    margin: 14px 0 4px; padding: 15px 17px;
+    border: 1px solid var(--border-strong); border-left: 5px solid var(--text-3);
+    border-radius: var(--radius-sm); background: #fff;
   }
-  .kf-panel .prow {
-    display: flex; justify-content: space-between; gap: 8px;
-    font-family: var(--mono); font-size: 12px; padding: 4px 0;
+  .kd-verdict.t-ok   { border-left-color: var(--ok);   background: var(--ok-soft); }
+  .kd-verdict.t-warn { border-left-color: var(--warn); background: var(--warn-soft); }
+  .kd-verdict.t-bad  { border-left-color: var(--bad);  background: var(--bad-soft); }
+  .kd-verdict .vk {
+    display: block; margin-bottom: 5px; color: var(--text-3);
+    font-family: var(--mono); font-size: 10.5px; letter-spacing: .06em; text-transform: uppercase;
+  }
+  .kd-verdict .vt { font-weight: 700; font-size: 16px; line-height: 1.45; color: var(--text); }
+  .kd-why { list-style: none; margin: 11px 0 0; padding: 0; }
+  .kd-why li {
+    position: relative; padding: 6px 0 6px 21px;
+    font-size: 13px; line-height: 1.65; color: var(--text-2);
     border-bottom: 1px dashed var(--border);
   }
-  .kf-panel .prow:last-child { border-bottom: none; }
-  .kf-panel .pk { color: var(--text-3); white-space: nowrap; }
-  .kf-panel .pv { color: var(--text); font-weight: 600; text-align: right; word-break: break-all; }
-  .kf-panel .pv.good { color: var(--ok); }
-  .kf-panel .pv.bad { color: var(--bad); }
-  .kf-panel .pv.warn { color: var(--warn); }
+  .kd-why li:last-child { border-bottom: none; }
+  .kd-why li::before {
+    position: absolute; top: 6px;
+    font-family: var(--mono); font-size: 11px; font-weight: 700;
+  }
+  .kd-why li.sv-blocker::before { content: "!!"; color: var(--bad);    left: 0; }
+  .kd-why li.sv-risk::before    { content: "!";  color: var(--warn);   left: 4px; }
+  .kd-why li.sv-info::before    { content: "·";  color: var(--text-3); left: 5px; }
+  .kd-more { margin-top: 9px; }
+  .kd-more summary {
+    cursor: pointer; color: var(--text-3);
+    font-family: var(--mono); font-size: 11px; letter-spacing: .04em;
+  }
+  .kd-adv {
+    margin-top: 12px; padding-top: 11px; border-top: 1px solid var(--border-strong);
+    font-size: 13px; line-height: 1.65; color: var(--text);
+  }
+  .kd-adv .at {
+    display: block; margin-bottom: 5px; color: var(--text-3);
+    font-family: var(--mono); font-size: 10.5px; letter-spacing: .06em; text-transform: uppercase;
+  }
+  .kd-adv ul { list-style: none; margin: 0; padding: 0; }
+  .kd-adv li { margin: 4px 0; }
+  .kd-adv .kb { font-family: var(--mono); font-weight: 700; color: var(--text); }
+  .kd-adv .kv { font-family: var(--mono); color: var(--accent); }
+  .kd-adv .kw { color: var(--text-2); }
 
-  .kf-wire {
-    border: 1px solid var(--border); border-radius: var(--radius-sm);
-    background: #fff; padding: 8px 10px; margin-top: 10px; max-height: 280px; overflow-y: auto;
+  /* 雙軸容忍度尺：本節的論點就是「這兩個數字不一樣」 */
+  .kd-tol {
+    margin: 14px 0 6px; padding: 13px 15px 12px;
+    border: 1px solid var(--border-strong); border-radius: 8px; background: var(--bg-soft);
   }
-  .kf-row {
-    display: flex; align-items: baseline; gap: 8px;
-    font-family: var(--mono); font-size: 11.5px; padding: 4px 0;
-    border-bottom: 1px dashed var(--border);
+  .kd-axis { display: grid; grid-template-columns: 124px 1fr; gap: 10px; align-items: center; }
+  .kd-axis + .kd-axis { margin-top: 9px; }
+  .kd-axis .al { font-family: var(--mono); font-size: 11px; color: var(--text-2); line-height: 1.35; }
+  .kd-axis .al b { display: block; font-size: 17px; color: var(--text); }
+  .kd-track {
+    display: grid; gap: 1px; background: var(--border);
+    border: 1px solid var(--border-strong); border-radius: 6px; overflow: hidden;
   }
-  .kf-row:last-child { border-bottom: none; }
-  .kf-row .ar { width: 42px; flex: none; text-align: center; color: var(--text-3); font-weight: 700; }
-  .kf-row .tg {
-    flex: none; border-radius: 4px; padding: 2px 6px; font-size: 10.5px; font-weight: 700;
-    border: 1px solid var(--border-strong); background: var(--bg-soft); color: var(--text-3);
+  .kd-track .tk {
+    background: #fff; text-align: center; padding: 8px 2px;
+    font-family: var(--mono); font-size: 11px; color: var(--text-3);
   }
-  .kf-row .tx { color: var(--text-2); line-height: 1.5; }
-  .kf-row.read .tg { background: var(--kf-c-soft); border-color: var(--kf-c); color: var(--kf-c); }
-  .kf-row.ok .tg { background: var(--kf-s-soft); border-color: var(--kf-s); color: var(--kf-s); }
-  .kf-row.warn .tg { background: var(--kf-w-soft); border-color: var(--kf-w); color: var(--kf-w); }
-  .kf-row.bad .tg { background: var(--kf-bad-soft); border-color: var(--kf-bad); color: var(--kf-bad); }
+  .kd-track .tk.safe   { background: var(--ok-soft);  color: var(--ok); font-weight: 700; }
+  .kd-track .tk.unsafe { background: var(--bad-soft); color: var(--bad); }
+  .kd-track .tk.cur    { box-shadow: inset 0 0 0 2px var(--accent); }
+  .kd-tolnote { margin: 10px 0 0; font-size: 12.5px; line-height: 1.6; color: var(--text-2); }
 
-  .kf-verdict {
-    margin-top: 10px; padding: 10px 12px; border-radius: var(--radius-sm);
-    border: 1px solid var(--border); background: var(--bg-soft);
-    font-size: 13px; color: var(--text-2); line-height: 1.55;
+  /* 副本 × 時刻 存活與複製矩陣 */
+  .kd-mx { overflow-x: auto; margin: 4px 0; }
+  .kd-grid {
+    display: grid; gap: 1px; min-width: 460px;
+    background: var(--border); border: 1px solid var(--border-strong);
+    border-radius: 8px; overflow: hidden;
   }
-  .kf-verdict.tone-ok { border-left: 3px solid var(--ok); background: var(--ok-soft); color: var(--text); }
-  .kf-verdict.tone-lock { border-left: 3px solid var(--warn); background: var(--warn-soft); color: var(--text); }
-  .kf-verdict.tone-bad { border-left: 3px solid var(--bad); background: var(--bad-soft); color: var(--text); }
+  .kd-grid > div {
+    background: #fff; padding: 7px 3px; text-align: center; line-height: 1.3;
+    font-family: var(--mono); font-size: 11px; color: var(--text-3);
+  }
+  .kd-grid .hd { background: var(--bg-soft); font-weight: 700; color: var(--text-2); }
+  .kd-grid .rl {
+    background: var(--bg-soft); font-weight: 700; color: var(--text-2);
+    text-align: left; padding-left: 9px; white-space: nowrap;
+  }
+  .kd-grid .c-held { background: var(--ok-soft);   color: var(--ok);   font-weight: 700; }
+  .kd-grid .c-gone { background: var(--bg-soft);   color: var(--text-3); }
+  .kd-grid .c-blk  { background: var(--warn-soft); color: var(--warn); font-weight: 700; }
+  .kd-grid .c-cut  { background: var(--bad-soft);  color: var(--bad);  font-weight: 700; text-decoration: line-through; }
+  .kd-grid .hw     { background: var(--accent-soft); color: var(--accent); font-weight: 700; }
+  .kd-grid .hwoff  { background: var(--bg-soft); color: var(--text-3); }
+  .kd-empty {
+    margin: 4px 0; padding: 14px 16px;
+    border: 1px dashed var(--border-strong); border-radius: 8px; background: var(--bg-soft);
+    font-size: 13px; line-height: 1.65; color: var(--text-2);
+  }
+  .kd-empty[hidden], .kd-mx[hidden] { display: none; }
+
+  /* ── demo 2（B｜partition 指派計算器）前綴 kg- ───────────────────── */
+  .kg-ctrl { display: flex; flex-wrap: wrap; gap: 9px 14px; align-items: center; margin: 10px 0 0; }
+  .kg-sl {
+    display: inline-flex; align-items: center; gap: 7px;
+    border: 1px solid var(--border-strong); border-radius: 20px;
+    background: #fff; padding: 5px 12px 5px 11px;
+  }
+  .kg-sl input[type="range"] { width: 112px; accent-color: var(--accent); }
+  .kg-sl .sn { font-family: var(--mono); font-size: 11px; color: var(--text-3); letter-spacing: .04em; white-space: nowrap; }
+  .kg-sl b { font-family: var(--mono); font-size: 13px; color: var(--accent); min-width: 18px; text-align: right; }
+  .kg-pick {
+    display: inline-flex; align-items: center; gap: 7px;
+    font-family: var(--mono); font-size: 11px; color: var(--text-3); letter-spacing: .04em;
+  }
+  .kg-pick select {
+    font-family: var(--sans); font-size: 12.5px; color: var(--text);
+    border: 1px solid var(--border-strong); border-radius: 6px;
+    background: #fff; padding: 5px 8px;
+  }
+  .kg-lab {
+    font-family: var(--mono); font-size: 10.5px; letter-spacing: .06em; text-transform: uppercase;
+    color: var(--text-3); margin: 14px 0 2px;
+  }
+  .kg-rib { overflow-x: auto; margin: 4px 0; }
+  .kg-band {
+    display: grid; gap: 1px; min-width: 430px;
+    background: var(--border); border: 1px solid var(--border-strong);
+    border-radius: 8px; overflow: hidden;
+  }
+  .kg-band + .kg-band { margin-top: 6px; }
+  .kg-band > div {
+    background: #fff; padding: 8px 2px; text-align: center;
+    font-family: var(--mono); font-size: 11px; color: var(--text-3);
+  }
+  .kg-band .bl {
+    background: var(--bg-soft); font-weight: 700; color: var(--text-2);
+    text-align: left; padding-left: 9px; white-space: nowrap;
+  }
+  .kg-band .ph { background: var(--bg-soft); font-weight: 700; color: var(--text-2); }
+  .kg-band .o0 { background: #eef2f7; color: #3f6188; box-shadow: inset 0 -3px 0 #3f6188; }
+  .kg-band .o1 { background: #eef4f1; color: #4d7d68; box-shadow: inset 0 -3px 0 #4d7d68; }
+  .kg-band .o2 { background: #f6f0e7; color: #a3743e; box-shadow: inset 0 -3px 0 #a3743e; }
+  .kg-band .o3 { background: #eef0f6; color: #6b6f9a; box-shadow: inset 0 -3px 0 #6b6f9a; }
+  .kg-band .o4 { background: #f6ecea; color: #a8554f; box-shadow: inset 0 -3px 0 #a8554f; }
+  .kg-band .o5 { background: #f1f3ee; color: #6f7d5c; box-shadow: inset 0 -3px 0 #6f7d5c; }
+  .kg-band .o6 { background: #f3eff5; color: #8a5f8f; box-shadow: inset 0 -3px 0 #8a5f8f; }
+  .kg-band .o7 { background: #eaf0f2; color: #4a7480; box-shadow: inset 0 -3px 0 #4a7480; }
+  .kg-band .o8 { background: #f4f1eb; color: #8a7250; box-shadow: inset 0 -3px 0 #8a7250; }
+  .kg-band .onone { background: var(--bg-soft); color: var(--text-3); }
+  .kg-band .d-keep  { background: #fff; color: var(--text-3); }
+  .kg-band .d-move  { background: var(--warn-soft); color: var(--warn); font-weight: 700; }
+  .kg-band .d-stall { background: var(--bad-soft);  color: var(--bad);  font-weight: 700; }
+
+  .kg-load { display: grid; gap: 5px; margin: 4px 0; }
+  .kg-lrow { display: grid; grid-template-columns: 66px 1fr 92px; gap: 9px; align-items: center; }
+  .kg-lrow .ln { font-family: var(--mono); font-size: 11.5px; font-weight: 700; color: var(--text-2); }
+  .kg-lrow .lv { font-family: var(--mono); font-size: 11px; color: var(--text-3); text-align: right; }
+  .kg-lrow.idle .ln, .kg-lrow.idle .lv { color: var(--bad); }
+  .kg-lbar {
+    height: 16px; border-radius: 4px; overflow: hidden;
+    background: var(--bg-soft); border: 1px solid var(--border);
+  }
+  .kg-lbar i { display: block; height: 100%; }
+  .kg-f0 { background: #3f6188; } .kg-f1 { background: #4d7d68; } .kg-f2 { background: #a3743e; }
+  .kg-f3 { background: #6b6f9a; } .kg-f4 { background: #a8554f; } .kg-f5 { background: #6f7d5c; }
+  .kg-f6 { background: #8a5f8f; } .kg-f7 { background: #4a7480; } .kg-f8 { background: #8a7250; }
+
+  .kg-costwrap { overflow-x: auto; margin: 4px 0; }
+  .kg-cost { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+  .kg-cost th, .kg-cost td { border: 1px solid var(--border); padding: 8px 10px; text-align: right; }
+  .kg-cost th {
+    background: var(--bg-soft); color: var(--text-2);
+    font-family: var(--mono); font-size: 11px; font-weight: 700; letter-spacing: .03em;
+  }
+  .kg-cost th:first-child, .kg-cost td:first-child { text-align: left; }
+  .kg-cost td { font-family: var(--mono); color: var(--text); }
+  .kg-cost td.nm { font-family: var(--sans); }
+  .kg-cost tr.sel td { background: var(--accent-soft); font-weight: 700; }
+  .kg-cost tr.sel td.nm { color: var(--accent); }
 </style>
 
 <div id="kf-root">
@@ -1813,7 +1896,7 @@
       </tbody>
     </table>
   </div>
-  <p class="cap"><code>acks=all</code> 等的是 ISR，不是「複製因子 RF 張副本都活著」。ISR 若被縮到只剩 Leader，<code>all</code> 等價於 <code>1</code>——除非 <code>min.insync.replicas</code> 把寫入擋下來。</p>
+  <p class="cap"><code>acks=all</code> 等的是 ISR，不是「複製因子 RF 張副本都活著」。ISR 若被縮到只剩 Leader，<code>all</code> 等價於 <code>1</code>——除非 <code>min.insync.replicas</code> 把寫入擋下來。這條等價關係可以在「ISR、min.insync.replicas 與 unclean election」那一節的決策器裡，把 <code>min.insync.replicas</code> 拖到 1 直接看出來。</p>
 
   <p class="kf-sub">冪等 Producer：消掉重試造成的重複</p>
   <p>網路超時後客戶端重試，Leader 其實已經寫入——這會在同一 partition 留下兩筆內容相同、offset 不同的紀錄。Idempotent Producer 給每個 Producer 一個 <var>PID</var>，並對每個 partition 維護單調的 sequence。Broker 記住「這個 PID 在這個 partition 上見過的最大序號」，重複序號直接丟棄並回成功。這條路徑要求 <code>acks=all</code> 與有上限的 in-flight batches；它修的是<strong>寫入端重試</strong>，不是消費端的效果一次，也不是跨 topic 的事務。</p>
@@ -1895,16 +1978,83 @@
       </ul>
     </div>
     <div class="kf-pane ok">
-      <div class="st">Sticky 與靜態成員</div>
-      <div class="ss">少搬家 · 少誤傷</div>
+      <div class="st">Sticky assignor 與 Cooperative 協定</div>
+      <div class="ss">兩件事 · 各砍一半</div>
       <ul>
-        <li>Cooperative sticky：只收回「必須換手」的 partition，其餘繼續拉。</li>
-        <li>動機：減少無效 revoke，縮短停頓，保留本機狀態（如處理中緩衝）。</li>
+        <li><strong>Sticky assignor</strong> 砍的是<strong>搬家數</strong>：新指派盡量沿用既有歸屬，只動必要的區。但它仍走 eager 協定——全組照樣先 revoke，停頓沒有變短。</li>
+        <li><strong>Cooperative 協定</strong> 砍的是<strong>停頓數</strong>：分兩輪 JoinGroup，只收回真正換手的那幾條，其餘繼續拉。</li>
         <li>Static membership（<code>group.instance.id</code>）：進程重啟在 timeout 內回來，視為同一人，不觸發 rebalance。</li>
       </ul>
     </div>
   </div>
-  <p class="cap">Sticky 不是「永不停頓」——該換手的區仍會暫停。Static membership 換到的是部署友好：滾動重啟不再震盪整個 group，但實例 ID 衝突或僵屍成員會佔住指派，要把 session timeout 與撤銷流程想清楚。</p>
+  <p class="cap">關鍵在左右兩欄砍的不是同一個數字：Eager Range 搬得多也停得久；Sticky 搬得少、卻因為仍走 eager 協定而停得一樣久；只有 Cooperative Sticky 兩個都少。Sticky 也不是「永不停頓」——該換手的區仍會暫停。Static membership 換到的是部署友好：滾動重啟不再震盪整個 group，但實例 ID 衝突或僵屍成員會佔住指派，要把 session timeout 與撤銷流程想清楚。</p>
+
+  <div class="demo" id="demo-kf-group">
+    <div class="demo-bar">
+      <span class="label">互動 · partition 指派計算器</span>
+      <span class="label" style="text-transform:none;font-family:var(--sans);font-size:12px;color:var(--text-2)">真的跑三套 assignor；換手數與停頓數即時重算</span>
+    </div>
+    <div class="demo-body">
+      <div class="seg" role="group" aria-label="指派策略" id="kg-seg-strat">
+        <button data-strat="range" aria-pressed="true">Eager · RangeAssignor</button>
+        <button data-strat="sticky" aria-pressed="false">Sticky（eager 協定）</button>
+        <button data-strat="coop" aria-pressed="false">Cooperative Sticky</button>
+      </div>
+
+      <div class="kg-ctrl">
+        <label class="kg-sl" for="kg-p">
+          <span class="sn">partition 數</span>
+          <input type="range" id="kg-p" min="1" max="12" step="1" value="6">
+          <b id="kg-p-val">6</b>
+        </label>
+        <label class="kg-sl" for="kg-c">
+          <span class="sn">consumer 數</span>
+          <input type="range" id="kg-c" min="1" max="8" step="1" value="2">
+          <b id="kg-c-val">2</b>
+        </label>
+        <label class="kg-pick" for="kg-delta">
+          <span>成員變動</span>
+          <select id="kg-delta">
+            <option value="join" selected>加入一名</option>
+            <option value="leave">離開一名</option>
+            <option value="none">無變動</option>
+          </select>
+        </label>
+        <button class="btn" id="kg-reset">重置</button>
+      </div>
+
+      <div class="legend">
+        <span><i class="dot ns-idle"></i>留（沒換手、也沒停頓）</span>
+        <span><i class="dot ns-lock"></i>搬（換手；換手期間必然停頓）</span>
+        <span><i class="dot ns-bad"></i>停（沒換手卻仍被 revoke 而停頓）</span>
+      </div>
+
+      <div class="kg-lab">partition 歸屬條帶 · before ／ 換手 ／ after</div>
+      <div class="kg-rib" id="kg-rib" aria-live="polite"></div>
+
+      <div class="kg-lab">每名 consumer 的持有量（after 指派）</div>
+      <div class="kg-load" id="kg-load"></div>
+
+      <div class="kg-lab">三種策略的換手成本（同一組輸入下同時計算）</div>
+      <div class="kg-costwrap">
+        <table class="kg-cost" id="kg-cost">
+          <thead>
+            <tr>
+              <th>策略</th>
+              <th>換手條數</th>
+              <th>停頓條數</th>
+              <th>停頓佔比</th>
+              <th>JoinGroup 輪數</th>
+            </tr>
+          </thead>
+          <tbody id="kg-cost-body"></tbody>
+        </table>
+      </div>
+
+      <div class="status-line" id="kg-status">—</div>
+    </div>
+  </div>
+  <p class="cap">先看成本表為什麼<strong>中間那一列只砍了一半</strong>：預設 6 條 partition、2 名成員、第 3 名加入時，Eager Range 換手 <strong>3</strong> 條、停頓 <strong>6</strong> 條；換成 Sticky，換手掉到 <strong>2</strong> 條，停頓<strong>還是 6 條</strong>——因為 sticky 只是換了 assignor，協定仍是 eager，全組照樣先 revoke；換成 Cooperative Sticky，指派結果與 Sticky <strong>完全相同</strong>（換手仍是 2 條），但停頓掉到 <strong>2</strong> 條、佔比 33%，代價是要跑 <strong>2</strong> 輪 JoinGroup。所以 <code>StickyAssignor</code> 與 <code>CooperativeStickyAssignor</code> 的換手數本來就一樣，差的是協定。另外兩組值得比對：把成員變動改成「離開一名」（3 名減為 2 名），Range 換手 3 條、Sticky 與 Cooperative 都是 2 條；把 partition 拖到 2、consumer 留 3、成員變動選「無變動」，並行度上限變成 <code>min(2, 3) = 2</code>，第 3 名 consumer 拿不到任何 partition、負載橫條是空的——加工人加不過 partition 數這道天花板。</p>
 
   <div class="callout accent">
     <div class="c-title"><span class="ic">關鍵</span>Rebalance 的帳單是延遲與重複，不是「分配不均」</div>
@@ -1962,7 +2112,7 @@
       </tbody>
     </table>
   </div>
-  <p class="cap">RF=3、<code>min.insync.replicas=2</code>、<code>acks=all</code>、關閉 unclean election，是常見的耐久組合：允許少一張副本，但不允許「只寫在 Leader 上」或「用過期日誌接班」。</p>
+  <p class="cap">RF=3、<code>min.insync.replicas=2</code>、<code>acks=all</code>、關閉 unclean election，是常見的耐久組合：允許少一張副本，但不允許「只寫在 Leader 上」或「用過期日誌接班」。下方的決策器預設就是這一組（所以它的建議清單是空的）；把「同時掛掉幾台」從 1 拖到 2，就會看到它為什麼從「可寫入」翻成「拒絕寫入」。</p>
 
   <div class="kf-split">
     <div class="kf-pane ok">
@@ -1984,6 +2134,84 @@
       </ul>
     </div>
   </div>
+
+  <div class="demo" id="demo-kf-dur">
+    <div class="demo-bar">
+      <span class="label">互動 · durability 決策器</span>
+      <span class="label" style="text-transform:none;font-family:var(--sans);font-size:12px;color:var(--text-2)">四顆旋鈕加「掛幾台」，判定與理由即時重算</span>
+    </div>
+    <div class="demo-body">
+      <div class="seg" role="group" aria-label="acks" id="kd-seg-acks">
+        <button data-acks="0" aria-pressed="false">acks=0</button>
+        <button data-acks="1" aria-pressed="false">acks=1</button>
+        <button data-acks="all" aria-pressed="true">acks=all</button>
+      </div>
+
+      <div class="kd-ctrl">
+        <label class="kd-sl" for="kd-rf">
+          <span class="sn">replication.factor</span>
+          <input type="range" id="kd-rf" min="1" max="5" step="1" value="3">
+          <b id="kd-rf-val">3</b>
+        </label>
+        <label class="kd-sl" for="kd-isr">
+          <span class="sn">min.insync.replicas</span>
+          <input type="range" id="kd-isr" min="1" max="5" step="1" value="2">
+          <b id="kd-isr-val">2</b>
+        </label>
+        <label class="kd-sl" for="kd-down">
+          <span class="sn">同時掛掉幾台</span>
+          <input type="range" id="kd-down" min="0" max="5" step="1" value="1">
+          <b id="kd-down-val">1</b>
+        </label>
+        <label class="kd-ck" for="kd-unclean">
+          <input type="checkbox" id="kd-unclean">
+          unclean.leader.election.enable
+        </label>
+        <button class="btn" id="kd-reset">重置</button>
+      </div>
+
+      <div class="kd-verdict" id="kd-verdict" aria-live="polite">
+        <span class="vk">判定</span>
+        <div class="vt" id="kd-outcome">—</div>
+        <ul class="kd-why" id="kd-why"></ul>
+        <details class="kd-more" id="kd-more" hidden>
+          <summary id="kd-more-sum">其餘理由</summary>
+          <ul class="kd-why" id="kd-why-rest"></ul>
+        </details>
+        <div class="kd-adv">
+          <span class="at">建議設定</span>
+          <ul id="kd-adv-list"></ul>
+        </div>
+      </div>
+
+      <div class="kd-tol">
+        <div class="kd-axis">
+          <div class="al">可用性容忍度<b id="kd-ta">1</b>台故障仍可寫</div>
+          <div class="kd-track" id="kd-track-a"></div>
+        </div>
+        <div class="kd-axis">
+          <div class="al">耐久容忍度<b id="kd-td">2</b>台故障仍不丟</div>
+          <div class="kd-track" id="kd-track-d"></div>
+        </div>
+        <p class="kd-tolnote" id="kd-tolnote">—</p>
+      </div>
+
+      <div class="legend">
+        <span><i class="dot ns-ok"></i>該刻已複製到此副本</span>
+        <span><i class="dot ns-idle"></i>副本已下線</span>
+        <span><i class="dot ns-lock"></i>該刻拒寫（ISR &lt; 需求）</span>
+        <span><i class="dot ns-bad"></i>unclean 接班會截掉的 offset</span>
+        <span><i class="dot ns-wait"></i>High Watermark</span>
+      </div>
+
+      <div class="kd-lab">副本 × 時刻 · 存活與複製矩陣（每刻嘗試寫入 1 筆，共 8 筆）</div>
+      <div class="kd-mx" id="kd-mx"><div class="kd-grid" id="kd-grid"></div></div>
+      <div class="kd-empty" id="kd-empty" hidden></div>
+
+      <div class="status-line" id="kd-status">—</div>
+    </div>
+  </div>
+  <p class="cap">四組值得停下來比對的設定。<strong>(1)</strong> 預設 RF=3、<code>min.isr=2</code>、<code>acks=all</code>、<code>unclean=off</code>、掛 1 台：8 筆全部接受、HWM=8，但兩條刻度尺停在不同格——<strong>可用性容忍 1 台、耐久容忍 2 台</strong>，先撐不住的是可用性。<strong>(2)</strong> 把「同時掛掉幾台」拖到 <strong>2</strong>：ISR 剩 1 台 &lt; 需求 2 台，後 <strong>2</strong> 筆被擋（矩陣右側兩欄變成 <code>✕</code>），判定翻成「拒絕寫入 — 保護成功」，並算出「要在 2 台掛掉下仍可寫，RF 至少要 4」。<strong>(3)</strong> 維持掛 2 台再勾選 <strong>unclean</strong>：耐久容忍度從 2 掉到 1，序列②算出落後副本 <code>r2</code> 會以 <code>LEO=3</code> 接班，<strong>offset 3–5 共 3 筆永久消失</strong>——矩陣上那三欄被畫上刪除線。<strong>(4)</strong> 把 <code>min.insync.replicas</code> 拖到 <strong>4</strong>（超過 RF=3）：矩陣整個空掉，8 筆全被擋，因為 <code>acks=all</code> 要求的 ISR 數已經超過副本總數——這組設定自相矛盾。接著把 acks 切到 <strong>1</strong>，同一組矛盾設定卻<strong>寫得進去</strong>：<code>acks=0</code>／<code>1</code> 根本不查 <code>min.insync.replicas</code>，於是 min.isr 完全沒有在保護你。</p>
 
   <div class="callout warn">
     <div class="c-title"><span class="ic">陷阱</span>複製因子 3 不是三份安全</div>
@@ -2040,105 +2268,6 @@
 <section id="s8">
   <div class="sec-head">
     <span class="sec-num">08</span>
-    <h2>互動 · Rebalance 與 ISR 耐久</h2>
-  </div>
-  <p class="sec-sub">三條 partition 上看游標與換手停頓；三台 broker 上調 acks／min.isr，再下線副本觀察能否寫入與會不會丟資料。</p>
-
-  <div class="demo" id="demo-kf">
-    <div class="demo-bar">
-      <span class="label">互動 · Kafka 機制</span>
-      <span class="label" style="text-transform:none;font-family:var(--sans);font-size:12px;color:var(--text-2)">下一步推進時序；重置回到起點</span>
-    </div>
-    <div class="demo-body">
-      <div class="seg" role="group" aria-label="情境切換" id="kf-seg-mode">
-        <button data-mode="rebal" aria-pressed="true">Consumer Group · Rebalance</button>
-        <button data-mode="dur" aria-pressed="false">acks · ISR · 下線</button>
-      </div>
-
-      <div id="kf-rebal-view" class="kf-view">
-        <div class="seg" role="group" aria-label="指派策略" id="kf-seg-assign" style="margin-top:8px">
-          <button data-assign="eager" aria-pressed="true">Eager · 全組停手</button>
-          <button data-assign="sticky" aria-pressed="false">Cooperative Sticky</button>
-        </div>
-        <p class="kf-mode-hint">三條 partition、兩名成員先消費。第三名加入時，Eager 收回所有區；Sticky 只讓必須換手的 P1 停頓，C2 仍可拉 P2。</p>
-      </div>
-
-      <div id="kf-dur-view" class="kf-view" hidden>
-        <div class="seg" role="group" aria-label="acks" id="kf-seg-acks" style="margin-top:8px">
-          <button data-acks="0" aria-pressed="false">acks=0</button>
-          <button data-acks="1" aria-pressed="false">acks=1</button>
-          <button data-acks="all" aria-pressed="true">acks=all</button>
-        </div>
-        <div class="seg" role="group" aria-label="min.isr" id="kf-seg-isr" style="margin-top:8px">
-          <button data-isr="1" aria-pressed="false">min.isr=1</button>
-          <button data-isr="2" aria-pressed="true">min.isr=2</button>
-        </div>
-        <div class="seg" role="group" aria-label="unclean election" id="kf-seg-unclean" style="margin-top:8px">
-          <button data-unclean="off" aria-pressed="true">unclean=off</button>
-          <button data-unclean="on" aria-pressed="false">unclean=on</button>
-        </div>
-        <p class="kf-mode-hint">RF=3。依序寫入、下線 F2、再下線 F1、嘗試寫入、最後打下 Leader。min.isr=2 在只剩 Leader 時拒寫是保護成功；unclean=on 讓過期的 F2 接班並丟資料。</p>
-      </div>
-
-      <div class="kf-ctrl">
-        <button class="btn primary" id="kf-btn-next">下一步</button>
-        <button class="btn" id="kf-btn-reset">重置</button>
-      </div>
-
-      <div class="kf-metric">
-        <span>步 <strong id="kf-m-step">0</strong> / <span id="kf-m-total">6</span></span>
-        <span>寫入 <strong id="kf-m-prod">0</strong></span>
-        <span>提交 offset <strong id="kf-m-commit">0</strong></span>
-        <span>拒寫 <strong id="kf-m-rej">0</strong></span>
-        <span>遺失 <strong id="kf-m-lost">0</strong></span>
-      </div>
-
-      <div class="legend">
-        <span><i class="dot ns-idle"></i>待命 / 未指派</span>
-        <span><i class="dot ns-wait"></i>拉取 / 複製中</span>
-        <span><i class="dot ns-lock"></i>Rebalance 停頓</span>
-        <span><i class="dot ns-ok"></i>已提交 / ISR 內</span>
-        <span><i class="dot ns-bad"></i>下線 / 拒寫 / 遺失</span>
-      </div>
-
-      <div class="kf-col-label" id="kf-parts-label">Partitions</div>
-      <div class="kf-parts" id="kf-parts" aria-live="polite"></div>
-
-      <div class="kf-col-label" id="kf-actors-label">Consumers</div>
-      <div class="kf-actors" id="kf-actors"></div>
-
-      <div class="kf-panels">
-        <div class="kf-panel">
-          <div class="pt">本步語義</div>
-          <div class="prow"><span class="pk">事件</span><span class="pv" id="kf-p-op">—</span></div>
-          <div class="prow"><span class="pk">規則</span><span class="pv" id="kf-p-rule">—</span></div>
-          <div class="prow"><span class="pk">指派 / ISR</span><span class="pv" id="kf-p-hold">—</span></div>
-          <div class="prow"><span class="pk">客戶端</span><span class="pv" id="kf-p-cli">—</span></div>
-        </div>
-        <div class="kf-panel">
-          <div class="pt">觀測</div>
-          <div class="prow"><span class="pk">策略 / 旋鈕</span><span class="pv" id="kf-p-model">Eager</span></div>
-          <div class="prow"><span class="pk">HWM / 游標</span><span class="pv" id="kf-p-hwm">0</span></div>
-          <div class="prow"><span class="pk">可寫入</span><span class="pv" id="kf-p-writable">是</span></div>
-          <div class="prow"><span class="pk">資料風險</span><span class="pv" id="kf-p-risk">無</span></div>
-        </div>
-      </div>
-
-      <div class="status-line" id="kf-status">選擇情境後按「下一步」。Rebalance 與 ISR 劇本皆為 6 步。</div>
-      <div class="kf-verdict" id="kf-verdict">判定尚未產生——走完一輪後會摘要換手停頓，或拒寫／遺失是保護還是事故。</div>
-      <div class="kf-wire" id="kf-wire" aria-label="事件日誌"></div>
-    </div>
-  </div>
-  <p class="cap">Eager 下第三名加入時三條區都會停；Sticky 下 P2 可以繼續被拉。耐久劇本裡，被拒的寫入請看成保護成功（判定偏綠），unclean 接班造成的空洞才是事故。</p>
-
-  <div class="oneliner">
-    <b>一句話答法</b>Rebalance 的代價是停頓與可能重拉；acks=all 加 min.isr 用拒寫換耐久，unclean election 用過期日誌換可用性。
-  </div>
-</section>
-
-<section id="s9">
-  <div class="sec-head">
-    <span class="sec-num">09</span>
     <h2>面試折衷與邊界</h2>
   </div>
   <p class="sec-sub">先答定址與耐久旋鈕，再談產品周邊。事件建模、串流視窗、通用複寫各有自己的篇。</p>
@@ -2286,873 +2415,770 @@
 (function () {
   "use strict";
 
-  var demo = document.getElementById("demo-kf");
-  if (!demo) return;
+  /* ---------- (1) 常數與參數表 ---------- */
 
-  var HINTS = {
-    rebal: "三條 partition、兩名成員。第三名加入時看 Eager 全停，或 Sticky 只讓 P1 換手。",
-    dur: "RF=3。調 acks / min.isr / unclean，依序寫入並下線副本，觀察拒寫與遺失。"
+  /* demo 1：durability 決策器 */
+  var TICKS = 8;                 /* 觀測視窗：每一刻嘗試寫入 1 筆，共 8 筆 */
+  var RF_MIN = 1, RF_MAX = 5;
+  var ISR_MIN = 1, ISR_MAX = 5;
+  var DOWN_MIN = 0, DOWN_MAX = 5;
+  var WHY_SHOWN = 5;             /* 畫面最多顯示 5 條理由，其餘收進 details（截斷在 render） */
+  var DUR_BASE = { rf: 3, minIsr: 2, acks: "all", unclean: false, down: 1 };
+
+  var OUTCOME = {
+    "cfg-impossible":        { label: "這組設定本身寫不進去", tone: "bad" },
+    "all-down":              { label: "副本全滅：已承諾的資料無人持有", tone: "bad" },
+    "blocked":               { label: "拒絕寫入 — 保護成功", tone: "warn" },
+    "fire-and-forget":       { label: "寫得進去，但叢集沒承諾過任何一筆", tone: "bad" },
+    "writable-lossy":        { label: "寫得進去，但一台故障就可能少資料", tone: "warn" },
+    "writable-unclean-risk": { label: "寫得進去，但已開放用過期日誌接班", tone: "warn" },
+    "writable-durable":      { label: "寫得進去，且已 ack 的資料不會遺失", tone: "ok" }
   };
 
-  var REBAL_TOTAL = 6;
-  var DUR_TOTAL = 6;
+  var SEV_RANK = { blocker: 0, risk: 1, info: 2 };
 
-  var mode = "rebal";
-  var assign = "eager";
-  var acks = "all";
-  var minIsr = 2;
-  var unclean = false;
+  /* demo 2：partition 指派計算器 */
+  var P_MIN = 1, P_MAX = 12;
+  var C_MIN = 1, C_MAX = 8;
+  var C_CEIL = 9;                /* 加入一名後的人數上限 */
+  var ASN_BASE = { partitions: 6, consumers: 2, strategy: "range", delta: "join" };
 
-  var step = 0;
-  var wire = [];
-  var metrics = { prod: 0, commit: 0, rej: 0, lost: 0 };
-  var panel = { op: "—", rule: "—", hold: "—", cli: "—", model: "Eager", hwm: "0", writable: "是", risk: "無" };
-  var verdict = { text: "", tone: "" };
-  var statusText = "";
+  var STRAT_IDS = ["range", "sticky", "coop"];
+  var STRAT_NAME = {
+    range:  "Eager · RangeAssignor",
+    sticky: "Sticky（eager 協定）",
+    coop:   "Cooperative Sticky"
+  };
+  var DIFF_GLYPH = { keep: "留", move: "搬", stall: "停" };
 
-  var parts = [];
-  var actors = [];
+  /* ---------- (2) compute* 純函式（不得碰 DOM） ---------- */
 
-  var statusEl = document.getElementById("kf-status");
-  var verdictEl = document.getElementById("kf-verdict");
-  var wireEl = document.getElementById("kf-wire");
-  var partsEl = document.getElementById("kf-parts");
-  var actorsEl = document.getElementById("kf-actors");
-  var partsLabel = document.getElementById("kf-parts-label");
-  var actorsLabel = document.getElementById("kf-actors-label");
-  var rebalView = document.getElementById("kf-rebal-view");
-  var durView = document.getElementById("kf-dur-view");
-  var btnNext = document.getElementById("kf-btn-next");
-  var btnReset = document.getElementById("kf-btn-reset");
-
-  function el(id) { return document.getElementById(id); }
-
-  function logRow(k, tag, text, at) {
-    wire.push({ kind: k, tag: tag, text: text, step: at == null ? step : at });
-  }
-
-  function setSeg(rootId, attr, value) {
-    var root = document.getElementById(rootId);
-    if (!root) return;
-    var buttons = root.querySelectorAll("button");
-    for (var i = 0; i < buttons.length; i += 1) {
-      buttons[i].setAttribute("aria-pressed", buttons[i].getAttribute(attr) === value ? "true" : "false");
-    }
-  }
-
-  function knobLabel() {
-    if (mode === "rebal") return assign === "eager" ? "Eager" : "Sticky";
-    return "acks=" + acks + " · min.isr=" + minIsr + " · unclean=" + (unclean ? "on" : "off");
-  }
-
-  function fresh() {
-    step = 0;
-    wire = [];
-    metrics = { prod: 0, commit: 0, rej: 0, lost: 0 };
-    panel = {
-      op: "—",
-      rule: "—",
-      hold: "—",
-      cli: "—",
-      model: knobLabel(),
-      hwm: "0",
-      writable: "是",
-      risk: "無"
-    };
-    verdict = {
-      text: "判定尚未產生——走完一輪後會摘要換手停頓，或拒寫／遺失是保護還是事故。",
-      tone: ""
-    };
-    statusText = HINTS[mode];
-    parts = [];
-    actors = [];
-    btnNext.disabled = false;
-  }
-
-  function emptyPart(id, title) {
-    return {
-      id: id,
-      title: title,
-      owner: "—",
-      klass: "idle",
-      hint: "空",
-      slots: []
-    };
-  }
-
-  function actor(id, name, sub, klass, val, hint) {
-    return { id: id, name: name, sub: sub, klass: klass, val: val, hint: hint };
-  }
-
-  function slot(label, klass) {
-    return { label: label, klass: klass };
-  }
-
-  function applyRebal() {
-    var p0 = emptyPart("p0", "P0");
-    var p1 = emptyPart("p1", "P1");
-    var p2 = emptyPart("p2", "P2");
-    var c1 = actor("c1", "Consumer 1", "group G", "idle", "—", "待命");
-    var c2 = actor("c2", "Consumer 2", "group G", "idle", "—", "待命");
-    var c3 = actor("c3", "Consumer 3", "尚未入組", "idle", "—", "不在 group");
-
-    function own(p, name) {
-      p.owner = name;
-    }
-
-    function fillTwo(p, key) {
-      p.slots = [slot(key + "@0", "ready"), slot(key + "@1", "ready")];
-    }
-
-    function markOk(p) {
-      p.slots.forEach(function (s) { s.klass = "ok"; });
-    }
-
-    function addM2(p, key) {
-      p.slots.push(slot(key + "@2", "ready"));
-    }
-
-    own(p0, "C1");
-    own(p1, "C1");
-    own(p2, "C2");
-    c1.val = "P0, P1";
-    c1.hint = "兩區主人";
-    c1.klass = "ok";
-    c2.val = "P2";
-    c2.hint = "一區主人";
-    c2.klass = "ok";
-    p0.klass = "ok";
-    p1.klass = "ok";
-    p2.klass = "ok";
-    p0.hint = "committed=0";
-    p1.hint = "committed=0";
-    p2.hint = "committed=0";
-
-    panel.op = "初始指派";
-    panel.rule = "一區一人";
-    panel.hold = "C1→P0,P1 · C2→P2";
-    panel.cli = "C3 尚未加入";
-    panel.hwm = "游標 0 / 0 / 0";
-    panel.writable = "—";
-    panel.risk = "無";
-    logRow("read", "JOIN", "Group G：C1 持有 P0+P1，C2 持有 P2。每個 partition 同一時間只有一個主人。", 0);
-
-    if (step < 1) {
-      parts = [p0, p1, p2];
-      actors = [c1, c2, c3];
-      return;
-    }
-
-    fillTwo(p0, "A");
-    fillTwo(p1, "B");
-    fillTwo(p2, "C");
-    metrics.prod = 6;
-    p0.hint = "LEO=2 · committed=0";
-    p1.hint = "LEO=2 · committed=0";
-    p2.hint = "LEO=2 · committed=0";
-    p0.klass = "wait";
-    p1.klass = "wait";
-    p2.klass = "wait";
-    panel.op = "PRODUCE ×6";
-    panel.rule = "追加到各區尾巴";
-    panel.hold = "每區 offset 0,1";
-    panel.cli = "尚未 fetch";
-    panel.hwm = "可見 2 / 2 / 2";
-    logRow("read", "PROD", "每條 partition 追加兩筆。地址是 topic+partition+offset，不是「佇列下一筆」。", 1);
-
-    if (step < 2) {
-      parts = [p0, p1, p2];
-      actors = [c1, c2, c3];
-      return;
-    }
-
-    markOk(p0);
-    markOk(p1);
-    markOk(p2);
-    metrics.commit = 6;
-    p0.hint = "LEO=2 · committed=2";
-    p1.hint = "LEO=2 · committed=2";
-    p2.hint = "LEO=2 · committed=2";
-    p0.klass = "ok";
-    p1.klass = "ok";
-    p2.klass = "ok";
-    c1.hint = "已提交 P0、P1";
-    c2.hint = "已提交 P2";
-    panel.op = "FETCH + COMMIT";
-    panel.rule = "主人拉自己的區";
-    panel.hold = "游標全部到 2";
-    panel.cli = "C1、C2 正常拉";
-    panel.hwm = "committed 2 / 2 / 2";
-    logRow("ok", "COMMIT", "C1 提交 P0、P1；C2 提交 P2。另一個 group 仍可從自己的游標重放同一批資料。", 2);
-
-    if (step < 3) {
-      parts = [p0, p1, p2];
-      actors = [c1, c2, c3];
-      return;
-    }
-
-    addM2(p0, "A");
-    addM2(p1, "B");
-    addM2(p2, "C");
-    metrics.prod = 9;
-    c3.sub = "正在加入";
-    c3.klass = "wait";
-    c3.val = "JOIN";
-    c3.hint = "觸發 rebalance";
-
-    if (assign === "eager") {
-      own(p0, "（收回）");
-      own(p1, "（收回）");
-      own(p2, "（收回）");
-      p0.klass = "hold";
-      p1.klass = "hold";
-      p2.klass = "hold";
-      p0.hint = "revoke · A@2 未拉";
-      p1.hint = "revoke · B@2 未拉";
-      p2.hint = "revoke · C@2 未拉";
-      c1.klass = "hold";
-      c2.klass = "hold";
-      c1.val = "∅";
-      c2.val = "∅";
-      c1.hint = "停手 · 等待新指派";
-      c2.hint = "停手 · 等待新指派";
-      panel.op = "REBALANCE · Eager";
-      panel.rule = "先收回全部再重分";
-      panel.hold = "三區皆無主人";
-      panel.cli = "C1 C2 C3 全組停頓";
-      panel.hwm = "A@2 B@2 C@2 堆積";
-      panel.risk = "全組 lag";
-      logRow("warn", "STOP", "Eager：第三名加入，C1、C2 必須放下正在做的區。三條 partition 暫時沒有人拉。", 3);
-    } else {
-      own(p0, "C1");
-      own(p1, "（收回）");
-      own(p2, "C2");
-      p0.slots[2].klass = "ok";
-      p2.slots[2].klass = "ok";
-      metrics.commit = 8;
-      p0.klass = "ok";
-      p1.klass = "hold";
-      p2.klass = "ok";
-      p0.hint = "仍屬 C1 · committed=3";
-      p1.hint = "revoke · B@2 未拉";
-      p2.hint = "仍屬 C2 · committed=3";
-      c1.klass = "ok";
-      c2.klass = "ok";
-      c1.val = "P0";
-      c2.val = "P2";
-      c1.hint = "只交回 P1，P0 續拉";
-      c2.hint = "P2 不必搬家，繼續拉";
-      panel.op = "REBALANCE · Sticky";
-      panel.rule = "只收回必須換手的區";
-      panel.hold = "P1 停 · P0/P2 仍在拉";
-      panel.cli = "C2 不受誤傷";
-      panel.hwm = "P0、P2 已到 3；P1 停在 2";
-      panel.risk = "僅 P1 lag";
-      logRow("warn", "MOVE", "Sticky：只有 P1 要交給新人，被收回。C1 續拉 P0、C2 續拉 P2，A@2 與 C@2 已被提交。", 3);
-    }
-
-    if (step < 4) {
-      parts = [p0, p1, p2];
-      actors = [c1, c2, c3];
-      return;
-    }
-
-    own(p0, "C1");
-    own(p1, "C3");
-    own(p2, "C2");
-    c3.sub = "group G";
-    c1.val = "P0";
-    c2.val = "P2";
-    c3.val = "P1";
-    c1.klass = "ok";
-    c2.klass = "ok";
-    c3.klass = "ok";
-    c1.hint = "新指派：只留 P0";
-    c2.hint = "新指派：仍是 P2";
-    c3.hint = "接手 P1";
-    p0.klass = "ok";
-    p1.klass = "wait";
-    p2.klass = "ok";
-
-    if (assign === "eager") {
-      p0.hint = "C1 · A@2 待拉";
-      p1.hint = "C3 · B@2 待拉";
-      p2.hint = "C2 · C@2 待拉";
-      panel.op = "ASSIGN 完成";
-      panel.rule = "C1→P0 · C2→P2 · C3→P1";
-      panel.hold = "三區重新有主人";
-      panel.cli = "開始補拉 @2";
-      panel.hwm = "committed 仍是 2 / 2 / 2";
-      panel.risk = "空窗結束";
-      logRow("ok", "ASSIGN", "新指派生效。Eager 期間堆積的三筆 @2 現在才有人能拉。", 4);
-    } else {
-      p0.hint = "C1 · committed=3";
-      p1.hint = "C3 · B@2 待拉";
-      p2.hint = "C2 · committed=3";
-      p1.slots[2].klass = "ready";
-      panel.op = "ASSIGN 完成";
-      panel.rule = "C3 只接走 P1";
-      panel.hold = "P0、P2 從未中斷";
-      panel.cli = "C3 補拉 B@2";
-      panel.hwm = "committed 3 / 2 / 3";
-      panel.risk = "僅 P1 有空窗";
-      logRow("ok", "ASSIGN", "C3 成為 P1 主人。P0 與 P2 在 sticky 下沒有停過，游標已經在 3。", 4);
-    }
-
-    if (step < 5) {
-      parts = [p0, p1, p2];
-      actors = [c1, c2, c3];
-      return;
-    }
-
-    p0.slots.forEach(function (s) { s.klass = "ok"; });
-    p1.slots.forEach(function (s) { s.klass = "ok"; });
-    p2.slots.forEach(function (s) { s.klass = "ok"; });
-    metrics.commit = 9;
-    p0.klass = "ok";
-    p1.klass = "ok";
-    p2.klass = "ok";
-    p0.hint = "committed=3";
-    p1.hint = "committed=3";
-    p2.hint = "committed=3";
-    c1.hint = "穩定持有 P0";
-    c2.hint = "穩定持有 P2";
-    c3.hint = "穩定持有 P1";
-    panel.op = "RESUME + COMMIT";
-    panel.rule = "新主人從上次 commit 接";
-    panel.hold = "游標全部到 3";
-    panel.cli = "三名成員恢復拉取";
-    panel.hwm = "committed 3 / 3 / 3";
-    panel.risk = "無";
-    logRow("ok", "RESUME", "剩餘 @2 提交完畢。若 rebalance 當下有未提交的 fetch，新主人會從舊 commit 重拉——at-least-once 再次出現。", 5);
-
-    if (assign === "eager") {
-      verdict = {
-        text: "判定：Eager 讓 C3 加入變成全組停手，三條區的 @2 都堆積到指派結束。換手完成後資料還在（Log 可重放），帳單是 lag 與可能的重拉。",
-        tone: "lock"
-      };
-    } else {
-      verdict = {
-        text: "判定：Sticky 只移動 P1，C2 全程續拉 P2。停頓被限制在「必須換手」的那一區——這就是 cooperative sticky 的動機。",
-        tone: "ok"
-      };
-    }
-    btnNext.disabled = true;
-
-    parts = [p0, p1, p2];
-    actors = [c1, c2, c3];
-  }
-
-  function countIsr(brokers) {
-    var n = 0;
-    brokers.forEach(function (b) {
-      if (b.up && b.inIsr) n += 1;
-    });
+  function clampInt(v, lo, hi, dflt) {
+    var n = Math.round(Number(v));
+    if (!isFinite(n)) n = dflt;
+    if (n < lo) n = lo;
+    if (n > hi) n = hi;
     return n;
   }
 
-  function minIsrLeo(brokers) {
-    var m = Infinity;
-    brokers.forEach(function (b) {
-      if (b.up && b.inIsr && b.leo < m) m = b.leo;
+  function oneOf(v, list, dflt) {
+    var s = String(v);
+    return list.indexOf(s) === -1 ? dflt : s;
+  }
+
+  /* 依嚴重度排序（同級維持規則宣告順序）。純函式，供 render 截斷前使用。 */
+  function sortReasons(list) {
+    var arr = [], out = [], i;
+    for (i = 0; i < list.length; i += 1) arr.push({ r: list[i], i: i });
+    arr.sort(function (a, b) {
+      var d = SEV_RANK[a.r.sev] - SEV_RANK[b.r.sev];
+      return d !== 0 ? d : a.i - b.i;
     });
-    return m === Infinity ? 0 : m;
+    for (i = 0; i < arr.length; i += 1) out.push(arr[i].r);
+    return out;
   }
 
-  function leaderOf(brokers) {
-    for (var i = 0; i < brokers.length; i += 1) {
-      if (brokers[i].role === "leader" && brokers[i].up) return brokers[i];
+  // @probe fn       computeDurability
+  // @probe baseline {"rf":3,"minIsr":2,"acks":"all","unclean":false,"down":1}
+  // @probe sweep    {"rf":[1,5],"minIsr":[1,5],"acks":["0","1"],"unclean":[true,false],"down":[0,5]}
+  function computeDurability(p) {
+    p = p || {};
+    var rf = clampInt(p.rf, RF_MIN, RF_MAX, DUR_BASE.rf);
+    var minIsr = clampInt(p.minIsr, ISR_MIN, ISR_MAX, DUR_BASE.minIsr);
+    var acks = oneOf(p.acks == null ? DUR_BASE.acks : p.acks, ["0", "1", "all"], DUR_BASE.acks);
+    var unclean = !!p.unclean;
+    var down = clampInt(p.down, DOWN_MIN, DOWN_MAX, DUR_BASE.down);
+    if (down > rf) down = rf;              /* 不能掛超過 RF 台；夾在純函式內完成 */
+
+    /* acks=0／1 根本不查 min.insync.replicas —— 這條不對稱是本 demo 的邊界來源 */
+    var needIsr = acks === "all" ? minIsr : 1;
+    var contradictory = needIsr > rf;
+
+    var tolAvail = rf - needIsr;           /* 容忍幾台仍可寫入；負數＝連 0 台都寫不進去 */
+    var tolDur;                            /* 容忍幾台仍不遺失已 ack 的資料 */
+    if (acks === "0") tolDur = -1;
+    else if (acks === "1") tolDur = 0;
+    else tolDur = Math.min(unclean ? minIsr - 1 : rf - 1, rf - 1);
+
+    /* 滾動故障：follower 先落後退出，Leader（r0）最後才倒。
+       r(rf-1) 最早掛，因此是最舊的落後副本，也是 unclean 接班的候選人。 */
+    var deathTick = [], replicaDeath = [], order, i, k;
+    for (k = 0; k < down; k += 1) {
+      deathTick.push(Math.ceil((k + 1) * TICKS / (down + 1)));
     }
-    return null;
-  }
-
-  function applyDur() {
-    var b1 = { id: "b1", name: "Broker 1", sub: "Leader · P0", up: true, inIsr: true, leo: 0, role: "leader", klass: "ok", val: "LEO 0", hint: "ISR 內" };
-    var b2 = { id: "b2", name: "Broker 2", sub: "Follower", up: true, inIsr: true, leo: 0, role: "follower", klass: "ok", val: "LEO 0", hint: "ISR 內" };
-    var b3 = { id: "b3", name: "Broker 3", sub: "Follower", up: true, inIsr: true, leo: 0, role: "follower", klass: "ok", val: "LEO 0", hint: "ISR 內" };
-    var log = emptyPart("log", "P0 log");
-    log.owner = "Leader = B1";
-    log.hint = "HWM=0";
-    log.klass = "idle";
-
-    var brokers = [b1, b2, b3];
-    var rejectedLast = false;
-    var lostCount = 0;
-    var noLeader = false;
-
-    function paintBrokers() {
-      brokers.forEach(function (b) {
-        if (!b.up) {
-          b.klass = "bad down";
-          b.sub = b.id === "b1" ? "前 Leader · 下線" : "Follower · 下線";
-          b.val = "LEO " + b.leo + " · DOWN";
-          b.hint = "已下線 · 不在 ISR";
-          return;
-        }
-        if (b.role === "leader") {
-          b.klass = "ok";
-          b.sub = "Leader · P0";
-          b.val = "LEO " + b.leo;
-          b.hint = b.inIsr ? "ISR 內 · 接寫入" : "Leader 但不在 ISR";
-          return;
-        }
-        if (b.inIsr) {
-          b.klass = "wait";
-          b.sub = "Follower · ISR";
-          b.val = "LEO " + b.leo;
-          b.hint = "跟得上 Leader";
-        } else {
-          b.klass = "hold";
-          b.sub = "Follower · 落後";
-          b.val = "LEO " + b.leo;
-          b.hint = "不在 ISR";
-        }
-      });
+    for (i = 0; i < rf; i += 1) {
+      order = rf - 1 - i;                  /* order 0 = 最早掛 */
+      replicaDeath.push(order < down ? deathTick[order] : 0);   /* 0 = 全程存活 */
     }
+    var staleIdx = down >= 1 ? rf - 1 : -1;
 
-    function syncIsr() {
-      brokers.forEach(function (b) {
-        if (!b.up) {
-          b.inIsr = false;
-        }
-      });
-    }
-
-    function canWrite() {
-      var leader = leaderOf(brokers);
-      if (!leader) return false;
-      if (acks === "all" && countIsr(brokers) < minIsr) return false;
-      return true;
-    }
-
-    function produce(label) {
-      if (!canWrite()) {
-        metrics.rej += 1;
-        rejectedLast = true;
-        log.slots.push(slot(label + " 拒", "hold"));
-        return "reject";
+    /* 逐刻推演：每刻嘗試寫 1 筆，ISR 大小決定接受或 NOT_ENOUGH_REPLICAS */
+    var ticks = [], hwm = 0, accepted = 0, replicasAtAckMin = 0, seen = false;
+    var t, dead, isrAt, ok;
+    for (t = 1; t <= TICKS; t += 1) {
+      dead = 0;
+      for (k = 0; k < down; k += 1) { if (deathTick[k] < t) dead += 1; }
+      isrAt = rf - dead;
+      ok = isrAt >= 1 && isrAt >= needIsr;
+      if (ok) {
+        hwm += 1;
+        accepted += 1;
+        if (!seen || isrAt < replicasAtAckMin) { replicasAtAckMin = isrAt; seen = true; }
       }
-      rejectedLast = false;
-      metrics.prod += 1;
-      var leader = leaderOf(brokers);
-      leader.leo += 1;
-      if (acks === "0") {
-        log.slots.push(slot(label, "hold"));
-        return "acks0";
+      ticks.push({ t: t, isr: isrAt, ok: ok, hwm: hwm, offset: ok ? hwm - 1 : -1 });
+    }
+    var acceptedWrites = accepted;
+    var rejectedWrites = TICKS - accepted;
+
+    /* 最早退出 ISR 的副本凍結在哪一個 LEO */
+    var staleLeo = acceptedWrites;
+    if (down >= 1) {
+      staleLeo = 0;
+      for (i = 0; i < ticks.length; i += 1) {
+        if (ticks[i].t <= deathTick[0]) staleLeo = ticks[i].hwm;
       }
-      if (acks === "1") {
-        brokers.forEach(function (b) {
-          if (b.up && b.inIsr && b !== leader) b.leo = leader.leo;
-        });
-        log.slots.push(slot(label, "ready"));
-        return "acks1";
-      }
-      brokers.forEach(function (b) {
-        if (b.up && b.inIsr) b.leo = leader.leo;
-      });
-      log.slots.push(slot(label, "ok"));
-      return "acksall";
     }
 
-    function hwm() {
-      return minIsrLeo(brokers);
+    var isrNow = rf - down;
+    var writable = isrNow >= 1 && isrNow >= needIsr;
+    var ackedGuaranteed = acks === "0" ? 0 : acceptedWrites;
+    var extraFailuresNeeded = rf - down;
+    var rfNeededToStayWritable = down + needIsr;
+
+    /* 序列①「同時掛 down 台」：存活者仍在 ISR、已追上 HWM */
+    var seq1Lost;
+    if (isrNow === 0) seq1Lost = ackedGuaranteed;
+    else if (acks === "1" && down >= 1) seq1Lost = Math.min(1, ackedGuaranteed);
+    else seq1Lost = 0;
+
+    /* 序列②「滾動故障後，只有最早退出 ISR 的落後副本還活著」 */
+    var seq2Applicable = down >= 1;
+    var seq2Lost = unclean && seq2Applicable ? Math.max(0, acceptedWrites - staleLeo) : 0;
+    var cutFrom = unclean && seq2Applicable && seq2Lost > 0 ? staleLeo : -1;
+
+    var outcome;
+    if (contradictory) outcome = "cfg-impossible";
+    else if (isrNow === 0) outcome = "all-down";
+    else if (!writable) outcome = "blocked";
+    else if (acks === "0") outcome = "fire-and-forget";
+    else if (tolDur <= 0) outcome = "writable-lossy";
+    else if (unclean) outcome = "writable-unclean-risk";
+    else outcome = "writable-durable";
+
+    /* 12 條規則各自評估後疊加成子句集合，不按 (acks x min.isr x unclean x down) 查表。
+       嚴重度由規則本身決定；顯示條數的截斷在 render 做，這裡回傳全部。 */
+    var reasons = [];
+    function why(sev, text) { reasons.push({ sev: sev, text: text }); }
+
+    if (contradictory && acks === "all") {
+      why("blocker", "acks=all 要求 ISR 至少 " + minIsr + " 台，但 RF 只有 " + rf + " 台——上限就是 " + rf +
+        " 台，所以 0 台故障也寫不進去：本輪 " + rejectedWrites + " / " + TICKS + " 筆全被擋。");
+    }
+    if (minIsr > rf && acks !== "all") {
+      why("blocker", "min.insync.replicas=" + minIsr + " > RF=" + rf + " 是自相矛盾的設定，但 acks=" + acks +
+        " 根本不查 min.insync.replicas——所以它現在寫得進去（接受 " + acceptedWrites +
+        " 筆），而 min.isr 完全沒有在保護你。");
+    }
+    if (isrNow === 0) {
+      why("blocker", rf + " 台副本全滅：已承諾的 " + ackedGuaranteed + " 筆沒有任何一份存活的副本持有。");
+    }
+    if (!writable && !contradictory && isrNow > 0) {
+      why("blocker", "目前 ISR " + isrNow + " 台 < 需求 " + needIsr + " 台 → NOT_ENOUGH_REPLICAS，本輪 " +
+        rejectedWrites + " 筆被擋。這是保護成功，不是「降級成 acks=1」的暗示。");
+    }
+    if (writable && acks === "0") {
+      why("blocker", "acks=0：" + acceptedWrites + " 筆送出、0 筆被叢集承諾過。客戶端已經當成功往下走了。");
+    }
+    if (writable && acks === "1") {
+      why("risk", "acks=1：每一筆只保證躺在 Leader 1 台上，抄寫仍是非同步。耐久容忍度因此是 0 台。");
+    }
+    if (writable && acks === "all" && !contradictory) {
+      why("info", "acks=all 等的是「當下的 ISR」：本輪最不安全的那一筆躺在 " + replicasAtAckMin +
+        " 台上，不是 RF=" + rf + " 台。");
+    }
+    if (tolAvail !== tolDur && !contradictory) {
+      why("info", "兩個容忍度不一樣：可用性容忍 " + tolAvail + " 台（RF 減去需求 ISR），耐久容忍 " + tolDur +
+        " 台——先撐不住的是「" + (tolAvail < tolDur ? "可用性" : "耐久") + "」。差的那 " +
+        Math.abs(tolAvail - tolDur) + " 台就是這組設定正在買賣的東西。");
+    }
+    if (unclean && seq2Applicable && seq2Lost > 0) {
+      why("blocker", "unclean=on：再掛 " + extraFailuresNeeded + " 台、且落後副本 r" + staleIdx +
+        " 回來，它會以 LEO=" + staleLeo + " 接班——offset " + staleLeo + "–" + (acceptedWrites - 1) +
+        " 共 " + seq2Lost + " 筆永久消失。");
+    }
+    if (!unclean && seq2Applicable) {
+      why("info", "unclean=off：同一條序列下 partition 直接停止服務，已接受的 " + acceptedWrites +
+        " 筆一筆不丟。用停機換不丟資料。");
+    }
+    if (minIsr === 1 && acks === "all" && !contradictory) {
+      why("risk", "min.isr=1 讓 acks=all 在 ISR 縮到 1 台時仍然 ack——all 等價於 1。");
+    }
+    if (writable && down > 0) {
+      why("info", (tolAvail - down > 0 ? "還能再掛 " + (tolAvail - down) + " 台才會開始拒寫"
+                                       : "再掛 1 台就會開始拒寫") +
+        "；要在 " + down + " 台掛掉的情況下仍可寫，RF 至少要 " + rfNeededToStayWritable + "。");
+    } else if (writable) {
+      why("info", "目前 0 台故障：還能掛 " + tolAvail + " 台才會開始拒寫（RF " + rf + " 減去需求 ISR " +
+        needIsr + "）。");
     }
 
-    function riskText() {
-      if (lostCount > 0) return "已遺失 " + lostCount;
-      if (noLeader) return "無 Leader";
-      if (acks === "0") return "fire-and-forget";
-      if (acks === "all" && countIsr(brokers) >= minIsr && minIsr >= 2) return "ISR 耐久";
-      if (acks === "all" && countIsr(brokers) < minIsr) return "寫入已擋";
-      if (countIsr(brokers) <= 1) return "只在 Leader";
-      return "Leader 點頭";
+    /* 建議設定：規則引擎推導，不是每種組合一段預寫文案。
+       advRf 取 max(現況, 3, down + 2)——永遠不建議「把 RF 調低」。 */
+    var advRf = Math.max(rf, 3, down + 2);
+    if (advRf > RF_MAX) advRf = RF_MAX;
+    var advMinIsr = Math.min(2, advRf - 1);
+    if (advMinIsr < 1) advMinIsr = 1;
+    var rfNeededForAdvice = down + advMinIsr;   /* 在建議的 min.isr 之下，RF 至少要多大 */
+
+    var adviceDelta = [];
+    if (acks !== "all") {
+      adviceDelta.push({ knob: "acks", from: acks, to: "all",
+        why: "目前耐久容忍度只有 " + tolDur + " 台；只有 acks=all 會把「已提交」定義成當下 ISR 全員都有。" });
     }
-
-    paintBrokers();
-    panel.op = "叢集健康";
-    panel.rule = "RF=3 · ISR={B1,B2,B3}";
-    panel.hold = "ISR 3";
-    panel.cli = "尚未寫入";
-    panel.hwm = "HWM 0";
-    panel.writable = "是";
-    panel.risk = "無";
-    logRow("read", "ISR", "三台都在 ISR。消費者能讀的是 HWM（ISR 最小 LEO），不是 Leader 自己的尾巴。", 0);
-
-    if (step < 1) {
-      paintBrokers();
-      parts = [log];
-      actors = brokers;
-      return;
+    if (rf !== advRf) {
+      adviceDelta.push({ knob: "replication.factor", from: String(rf), to: String(advRf),
+        why: "要在 " + down + " 台掛掉下仍可寫、且 min.isr 維持 " + advMinIsr + "，RF 至少要 " +
+          rfNeededForAdvice + "。" });
     }
-
-    var r1 = produce("R1");
-    paintBrokers();
-    log.hint = "HWM=" + hwm();
-    log.klass = r1 === "reject" ? "hold" : "wait";
-    panel.op = "PRODUCE R1";
-    if (r1 === "acks0") {
-      panel.rule = "acks=0 不等待";
-      panel.cli = "客戶端當下當成功";
-      panel.risk = "可能沒落地";
-      logRow("warn", "ACK0", "R1 只在 Leader 記憶體／頁快取視角。Follower 尚未抄，客戶端已經往下走。", 1);
-    } else if (r1 === "acks1") {
-      panel.rule = "只等 Leader";
-      panel.cli = "Leader 點頭即成功";
-      panel.risk = "抄寫仍是非同步";
-      logRow("read", "ACK1", "R1 先在 Leader 成功。本步讓仍在 ISR 的 Follower 隨後追上，HWM=" + hwm() + "。", 1);
-    } else if (r1 === "acksall") {
-      panel.rule = "等滿目前 ISR";
-      panel.cli = "ISR 皆寫入才成功";
-      panel.risk = "ISR 耐久";
-      logRow("ok", "ACKALL", "R1 寫進 ISR 內每一份副本。HWM 推進到 " + hwm() + "。", 1);
+    if (minIsr !== advMinIsr) {
+      adviceDelta.push({ knob: "min.insync.replicas", from: String(minIsr), to: String(advMinIsr),
+        why: minIsr < advMinIsr
+          ? "min.isr=" + minIsr + " 時本輪最不安全的那筆只躺在 " + replicasAtAckMin + " 台上。"
+          : "min.isr=" + minIsr + " 在 RF=" + rf + " 下只剩 " + tolAvail + " 台可用性餘裕，被擋 " +
+            rejectedWrites + " 筆。" });
     }
-    panel.hold = "ISR " + countIsr(brokers);
-    panel.hwm = "HWM " + hwm();
-    panel.writable = canWrite() ? "是" : "否";
-
-    if (step < 2) {
-      parts = [log];
-      actors = brokers;
-      return;
-    }
-
-    b3.up = false;
-    b3.inIsr = false;
-    syncIsr();
-    paintBrokers();
-    log.owner = "Leader = B1 · F2 下線";
-    log.hint = "HWM=" + hwm() + " · ISR=" + countIsr(brokers);
-    log.klass = "hold";
-    panel.op = "KILL Broker 3";
-    panel.rule = "落後／下線者踢出 ISR";
-    panel.hold = "ISR {B1,B2}";
-    panel.cli = "寫入路徑仍有兩張嘴";
-    panel.hwm = "HWM " + hwm();
-    panel.writable = canWrite() ? "是" : "否";
-    panel.risk = riskText();
-    logRow("warn", "DOWN", "B3 下線，ISR 縮成 {B1,B2}。它的 LEO 停在 " + b3.leo + "，之後的寫入它看不到。", 2);
-
-    if (step < 3) {
-      parts = [log];
-      actors = brokers;
-      return;
-    }
-
-    var r2 = produce("R2");
-    paintBrokers();
-    log.hint = "HWM=" + hwm();
-    log.klass = r2 === "reject" ? "hold" : "wait";
-    panel.op = "PRODUCE R2";
-    panel.hold = "ISR " + countIsr(brokers) + " · B3.LEO=" + b3.leo;
-    panel.hwm = "HWM " + hwm();
-    panel.writable = canWrite() ? "是" : "否";
-    panel.risk = riskText();
-    if (r2 === "reject") {
-      panel.rule = "ISR < min.isr → 拒寫";
-      panel.cli = "NOT_ENOUGH_REPLICAS";
-      logRow("ok", "REJECT", "R2 被拒。這是保護成功：叢集拒絕在不安全的 ISR 上繼續 ack。", 3);
-    } else if (r2 === "acksall") {
-      panel.rule = "ISR=2 ≥ min.isr";
-      panel.cli = "B1、B2 寫入成功";
-      logRow("ok", "ACKALL", "R2 只寫進仍在 ISR 的 B1、B2。B3 停在 LEO " + b3.leo + "，已經是過期副本。", 3);
-    } else if (r2 === "acks1") {
-      panel.rule = "只等 Leader";
-      panel.cli = "R2 在 B1 成功";
-      logRow("read", "ACK1", "R2 被 Leader 接受。B3 仍停在 LEO " + b3.leo + "。", 3);
-    } else {
-      panel.rule = "acks=0";
-      panel.cli = "未等待任何副本";
-      logRow("warn", "ACK0", "R2 再次 fire-and-forget。B3 完全沒看到這筆。", 3);
-    }
-
-    if (step < 4) {
-      parts = [log];
-      actors = brokers;
-      return;
-    }
-
-    b2.up = false;
-    b2.inIsr = false;
-    syncIsr();
-    var r3 = produce("R3");
-    paintBrokers();
-    log.owner = "只剩 Leader";
-    log.hint = "HWM=" + hwm() + " · ISR=" + countIsr(brokers);
-    log.klass = r3 === "reject" ? "ok" : "hold";
-    panel.op = "KILL B2 + PRODUCE R3";
-    panel.hold = "ISR {B1}";
-    panel.hwm = "HWM " + hwm();
-    panel.writable = canWrite() ? "是" : "否";
-    if (r3 === "reject") {
-      panel.rule = "min.isr=2 擋住單點寫";
-      panel.cli = "拒寫 · 保護成功";
-      panel.risk = "寫入已擋";
-      log.slots[log.slots.length - 1].klass = "hold";
-      logRow("ok", "REJECT", "只剩 Leader，acks=all 且 min.isr=2 → NOT_ENOUGH_REPLICAS。R3 沒有變成「只寫在一臺」。", 4);
-    } else {
-      panel.rule = acks === "all" ? "min.isr=1 允許退化" : ("acks=" + acks + " 不等 ISR");
-      panel.cli = "R3 只在 B1";
-      panel.risk = "只在 Leader";
-      logRow("warn", "SOLO", "R3 被接受，但 ISR 只剩 Leader。這筆資料的命運綁在 B1 還活著。", 4);
-    }
-
-    if (step < 5) {
-      parts = [log];
-      actors = brokers;
-      return;
-    }
-
-    var leaderLeoBefore = b1.leo;
-    b1.up = false;
-    b1.inIsr = false;
-    b1.role = "follower";
-
     if (unclean) {
-      b3.up = true;
-      b3.role = "leader";
-      b3.inIsr = true;
-      b3.sub = "Leader · unclean";
-      var cut = b3.leo;
-      log.slots.forEach(function (s, idx) {
-        if (idx >= cut && s.klass !== "hold") {
-          s.klass = "lost";
-          lostCount += 1;
-        }
-      });
-      metrics.lost = lostCount;
-      log.owner = "Unclean Leader = B3";
-      log.hint = "HWM 倒退到 " + cut;
-      log.klass = "bad";
-      panel.op = "KILL Leader · unclean 接班";
-      panel.rule = "過期副本的 LEO 成為新 HWM";
-      panel.hold = "新 Leader LEO=" + cut;
-      panel.cli = "已 ack 的 offset 可能蒸發";
-      panel.hwm = "HWM " + cut + "（倒退）";
-      panel.writable = "是（但資料已少）";
-      panel.risk = "已遺失 " + lostCount;
-      logRow("bad", "UNCLEAN", "B3 以 LEO " + cut + " 上台。B1 曾經寫到 " + leaderLeoBefore + " 的紀錄，對新叢集而言不存在。", 5);
-      verdict = {
-        text: "判定：unclean election 用可用性換資料。過期 Follower 接班後，HWM 倒退，中間的 offset 永久消失——這是事故，不是保護。",
-        tone: "bad"
-      };
-    } else {
-      noLeader = true;
-      b3.role = "follower";
-      log.owner = "無 Leader";
-      log.hint = "ISR 空 · 等待同步副本";
-      log.klass = "hold";
-      panel.op = "KILL Leader · 拒絕 unclean";
-      panel.rule = "只有 ISR 成員能接班";
-      panel.hold = "沒有合格接班者";
-      panel.cli = "partition 不可用";
-      panel.hwm = "停在 " + leaderLeoBefore + "（離線）";
-      panel.writable = "否";
-      panel.risk = "無 Leader · 資料未宣告遺失";
-      logRow("warn", "UNAVAIL", "B1 倒下，剩餘的 B3 不在 ISR。unclean=off → 不選舉，P0 停止服務，但也不用過期日誌重寫歷史。", 5);
-      if (metrics.rej > 0 && acks === "all" && minIsr >= 2) {
-        verdict = {
-          text: "判定：min.isr 在單點時拒寫是保護成功；接著 unclean=off 選擇停機而不是丟資料。可用性的帳單已經付了，耐久沒有被賣掉。",
-          tone: "ok"
-        };
-      } else {
-        verdict = {
-          text: "判定：Leader 與 ISR 同伴都沒了，clean election 讓 P0 不可用。資料還在倒下的磁碟上，沒有被過期副本覆寫——這是用停機換不丟。",
-          tone: "lock"
-        };
-      }
+      adviceDelta.push({ knob: "unclean.leader.election.enable", from: "true", to: "false",
+        why: "關掉它，序列②那 " + seq2Lost + " 筆（offset " + staleLeo + "–" + (acceptedWrites - 1) +
+          "）就不會被過期日誌覆寫掉。" });
     }
 
-    paintBrokers();
-    if (!b1.up && unclean) {
-      b3.klass = "ok";
-      b3.val = "LEO " + b3.leo;
-      b3.hint = "過期接班 · 已丟資料";
-    }
-    btnNext.disabled = true;
-    parts = [log];
-    actors = brokers;
-  }
+    var adviceNote = adviceDelta.length === 0
+      ? ("已是耐久基線：RF=" + rf + "、min.insync.replicas=" + minIsr + "、acks=all、unclean=off。要在 " +
+         (down + 1) + " 台同時掛掉下仍然可寫，RF 至少要 " + (down + 1 + needIsr) + "。")
+      : "";
 
-  function apply() {
-    wire = [];
-    metrics = { prod: 0, commit: 0, rej: 0, lost: 0 };
-    panel.model = knobLabel();
-    verdict = {
-      text: "判定尚未產生——走完一輪後會摘要換手停頓，或拒寫／遺失是保護還是事故。",
-      tone: ""
+    var tolTail;
+    if (acks === "0") tolTail = "acks=0 不等任何確認，耐久容忍度記為 −1：0 台掛掉就可能沒落地。";
+    else if (acks === "1") tolTail = "acks=1 只保證 Leader 那一份，所以耐久容忍度是 0 台。";
+    else if (unclean) tolTail = "unclean=on 時耐久容忍度掉到 min.isr 減 1 = " + (minIsr - 1) +
+      " 台（以 ISR 剛好縮到 min.isr 的最壞合法狀態計）。";
+    else tolTail = "unclean=off 時只有 RF 台全滅才算遺失，所以耐久容忍度是 RF 減 1 = " + (rf - 1) + " 台。";
+
+    var tolNote = "可用性容忍 " + tolAvail + " 台（RF " + rf + " 減去需求 ISR " + needIsr + "），耐久容忍 " +
+      tolDur + " 台；目前掛 " + down + " 台。" + tolTail;
+
+    var rule = "需求 ISR = " +
+      (acks === "all" ? "min.insync.replicas = " + minIsr
+                      : "1（acks=" + acks + " 不查 min.insync.replicas）") +
+      "｜目前 ISR " + isrNow + " / RF " + rf +
+      "｜本輪接受 " + acceptedWrites + " 筆、被擋 " + rejectedWrites + " 筆，HWM = " + acceptedWrites;
+
+    var emptyNote = contradictory
+      ? ("acks=all 要求 ISR 至少 " + minIsr + " 台，RF 只有 " + rf + " 台——上限就是 " + rf +
+         " 台，所以矩陣是空的：" + TICKS +
+         " 筆全部被擋在 NOT_ENOUGH_REPLICAS，一筆都沒有進到任何副本。這不是壞掉，是這組設定自相矛盾。")
+      : ("本輪 " + TICKS + " 筆全部被擋（ISR " + isrNow + " 台 < 需求 " + needIsr +
+         " 台），所以沒有任何已複製的 offset 可畫。把「同時掛掉幾台」往左拉，或把 min.insync.replicas 調低，矩陣就會回來。");
+
+    return {
+      rf: rf, minIsr: minIsr, acks: acks, unclean: unclean, down: down,
+      needIsr: needIsr, contradictory: contradictory,
+      isrNow: isrNow, writable: writable,
+      tolAvail: tolAvail, tolDur: tolDur,
+      deathTick: deathTick, replicaDeath: replicaDeath, staleIdx: staleIdx,
+      ticks: ticks,
+      acceptedWrites: acceptedWrites, rejectedWrites: rejectedWrites,
+      replicasAtAckMin: replicasAtAckMin, ackedGuaranteed: ackedGuaranteed,
+      staleLeo: staleLeo, cutFrom: cutFrom,
+      seq1Lost: seq1Lost, seq2Applicable: seq2Applicable, seq2Lost: seq2Lost,
+      extraFailuresNeeded: extraFailuresNeeded,
+      rfNeededToStayWritable: rfNeededToStayWritable,
+      outcome: outcome,
+      reasons: reasons, reasonCount: reasons.length,
+      adviceDelta: adviceDelta, adviceDeltaCount: adviceDelta.length, adviceNote: adviceNote,
+      tolNote: tolNote, rule: rule, emptyNote: emptyNote
     };
-    btnNext.disabled = false;
-    if (mode === "rebal") applyRebal();
-    else applyDur();
-    if (step === 0) {
-      statusText = HINTS[mode];
-    } else {
-      statusText = panel.op + " · " + panel.rule;
+  }
+
+  /* Kafka RangeAssignor 原式：每人拿一段連續區間 */
+  function rangeAssign(pCount, cCount) {
+    var owners = [], q = Math.floor(pCount / cCount), r = pCount % cCount;
+    var i, j, start, len;
+    for (i = 0; i < pCount; i += 1) owners.push(-1);
+    for (i = 0; i < cCount; i += 1) {
+      start = i * q + Math.min(i, r);
+      len = q + (i < r ? 1 : 0);
+      for (j = start; j < start + len && j < pCount; j += 1) owners[j] = i;
     }
-    render();
+    return owners;
   }
 
-  function renderParts() {
-    partsEl.innerHTML = "";
-    parts.forEach(function (p) {
-      var box = document.createElement("div");
-      box.className = "kf-part " + p.klass;
-      var slots = document.createElement("div");
-      slots.className = "kf-slots";
-      if (p.slots.length === 0) {
-        var empty = document.createElement("span");
-        empty.className = "kf-slot";
-        empty.textContent = "（空）";
-        slots.appendChild(empty);
-      } else {
-        p.slots.forEach(function (s) {
-          var chip = document.createElement("span");
-          chip.className = "kf-slot " + s.klass;
-          chip.textContent = s.label;
-          slots.appendChild(chip);
-        });
+  function loadsOf(owners, cCount) {
+    var l = [], i;
+    for (i = 0; i < cCount; i += 1) l.push(0);
+    for (i = 0; i < owners.length; i += 1) {
+      if (owners[i] >= 0 && owners[i] < cCount) l[owners[i]] += 1;
+    }
+    return l;
+  }
+
+  /* Kafka StickyAssignor 的確定性簡化：保留既有歸屬，只把必要的搬家做完。
+     tie-break 固定為「取持有最多者中 index 最大的 partition」，讓讀者能自己複算。 */
+  function stickyAssign(before, pCount, cCount) {
+    var owners = before.slice(), loads, i, j, hi, lo, pick, guard = 0;
+    for (i = 0; i < pCount; i += 1) {
+      if (owners[i] >= cCount) owners[i] = -1;        /* 離開的成員釋出手上的 partition */
+    }
+    loads = loadsOf(owners, cCount);
+    for (i = 0; i < pCount; i += 1) {                  /* 未指派的 partition 給持有最少者 */
+      if (owners[i] === -1) {
+        lo = 0;
+        for (j = 1; j < cCount; j += 1) { if (loads[j] < loads[lo]) lo = j; }
+        owners[i] = lo;
+        loads[lo] += 1;
       }
-      box.innerHTML = '<div class="an"></div><div class="al"></div><div class="ah"></div>';
-      box.querySelector(".an").textContent = p.title;
-      box.querySelector(".al").textContent = "owner " + p.owner;
-      box.querySelector(".ah").textContent = p.hint;
-      box.appendChild(slots);
-      partsEl.appendChild(box);
+    }
+    while (guard < pCount * cCount + 8) {              /* 平衡到 max 減 min 不大於 1 */
+      guard += 1;
+      hi = 0; lo = 0;
+      for (j = 1; j < cCount; j += 1) {
+        if (loads[j] > loads[hi]) hi = j;
+        if (loads[j] < loads[lo]) lo = j;
+      }
+      if (loads[hi] - loads[lo] <= 1) break;
+      pick = -1;
+      for (i = pCount - 1; i >= 0; i -= 1) { if (owners[i] === hi) { pick = i; break; } }
+      if (pick === -1) break;
+      owners[pick] = lo;
+      loads[hi] -= 1;
+      loads[lo] += 1;
+    }
+    return owners;
+  }
+
+  // @probe fn       computeAssign
+  // @probe baseline {"partitions":6,"consumers":2,"strategy":"range","delta":"join"}
+  // @probe sweep    {"partitions":[1,12],"consumers":[1,8],"strategy":["sticky","coop"],"delta":["leave","none"]}
+  function computeAssign(p) {
+    p = p || {};
+    var P = clampInt(p.partitions, P_MIN, P_MAX, ASN_BASE.partitions);
+    var C = clampInt(p.consumers, C_MIN, C_MAX, ASN_BASE.consumers);
+    var strategy = oneOf(p.strategy == null ? ASN_BASE.strategy : p.strategy, STRAT_IDS, ASN_BASE.strategy);
+    var delta = oneOf(p.delta == null ? ASN_BASE.delta : p.delta, ["join", "leave", "none"], ASN_BASE.delta);
+
+    var step = delta === "join" ? 1 : (delta === "leave" ? -1 : 0);
+    var cAfter = clampInt(C + step, C_MIN, C_CEIL, C);
+    var triggered = delta !== "none" && cAfter !== C;
+
+    /* 三種策略共用同一個起點（RangeAssignor 是 Kafka 預設），
+       所以比出來的是「assignor 與協定的差別」，不是「起點的差別」。 */
+    var before = rangeAssign(P, C);
+
+    function afterFor(sid) {
+      if (!triggered) return before.slice();
+      return sid === "range" ? rangeAssign(P, cAfter) : stickyAssign(before, P, cAfter);
+    }
+
+    function costFor(sid) {
+      var after = afterFor(sid), moved = 0, i, coop, stalled;
+      for (i = 0; i < P; i += 1) { if (before[i] !== after[i]) moved += 1; }
+      coop = sid === "coop";
+      /* Eager 與 Sticky 都走 eager 協定，全員 revoke；
+         只有 cooperative 只 revoke 真正換手的那幾條。 */
+      stalled = !triggered ? 0 : (coop ? moved : P);
+      return {
+        id: sid, after: after, moved: moved, stalled: stalled,
+        stallPct: Math.round(stalled * 100 / P),
+        rounds: !triggered ? 0 : (coop && moved > 0 ? 2 : 1)
+      };
+    }
+
+    var costRows = [], i;
+    for (i = 0; i < STRAT_IDS.length; i += 1) costRows.push(costFor(STRAT_IDS[i]));
+
+    var cur = costFor(strategy);
+    var after = cur.after;
+    var loads = loadsOf(after, cAfter);
+    var maxL = loads[0], minL = loads[0];
+    for (i = 1; i < loads.length; i += 1) {
+      if (loads[i] > maxL) maxL = loads[i];
+      if (loads[i] < minL) minL = loads[i];
+    }
+
+    var diffBand = [], keepCount = 0, moveCount = 0, stallOnly = 0;
+    for (i = 0; i < P; i += 1) {
+      if (before[i] !== after[i]) diffBand.push("move");
+      else if (cur.stalled > 0 && strategy !== "coop") diffBand.push("stall");
+      else diffBand.push("keep");
+    }
+    for (i = 0; i < diffBand.length; i += 1) {
+      if (diffBand[i] === "keep") keepCount += 1;
+      else if (diffBand[i] === "move") moveCount += 1;
+      else stallOnly += 1;
+    }
+
+    var parallelCap = Math.min(P, cAfter);
+    var idleConsumers = Math.max(0, cAfter - P);
+
+    var rule = "並行度上限 = min(partition " + P + ", consumer " + cAfter + ") = " + parallelCap + " 條" +
+      (idleConsumers > 0 ? "｜有 " + idleConsumers + " 名 consumer 拿不到任何 partition" : "") +
+      "｜負載差 " + (maxL - minL) + " 條" +
+      (triggered
+        ? "｜事件：" + (delta === "join" ? "第 " + cAfter + " 名加入"
+                                       : "從 " + C + " 名減為 " + cAfter + " 名") +
+          "，換手 " + cur.moved + " 條、停頓 " + cur.stalled + " 條"
+        : "｜沒有成員變動，不觸發 rebalance");
+
+    return {
+      partitions: P, consumers: C, cAfter: cAfter, strategy: strategy, delta: delta,
+      triggered: triggered,
+      before: before, after: after, diffBand: diffBand,
+      keepCount: keepCount, moveCount: moveCount, stallOnlyCount: stallOnly,
+      movedCount: cur.moved, stalledCount: cur.stalled, revokedCount: cur.stalled,
+      stallPct: cur.stallPct, rounds: cur.rounds,
+      parallelCap: parallelCap, idleConsumers: idleConsumers,
+      loads: loads, skew: maxL - minL,
+      costRows: costRows, rule: rule
+    };
+  }
+
+  /* ---------- (3) DOM 參照 ---------- */
+
+  var demoDur = document.getElementById("demo-kf-dur");
+  var demoGrp = document.getElementById("demo-kf-group");
+  if (!demoDur && !demoGrp) return;
+
+  function pick(id) { return document.getElementById(id); }
+
+  var dEl = null, gEl = null;
+
+  if (demoDur) {
+    dEl = {
+      seg: pick("kd-seg-acks"),
+      rf: pick("kd-rf"), rfv: pick("kd-rf-val"),
+      isr: pick("kd-isr"), isrv: pick("kd-isr-val"),
+      down: pick("kd-down"), downv: pick("kd-down-val"),
+      unclean: pick("kd-unclean"),
+      reset: pick("kd-reset"),
+      verdict: pick("kd-verdict"), outcome: pick("kd-outcome"),
+      why: pick("kd-why"), more: pick("kd-more"),
+      moreSum: pick("kd-more-sum"), whyRest: pick("kd-why-rest"),
+      advList: pick("kd-adv-list"),
+      ta: pick("kd-ta"), td: pick("kd-td"),
+      trackA: pick("kd-track-a"), trackD: pick("kd-track-d"),
+      tolnote: pick("kd-tolnote"),
+      mx: pick("kd-mx"), grid: pick("kd-grid"), empty: pick("kd-empty"),
+      status: pick("kd-status")
+    };
+  }
+
+  if (demoGrp) {
+    gEl = {
+      seg: pick("kg-seg-strat"),
+      p: pick("kg-p"), pv: pick("kg-p-val"),
+      c: pick("kg-c"), cv: pick("kg-c-val"),
+      delta: pick("kg-delta"),
+      reset: pick("kg-reset"),
+      rib: pick("kg-rib"), load: pick("kg-load"),
+      costBody: pick("kg-cost-body"),
+      status: pick("kg-status")
+    };
+  }
+
+  var durState = {
+    rf: DUR_BASE.rf, minIsr: DUR_BASE.minIsr, acks: DUR_BASE.acks,
+    unclean: DUR_BASE.unclean, down: DUR_BASE.down
+  };
+  var asnState = {
+    partitions: ASN_BASE.partitions, consumers: ASN_BASE.consumers,
+    strategy: ASN_BASE.strategy, delta: ASN_BASE.delta
+  };
+
+  /* ---------- (4) render — 只讀 compute 回傳的 state 畫出來 ---------- */
+
+  function box(parent, cls, text) {
+    var n = document.createElement("div");
+    n.className = cls;
+    n.textContent = text;
+    parent.appendChild(n);
+    return n;
+  }
+
+  function item(cls, text) {
+    var n = document.createElement("li");
+    n.className = cls;
+    n.textContent = text;
+    return n;
+  }
+
+  function markPressed(root, attr, value) {
+    if (!root) return;
+    var btns = root.querySelectorAll("button"), i;
+    for (i = 0; i < btns.length; i += 1) {
+      btns[i].setAttribute("aria-pressed", btns[i].getAttribute(attr) === value ? "true" : "false");
+    }
+  }
+
+  function paintTrack(track, tol, rf, down) {
+    track.innerHTML = "";
+    track.style.gridTemplateColumns = "repeat(" + (rf + 1) + ", minmax(0, 1fr))";
+    var i, cls;
+    for (i = 0; i <= rf; i += 1) {
+      cls = "tk " + (i <= tol ? "safe" : "unsafe");
+      if (i === down) cls += " cur";
+      box(track, cls, String(i));
+    }
+  }
+
+  function renderDur(s) {
+    var meta = OUTCOME[s.outcome], i, d, row, span;
+
+    dEl.rf.value = String(s.rf);
+    dEl.isr.value = String(s.minIsr);
+    dEl.down.value = String(s.down);
+    dEl.unclean.checked = s.unclean;
+    dEl.rfv.textContent = String(s.rf);
+    dEl.isrv.textContent = String(s.minIsr);
+    dEl.downv.textContent = String(s.down);
+    markPressed(dEl.seg, "data-acks", s.acks);
+
+    dEl.verdict.className = "kd-verdict t-" + meta.tone;
+    dEl.outcome.textContent = meta.label;
+
+    /* 排序與「最多顯示 5 條」的截斷只發生在這裡；compute 一律回傳全部條數 */
+    var ordered = sortReasons(s.reasons);
+    var shown = ordered.slice(0, WHY_SHOWN);
+    var rest = ordered.slice(WHY_SHOWN);
+    dEl.why.innerHTML = "";
+    for (i = 0; i < shown.length; i += 1) dEl.why.appendChild(item("sv-" + shown[i].sev, shown[i].text));
+    dEl.whyRest.innerHTML = "";
+    for (i = 0; i < rest.length; i += 1) dEl.whyRest.appendChild(item("sv-" + rest[i].sev, rest[i].text));
+    dEl.more.hidden = rest.length === 0;
+    dEl.moreSum.textContent = "其餘 " + rest.length + " 條理由";
+
+    dEl.advList.innerHTML = "";
+    if (s.adviceNote) {
+      dEl.advList.appendChild(item("kw", s.adviceNote));
+    } else {
+      for (i = 0; i < s.adviceDelta.length; i += 1) {
+        d = s.adviceDelta[i];
+        row = document.createElement("li");
+        span = document.createElement("span");
+        span.className = "kb"; span.textContent = d.knob;
+        row.appendChild(span);
+        span = document.createElement("span");
+        span.className = "kv"; span.textContent = " " + d.from + " → " + d.to + " ";
+        row.appendChild(span);
+        span = document.createElement("span");
+        span.className = "kw"; span.textContent = "· " + d.why;
+        row.appendChild(span);
+        dEl.advList.appendChild(row);
+      }
+    }
+
+    dEl.ta.textContent = String(s.tolAvail);
+    dEl.td.textContent = String(s.tolDur);
+    paintTrack(dEl.trackA, s.tolAvail, s.rf, s.down);
+    paintTrack(dEl.trackD, s.tolDur, s.rf, s.down);
+    dEl.tolnote.textContent = s.tolNote;
+
+    var hasMatrix = s.acceptedWrites > 0;
+    dEl.mx.hidden = !hasMatrix;
+    dEl.empty.hidden = hasMatrix;
+    dEl.empty.textContent = s.emptyNote;
+
+    if (hasMatrix) {
+      var g = dEl.grid, t, r, death, lab, tk, cls, txt;
+      g.innerHTML = "";
+      g.style.gridTemplateColumns = "108px repeat(" + s.ticks.length + ", minmax(34px, 1fr))";
+      box(g, "hd rl", "副本 / 時刻");
+      for (t = 0; t < s.ticks.length; t += 1) box(g, "hd", "t" + s.ticks[t].t);
+      for (r = 0; r < s.rf; r += 1) {
+        death = s.replicaDeath[r];
+        lab = "r" + r + (r === 0 ? "·L" : "");
+        if (death > 0) lab += " ✕t" + death;
+        box(g, "rl", lab);
+        for (t = 0; t < s.ticks.length; t += 1) {
+          tk = s.ticks[t];
+          if (!tk.ok) { cls = "c-blk"; txt = "✕"; }
+          else if (death > 0 && death < tk.t) { cls = "c-gone"; txt = "—"; }
+          else if (s.cutFrom >= 0 && tk.offset >= s.cutFrom) { cls = "c-cut"; txt = String(tk.offset); }
+          else { cls = "c-held"; txt = String(tk.offset); }
+          box(g, cls, txt);
+        }
+      }
+      box(g, "rl", "HWM");
+      for (t = 0; t < s.ticks.length; t += 1) {
+        tk = s.ticks[t];
+        box(g, tk.ok ? "hw" : "hwoff", String(tk.hwm));
+      }
+    }
+
+    dEl.status.textContent = s.rule;
+  }
+
+  function renderAssign(s) {
+    var cols = "82px repeat(" + s.partitions + ", minmax(30px, 1fr))";
+    var i, b, o, row, nm, bar, fill, val, tr, td, c, cells, j, maxL;
+
+    gEl.p.value = String(s.partitions);
+    gEl.c.value = String(s.consumers);
+    gEl.delta.value = s.delta;
+    gEl.pv.textContent = String(s.partitions);
+    gEl.cv.textContent = String(s.consumers);
+    markPressed(gEl.seg, "data-strat", s.strategy);
+
+    gEl.rib.innerHTML = "";
+
+    b = document.createElement("div");
+    b.className = "kg-band";
+    b.style.gridTemplateColumns = cols;
+    box(b, "bl", "partition");
+    for (i = 0; i < s.partitions; i += 1) box(b, "ph", "P" + i);
+    gEl.rib.appendChild(b);
+
+    b = document.createElement("div");
+    b.className = "kg-band";
+    b.style.gridTemplateColumns = cols;
+    box(b, "bl", "before");
+    for (i = 0; i < s.partitions; i += 1) {
+      o = s.before[i];
+      box(b, o >= 0 ? "o" + (o % 9) : "onone", o >= 0 ? "c" + o : "—");
+    }
+    gEl.rib.appendChild(b);
+
+    b = document.createElement("div");
+    b.className = "kg-band";
+    b.style.gridTemplateColumns = cols;
+    box(b, "bl", "換手");
+    for (i = 0; i < s.partitions; i += 1) {
+      box(b, "d-" + s.diffBand[i], DIFF_GLYPH[s.diffBand[i]]);
+    }
+    gEl.rib.appendChild(b);
+
+    b = document.createElement("div");
+    b.className = "kg-band";
+    b.style.gridTemplateColumns = cols;
+    box(b, "bl", "after");
+    for (i = 0; i < s.partitions; i += 1) {
+      o = s.after[i];
+      box(b, o >= 0 ? "o" + (o % 9) : "onone", o >= 0 ? "c" + o : "—");
+    }
+    gEl.rib.appendChild(b);
+
+    maxL = 1;
+    for (i = 0; i < s.loads.length; i += 1) { if (s.loads[i] > maxL) maxL = s.loads[i]; }
+    gEl.load.innerHTML = "";
+    for (i = 0; i < s.loads.length; i += 1) {
+      row = document.createElement("div");
+      row.className = "kg-lrow" + (s.loads[i] === 0 ? " idle" : "");
+      nm = document.createElement("div");
+      nm.className = "ln"; nm.textContent = "c" + i;
+      bar = document.createElement("div");
+      bar.className = "kg-lbar";
+      fill = document.createElement("i");
+      fill.className = "kg-f" + (i % 9);
+      fill.style.width = Math.round(s.loads[i] * 100 / maxL) + "%";
+      bar.appendChild(fill);
+      val = document.createElement("div");
+      val.className = "lv";
+      val.textContent = s.loads[i] + " 條" + (s.loads[i] === 0 ? " · 閒置" : "");
+      row.appendChild(nm); row.appendChild(bar); row.appendChild(val);
+      gEl.load.appendChild(row);
+    }
+
+    gEl.costBody.innerHTML = "";
+    for (i = 0; i < s.costRows.length; i += 1) {
+      c = s.costRows[i];
+      tr = document.createElement("tr");
+      if (c.id === s.strategy) tr.className = "sel";
+      cells = [
+        { cls: "nm", v: STRAT_NAME[c.id] },
+        { cls: "", v: String(c.moved) },
+        { cls: "", v: String(c.stalled) },
+        { cls: "", v: c.stallPct + "%" },
+        { cls: "", v: String(c.rounds) }
+      ];
+      for (j = 0; j < cells.length; j += 1) {
+        td = document.createElement("td");
+        td.className = cells[j].cls;
+        td.textContent = cells[j].v;
+        tr.appendChild(td);
+      }
+      gEl.costBody.appendChild(tr);
+    }
+
+    gEl.status.textContent = s.rule;
+  }
+
+  function syncDur() { renderDur(computeDurability(durState)); }
+  function syncAssign() { renderAssign(computeAssign(asnState)); }
+
+  /* ---------- (5) 事件綁定 ---------- */
+
+  if (demoDur) {
+    dEl.seg.addEventListener("click", function (e) {
+      var btn = e.target.closest("button[data-acks]");
+      if (!btn) return;
+      durState.acks = btn.getAttribute("data-acks");
+      syncDur();
     });
-  }
-
-  function renderActors() {
-    actorsEl.innerHTML = "";
-    actors.forEach(function (a) {
-      var box = document.createElement("div");
-      box.className = "kf-node " + a.klass;
-      box.innerHTML = '<div class="an"></div><div class="al"></div><div class="av"></div><div class="ah"></div>';
-      box.querySelector(".an").textContent = a.name;
-      box.querySelector(".al").textContent = a.sub;
-      box.querySelector(".av").textContent = a.val;
-      box.querySelector(".ah").textContent = a.hint;
-      actorsEl.appendChild(box);
+    dEl.rf.addEventListener("input", function () {
+      durState.rf = parseInt(dEl.rf.value, 10);
+      syncDur();
     });
-  }
-
-  function renderWire() {
-    wireEl.innerHTML = "";
-    wire.forEach(function (row) {
-      var div = document.createElement("div");
-      div.className = "kf-row " + row.kind;
-      div.innerHTML = '<span class="ar"></span><span class="tg"></span><span class="tx"></span>';
-      div.querySelector(".ar").textContent = String(row.step);
-      div.querySelector(".tg").textContent = row.tag;
-      div.querySelector(".tx").textContent = row.text;
-      wireEl.appendChild(div);
+    dEl.isr.addEventListener("input", function () {
+      durState.minIsr = parseInt(dEl.isr.value, 10);
+      syncDur();
     });
+    dEl.down.addEventListener("input", function () {
+      durState.down = parseInt(dEl.down.value, 10);
+      syncDur();
+    });
+    dEl.unclean.addEventListener("change", function () {
+      durState.unclean = dEl.unclean.checked;
+      syncDur();
+    });
+    dEl.reset.addEventListener("click", function () {
+      durState.rf = DUR_BASE.rf;
+      durState.minIsr = DUR_BASE.minIsr;
+      durState.acks = DUR_BASE.acks;
+      durState.unclean = DUR_BASE.unclean;
+      durState.down = DUR_BASE.down;
+      syncDur();
+    });
+    syncDur();
   }
 
-  function toneClass(elNode, val, goodList, badList, warnList) {
-    elNode.classList.remove("good", "bad", "warn");
-    if (goodList && goodList.indexOf(val) !== -1) elNode.classList.add("good");
-    else if (badList && badList.indexOf(val) !== -1) elNode.classList.add("bad");
-    else if (warnList && warnList.indexOf(val) !== -1) elNode.classList.add("warn");
+  if (demoGrp) {
+    gEl.seg.addEventListener("click", function (e) {
+      var btn = e.target.closest("button[data-strat]");
+      if (!btn) return;
+      asnState.strategy = btn.getAttribute("data-strat");
+      syncAssign();
+    });
+    gEl.p.addEventListener("input", function () {
+      asnState.partitions = parseInt(gEl.p.value, 10);
+      syncAssign();
+    });
+    gEl.c.addEventListener("input", function () {
+      asnState.consumers = parseInt(gEl.c.value, 10);
+      syncAssign();
+    });
+    gEl.delta.addEventListener("change", function () {
+      asnState.delta = gEl.delta.value;
+      syncAssign();
+    });
+    gEl.reset.addEventListener("click", function () {
+      asnState.partitions = ASN_BASE.partitions;
+      asnState.consumers = ASN_BASE.consumers;
+      asnState.strategy = ASN_BASE.strategy;
+      asnState.delta = ASN_BASE.delta;
+      syncAssign();
+    });
+    syncAssign();
   }
-
-  function render() {
-    var total = mode === "rebal" ? REBAL_TOTAL : DUR_TOTAL;
-    el("kf-m-step").textContent = String(step);
-    el("kf-m-total").textContent = String(total);
-    el("kf-m-prod").textContent = String(metrics.prod);
-    el("kf-m-commit").textContent = String(metrics.commit);
-    el("kf-m-rej").textContent = String(metrics.rej);
-    el("kf-m-lost").textContent = String(metrics.lost);
-
-    el("kf-p-op").textContent = panel.op;
-    el("kf-p-rule").textContent = panel.rule;
-    el("kf-p-hold").textContent = panel.hold;
-    el("kf-p-cli").textContent = panel.cli;
-    el("kf-p-model").textContent = panel.model;
-    el("kf-p-hwm").textContent = panel.hwm;
-    el("kf-p-writable").textContent = panel.writable;
-    el("kf-p-risk").textContent = panel.risk;
-
-    toneClass(el("kf-p-writable"), panel.writable, ["是"], ["否"], []);
-    var riskEl = el("kf-p-risk");
-    riskEl.classList.remove("good", "bad", "warn");
-    if (/已遺失|只在 Leader|fire-and-forget/.test(panel.risk)) riskEl.classList.add("bad");
-    else if (/已擋|無 Leader|lag/.test(panel.risk)) riskEl.classList.add("warn");
-    else if (/耐久|無/.test(panel.risk)) riskEl.classList.add("good");
-
-    partsLabel.textContent = mode === "rebal" ? "Partitions" : "Partition log";
-    actorsLabel.textContent = mode === "rebal" ? "Consumers" : "Brokers";
-
-    renderParts();
-    renderActors();
-    renderWire();
-
-    statusEl.textContent = statusText;
-    verdictEl.textContent = verdict.text;
-    verdictEl.className = "kf-verdict" + (verdict.tone ? " tone-" + verdict.tone : "");
-
-    rebalView.hidden = mode !== "rebal";
-    durView.hidden = mode !== "dur";
-  }
-
-  function totalSteps() {
-    return mode === "rebal" ? REBAL_TOTAL : DUR_TOTAL;
-  }
-
-  document.getElementById("kf-seg-mode").addEventListener("click", function (e) {
-    var btn = e.target.closest("button[data-mode]");
-    if (!btn) return;
-    mode = btn.getAttribute("data-mode");
-    setSeg("kf-seg-mode", "data-mode", mode);
-    fresh();
-    apply();
-  });
-
-  document.getElementById("kf-seg-assign").addEventListener("click", function (e) {
-    var btn = e.target.closest("button[data-assign]");
-    if (!btn) return;
-    assign = btn.getAttribute("data-assign");
-    setSeg("kf-seg-assign", "data-assign", assign);
-    apply();
-  });
-
-  document.getElementById("kf-seg-acks").addEventListener("click", function (e) {
-    var btn = e.target.closest("button[data-acks]");
-    if (!btn) return;
-    acks = btn.getAttribute("data-acks");
-    setSeg("kf-seg-acks", "data-acks", acks);
-    apply();
-  });
-
-  document.getElementById("kf-seg-isr").addEventListener("click", function (e) {
-    var btn = e.target.closest("button[data-isr]");
-    if (!btn) return;
-    minIsr = parseInt(btn.getAttribute("data-isr"), 10);
-    setSeg("kf-seg-isr", "data-isr", String(minIsr));
-    apply();
-  });
-
-  document.getElementById("kf-seg-unclean").addEventListener("click", function (e) {
-    var btn = e.target.closest("button[data-unclean]");
-    if (!btn) return;
-    unclean = btn.getAttribute("data-unclean") === "on";
-    setSeg("kf-seg-unclean", "data-unclean", unclean ? "on" : "off");
-    apply();
-  });
-
-  btnNext.addEventListener("click", function () {
-    if (step >= totalSteps() - 1) return;
-    step += 1;
-    apply();
-  });
-
-  btnReset.addEventListener("click", function () {
-    fresh();
-    apply();
-  });
-
-  fresh();
-  apply();
 })();
 </script>
 

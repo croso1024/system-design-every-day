@@ -1,4 +1,9 @@
-<!-- demo-archetype: A｜時序推進 — 讀者先選情境（Consumer Group Rebalance 或 acks·ISR·下線），調整指派策略或 acks／min.insync.replicas／unclean election，再按「下一步」走完固定六步劇本，觀察換手停頓、HWM 推進與拒寫／遺失。選 A 是因為兩個劇本本質都是「第三名成員加入」與「副本逐一下線」這種順序固定、且每一步的後果只有在前一步成立時才成立的事件序列。 -->
+<!-- demo-archetype: E｜決策器（主，第 6 節「ISR、min.insync.replicas 與 unclean election」）＋B｜參數掃描（次，第 5 節「Consumer Group 與 Rebalance」）
+     E：讀者調 acks／min.insync.replicas／replication factor／unclean election 四顆旋鈕，再加「同時掛掉幾台 broker」，
+     即時算出可否寫入、已 ack 的訊息會不會遺失（在哪一種故障序列下）、能容忍幾台故障而不失可用性、能容忍幾台而不遺失資料，
+     並由判定集合推導建議設定與理由。選 E 是因為本節的命題是「這組設定在什麼故障下會出事」——那是一個判定問題，不是一段流程。
+     B：讀者調 partition 數／consumer 數／指派策略（Eager RangeAssignor／Sticky／Cooperative Sticky）／成員加入或離開，
+     真的跑三套 assignor 演算法，算出指派表、換手條數、停頓條數與消費並行度上限。選 B 是因為三種策略的真正差別是兩個數字，不是一段敘事。 -->
 <style>
   #kf-root {
     --kf-c: #3f6188; --kf-c-soft: #eef2f7;
@@ -87,126 +92,205 @@
   .kf-pane .ss { font-family: var(--mono); font-size: 11px; color: var(--text-3); margin-bottom: 8px; letter-spacing: .04em; }
   .kf-pane ul { margin: 0; padding-left: 1.15em; font-size: 13px; color: var(--text-2); line-height: 1.65; }
 
-  .kf-ctrl { display: flex; flex-wrap: wrap; gap: 10px; margin: 10px 0 8px; align-items: center; }
-  .kf-metric { display: flex; flex-wrap: wrap; gap: 14px; margin: 8px 0 4px; font-size: 13px; color: var(--text-2); }
-  .kf-metric strong { color: var(--text); font-family: var(--mono); font-size: 12.5px; }
-
-  .kf-mode-hint { font-size: 12.5px; color: var(--text-2); margin: 8px 0 4px; line-height: 1.55; }
-
-  .kf-view { display: block; }
-  .kf-view[hidden] { display: none; }
-
-  .kf-parts { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin: 12px 0 6px; }
-  @media (max-width: 720px) { .kf-parts { grid-template-columns: 1fr; } }
-  .kf-parts[hidden] { display: none; }
-
-  .kf-part {
-    border: 1.5px solid var(--border-strong); border-radius: var(--radius-sm);
-    padding: 10px 10px 8px; background: #fff;
-    transition: background .18s, border-color .18s, box-shadow .18s;
+  /* ── demo 1（E｜durability 決策器）前綴 kd- ───────────────────────── */
+  .kd-ctrl { display: flex; flex-wrap: wrap; gap: 9px 14px; align-items: center; margin: 10px 0 0; }
+  .kd-sl {
+    display: inline-flex; align-items: center; gap: 7px;
+    border: 1px solid var(--border-strong); border-radius: 20px;
+    background: #fff; padding: 5px 12px 5px 11px;
   }
-  .kf-part .an { font-weight: 700; font-size: 13px; }
-  .kf-part .al { font-family: var(--mono); font-size: 10.5px; color: var(--text-3); margin-top: 2px; }
-  .kf-part .ah { font-size: 11.5px; color: var(--text-2); margin-top: 4px; min-height: 1.4em; }
-  .kf-part.idle { background: #fff; }
-  .kf-part.wait { background: var(--accent-soft); border-color: var(--accent); }
-  .kf-part.wait .an { color: var(--accent); }
-  .kf-part.ok { background: var(--ok-soft); border-color: var(--ok); }
-  .kf-part.ok .an { color: var(--ok); }
-  .kf-part.hold { background: var(--warn-soft); border-color: var(--warn); }
-  .kf-part.hold .an { color: var(--warn); }
-  .kf-part.bad { background: var(--bad-soft); border-color: var(--bad); }
-  .kf-part.bad .an { color: var(--bad); }
-
-  .kf-slots { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 8px; min-height: 28px; }
-  .kf-slot {
-    font-family: var(--mono); font-size: 10.5px; font-weight: 700;
-    border: 1.5px solid var(--border-strong); border-radius: 5px;
-    padding: 4px 7px; background: #fff; color: var(--text-3);
+  .kd-sl input[type="range"] { width: 112px; accent-color: var(--accent); }
+  .kd-sl .sn { font-family: var(--mono); font-size: 11px; color: var(--text-3); letter-spacing: .04em; white-space: nowrap; }
+  .kd-sl b { font-family: var(--mono); font-size: 13px; color: var(--accent); min-width: 15px; text-align: right; }
+  .kd-ck {
+    display: inline-flex; align-items: center; gap: 7px; cursor: pointer;
+    border: 1px solid var(--border-strong); border-radius: 20px;
+    background: #fff; padding: 6px 13px;
+    font-family: var(--mono); font-size: 11px; color: var(--text-2);
   }
-  .kf-slot.ready { background: var(--kf-c-soft); border-color: var(--kf-c); color: var(--kf-c); }
-  .kf-slot.ok { background: var(--kf-s-soft); border-color: var(--kf-s); color: var(--kf-s); }
-  .kf-slot.hold { background: var(--kf-w-soft); border-color: var(--kf-w); color: var(--kf-w); }
-  .kf-slot.lost { background: var(--kf-bad-soft); border-color: var(--kf-bad); color: var(--kf-bad); text-decoration: line-through; }
-
-  .kf-actors { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin: 12px 0 6px; }
-  @media (max-width: 720px) { .kf-actors { grid-template-columns: 1fr; } }
-  .kf-actors[hidden] { display: none; }
-
-  .kf-node {
-    border: 1.5px solid var(--border-strong); border-radius: var(--radius-sm);
-    padding: 10px 10px 8px; background: #fff;
-    transition: background .18s, border-color .18s, box-shadow .18s;
-  }
-  .kf-node .an { font-weight: 700; font-size: 13px; }
-  .kf-node .al { font-family: var(--mono); font-size: 10.5px; color: var(--text-3); margin-top: 2px; }
-  .kf-node .av { font-family: var(--mono); font-size: 12.5px; font-weight: 700; margin-top: 8px; color: var(--text); word-break: break-all; }
-  .kf-node .ah { font-size: 11.5px; color: var(--text-2); margin-top: 4px; min-height: 1.4em; }
-  .kf-node.idle { background: #fff; }
-  .kf-node.ok { background: var(--ok-soft); border-color: var(--ok); }
-  .kf-node.ok .an { color: var(--ok); }
-  .kf-node.wait { background: var(--accent-soft); border-color: var(--accent); }
-  .kf-node.wait .an { color: var(--accent); }
-  .kf-node.hold { background: var(--warn-soft); border-color: var(--warn); }
-  .kf-node.hold .an { color: var(--warn); }
-  .kf-node.bad { background: var(--bad-soft); border-color: var(--bad); }
-  .kf-node.bad .an { color: var(--bad); }
-  .kf-node.coord { border-style: dashed; }
-  .kf-node.down { opacity: .55; background: var(--bg-soft); }
-
-  .kf-col-label {
+  .kd-ck input { accent-color: var(--kf-bad); }
+  .kd-lab {
     font-family: var(--mono); font-size: 10.5px; letter-spacing: .06em; text-transform: uppercase;
-    color: var(--text-3); margin: 10px 0 2px;
+    color: var(--text-3); margin: 14px 0 2px;
   }
 
-  .kf-panels { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 12px; }
-  @media (max-width: 640px) { .kf-panels { grid-template-columns: 1fr; } }
-  .kf-panel { border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 12px; background: #fff; }
-  .kf-panel .pt {
-    font-size: 11px; color: var(--text-3); letter-spacing: .06em; text-transform: uppercase;
-    font-family: var(--mono); margin-bottom: 8px;
+  /* 結論條：E 型的產出就是它，刻意給它最大的視覺權重 */
+  .kd-verdict {
+    margin: 14px 0 4px; padding: 15px 17px;
+    border: 1px solid var(--border-strong); border-left: 5px solid var(--text-3);
+    border-radius: var(--radius-sm); background: #fff;
   }
-  .kf-panel .prow {
-    display: flex; justify-content: space-between; gap: 8px;
-    font-family: var(--mono); font-size: 12px; padding: 4px 0;
+  .kd-verdict.t-ok   { border-left-color: var(--ok);   background: var(--ok-soft); }
+  .kd-verdict.t-warn { border-left-color: var(--warn); background: var(--warn-soft); }
+  .kd-verdict.t-bad  { border-left-color: var(--bad);  background: var(--bad-soft); }
+  .kd-verdict .vk {
+    display: block; margin-bottom: 5px; color: var(--text-3);
+    font-family: var(--mono); font-size: 10.5px; letter-spacing: .06em; text-transform: uppercase;
+  }
+  .kd-verdict .vt { font-weight: 700; font-size: 16px; line-height: 1.45; color: var(--text); }
+  .kd-why { list-style: none; margin: 11px 0 0; padding: 0; }
+  .kd-why li {
+    position: relative; padding: 6px 0 6px 21px;
+    font-size: 13px; line-height: 1.65; color: var(--text-2);
     border-bottom: 1px dashed var(--border);
   }
-  .kf-panel .prow:last-child { border-bottom: none; }
-  .kf-panel .pk { color: var(--text-3); white-space: nowrap; }
-  .kf-panel .pv { color: var(--text); font-weight: 600; text-align: right; word-break: break-all; }
-  .kf-panel .pv.good { color: var(--ok); }
-  .kf-panel .pv.bad { color: var(--bad); }
-  .kf-panel .pv.warn { color: var(--warn); }
+  .kd-why li:last-child { border-bottom: none; }
+  .kd-why li::before {
+    position: absolute; top: 6px;
+    font-family: var(--mono); font-size: 11px; font-weight: 700;
+  }
+  .kd-why li.sv-blocker::before { content: "!!"; color: var(--bad);    left: 0; }
+  .kd-why li.sv-risk::before    { content: "!";  color: var(--warn);   left: 4px; }
+  .kd-why li.sv-info::before    { content: "·";  color: var(--text-3); left: 5px; }
+  .kd-more { margin-top: 9px; }
+  .kd-more summary {
+    cursor: pointer; color: var(--text-3);
+    font-family: var(--mono); font-size: 11px; letter-spacing: .04em;
+  }
+  .kd-adv {
+    margin-top: 12px; padding-top: 11px; border-top: 1px solid var(--border-strong);
+    font-size: 13px; line-height: 1.65; color: var(--text);
+  }
+  .kd-adv .at {
+    display: block; margin-bottom: 5px; color: var(--text-3);
+    font-family: var(--mono); font-size: 10.5px; letter-spacing: .06em; text-transform: uppercase;
+  }
+  .kd-adv ul { list-style: none; margin: 0; padding: 0; }
+  .kd-adv li { margin: 4px 0; }
+  .kd-adv .kb { font-family: var(--mono); font-weight: 700; color: var(--text); }
+  .kd-adv .kv { font-family: var(--mono); color: var(--accent); }
+  .kd-adv .kw { color: var(--text-2); }
 
-  .kf-wire {
-    border: 1px solid var(--border); border-radius: var(--radius-sm);
-    background: #fff; padding: 8px 10px; margin-top: 10px; max-height: 280px; overflow-y: auto;
+  /* 雙軸容忍度尺：本節的論點就是「這兩個數字不一樣」 */
+  .kd-tol {
+    margin: 14px 0 6px; padding: 13px 15px 12px;
+    border: 1px solid var(--border-strong); border-radius: 8px; background: var(--bg-soft);
   }
-  .kf-row {
-    display: flex; align-items: baseline; gap: 8px;
-    font-family: var(--mono); font-size: 11.5px; padding: 4px 0;
-    border-bottom: 1px dashed var(--border);
+  .kd-axis { display: grid; grid-template-columns: 124px 1fr; gap: 10px; align-items: center; }
+  .kd-axis + .kd-axis { margin-top: 9px; }
+  .kd-axis .al { font-family: var(--mono); font-size: 11px; color: var(--text-2); line-height: 1.35; }
+  .kd-axis .al b { display: block; font-size: 17px; color: var(--text); }
+  .kd-track {
+    display: grid; gap: 1px; background: var(--border);
+    border: 1px solid var(--border-strong); border-radius: 6px; overflow: hidden;
   }
-  .kf-row:last-child { border-bottom: none; }
-  .kf-row .ar { width: 42px; flex: none; text-align: center; color: var(--text-3); font-weight: 700; }
-  .kf-row .tg {
-    flex: none; border-radius: 4px; padding: 2px 6px; font-size: 10.5px; font-weight: 700;
-    border: 1px solid var(--border-strong); background: var(--bg-soft); color: var(--text-3);
+  .kd-track .tk {
+    background: #fff; text-align: center; padding: 8px 2px;
+    font-family: var(--mono); font-size: 11px; color: var(--text-3);
   }
-  .kf-row .tx { color: var(--text-2); line-height: 1.5; }
-  .kf-row.read .tg { background: var(--kf-c-soft); border-color: var(--kf-c); color: var(--kf-c); }
-  .kf-row.ok .tg { background: var(--kf-s-soft); border-color: var(--kf-s); color: var(--kf-s); }
-  .kf-row.warn .tg { background: var(--kf-w-soft); border-color: var(--kf-w); color: var(--kf-w); }
-  .kf-row.bad .tg { background: var(--kf-bad-soft); border-color: var(--kf-bad); color: var(--kf-bad); }
+  .kd-track .tk.safe   { background: var(--ok-soft);  color: var(--ok); font-weight: 700; }
+  .kd-track .tk.unsafe { background: var(--bad-soft); color: var(--bad); }
+  .kd-track .tk.cur    { box-shadow: inset 0 0 0 2px var(--accent); }
+  .kd-tolnote { margin: 10px 0 0; font-size: 12.5px; line-height: 1.6; color: var(--text-2); }
 
-  .kf-verdict {
-    margin-top: 10px; padding: 10px 12px; border-radius: var(--radius-sm);
-    border: 1px solid var(--border); background: var(--bg-soft);
-    font-size: 13px; color: var(--text-2); line-height: 1.55;
+  /* 副本 × 時刻 存活與複製矩陣 */
+  .kd-mx { overflow-x: auto; margin: 4px 0; }
+  .kd-grid {
+    display: grid; gap: 1px; min-width: 460px;
+    background: var(--border); border: 1px solid var(--border-strong);
+    border-radius: 8px; overflow: hidden;
   }
-  .kf-verdict.tone-ok { border-left: 3px solid var(--ok); background: var(--ok-soft); color: var(--text); }
-  .kf-verdict.tone-lock { border-left: 3px solid var(--warn); background: var(--warn-soft); color: var(--text); }
-  .kf-verdict.tone-bad { border-left: 3px solid var(--bad); background: var(--bad-soft); color: var(--text); }
+  .kd-grid > div {
+    background: #fff; padding: 7px 3px; text-align: center; line-height: 1.3;
+    font-family: var(--mono); font-size: 11px; color: var(--text-3);
+  }
+  .kd-grid .hd { background: var(--bg-soft); font-weight: 700; color: var(--text-2); }
+  .kd-grid .rl {
+    background: var(--bg-soft); font-weight: 700; color: var(--text-2);
+    text-align: left; padding-left: 9px; white-space: nowrap;
+  }
+  .kd-grid .c-held { background: var(--ok-soft);   color: var(--ok);   font-weight: 700; }
+  .kd-grid .c-gone { background: var(--bg-soft);   color: var(--text-3); }
+  .kd-grid .c-blk  { background: var(--warn-soft); color: var(--warn); font-weight: 700; }
+  .kd-grid .c-cut  { background: var(--bad-soft);  color: var(--bad);  font-weight: 700; text-decoration: line-through; }
+  .kd-grid .hw     { background: var(--accent-soft); color: var(--accent); font-weight: 700; }
+  .kd-grid .hwoff  { background: var(--bg-soft); color: var(--text-3); }
+  .kd-empty {
+    margin: 4px 0; padding: 14px 16px;
+    border: 1px dashed var(--border-strong); border-radius: 8px; background: var(--bg-soft);
+    font-size: 13px; line-height: 1.65; color: var(--text-2);
+  }
+  .kd-empty[hidden], .kd-mx[hidden] { display: none; }
+
+  /* ── demo 2（B｜partition 指派計算器）前綴 kg- ───────────────────── */
+  .kg-ctrl { display: flex; flex-wrap: wrap; gap: 9px 14px; align-items: center; margin: 10px 0 0; }
+  .kg-sl {
+    display: inline-flex; align-items: center; gap: 7px;
+    border: 1px solid var(--border-strong); border-radius: 20px;
+    background: #fff; padding: 5px 12px 5px 11px;
+  }
+  .kg-sl input[type="range"] { width: 112px; accent-color: var(--accent); }
+  .kg-sl .sn { font-family: var(--mono); font-size: 11px; color: var(--text-3); letter-spacing: .04em; white-space: nowrap; }
+  .kg-sl b { font-family: var(--mono); font-size: 13px; color: var(--accent); min-width: 18px; text-align: right; }
+  .kg-pick {
+    display: inline-flex; align-items: center; gap: 7px;
+    font-family: var(--mono); font-size: 11px; color: var(--text-3); letter-spacing: .04em;
+  }
+  .kg-pick select {
+    font-family: var(--sans); font-size: 12.5px; color: var(--text);
+    border: 1px solid var(--border-strong); border-radius: 6px;
+    background: #fff; padding: 5px 8px;
+  }
+  .kg-lab {
+    font-family: var(--mono); font-size: 10.5px; letter-spacing: .06em; text-transform: uppercase;
+    color: var(--text-3); margin: 14px 0 2px;
+  }
+  .kg-rib { overflow-x: auto; margin: 4px 0; }
+  .kg-band {
+    display: grid; gap: 1px; min-width: 430px;
+    background: var(--border); border: 1px solid var(--border-strong);
+    border-radius: 8px; overflow: hidden;
+  }
+  .kg-band + .kg-band { margin-top: 6px; }
+  .kg-band > div {
+    background: #fff; padding: 8px 2px; text-align: center;
+    font-family: var(--mono); font-size: 11px; color: var(--text-3);
+  }
+  .kg-band .bl {
+    background: var(--bg-soft); font-weight: 700; color: var(--text-2);
+    text-align: left; padding-left: 9px; white-space: nowrap;
+  }
+  .kg-band .ph { background: var(--bg-soft); font-weight: 700; color: var(--text-2); }
+  .kg-band .o0 { background: #eef2f7; color: #3f6188; box-shadow: inset 0 -3px 0 #3f6188; }
+  .kg-band .o1 { background: #eef4f1; color: #4d7d68; box-shadow: inset 0 -3px 0 #4d7d68; }
+  .kg-band .o2 { background: #f6f0e7; color: #a3743e; box-shadow: inset 0 -3px 0 #a3743e; }
+  .kg-band .o3 { background: #eef0f6; color: #6b6f9a; box-shadow: inset 0 -3px 0 #6b6f9a; }
+  .kg-band .o4 { background: #f6ecea; color: #a8554f; box-shadow: inset 0 -3px 0 #a8554f; }
+  .kg-band .o5 { background: #f1f3ee; color: #6f7d5c; box-shadow: inset 0 -3px 0 #6f7d5c; }
+  .kg-band .o6 { background: #f3eff5; color: #8a5f8f; box-shadow: inset 0 -3px 0 #8a5f8f; }
+  .kg-band .o7 { background: #eaf0f2; color: #4a7480; box-shadow: inset 0 -3px 0 #4a7480; }
+  .kg-band .o8 { background: #f4f1eb; color: #8a7250; box-shadow: inset 0 -3px 0 #8a7250; }
+  .kg-band .onone { background: var(--bg-soft); color: var(--text-3); }
+  .kg-band .d-keep  { background: #fff; color: var(--text-3); }
+  .kg-band .d-move  { background: var(--warn-soft); color: var(--warn); font-weight: 700; }
+  .kg-band .d-stall { background: var(--bad-soft);  color: var(--bad);  font-weight: 700; }
+
+  .kg-load { display: grid; gap: 5px; margin: 4px 0; }
+  .kg-lrow { display: grid; grid-template-columns: 66px 1fr 92px; gap: 9px; align-items: center; }
+  .kg-lrow .ln { font-family: var(--mono); font-size: 11.5px; font-weight: 700; color: var(--text-2); }
+  .kg-lrow .lv { font-family: var(--mono); font-size: 11px; color: var(--text-3); text-align: right; }
+  .kg-lrow.idle .ln, .kg-lrow.idle .lv { color: var(--bad); }
+  .kg-lbar {
+    height: 16px; border-radius: 4px; overflow: hidden;
+    background: var(--bg-soft); border: 1px solid var(--border);
+  }
+  .kg-lbar i { display: block; height: 100%; }
+  .kg-f0 { background: #3f6188; } .kg-f1 { background: #4d7d68; } .kg-f2 { background: #a3743e; }
+  .kg-f3 { background: #6b6f9a; } .kg-f4 { background: #a8554f; } .kg-f5 { background: #6f7d5c; }
+  .kg-f6 { background: #8a5f8f; } .kg-f7 { background: #4a7480; } .kg-f8 { background: #8a7250; }
+
+  .kg-costwrap { overflow-x: auto; margin: 4px 0; }
+  .kg-cost { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+  .kg-cost th, .kg-cost td { border: 1px solid var(--border); padding: 8px 10px; text-align: right; }
+  .kg-cost th {
+    background: var(--bg-soft); color: var(--text-2);
+    font-family: var(--mono); font-size: 11px; font-weight: 700; letter-spacing: .03em;
+  }
+  .kg-cost th:first-child, .kg-cost td:first-child { text-align: left; }
+  .kg-cost td { font-family: var(--mono); color: var(--text); }
+  .kg-cost td.nm { font-family: var(--sans); }
+  .kg-cost tr.sel td { background: var(--accent-soft); font-weight: 700; }
+  .kg-cost tr.sel td.nm { color: var(--accent); }
 </style>
 
 <div id="kf-root">
@@ -416,7 +500,7 @@
       </tbody>
     </table>
   </div>
-  <p class="cap"><code>acks=all</code> 等的是 ISR，不是「複製因子 RF 張副本都活著」。ISR 若被縮到只剩 Leader，<code>all</code> 等價於 <code>1</code>——除非 <code>min.insync.replicas</code> 把寫入擋下來。</p>
+  <p class="cap"><code>acks=all</code> 等的是 ISR，不是「複製因子 RF 張副本都活著」。ISR 若被縮到只剩 Leader，<code>all</code> 等價於 <code>1</code>——除非 <code>min.insync.replicas</code> 把寫入擋下來。這條等價關係可以在「ISR、min.insync.replicas 與 unclean election」那一節的決策器裡，把 <code>min.insync.replicas</code> 拖到 1 直接看出來。</p>
 
   <p class="kf-sub">冪等 Producer：消掉重試造成的重複</p>
   <p>網路超時後客戶端重試，Leader 其實已經寫入——這會在同一 partition 留下兩筆內容相同、offset 不同的紀錄。Idempotent Producer 給每個 Producer 一個 <var>PID</var>，並對每個 partition 維護單調的 sequence。Broker 記住「這個 PID 在這個 partition 上見過的最大序號」，重複序號直接丟棄並回成功。這條路徑要求 <code>acks=all</code> 與有上限的 in-flight batches；它修的是<strong>寫入端重試</strong>，不是消費端的效果一次，也不是跨 topic 的事務。</p>
@@ -498,16 +582,83 @@
       </ul>
     </div>
     <div class="kf-pane ok">
-      <div class="st">Sticky 與靜態成員</div>
-      <div class="ss">少搬家 · 少誤傷</div>
+      <div class="st">Sticky assignor 與 Cooperative 協定</div>
+      <div class="ss">兩件事 · 各砍一半</div>
       <ul>
-        <li>Cooperative sticky：只收回「必須換手」的 partition，其餘繼續拉。</li>
-        <li>動機：減少無效 revoke，縮短停頓，保留本機狀態（如處理中緩衝）。</li>
+        <li><strong>Sticky assignor</strong> 砍的是<strong>搬家數</strong>：新指派盡量沿用既有歸屬，只動必要的區。但它仍走 eager 協定——全組照樣先 revoke，停頓沒有變短。</li>
+        <li><strong>Cooperative 協定</strong> 砍的是<strong>停頓數</strong>：分兩輪 JoinGroup，只收回真正換手的那幾條，其餘繼續拉。</li>
         <li>Static membership（<code>group.instance.id</code>）：進程重啟在 timeout 內回來，視為同一人，不觸發 rebalance。</li>
       </ul>
     </div>
   </div>
-  <p class="cap">Sticky 不是「永不停頓」——該換手的區仍會暫停。Static membership 換到的是部署友好：滾動重啟不再震盪整個 group，但實例 ID 衝突或僵屍成員會佔住指派，要把 session timeout 與撤銷流程想清楚。</p>
+  <p class="cap">關鍵在左右兩欄砍的不是同一個數字：Eager Range 搬得多也停得久；Sticky 搬得少、卻因為仍走 eager 協定而停得一樣久；只有 Cooperative Sticky 兩個都少。Sticky 也不是「永不停頓」——該換手的區仍會暫停。Static membership 換到的是部署友好：滾動重啟不再震盪整個 group，但實例 ID 衝突或僵屍成員會佔住指派，要把 session timeout 與撤銷流程想清楚。</p>
+
+  <div class="demo" id="demo-kf-group">
+    <div class="demo-bar">
+      <span class="label">互動 · partition 指派計算器</span>
+      <span class="label" style="text-transform:none;font-family:var(--sans);font-size:12px;color:var(--text-2)">真的跑三套 assignor；換手數與停頓數即時重算</span>
+    </div>
+    <div class="demo-body">
+      <div class="seg" role="group" aria-label="指派策略" id="kg-seg-strat">
+        <button data-strat="range" aria-pressed="true">Eager · RangeAssignor</button>
+        <button data-strat="sticky" aria-pressed="false">Sticky（eager 協定）</button>
+        <button data-strat="coop" aria-pressed="false">Cooperative Sticky</button>
+      </div>
+
+      <div class="kg-ctrl">
+        <label class="kg-sl" for="kg-p">
+          <span class="sn">partition 數</span>
+          <input type="range" id="kg-p" min="1" max="12" step="1" value="6">
+          <b id="kg-p-val">6</b>
+        </label>
+        <label class="kg-sl" for="kg-c">
+          <span class="sn">consumer 數</span>
+          <input type="range" id="kg-c" min="1" max="8" step="1" value="2">
+          <b id="kg-c-val">2</b>
+        </label>
+        <label class="kg-pick" for="kg-delta">
+          <span>成員變動</span>
+          <select id="kg-delta">
+            <option value="join" selected>加入一名</option>
+            <option value="leave">離開一名</option>
+            <option value="none">無變動</option>
+          </select>
+        </label>
+        <button class="btn" id="kg-reset">重置</button>
+      </div>
+
+      <div class="legend">
+        <span><i class="dot ns-idle"></i>留（沒換手、也沒停頓）</span>
+        <span><i class="dot ns-lock"></i>搬（換手；換手期間必然停頓）</span>
+        <span><i class="dot ns-bad"></i>停（沒換手卻仍被 revoke 而停頓）</span>
+      </div>
+
+      <div class="kg-lab">partition 歸屬條帶 · before ／ 換手 ／ after</div>
+      <div class="kg-rib" id="kg-rib" aria-live="polite"></div>
+
+      <div class="kg-lab">每名 consumer 的持有量（after 指派）</div>
+      <div class="kg-load" id="kg-load"></div>
+
+      <div class="kg-lab">三種策略的換手成本（同一組輸入下同時計算）</div>
+      <div class="kg-costwrap">
+        <table class="kg-cost" id="kg-cost">
+          <thead>
+            <tr>
+              <th>策略</th>
+              <th>換手條數</th>
+              <th>停頓條數</th>
+              <th>停頓佔比</th>
+              <th>JoinGroup 輪數</th>
+            </tr>
+          </thead>
+          <tbody id="kg-cost-body"></tbody>
+        </table>
+      </div>
+
+      <div class="status-line" id="kg-status">—</div>
+    </div>
+  </div>
+  <p class="cap">先看成本表為什麼<strong>中間那一列只砍了一半</strong>：預設 6 條 partition、2 名成員、第 3 名加入時，Eager Range 換手 <strong>3</strong> 條、停頓 <strong>6</strong> 條；換成 Sticky，換手掉到 <strong>2</strong> 條，停頓<strong>還是 6 條</strong>——因為 sticky 只是換了 assignor，協定仍是 eager，全組照樣先 revoke；換成 Cooperative Sticky，指派結果與 Sticky <strong>完全相同</strong>（換手仍是 2 條），但停頓掉到 <strong>2</strong> 條、佔比 33%，代價是要跑 <strong>2</strong> 輪 JoinGroup。所以 <code>StickyAssignor</code> 與 <code>CooperativeStickyAssignor</code> 的換手數本來就一樣，差的是協定。另外兩組值得比對：把成員變動改成「離開一名」（3 名減為 2 名），Range 換手 3 條、Sticky 與 Cooperative 都是 2 條；把 partition 拖到 2、consumer 留 3、成員變動選「無變動」，並行度上限變成 <code>min(2, 3) = 2</code>，第 3 名 consumer 拿不到任何 partition、負載橫條是空的——加工人加不過 partition 數這道天花板。</p>
 
   <div class="callout accent">
     <div class="c-title"><span class="ic">關鍵</span>Rebalance 的帳單是延遲與重複，不是「分配不均」</div>
@@ -565,7 +716,7 @@
       </tbody>
     </table>
   </div>
-  <p class="cap">RF=3、<code>min.insync.replicas=2</code>、<code>acks=all</code>、關閉 unclean election，是常見的耐久組合：允許少一張副本，但不允許「只寫在 Leader 上」或「用過期日誌接班」。</p>
+  <p class="cap">RF=3、<code>min.insync.replicas=2</code>、<code>acks=all</code>、關閉 unclean election，是常見的耐久組合：允許少一張副本，但不允許「只寫在 Leader 上」或「用過期日誌接班」。下方的決策器預設就是這一組（所以它的建議清單是空的）；把「同時掛掉幾台」從 1 拖到 2，就會看到它為什麼從「可寫入」翻成「拒絕寫入」。</p>
 
   <div class="kf-split">
     <div class="kf-pane ok">
@@ -587,6 +738,84 @@
       </ul>
     </div>
   </div>
+
+  <div class="demo" id="demo-kf-dur">
+    <div class="demo-bar">
+      <span class="label">互動 · durability 決策器</span>
+      <span class="label" style="text-transform:none;font-family:var(--sans);font-size:12px;color:var(--text-2)">四顆旋鈕加「掛幾台」，判定與理由即時重算</span>
+    </div>
+    <div class="demo-body">
+      <div class="seg" role="group" aria-label="acks" id="kd-seg-acks">
+        <button data-acks="0" aria-pressed="false">acks=0</button>
+        <button data-acks="1" aria-pressed="false">acks=1</button>
+        <button data-acks="all" aria-pressed="true">acks=all</button>
+      </div>
+
+      <div class="kd-ctrl">
+        <label class="kd-sl" for="kd-rf">
+          <span class="sn">replication.factor</span>
+          <input type="range" id="kd-rf" min="1" max="5" step="1" value="3">
+          <b id="kd-rf-val">3</b>
+        </label>
+        <label class="kd-sl" for="kd-isr">
+          <span class="sn">min.insync.replicas</span>
+          <input type="range" id="kd-isr" min="1" max="5" step="1" value="2">
+          <b id="kd-isr-val">2</b>
+        </label>
+        <label class="kd-sl" for="kd-down">
+          <span class="sn">同時掛掉幾台</span>
+          <input type="range" id="kd-down" min="0" max="5" step="1" value="1">
+          <b id="kd-down-val">1</b>
+        </label>
+        <label class="kd-ck" for="kd-unclean">
+          <input type="checkbox" id="kd-unclean">
+          unclean.leader.election.enable
+        </label>
+        <button class="btn" id="kd-reset">重置</button>
+      </div>
+
+      <div class="kd-verdict" id="kd-verdict" aria-live="polite">
+        <span class="vk">判定</span>
+        <div class="vt" id="kd-outcome">—</div>
+        <ul class="kd-why" id="kd-why"></ul>
+        <details class="kd-more" id="kd-more" hidden>
+          <summary id="kd-more-sum">其餘理由</summary>
+          <ul class="kd-why" id="kd-why-rest"></ul>
+        </details>
+        <div class="kd-adv">
+          <span class="at">建議設定</span>
+          <ul id="kd-adv-list"></ul>
+        </div>
+      </div>
+
+      <div class="kd-tol">
+        <div class="kd-axis">
+          <div class="al">可用性容忍度<b id="kd-ta">1</b>台故障仍可寫</div>
+          <div class="kd-track" id="kd-track-a"></div>
+        </div>
+        <div class="kd-axis">
+          <div class="al">耐久容忍度<b id="kd-td">2</b>台故障仍不丟</div>
+          <div class="kd-track" id="kd-track-d"></div>
+        </div>
+        <p class="kd-tolnote" id="kd-tolnote">—</p>
+      </div>
+
+      <div class="legend">
+        <span><i class="dot ns-ok"></i>該刻已複製到此副本</span>
+        <span><i class="dot ns-idle"></i>副本已下線</span>
+        <span><i class="dot ns-lock"></i>該刻拒寫（ISR &lt; 需求）</span>
+        <span><i class="dot ns-bad"></i>unclean 接班會截掉的 offset</span>
+        <span><i class="dot ns-wait"></i>High Watermark</span>
+      </div>
+
+      <div class="kd-lab">副本 × 時刻 · 存活與複製矩陣（每刻嘗試寫入 1 筆，共 8 筆）</div>
+      <div class="kd-mx" id="kd-mx"><div class="kd-grid" id="kd-grid"></div></div>
+      <div class="kd-empty" id="kd-empty" hidden></div>
+
+      <div class="status-line" id="kd-status">—</div>
+    </div>
+  </div>
+  <p class="cap">四組值得停下來比對的設定。<strong>(1)</strong> 預設 RF=3、<code>min.isr=2</code>、<code>acks=all</code>、<code>unclean=off</code>、掛 1 台：8 筆全部接受、HWM=8，但兩條刻度尺停在不同格——<strong>可用性容忍 1 台、耐久容忍 2 台</strong>，先撐不住的是可用性。<strong>(2)</strong> 把「同時掛掉幾台」拖到 <strong>2</strong>：ISR 剩 1 台 &lt; 需求 2 台，後 <strong>2</strong> 筆被擋（矩陣右側兩欄變成 <code>✕</code>），判定翻成「拒絕寫入 — 保護成功」，並算出「要在 2 台掛掉下仍可寫，RF 至少要 4」。<strong>(3)</strong> 維持掛 2 台再勾選 <strong>unclean</strong>：耐久容忍度從 2 掉到 1，序列②算出落後副本 <code>r2</code> 會以 <code>LEO=3</code> 接班，<strong>offset 3–5 共 3 筆永久消失</strong>——矩陣上那三欄被畫上刪除線。<strong>(4)</strong> 把 <code>min.insync.replicas</code> 拖到 <strong>4</strong>（超過 RF=3）：矩陣整個空掉，8 筆全被擋，因為 <code>acks=all</code> 要求的 ISR 數已經超過副本總數——這組設定自相矛盾。接著把 acks 切到 <strong>1</strong>，同一組矛盾設定卻<strong>寫得進去</strong>：<code>acks=0</code>／<code>1</code> 根本不查 <code>min.insync.replicas</code>，於是 min.isr 完全沒有在保護你。</p>
 
   <div class="callout warn">
     <div class="c-title"><span class="ic">陷阱</span>複製因子 3 不是三份安全</div>
@@ -643,105 +872,6 @@
 <section id="s8">
   <div class="sec-head">
     <span class="sec-num">08</span>
-    <h2>互動 · Rebalance 與 ISR 耐久</h2>
-  </div>
-  <p class="sec-sub">三條 partition 上看游標與換手停頓；三台 broker 上調 acks／min.isr，再下線副本觀察能否寫入與會不會丟資料。</p>
-
-  <div class="demo" id="demo-kf">
-    <div class="demo-bar">
-      <span class="label">互動 · Kafka 機制</span>
-      <span class="label" style="text-transform:none;font-family:var(--sans);font-size:12px;color:var(--text-2)">下一步推進時序；重置回到起點</span>
-    </div>
-    <div class="demo-body">
-      <div class="seg" role="group" aria-label="情境切換" id="kf-seg-mode">
-        <button data-mode="rebal" aria-pressed="true">Consumer Group · Rebalance</button>
-        <button data-mode="dur" aria-pressed="false">acks · ISR · 下線</button>
-      </div>
-
-      <div id="kf-rebal-view" class="kf-view">
-        <div class="seg" role="group" aria-label="指派策略" id="kf-seg-assign" style="margin-top:8px">
-          <button data-assign="eager" aria-pressed="true">Eager · 全組停手</button>
-          <button data-assign="sticky" aria-pressed="false">Cooperative Sticky</button>
-        </div>
-        <p class="kf-mode-hint">三條 partition、兩名成員先消費。第三名加入時，Eager 收回所有區；Sticky 只讓必須換手的 P1 停頓，C2 仍可拉 P2。</p>
-      </div>
-
-      <div id="kf-dur-view" class="kf-view" hidden>
-        <div class="seg" role="group" aria-label="acks" id="kf-seg-acks" style="margin-top:8px">
-          <button data-acks="0" aria-pressed="false">acks=0</button>
-          <button data-acks="1" aria-pressed="false">acks=1</button>
-          <button data-acks="all" aria-pressed="true">acks=all</button>
-        </div>
-        <div class="seg" role="group" aria-label="min.isr" id="kf-seg-isr" style="margin-top:8px">
-          <button data-isr="1" aria-pressed="false">min.isr=1</button>
-          <button data-isr="2" aria-pressed="true">min.isr=2</button>
-        </div>
-        <div class="seg" role="group" aria-label="unclean election" id="kf-seg-unclean" style="margin-top:8px">
-          <button data-unclean="off" aria-pressed="true">unclean=off</button>
-          <button data-unclean="on" aria-pressed="false">unclean=on</button>
-        </div>
-        <p class="kf-mode-hint">RF=3。依序寫入、下線 F2、再下線 F1、嘗試寫入、最後打下 Leader。min.isr=2 在只剩 Leader 時拒寫是保護成功；unclean=on 讓過期的 F2 接班並丟資料。</p>
-      </div>
-
-      <div class="kf-ctrl">
-        <button class="btn primary" id="kf-btn-next">下一步</button>
-        <button class="btn" id="kf-btn-reset">重置</button>
-      </div>
-
-      <div class="kf-metric">
-        <span>步 <strong id="kf-m-step">0</strong> / <span id="kf-m-total">6</span></span>
-        <span>寫入 <strong id="kf-m-prod">0</strong></span>
-        <span>提交 offset <strong id="kf-m-commit">0</strong></span>
-        <span>拒寫 <strong id="kf-m-rej">0</strong></span>
-        <span>遺失 <strong id="kf-m-lost">0</strong></span>
-      </div>
-
-      <div class="legend">
-        <span><i class="dot ns-idle"></i>待命 / 未指派</span>
-        <span><i class="dot ns-wait"></i>拉取 / 複製中</span>
-        <span><i class="dot ns-lock"></i>Rebalance 停頓</span>
-        <span><i class="dot ns-ok"></i>已提交 / ISR 內</span>
-        <span><i class="dot ns-bad"></i>下線 / 拒寫 / 遺失</span>
-      </div>
-
-      <div class="kf-col-label" id="kf-parts-label">Partitions</div>
-      <div class="kf-parts" id="kf-parts" aria-live="polite"></div>
-
-      <div class="kf-col-label" id="kf-actors-label">Consumers</div>
-      <div class="kf-actors" id="kf-actors"></div>
-
-      <div class="kf-panels">
-        <div class="kf-panel">
-          <div class="pt">本步語義</div>
-          <div class="prow"><span class="pk">事件</span><span class="pv" id="kf-p-op">—</span></div>
-          <div class="prow"><span class="pk">規則</span><span class="pv" id="kf-p-rule">—</span></div>
-          <div class="prow"><span class="pk">指派 / ISR</span><span class="pv" id="kf-p-hold">—</span></div>
-          <div class="prow"><span class="pk">客戶端</span><span class="pv" id="kf-p-cli">—</span></div>
-        </div>
-        <div class="kf-panel">
-          <div class="pt">觀測</div>
-          <div class="prow"><span class="pk">策略 / 旋鈕</span><span class="pv" id="kf-p-model">Eager</span></div>
-          <div class="prow"><span class="pk">HWM / 游標</span><span class="pv" id="kf-p-hwm">0</span></div>
-          <div class="prow"><span class="pk">可寫入</span><span class="pv" id="kf-p-writable">是</span></div>
-          <div class="prow"><span class="pk">資料風險</span><span class="pv" id="kf-p-risk">無</span></div>
-        </div>
-      </div>
-
-      <div class="status-line" id="kf-status">選擇情境後按「下一步」。Rebalance 與 ISR 劇本皆為 6 步。</div>
-      <div class="kf-verdict" id="kf-verdict">判定尚未產生——走完一輪後會摘要換手停頓，或拒寫／遺失是保護還是事故。</div>
-      <div class="kf-wire" id="kf-wire" aria-label="事件日誌"></div>
-    </div>
-  </div>
-  <p class="cap">Eager 下第三名加入時三條區都會停；Sticky 下 P2 可以繼續被拉。耐久劇本裡，被拒的寫入請看成保護成功（判定偏綠），unclean 接班造成的空洞才是事故。</p>
-
-  <div class="oneliner">
-    <b>一句話答法</b>Rebalance 的代價是停頓與可能重拉；acks=all 加 min.isr 用拒寫換耐久，unclean election 用過期日誌換可用性。
-  </div>
-</section>
-
-<section id="s9">
-  <div class="sec-head">
-    <span class="sec-num">09</span>
     <h2>面試折衷與邊界</h2>
   </div>
   <p class="sec-sub">先答定址與耐久旋鈕，再談產品周邊。事件建模、串流視窗、通用複寫各有自己的篇。</p>
