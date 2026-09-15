@@ -350,7 +350,11 @@ sequenceDiagram
 **何時用**：(a) 幾何 / 座標語意（hash ring、向量空間、環狀分區）；(b) 圖需要被 demo 的 JS 即時重繪。
 
 站內範本：`drafts/consistent-hashing-handbook`（雜湊環）、`drafts/coordination-services`（鎖競態時間軸）、
-`drafts/leader-election-and-raft`（Raft 狀態機）、`drafts/data-replication-basics`（複製模擬）。
+`drafts/leader-election-and-raft`（Raft 狀態機，log 矩陣與 quorum 票型由狀態機推導）。
+
+> ⚠️ 本節談的是**畫法**。`drafts/data-replication-basics` 曾列在這份清單上——它的 SVG 沿路徑動畫封包的寫法可以參考，
+> 但**它的模擬層是假的**（「Client 讀到舊值」是寫死的字串，不是去讀當下 follower 的狀態），所以已從清單移除。
+> 借用它的畫法時，不要一起借走它的資料層。
 
 規範：
 
@@ -391,14 +395,18 @@ sequenceDiagram
 
 | # | Archetype | 核心互動 | 適合的概念 | 站內範本 |
 | :---: | :--- | :--- | :--- | :--- |
-| **A** | **時序推進**<br>Step-through | 按「下一步」走過一組固定步驟 | 本質**就是**固定順序協定的主題（2PC、TLS handshake、ICE、TCP 三向交握） | `DistributedTransactions.html`「2PC 流程」 |
-| **B** | **參數掃描**<br>Parameter sweep | 拖 slider / 改數值，結果**即時重算** | 有可調參數、且參數會改變結果的機制（watermark 延遲、W+R>N、TTL、acks、chunk size） | `drafts/stream-processing`（**全站最佳範本**） |
-| **C** | **並排對照**<br>Side-by-side | 同一組輸入同時餵給「天真做法」與「正確做法」兩個面板 | 有明確錯誤解法的主題（dual-write vs Outbox、快取穿透 vs 空值快取） | `DistributedTransactions.html`「雙寫問題 vs Outbox」 |
-| **D** | **空間視覺化**<br>Spatial | 在幾何／座標空間上點選、拖曳、增刪節點 | 有空間語意的主題（hash ring、向量空間、分區環、子網位址空間） | `drafts/consistent-hashing-handbook` |
-| **E** | **決策器**<br>Decision | 回答數個問題 → 導出選型建議與理由 | 選型類、trade-off 類、「什麼時候該用哪個」 | `DistributedTransactions.html`「選型決策器」 |
-| **F** | **拆解器**<br>Decomposer | 輸入一筆真實資料 → 逐層 / 逐 byte 拆解標註 | 有格式或編碼結構的主題（protobuf wire format、封包標頭、子網遮罩、JWT、URL） | — |
+| **A** | **時序推進**<br>Step-through | 按「下一步」走過一組固定步驟 | 本質**就是**固定順序協定的主題（2PC、TLS handshake、ICE、TCP 三向交握） | `drafts/tcp-udp-and-socket-programming`（點選封包注入丟包，cwnd／ssthresh／累積 ACK 真算） |
+| **B** | **參數掃描**<br>Parameter sweep | 拖 slider / 改數值，結果**即時重算** | 有可調參數、且參數會改變結果的機制（watermark 延遲、W+R>N、TTL、acks、chunk size） | `drafts/stream-processing`（視窗×水位）、`drafts/nat-port-forwarding`（自由輸入→四元組比對→改寫或 DROP） |
+| **C** | **並排對照**<br>Side-by-side | 同一組輸入同時餵給兩個面板（「天真 vs 正確」，或兩種都合法的相反設計） | 有明確錯誤解法、或有兩種對立取捨的主題（dual-write vs Outbox、B-Tree vs LSM-Tree） | `drafts/embedded-database`（SQLite vs RocksDB，MemTable／L0 stall／write amp 真算） |
+| **D** | **空間視覺化**<br>Spatial | 在幾何／座標空間上點選、拖曳、增刪節點 | 有空間語意的主題（hash ring、向量空間、分區環、子網位址空間） | `drafts/consistent-hashing-handbook`（successor rule 與 remap% 真算）、`drafts/vector-database-fundamentals`（canvas，IVF／HNSW 真的只掃被 probe 的部分） |
+| **E** | **決策器**<br>Decision | 回答數個問題 → 導出選型建議與理由 | 選型類、trade-off 類、「什麼時候該用哪個」 | `DistributedTransactions.html`「選型決策器」（三題 → `decide()` 推導，含衝突需求的特例） |
+| **F** | **拆解器**<br>Decomposer | 輸入一筆真實資料 → 逐層 / 逐 byte 拆解標註 | 有格式或編碼結構的主題（protobuf wire format、封包標頭、子網遮罩、JWT、URL） | `drafts/ip-addressing-subnetting`（逐 bit 切 net／host，含 /31 /32 邊界）、`drafts/search-analytics-engine`（分詞→posting→合併→BM25 逐階段攤開） |
 
 同一個主題常常有不只一種可行選型。**若 A 與 B 都說得通，優先選 B**——能被使用者擾動的 demo 幾乎總是資訊量更大。
+
+> **這張表的「站內範本」欄只列經過逐行查核、確認輸出真的由輸入算出來的篇。**
+> 不要拿其他篇當範本——全站曾有近半數的 demo 是把預寫敘事播一遍的播放器（見 §0.2 鐵律 4 的假 demo 判準），
+> 照著抄只會複製那個錯誤。每一格括號裡註明的就是「它真的算了什麼」，那是你該對齊的水準。
 
 #### 0.2 選型鐵律
 
@@ -430,7 +438,12 @@ sequenceDiagram
 
 - **兩三個各司其職的小 demo，遠優於一個塞滿多層 `.seg` 的巨型 demo。**
 - 經驗法則：**若單一 demo 需要 3 組以上 `.seg` 才講得完，那是在提示你該拆成 2 個 demo。**
+  注意這條規則的單位是**單一 demo**：一頁有 6 個 demo、每個各 1 組 `.seg`，完全合規。
 - 小 demo 可以就近放在它所解釋的那個章節，不必全部堆到文末。
+
+> 借它的**結構**（拆小、各司其職、就近擺放），不要以為它每個 demo 的深度都夠：
+> 6 個之中只有「補償鏈」與「決策器」兩個有真自由度，另外 4 個的輸出仍是字面常數。
+> 結構對了還要過 §0.2 鐵律 4。
 
 #### 0.4 非必備 chrome — 不要因為「上一篇有」就加
 
