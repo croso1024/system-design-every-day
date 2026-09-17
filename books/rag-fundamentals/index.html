@@ -1376,7 +1376,7 @@
         <a href="#s2"><span class="n">02</span>端到端 Pipeline</a>
         <a href="#s3"><span class="n">03</span>架構座標：各元件分工</a>
         <a href="#s4"><span class="n">04</span>何時用 RAG：與微調、長上下文對照</a>
-        <a href="#s5"><span class="n">05</span>互動 · 一次 Query 的資料流</a>
+        <a href="#s5"><span class="n">05</span>互動 · 切塊與 Top-k 如何決定召回</a>
         <a href="#s6"><span class="n">06</span>地基之上：刻意不展開的後續</a>
         <a href="#s7"><span class="n">07</span>面試折衷與實務清單</a>
       </div>
@@ -1393,7 +1393,7 @@
     <!-- ===================== MAIN CONTENT ===================== -->
     <main>
       <div class="inner">
-        <!-- demo-archetype: A｜時序推進 — 讀者選「檢索命中／弱相關誤檢／無 RAG 對照」三個情境，按「下一步」走過 embed query → retrieve → build prompt → generate 四階段，看同一個問題因為送進 prompt 的 chunk 不同而得到截然不同的答案。選 A 是因為本篇要建立的地基就是「一次 query 的固定資料流」，讀者得先記住順序與每一段的責任。 -->
+        <!-- demo-archetype: B｜參數掃描（主，第 5 節） — 讀者拖動切塊長度、重疊率、Top-k、分數門檻與 context 上限五個滑桿，並切換「單一事實」與「跨兩段事實」兩種提問；系統對五份固定中文文件即時重新切塊、重算每塊的檢索分數與 IDF、重新排序與過濾、重新堆進 context window，算出回答所需的兩個「答案要件」是否真的進到窗口裡。選 B 是因為本篇論述本身就是用參數的兩端在說話（小 k 噪音少、大 k 易塞爆窗口；塊太大噪音多、塊太小失去語境），而那些兩端只有被推到實際數字上才看得出來。 -->
 <style>
   /* 本篇專屬：rag-* 命名空間，不覆蓋全站 base 類別 */
   #rag-root {
@@ -1469,81 +1469,60 @@
     display: flex; align-items: center;
   }
 
-  /* Demo */
-  .rag-demo-controls {
-    display: flex; flex-wrap: wrap; gap: 8px; margin: 10px 0 8px; align-items: center;
+  /* ── 第 5 節 參數掃描：rag-sw-*（sweep），本輪新寫 ─────────────────── */
+  .rag-sw-knobs {
+    display: grid; grid-template-columns: repeat(3, 1fr); gap: 11px 14px; margin: 12px 0;
   }
-  .rag-phases {
-    display: flex; flex-wrap: wrap; gap: 6px; align-items: center;
-    margin: 10px 0; font-family: var(--mono); font-size: 11.5px;
-  }
-  .rag-phase {
-    border: 1px solid var(--border-strong); border-radius: 6px;
-    padding: 5px 9px; background: #fff; color: var(--text-3); font-weight: 600;
-    transition: background .2s, border-color .2s, color .2s;
-  }
-  .rag-phase.ph-done { color: var(--text-2); background: var(--bg-soft); }
-  .rag-phase.ph-active { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); }
-  .rag-phase.ph-active.ph-bad { background: var(--bad-soft); border-color: var(--bad); color: var(--bad); }
-  .rag-phase.ph-active.ph-lock { background: var(--warn-soft); border-color: var(--warn); color: var(--warn); }
-  .rag-phase-sep { color: var(--text-3); font-size: 12px; }
+  @media (max-width: 720px) { .rag-sw-knobs { grid-template-columns: 1fr 1fr; } }
+  @media (max-width: 460px) { .rag-sw-knobs { grid-template-columns: 1fr; } }
+  .rag-sw-knob { display: grid; grid-template-columns: 1fr auto; gap: 2px 8px; align-items: center; }
+  .rag-sw-knob .kl { font-size: 12.5px; color: var(--text-2); }
+  .rag-sw-knob .kv { font-family: var(--mono); font-size: 12px; font-weight: 700; color: var(--text); justify-self: end; }
+  .rag-sw-knob input[type="range"] { grid-column: 1 / -1; width: 100%; margin: 2px 0 0; accent-color: var(--accent); }
 
-  .rag-panels {
-    display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin: 10px 0;
+  .rag-sw-views {
+    display: grid; grid-template-columns: 1.3fr 1fr; gap: 12px; margin: 12px 0 6px;
   }
-  @media (max-width: 720px) { .rag-panels { grid-template-columns: 1fr; } }
-  .rag-panel {
+  @media (max-width: 720px) { .rag-sw-views { grid-template-columns: 1fr; } }
+  .rag-sw-view {
     border: 1px solid var(--border); border-radius: var(--radius-sm);
-    background: #fff; padding: 12px; min-height: 140px;
+    background: #fff; padding: 8px 6px 4px;
   }
-  .rag-panel .pt {
+  .rag-sw-view .vt {
     font-family: var(--mono); font-size: 11px; color: var(--text-3);
-    letter-spacing: .04em; margin-bottom: 8px; font-weight: 600;
+    letter-spacing: .04em; font-weight: 600; margin: 2px 0 5px 6px;
   }
-  .rag-chunk {
-    border: 1px solid var(--border); border-radius: 6px;
-    padding: 8px 10px; margin-bottom: 6px; background: var(--bg-soft);
-    font-size: 12.5px; line-height: 1.5; color: var(--text-2);
-    transition: border-color .2s, background .2s, opacity .2s;
-    opacity: .45;
+  .rag-sw-view svg { width: 100%; height: auto; display: block; }
+
+  .rag-sw-facts { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin: 10px 0; }
+  @media (max-width: 560px) { .rag-sw-facts { grid-template-columns: 1fr; } }
+  .rag-sw-fact {
+    border: 1px solid var(--border); border-left: 3px solid var(--border-strong);
+    border-radius: var(--radius-sm); background: var(--bg-soft); padding: 9px 11px;
   }
-  .rag-chunk:last-child { margin-bottom: 0; }
-  .rag-chunk .ck {
-    font-family: var(--mono); font-size: 10.5px; color: var(--text-3);
-    margin-bottom: 3px;
+  .rag-sw-fact.hit { border-left-color: var(--ok); background: var(--ok-soft); }
+  .rag-sw-fact.miss { border-left-color: var(--bad); background: var(--bad-soft); }
+  .rag-sw-fact.off { opacity: .5; }
+  .rag-sw-fact .fl { font-family: var(--mono); font-size: 10.5px; color: var(--text-3); letter-spacing: .04em; }
+  .rag-sw-fact .fv { font-size: 12.5px; color: var(--text); margin-top: 3px; line-height: 1.5; }
+
+  .rag-sw-meter { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin: 10px 0; }
+  @media (max-width: 640px) { .rag-sw-meter { grid-template-columns: 1fr 1fr; } }
+  .rag-sw-cell {
+    border: 1px solid var(--border); border-radius: var(--radius-sm);
+    background: var(--bg-soft); padding: 9px 10px;
   }
-  .rag-chunk.ch-hit {
-    opacity: 1; border-color: var(--ok); background: var(--ok-soft); color: var(--text);
-  }
-  .rag-chunk.ch-weak {
-    opacity: 1; border-color: var(--warn); background: var(--warn-soft); color: var(--text);
-  }
-  .rag-chunk.ch-miss {
-    opacity: 1; border-color: var(--bad); background: var(--bad-soft); color: var(--text);
-  }
-  .rag-chunk.ch-idle { opacity: .35; }
+  .rag-sw-cell .ml { font-size: 11px; color: var(--text-3); line-height: 1.4; }
+  .rag-sw-cell .mv { font-family: var(--mono); font-size: 14px; font-weight: 700; color: var(--text); margin-top: 3px; }
 
   .rag-prompt {
-    border: 1px solid var(--border); border-left: 3px solid var(--border-strong);
+    border: 1px solid var(--border); border-left: 3px solid var(--rag-query);
     border-radius: var(--radius-sm); background: var(--bg-soft);
     padding: 10px 12px; margin: 8px 0 0;
     font-family: var(--mono); font-size: 12px; line-height: 1.55;
-    color: var(--text); white-space: pre-wrap; min-height: 88px;
-    transition: border-color .2s;
+    color: var(--text); white-space: pre-wrap;
+    max-height: 210px; overflow-y: auto;
   }
-  .rag-prompt.tone-wait { border-left-color: var(--accent); }
-  .rag-prompt.tone-ok { border-left-color: var(--ok); }
-  .rag-prompt.tone-bad { border-left-color: var(--bad); }
-  .rag-prompt.tone-lock { border-left-color: var(--warn); }
-
-  .rag-answer {
-    border: 1px solid var(--border); border-radius: var(--radius-sm);
-    background: #fff; padding: 10px 12px; margin-top: 8px;
-    font-size: 13px; line-height: 1.55; color: var(--text-2); min-height: 52px;
-  }
-  .rag-answer.tone-ok { background: var(--ok-soft); color: var(--text); border-color: var(--ok); }
-  .rag-answer.tone-bad { background: var(--bad-soft); color: var(--text); border-color: var(--bad); }
-  .rag-answer.tone-lock { background: var(--warn-soft); color: var(--text); border-color: var(--warn); }
 
   .rag-query-box {
     border: 1px dashed var(--border-strong); border-radius: var(--radius-sm);
@@ -1826,78 +1805,84 @@ User: …使用者問題…</div>
 </section>
 
 <section id="s5">
-  <div class="sec-head"><span class="sec-num">05</span><h2>互動 · 一次 Query 的資料流</h2></div>
-  <p class="sec-sub">視覺化「問題 → 檢索 → 組 prompt → 生成」；對比命中、弱相關、以及沒有 RAG 時的幻覺風險。</p>
+  <div class="sec-head"><span class="sec-num">05</span><h2>互動 · 切塊與 Top-k 如何決定召回</h2></div>
+  <p class="sec-sub">同一個問題、同一份知識庫，只改切塊長度、重疊率、Top-<var>k</var>、分數門檻與 context 上限，看召回與「答案要件有沒有進到窗口」如何改變。</p>
 
-  <div class="demo" id="demo-rag-flow">
+  <p>第 2 節講的是 pipeline 的<strong>順序</strong>，這一節講的是它的<strong>參數</strong>。下面的知識庫是五份固定的中文文件（退貨政策、換貨作業、會員權益、配送 FAQ、舊促銷公告），其中退貨政策裡有兩個句子是回答問題的<strong>必要事實</strong>：一句寫期限、一句寫包裝要求，而且兩句相鄰。切塊邊界落在什麼位置，決定了它們是被完整包在某一塊裡、還是被切成兩半——這正是 chunking 最常見的失敗模式。</p>
+
+  <div class="demo" id="demo-rag-sweep">
     <div class="demo-bar">
-      <span class="label">互動 · RAG Query 資料流</span>
-      <span class="label" style="text-transform:none;font-family:var(--sans);font-size:12px;color:var(--text-2)">選情境後按「下一步」</span>
+      <span class="label">互動 · Chunking 與檢索參數</span>
+      <span class="label" style="text-transform:none;font-family:var(--sans);font-size:12px;color:var(--text-2)">拖任一個滑桿，切塊、分數、召回與 context 全部重算</span>
     </div>
     <div class="demo-body">
-      <div class="seg" role="group" aria-label="情境切換">
-        <button data-sc="hit" aria-pressed="true">檢索命中</button>
-        <button data-sc="weak" aria-pressed="false">弱相關／誤檢</button>
-        <button data-sc="norag" aria-pressed="false">無 RAG（對照）</button>
-      </div>
-
-      <div class="rag-demo-controls">
-        <button class="btn primary" id="rag-btn-next">下一步</button>
-        <button class="btn" id="rag-btn-reset">重置</button>
-        <div class="legend">
-          <span><i class="dot ns-wait"></i>進行中</span>
-          <span><i class="dot ns-ok"></i>命中／成功</span>
-          <span><i class="dot ns-lock"></i>弱相關</span>
-          <span><i class="dot ns-bad"></i>風險／失敗</span>
-          <span><i class="dot ns-idle"></i>未參與</span>
-        </div>
-      </div>
-
-      <div class="status-line" id="rag-status">選擇情境後按「下一步」，觀看一次 query 從檢索到組 prompt 的資料流。</div>
-
-      <div class="rag-phases" id="rag-phases" aria-hidden="true">
-        <span class="rag-phase" data-ph="embed">① Embed Query</span>
-        <span class="rag-phase-sep">→</span>
-        <span class="rag-phase" data-ph="retrieve">② Retrieve</span>
-        <span class="rag-phase-sep">→</span>
-        <span class="rag-phase" data-ph="prompt">③ Build Prompt</span>
-        <span class="rag-phase-sep">→</span>
-        <span class="rag-phase" data-ph="generate">④ Generate</span>
+      <div class="seg" role="group" aria-label="測試問題">
+        <button data-q="span1" aria-pressed="false">單一事實問題</button>
+        <button data-q="span2" aria-pressed="true">跨兩段事實問題</button>
       </div>
 
       <div class="rag-query-box">
         <div class="ql">USER QUERY</div>
-        <div id="rag-query-text">退貨期限是幾天？需要原包裝嗎？</div>
+        <div id="rag-sw-query">退貨期限是幾天？需要保留原廠包裝嗎？</div>
       </div>
 
-      <div class="rag-panels">
-        <div class="rag-panel">
-          <div class="pt">知識庫 Chunks（示意）</div>
-          <div class="rag-chunk" data-chunk="c1" id="rag-c1">
-            <div class="ck">doc:policy-v3 · chunk#12 · score —</div>
-            <span id="rag-c1-body">退貨須於到貨後 14 日內申請；商品須保持原包裝與完整配件。</span>
-          </div>
-          <div class="rag-chunk" data-chunk="c2" id="rag-c2">
-            <div class="ck">doc:shipping-faq · chunk#3 · score —</div>
-            <span id="rag-c2-body">標準配送時效為 2–4 個工作天；離島另計。</span>
-          </div>
-          <div class="rag-chunk" data-chunk="c3" id="rag-c3">
-            <div class="ck">doc:promo-2024 · chunk#1 · score —</div>
-            <span id="rag-c3-body">雙十一滿額贈品活動已結束，贈品恕不補發。</span>
-          </div>
+      <div class="rag-sw-knobs">
+        <div class="rag-sw-knob">
+          <span class="kl">切塊長度</span><span class="kv" id="rag-sw-v-size">160 字元</span>
+          <input type="range" id="rag-sw-size" min="80" max="400" step="10" value="160" aria-label="切塊長度">
         </div>
-        <div class="rag-panel">
-          <div class="pt">組好的 Prompt／模型輸出</div>
-          <div class="rag-prompt tone-wait" id="rag-prompt">// 按「下一步」開始：先把 query 變成向量，再檢索。</div>
-          <div class="rag-answer" id="rag-answer">（尚未生成）</div>
+        <div class="rag-sw-knob">
+          <span class="kl">重疊率 overlap</span><span class="kv" id="rag-sw-v-ov">0%</span>
+          <input type="range" id="rag-sw-ov" min="0" max="50" step="5" value="0" aria-label="重疊率">
+        </div>
+        <div class="rag-sw-knob">
+          <span class="kl">Top-<var>k</var></span><span class="kv" id="rag-sw-v-k">3</span>
+          <input type="range" id="rag-sw-k" min="1" max="8" step="1" value="3" aria-label="Top-k">
+        </div>
+        <div class="rag-sw-knob">
+          <span class="kl">分數門檻</span><span class="kv" id="rag-sw-v-min">0.15</span>
+          <input type="range" id="rag-sw-min" min="0" max="60" step="1" value="15" aria-label="分數門檻">
+        </div>
+        <div class="rag-sw-knob">
+          <span class="kl">context 上限</span><span class="kv" id="rag-sw-v-ctx">600 tok</span>
+          <input type="range" id="rag-sw-ctx" min="200" max="2000" step="50" value="600" aria-label="context 上限">
+        </div>
+        <div class="rag-sw-knob" style="align-self:end">
+          <button class="btn" id="rag-sw-reset" style="grid-column:1 / -1">重置為預設參數</button>
         </div>
       </div>
-      <p class="cap" style="text-align:center">三個情境共用同一問題；差異只在「有沒有把對的 chunk 送進 prompt」——這就是 RAG 的勝敗點。</p>
+
+      <div class="rag-sw-views">
+        <div class="rag-sw-view">
+          <div class="vt">文件座標 × 檢索分數</div>
+          <div id="rag-sw-ladder"></div>
+        </div>
+        <div class="rag-sw-view">
+          <div class="vt">Context window 填充</div>
+          <div id="rag-sw-fill"></div>
+        </div>
+      </div>
+      <p class="cap">左圖的<strong>縱軸是文件字元位置</strong>（五份文件由上往下接續）、<strong>橫軸是檢索分數</strong>，每個 chunk 是一條橫條：它的高度＝這一塊涵蓋的字元範圍，所以拉高重疊率時相鄰橫條會在縱軸上互相疊住；虛線是分數門檻。最右側兩條粗標記是「答案要件」所在的字元區間——看它是被某一條橫條<strong>完整涵蓋</strong>，還是剛好騎在兩條的交界上。右圖是同一次檢索的另一面：選中的塊依序堆進 context window，越過上限線的以斜紋畫在外面，代表它被截掉了。分數是以<strong>查詢詞權重 × 詞頻 × 由本次切塊算出的 IDF</strong> 當作相似度的教學代理，不是真的 embedding 餘弦相似度。</p>
+
+      <div class="legend">
+        <span><i class="dot ns-ok"></i>進 context</span>
+        <span><i class="dot ns-lock"></i>召回但被截掉</span>
+        <span><i class="dot ns-idle"></i>未被召回</span>
+        <span><i class="dot ns-bad"></i>答案要件未涵蓋</span>
+      </div>
+
+      <div class="rag-sw-facts" id="rag-sw-facts"></div>
+      <div class="rag-sw-meter" id="rag-sw-meter"></div>
+
+      <div class="rag-prompt" id="rag-sw-prompt"></div>
+      <div class="status-line" id="rag-sw-status"></div>
     </div>
   </div>
 
+  <p>值得停下來看的是<strong>重疊率</strong>那一格：把它從 0% 拉到 40%，塊數只多幾塊、token 成本幾乎沒變，但原本被邊界切斷的那個要件會突然被某一塊完整包住。這就是 overlap 存在的理由——它不是為了提高分數，而是為了讓「事實不被切在接縫上」。</p>
+
   <div class="oneliner">
-    <b>一句話答法</b>一次 RAG query＝embed 問題 → Top-k 檢索 → 把命中片段塞進 prompt → LLM 生成；檢索錯了，生成再漂亮也不可信。
+    <b>一句話答法</b>Chunking 與 Top-<var>k</var> 不是兩個獨立旋鈕：切塊決定事實會不會被切斷、<var>k</var> 與門檻決定它會不會被撈出來、context 上限決定它會不會被截掉——三關都過，答案才有依據。
   </div>
 </section>
 
@@ -2073,306 +2058,481 @@ User: …使用者問題…</div>
 (function () {
   "use strict";
 
-  var scenario = "hit";
-  var stepIdx = 0;
+  /* ───────────────────────── (1) 常數與參數表 ───────────────────────── */
 
-  var QUERY = "退貨期限是幾天？需要原包裝嗎？";
+  /* 固定小型語料：五份中文文件。這是被掃描的對象，不是輸出——
+     所有分數、邊界、召回與覆蓋判定都由參數對這份語料運算得出。 */
+  var DOCS = [
+    { id: "policy-v3", title: "退貨政策 v3", text:
+      "本頁說明線上商店的退貨與換貨規則，適用於官方網站與行動應用程式下單的一般商品，特販專區另有條款。" +
+      "訂單成立後，消費者可於出貨前在訂單頁自行取消，系統會即時釋放庫存並完成刷退。" +
+      "商品一旦出貨，取消入口即關閉，後續一律改走退貨流程，兩者的受理窗口與計時起點並不相同。" +
+      "受理時間以客服系統收到表單的時戳為準，而非消費者撥打電話的時間，跨日邊界上可能相差一天。" +
+      "退貨與換貨是兩條獨立流程：換貨僅限同型號且同價位的瑕疵品，退貨則適用於全部一般商品，兩者不得於同一張單據上混合申請。" +
+      "各通路的入口完全一致，海外倉出貨的商品需另計七個工作天。" +
+      "以下條款自版本三起生效，並取代先前公告的所有說明。" +
+      "退貨須於到貨後 14 日內提出申請，逾期不予受理。" +
+      "退回商品須保持原廠包裝完整並附齊全部配件，缺件將依售價比例扣款。" +
+      "客服收到申請後會寄出物流單，消費者須於七個日曆天內交寄，逾時自動失效。" +
+      "退款將於倉庫驗收完成後的三個工作天內原路退回原支付工具。" },
+    { id: "exchange-sop", title: "換貨作業說明", text:
+      "換貨僅受理同型號、同價位的瑕疵品，數量以原訂單為上限，不另計運費。" +
+      "換貨商品請以原本的紙箱與緩衝材寄回，外箱破損會影響驗收速度但不影響受理。" +
+      "換貨申請送出後，倉庫會先確認庫存，無庫存時系統自動轉為退貨並通知消費者。" +
+      "同一筆訂單只能申請一次換貨，第二次起請改走退貨流程。" },
+    { id: "member-benefit", title: "會員權益說明", text:
+      "白金會員每季享有兩次免運額度，額度不累積至下一季。" +
+      "會員於活動期間提出的退貨申請，點數會同步回收，回收後不再補發。" +
+      "生日禮券不得折抵運費，亦不得於退貨後重新發放。" },
+    { id: "shipping-faq", title: "配送常見問題", text:
+      "標準配送時效為二到四個工作天，離島與偏遠地區另計。配送前一日系統會發送簡訊通知。" +
+      "包裹外箱若有明顯破損，請當場拒收並聯絡客服，客服會安排原車退回並重新出貨。" },
+    { id: "promo-2024", title: "去年度促銷公告", text:
+      "雙十一滿額贈品活動已於去年結束，贈品恕不補發。活動期間購買的商品仍適用一般規則。滿額折價券逾期不予展延。" }
+  ];
 
-  var statusEl = document.getElementById("rag-status");
-  var promptEl = document.getElementById("rag-prompt");
-  var answerEl = document.getElementById("rag-answer");
-  var queryEl = document.getElementById("rag-query-text");
-  var btnNext = document.getElementById("rag-btn-next");
-  var btnReset = document.getElementById("rag-btn-reset");
-  var phaseEls = document.querySelectorAll("#rag-phases .rag-phase");
-  var chunkEls = {
-    c1: document.getElementById("rag-c1"),
-    c2: document.getElementById("rag-c2"),
-    c3: document.getElementById("rag-c3")
+  /* 答案要件：以句子本身宣告，字元區間由 indexOf 在語料上算出，避免硬編 offset 走樣 */
+  var FACTS = [
+    { id: "F1", label: "退貨期限", sent: "退貨須於到貨後 14 日內提出申請" },
+    { id: "F2", label: "包裝要求", sent: "退回商品須保持原廠包裝完整並附齊全部配件" }
+  ];
+
+  /* 兩組查詢：詞權重表是查表（相似度的教學代理），不是輸出 */
+  var QUERIES = {
+    span1: { text: "退貨要在幾天內提出申請？", need: ["F1"],
+             terms: { "退貨": 1, "申請": 1, "日內": 4, "到貨": 3 } },
+    span2: { text: "退貨期限是幾天？需要保留原廠包裝嗎？", need: ["F1", "F2"],
+             terms: { "退貨": 1, "日內": 4, "到貨": 3, "包裝": 4, "配件": 3 } }
   };
 
-  var CHUNK_META = {
-    c1: "doc:policy-v3 · chunk#12",
-    c2: "doc:shipping-faq · chunk#3",
-    c3: "doc:promo-2024 · chunk#1"
-  };
+  var BASE_LEN = 160;        /* 長度正規化的基準塊長 */
+  var SCORE_NORM = 40;       /* 固定除數，讓分數跨參數設定可比較 */
+  var CHARS_PER_TOKEN = 1.6; /* 中文字元→token 的粗估 */
+  var SYS_TOK = 48;          /* system prompt 固定占用 */
+  var NOISE_BAR = 0.35;      /* 低於此分數的塊視為噪音 */
+  var MIN_STRIDE = 8;
 
-  var SCENARIOS = {
-    hit: {
-      label: "檢索命中",
-      steps: [
-        {
-          ph: null,
-          tone: "wait",
-          chunks: { c1: "idle", c2: "idle", c3: "idle" },
-          scores: { c1: "—", c2: "—", c3: "—" },
-          prompt: "// 待命：索引已建好。按「下一步」把使用者問題做成 query vector。",
-          answer: "（尚未生成）",
-          answerTone: "",
-          status: "情境「檢索命中」：知識庫裡有正確的退貨政策 chunk。開始走線上路徑。"
-        },
-        {
-          ph: "embed",
-          tone: "wait",
-          chunks: { c1: "idle", c2: "idle", c3: "idle" },
-          scores: { c1: "—", c2: "—", c3: "—" },
-          prompt: "embed(query) → q⃗\nquery = \"" + QUERY + "\"\n// 使用與建庫相同的 embedding 模型",
-          answer: "（尚未生成）",
-          answerTone: "",
-          status: "① Embed Query：問題進入與文件相同的向量空間。換模型就必須整庫重嵌——這裡假設一致。"
-        },
-        {
-          ph: "retrieve",
-          tone: "ok",
-          chunks: { c1: "hit", c2: "idle", c3: "idle" },
-          scores: { c1: "0.91", c2: "0.31", c3: "0.22" },
-          prompt: "retrieve(q⃗, k=2) → [chunk#12]\n// Top-1 明確命中退貨政策；其餘分數過低可丟棄",
-          answer: "（尚未生成）",
-          answerTone: "",
-          status: "② Retrieve：ANN 回傳 Top-k。policy-v3#12 分數最高且語義對題；配送 FAQ／舊促銷被壓下去。"
-        },
-        {
-          ph: "prompt",
-          tone: "ok",
-          chunks: { c1: "hit", c2: "idle", c3: "idle" },
-          scores: { c1: "0.91", c2: "0.31", c3: "0.22" },
-          prompt: [
-            "System: 只根據「上下文」回答；不足則說不知道。請標註來源。",
-            "Context:",
-            "[1] (policy-v3#12) 退貨須於到貨後 14 日內申請；商品須保持原包裝與完整配件。",
-            "User: " + QUERY
-          ].join("\n"),
-          answer: "（尚未生成）",
-          answerTone: "",
-          status: "③ Build Prompt：把命中 chunk 編成帶編號的 Context，再接上使用者問題。檢索結果成為生成條件。"
-        },
-        {
-          ph: "generate",
-          tone: "ok",
-          chunks: { c1: "hit", c2: "idle", c3: "idle" },
-          scores: { c1: "0.91", c2: "0.31", c3: "0.22" },
-          prompt: [
-            "System: 只根據「上下文」回答；不足則說不知道。請標註來源。",
-            "Context:",
-            "[1] (policy-v3#12) 退貨須於到貨後 14 日內申請；商品須保持原包裝與完整配件。",
-            "User: " + QUERY
-          ].join("\n"),
-          answer: "依政策：到貨後 14 日內可申請退貨，且需保留原包裝與完整配件。[來源: policy-v3#12]",
-          answerTone: "tone-ok",
-          status: "④ Generate：模型依 Context 作答並可引用來源。幻覺被「有依據」壓住——前提是檢索真的對。"
-        }
-      ]
-    },
-    weak: {
-      label: "弱相關／誤檢",
-      steps: [
-        {
-          ph: null,
-          tone: "wait",
-          chunks: { c1: "idle", c2: "idle", c3: "idle" },
-          scores: { c1: "—", c2: "—", c3: "—" },
-          prompt: "// 待命。此情境模擬切塊／索引品質不佳：真正政策 chunk 分數被擠掉。",
-          answer: "（尚未生成）",
-          answerTone: "",
-          status: "情境「弱相關／誤檢」：正確政策仍在庫裡，但檢索沒把它排進 Top-k（或分數被稀釋）。"
-        },
-        {
-          ph: "embed",
-          tone: "wait",
-          chunks: { c1: "idle", c2: "idle", c3: "idle" },
-          scores: { c1: "—", c2: "—", c3: "—" },
-          prompt: "embed(query) → q⃗\nquery = \"" + QUERY + "\"",
-          answer: "（尚未生成）",
-          answerTone: "",
-          status: "① Embed Query：步驟相同。問題不在 embedding，而在「庫裡的切塊與相似度排序」。"
-        },
-        {
-          ph: "retrieve",
-          tone: "lock",
-          chunks: { c1: "idle", c2: "weak", c3: "miss" },
-          scores: { c1: "0.44", c2: "0.58", c3: "0.55" },
-          prompt: "retrieve(q⃗, k=2) → [shipping-faq#3, promo-2024#1]\n// 誤把物流／促銷當退貨依據；真正的 policy#12 落在 k 外",
-          answer: "（尚未生成）",
-          answerTone: "",
-          status: "② Retrieve：Top-2 變成配送 FAQ 與舊促銷。語義「有一點像購物」，但不是退貨條款——典型誤檢。"
-        },
-        {
-          ph: "prompt",
-          tone: "lock",
-          chunks: { c1: "idle", c2: "weak", c3: "miss" },
-          scores: { c1: "0.44", c2: "0.58", c3: "0.55" },
-          prompt: [
-            "System: 只根據「上下文」回答；不足則說不知道。請標註來源。",
-            "Context:",
-            "[1] (shipping-faq#3) 標準配送時效為 2–4 個工作天；離島另計。",
-            "[2] (promo-2024#1) 雙十一滿額贈品活動已結束，贈品恕不補發。",
-            "User: " + QUERY
-          ].join("\n"),
-          answer: "（尚未生成）",
-          answerTone: "",
-          status: "③ Build Prompt：錯的 Context 仍被認真塞進窗口。RAG 不會自動知道「這些片段答不了題」。"
-        },
-        {
-          ph: "generate",
-          tone: "bad",
-          chunks: { c1: "idle", c2: "weak", c3: "miss" },
-          scores: { c1: "0.44", c2: "0.58", c3: "0.55" },
-          prompt: [
-            "System: 只根據「上下文」回答；不足則說不知道。請標註來源。",
-            "Context:",
-            "[1] (shipping-faq#3) 標準配送時效為 2–4 個工作天；離島另計。",
-            "[2] (promo-2024#1) 雙十一滿額贈品活動已結束，贈品恕不補發。",
-            "User: " + QUERY
-          ].join("\n"),
-          answer: "（風險）模型可能硬湊：「大約 2–4 天內聯絡客服…」——看起來有引用，事實卻錯。或在嚴格 system 下回答「上下文不足」。",
-          answerTone: "tone-bad",
-          status: "④ Generate：垃圾進、垃圾出。這正是後續要做 chunking／hybrid／rerank／evaluation 的理由——RAG 不是幻覺疫苗。"
-        }
-      ]
-    },
-    norag: {
-      label: "無 RAG（對照）",
-      steps: [
-        {
-          ph: null,
-          tone: "wait",
-          chunks: { c1: "idle", c2: "idle", c3: "idle" },
-          scores: { c1: "—", c2: "—", c3: "—" },
-          prompt: "// 對照組：不檢索、不組 Context，直接把問題丟給參數模型。",
-          answer: "（尚未生成）",
-          answerTone: "",
-          status: "情境「無 RAG」：跳過檢索。知識庫 chunks 全程不參與——對照私有／最新政策進不了模型的痛點。"
-        },
-        {
-          ph: "embed",
-          tone: "wait",
-          chunks: { c1: "idle", c2: "idle", c3: "idle" },
-          scores: { c1: "—", c2: "—", c3: "—" },
-          prompt: "// 本情境不做 query embedding／檢索。\n// （階段列僅作對照；實際路徑直接進 Generate）",
-          answer: "（尚未生成）",
-          answerTone: "",
-          status: "① 無 Embed／Retrieve：沒有外部知識通道。公司退貨政策若未進訓練語料，模型只能猜或拒答。"
-        },
-        {
-          ph: "retrieve",
-          tone: "bad",
-          chunks: { c1: "idle", c2: "idle", c3: "idle" },
-          scores: { c1: "—", c2: "—", c3: "—" },
-          prompt: "retrieve = ∅\n// 私有政策、最新版條款都不在權重裡",
-          answer: "（尚未生成）",
-          answerTone: "",
-          status: "② 無檢索：知識過時與私有資料問題同時爆炸——索引裡明明有 policy-v3，卻從未被讀取。"
-        },
-        {
-          ph: "prompt",
-          tone: "bad",
-          chunks: { c1: "idle", c2: "idle", c3: "idle" },
-          scores: { c1: "—", c2: "—", c3: "—" },
-          prompt: [
-            "System: 你是電商客服助理。",
-            "User: " + QUERY,
-            "",
-            "// 注意：沒有 Context 區塊"
-          ].join("\n"),
-          answer: "（尚未生成）",
-          answerTone: "",
-          status: "③ Prompt 只有問題：沒有可引用片段，也無法做 ACL 過濾——因為根本沒走到知識庫。"
-        },
-        {
-          ph: "generate",
-          tone: "bad",
-          chunks: { c1: "idle", c2: "idle", c3: "idle" },
-          scores: { c1: "—", c2: "—", c3: "—" },
-          prompt: [
-            "System: 你是電商客服助理。",
-            "User: " + QUERY,
-            "",
-            "// 注意：沒有 Context 區塊"
-          ].join("\n"),
-          answer: "（幻覺風險）「一般是 7 天鑑賞期，建議保留包裝…」——語氣自信，卻可能與貴司 14 日政策衝突，且無來源可稽核。",
-          answerTone: "tone-bad",
-          status: "④ Generate：這就是 RAG 要解的痛——幻覺、過時、私有知識。對照「檢索命中」情境即可感受到差距。"
-        }
-      ]
+  var DEFAULTS = { query: "span2", chunkChars: 160, overlapPct: 0, topK: 3, minScore: 0.15, ctxLimit: 600 };
+
+  /* ────────────────── (2) compute* 純函式（不得碰 DOM） ────────────────── */
+
+  function clampN(v, lo, hi, dflt) {
+    v = Number(v);
+    if (!isFinite(v)) { return dflt; }
+    return Math.min(hi, Math.max(lo, v));
+  }
+  function countOcc(hay, needle) {
+    var c = 0, i = 0;
+    if (!needle) { return 0; }
+    while ((i = hay.indexOf(needle, i)) !== -1) { c++; i += needle.length; }
+    return c;
+  }
+  function toTokens(chars) { return Math.ceil(chars / CHARS_PER_TOKEN); }
+
+  // @probe fn       computeRetrieval
+  // @probe baseline {"query":"span2","chunkChars":160,"overlapPct":0,"topK":3,"minScore":0.15,"ctxLimit":600}
+  // @probe sweep    {"query":["span1","span2"],"chunkChars":[80,400],"overlapPct":[0,50],"topK":[1,8],"minScore":[0,0.6],"ctxLimit":[200,2000]}
+  function computeRetrieval(p) {
+    p = p || {};
+    var qk = QUERIES[p.query] ? p.query : DEFAULTS.query;
+    var Q = QUERIES[qk];
+    var chunkChars = Math.round(clampN(p.chunkChars, 80, 400, DEFAULTS.chunkChars));
+    var overlapPct = Math.round(clampN(p.overlapPct, 0, 50, DEFAULTS.overlapPct));
+    var topK = Math.round(clampN(p.topK, 1, 8, DEFAULTS.topK));
+    var minScore = clampN(p.minScore, 0, 0.6, DEFAULTS.minScore);
+    var ctxLimit = Math.round(clampN(p.ctxLimit, 200, 2000, DEFAULTS.ctxLimit));
+
+    /* ── 切塊：滑窗步長由重疊率算出；塊數下限 1，末塊 end 夾到文件長度 ── */
+    var stride = Math.max(MIN_STRIDE, Math.round(chunkChars * (1 - overlapPct / 100)));
+    var chunks = [], docMeta = [], base = 0, d, i;
+    for (d = 0; d < DOCS.length; d++) {
+      var doc = DOCS[d], len = doc.text.length;
+      var n = Math.max(1, Math.ceil((len - chunkChars) / stride) + 1);
+      docMeta.push({ id: doc.id, title: doc.title, len: len, base: base });
+      for (i = 0; i < n; i++) {
+        var st = i * stride;
+        if (i > 0 && st >= len) { break; }
+        var en = Math.min(st + chunkChars, len);
+        if (en <= st) { break; }
+        chunks.push({
+          key: doc.id + "#" + (i + 1), docIdx: d, docId: doc.id, idx: i + 1,
+          start: st, end: en, gStart: base + st, gEnd: base + en, len: en - st,
+          body: doc.text.slice(st, en), tokens: toTokens(en - st),
+          raw: 0, score: 0, rank: 0, picked: false, fit: false
+        });
+      }
+      base += len;
     }
+    var totalChars = base;
+
+    /* ── 計分：詞權重 × 詞頻 × IDF（IDF 由本次切塊結果算出），再做長度正規化 ── */
+    var terms = Object.keys(Q.terms), idf = {};
+    terms.forEach(function (t) {
+      var df = 0;
+      chunks.forEach(function (c) { if (c.body.indexOf(t) !== -1) { df++; } });
+      idf[t] = Math.log(1 + chunks.length / (1 + df));
+    });
+    chunks.forEach(function (c) {
+      var raw = 0;
+      terms.forEach(function (t) { raw += Q.terms[t] * countOcc(c.body, t) * idf[t]; });
+      c.raw = raw;
+      c.score = Math.min(1, raw / Math.sqrt(c.len / BASE_LEN) / SCORE_NORM);
+    });
+
+    /* ── 排序 → 取 Top-k → 過分數門檻 ── */
+    var ranked = chunks.slice().sort(function (a, b) {
+      return b.score - a.score || a.docIdx - b.docIdx || a.start - b.start;
+    });
+    ranked.forEach(function (c, r) { c.rank = r + 1; });
+    var headK = ranked.slice(0, topK);
+    var picked = headK.filter(function (c) { return c.score >= minScore; });
+    picked.forEach(function (c) { c.picked = true; });
+
+    /* ── 堆進 context window：放不下的標記為截掉 ── */
+    var queryTok = toTokens(Q.text.length);
+    var used = SYS_TOK + queryTok;
+    var fit = [], dropped = [];
+    picked.forEach(function (c) {
+      if (used + c.tokens <= ctxLimit) { used += c.tokens; c.fit = true; fit.push(c); }
+      else { dropped.push(c); }
+    });
+
+    /* ── 答案要件覆蓋：必須有一塊「完整涵蓋」且「真的進到 context」 ── */
+    var facts = FACTS.map(function (f) {
+      var s = DOCS[0].text.indexOf(f.sent), e = s + f.sent.length;
+      var holders = chunks.filter(function (c) { return c.docIdx === 0 && c.start <= s && c.end >= e; });
+      var by = null, j;
+      for (j = 0; j < fit.length; j++) {
+        if (fit[j].docIdx === 0 && fit[j].start <= s && fit[j].end >= e) { by = fit[j].key; break; }
+      }
+      var diag;
+      if (by) {
+        diag = "由 " + by + " 完整涵蓋，且已進入 context";
+      } else if (!holders.length) {
+        diag = "沒有任何 chunk 完整涵蓋它 —— 被切塊邊界切斷，提高重疊率或加大切塊長度才救得回來";
+      } else if (holders.filter(function (c) { return c.picked; }).length) {
+        diag = holders.filter(function (c) { return c.picked; })[0].key +
+          " 完整涵蓋它也被召回了，但 context 上限把它截掉";
+      } else {
+        diag = holders.map(function (c) { return c.key; }).join("、") +
+          " 完整涵蓋它，但沒進 Top-" + topK + " 或沒過分數門檻 " + minScore.toFixed(2);
+      }
+      return {
+        id: f.id, label: f.label, sent: f.sent, start: s, end: e,
+        required: Q.need.indexOf(f.id) !== -1,
+        holderCount: holders.length, by: by, diag: diag
+      };
+    });
+    var req = facts.filter(function (f) { return f.required; });
+    var covered = req.filter(function (f) { return f.by; }).length;
+
+    var noiseTok = 0;
+    fit.forEach(function (c) { if (c.score < NOISE_BAR) { noiseTok += c.tokens; } });
+
+    return {
+      query: qk, queryText: Q.text, chunkChars: chunkChars, overlapPct: overlapPct,
+      stride: stride, topK: topK, minScore: minScore, ctxLimit: ctxLimit,
+      chunkCount: chunks.length, chunks: chunks, docMeta: docMeta, totalChars: totalChars,
+      idf: idf,
+      avgChunkTokens: chunks.length
+        ? Math.round(chunks.reduce(function (a, c) { return a + c.tokens; }, 0) / chunks.length) : 0,
+      retrievedCount: picked.length, filteredOut: headK.length - picked.length,
+      fitCount: fit.length, droppedCount: dropped.length,
+      fitKeys: fit.map(function (c) { return c.key; }),
+      droppedKeys: dropped.map(function (c) { return c.key; }),
+      ctxTokens: used, sysTokens: SYS_TOK, queryTokens: queryTok,
+      ctxUsedPct: used / ctxLimit * 100, ctxFree: Math.max(0, ctxLimit - used),
+      noiseTokens: noiseTok, noisePct: used ? noiseTok / used * 100 : 0,
+      facts: facts, requiredCount: req.length, coveredCount: covered,
+      answerable: req.length > 0 && covered === req.length,
+      partial: covered > 0 && covered < req.length,
+      topScore: ranked.length ? ranked[0].score : 0
+    };
+  }
+
+  /* ───────────────────────── (3) DOM 參照 ───────────────────────── */
+
+  var demo = document.getElementById("demo-rag-sweep");
+  if (!demo) { return; }
+
+  var segRoot = demo.querySelector(".seg");
+  var elLadder = document.getElementById("rag-sw-ladder");
+  var elFill = document.getElementById("rag-sw-fill");
+  var elFacts = document.getElementById("rag-sw-facts");
+  var elMeter = document.getElementById("rag-sw-meter");
+  var elPrompt = document.getElementById("rag-sw-prompt");
+  var elStatus = document.getElementById("rag-sw-status");
+  var elQuery = document.getElementById("rag-sw-query");
+  var btnReset = document.getElementById("rag-sw-reset");
+
+  var IN = {
+    size: document.getElementById("rag-sw-size"),
+    ov: document.getElementById("rag-sw-ov"),
+    k: document.getElementById("rag-sw-k"),
+    min: document.getElementById("rag-sw-min"),
+    ctx: document.getElementById("rag-sw-ctx")
+  };
+  var OUT = {
+    size: document.getElementById("rag-sw-v-size"),
+    ov: document.getElementById("rag-sw-v-ov"),
+    k: document.getElementById("rag-sw-v-k"),
+    min: document.getElementById("rag-sw-v-min"),
+    ctx: document.getElementById("rag-sw-v-ctx")
   };
 
-  function setPhases(activePh, tone) {
-    phaseEls.forEach(function (el) {
-      var id = el.getAttribute("data-ph");
-      el.classList.remove("ph-active", "ph-done", "ph-bad", "ph-lock");
-      if (!activePh) return;
-      var order = ["embed", "retrieve", "prompt", "generate"];
-      var ai = order.indexOf(activePh);
-      var ei = order.indexOf(id);
-      if (ei < ai) el.classList.add("ph-done");
-      if (ei === ai) {
-        el.classList.add("ph-active");
-        if (tone === "bad") el.classList.add("ph-bad");
-        if (tone === "lock") el.classList.add("ph-lock");
+  var state = {
+    query: DEFAULTS.query, chunkChars: DEFAULTS.chunkChars, overlapPct: DEFAULTS.overlapPct,
+    topK: DEFAULTS.topK, minScore: DEFAULTS.minScore, ctxLimit: DEFAULTS.ctxLimit
+  };
+
+  /* ─────────────── (4) render(model)：只讀 model 畫出來 ─────────────── */
+
+  function esc(s) {
+    return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  }
+
+  function buildLadder(m) {
+    var W = 320, H = 442;
+    var L = 84, R = 276, T = 16, B = 416, GAP = 7;
+    var nDoc = m.docMeta.length;
+    var scale = (B - T - GAP * (nDoc - 1)) / m.totalChars;
+    var tops = [], acc = T, i;
+    for (i = 0; i < nDoc; i++) { tops.push(acc); acc += m.docMeta[i].len * scale + GAP; }
+
+    function xs(v) { return L + Math.max(0, Math.min(1, v)) * (R - L); }
+
+    var s = [];
+    s.push('<svg viewBox="0 0 ' + W + ' ' + H + '" role="img" aria-label="每個 chunk 在文件字元位置與檢索分數上的分布">');
+    s.push("<title>文件座標 × 檢索分數</title>");
+    s.push('<rect x="0" y="0" width="' + W + '" height="' + H + '" fill="#ffffff"/>');
+
+    /* 分數刻度 */
+    [0, 0.25, 0.5, 0.75, 1].forEach(function (v) {
+      var x = xs(v);
+      s.push('<line x1="' + x.toFixed(1) + '" y1="' + T + '" x2="' + x.toFixed(1) + '" y2="' + B +
+        '" stroke="var(--border)" stroke-width="1"/>');
+      s.push('<text x="' + x.toFixed(1) + '" y="' + (B + 14) +
+        '" font-family="var(--mono)" font-size="10" fill="#6b7076" text-anchor="middle">' + v + "</text>");
+    });
+
+    /* 每份文件一條軌道 + 左側標籤 */
+    m.docMeta.forEach(function (dm, d) {
+      var y0 = tops[d], hh = dm.len * scale;
+      s.push('<rect x="' + L + '" y="' + y0.toFixed(1) + '" width="' + (R - L) + '" height="' + hh.toFixed(1) +
+        '" fill="#fafaf9" stroke="var(--border)" stroke-width="1"/>');
+      s.push('<text x="' + (L - 6) + '" y="' + (y0 + 11).toFixed(1) +
+        '" font-family="var(--mono)" font-size="9.5" fill="#6b7076" text-anchor="end">' + esc(dm.id) + "</text>");
+      s.push('<text x="' + (L - 6) + '" y="' + (y0 + 22).toFixed(1) +
+        '" font-family="var(--mono)" font-size="9" fill="#9aa0a6" text-anchor="end">' + dm.len + " 字元</text>");
+    });
+
+    /* chunk 橫條：y＝字元範圍、x 右緣＝分數；奇偶列左緣內縮，重疊時仍可辨邊界 */
+    m.chunks.forEach(function (c, ci) {
+      var y0 = tops[c.docIdx] + c.start * scale;
+      var hh = Math.max(2.5, c.len * scale - 1.2);
+      var inset = (c.idx % 2) * 5;
+      var x0 = L + inset, x1 = Math.max(x0 + 2, xs(c.score));
+      var fill = "#ffffff", stroke = "var(--border-strong)", dash = "", op = "0.75";
+      if (c.fit) { fill = "var(--ok-soft)"; stroke = "var(--ok)"; op = "1"; }
+      else if (c.picked) { fill = "var(--warn-soft)"; stroke = "var(--warn)"; dash = ' stroke-dasharray="3 2"'; op = "1"; }
+      s.push('<rect x="' + x0.toFixed(1) + '" y="' + y0.toFixed(1) + '" width="' + (x1 - x0).toFixed(1) +
+        '" height="' + hh.toFixed(1) + '" rx="2" fill="' + fill + '" stroke="' + stroke +
+        '" stroke-width="1.4" opacity="' + op + '"' + dash + "/>");
+      if (hh >= 11) {
+        s.push('<text x="' + (x0 + 4).toFixed(1) + '" y="' + (y0 + 10).toFixed(1) +
+          '" font-family="var(--mono)" font-size="8.5" fill="#6b7076">#' + c.idx +
+          " · " + c.score.toFixed(2) + "</text>");
       }
     });
-  }
 
-  function setChunks(states, scores) {
-    Object.keys(chunkEls).forEach(function (id) {
-      var el = chunkEls[id];
-      if (!el) return;
-      el.classList.remove("ch-hit", "ch-weak", "ch-miss", "ch-idle");
-      var st = states[id] || "idle";
-      el.classList.add("ch-" + st);
-      var score = scores[id] != null ? scores[id] : "—";
-      var meta = el.querySelector(".ck");
-      if (meta) meta.textContent = CHUNK_META[id] + " · score " + score;
+    /* 分數門檻 */
+    var tx = xs(m.minScore);
+    s.push('<line x1="' + tx.toFixed(1) + '" y1="' + T + '" x2="' + tx.toFixed(1) + '" y2="' + B +
+      '" stroke="var(--bad)" stroke-width="1.5" stroke-dasharray="5 3"/>');
+    s.push('<text x="' + Math.min(tx + 4, R - 48).toFixed(1) + '" y="' + (T + 10) +
+      '" font-family="var(--mono)" font-size="9.5" fill="var(--bad)">門檻 ' + m.minScore.toFixed(2) + "</text>");
+
+    /* 答案要件標記（只畫在退貨政策那條軌道上） */
+    m.facts.forEach(function (f) {
+      var y0 = tops[0] + f.start * scale;
+      var hh = Math.max(3.5, (f.end - f.start) * scale);
+      var col = !f.required ? "var(--border-strong)" : (f.by ? "var(--ok)" : "var(--bad)");
+      s.push('<rect x="' + (R + 4) + '" y="' + y0.toFixed(1) + '" width="8" height="' + hh.toFixed(1) +
+        '" rx="2" fill="' + col + '"/>');
+      s.push('<text x="' + (R + 15) + '" y="' + (y0 + hh / 2 + 3.5).toFixed(1) +
+        '" font-family="var(--mono)" font-size="9.5" fill="' + col + '">' + f.id + "</text>");
     });
+
+    s.push('<text x="' + ((L + R) / 2) + '" y="' + (H - 6) +
+      '" font-family="var(--mono)" font-size="10" fill="#6b7076" text-anchor="middle">檢索分數 →　（縱向＝文件字元位置）</text>');
+    s.push("</svg>");
+    return s.join("");
   }
 
-  function render() {
-    var steps = SCENARIOS[scenario].steps;
-    if (stepIdx >= steps.length) stepIdx = steps.length - 1;
-    var s = steps[stepIdx];
+  function buildFill(m) {
+    var W = 260, H = 442;
+    var X0 = 74, X1 = 158, T = 16, B = 416;
+    var totalTok = m.ctxTokens;
+    m.chunks.forEach(function (c) { if (c.picked && !c.fit) { totalTok += c.tokens; } });
+    var maxTok = Math.max(m.ctxLimit, totalTok) * 1.02;
+    var sc = (B - T) / maxTok;
 
-    if (queryEl) queryEl.textContent = QUERY;
-    if (statusEl) statusEl.textContent = s.status;
+    var segs = [{ label: "system prompt", tok: m.sysTokens, kind: "sys" },
+                { label: "使用者問題", tok: m.queryTokens, kind: "sys" }];
+    m.chunks.filter(function (c) { return c.fit; }).forEach(function (c) {
+      segs.push({ label: c.key, tok: c.tokens, kind: "fit", score: c.score });
+    });
+    m.chunks.filter(function (c) { return c.picked && !c.fit; }).forEach(function (c) {
+      segs.push({ label: c.key, tok: c.tokens, kind: "drop", score: c.score });
+    });
 
-    promptEl.textContent = s.prompt;
-    promptEl.className = "rag-prompt tone-" + (s.tone || "wait");
+    var s = [];
+    s.push('<svg viewBox="0 0 ' + W + ' ' + H + '" role="img" aria-label="context window 的 token 填充狀況">');
+    s.push("<title>Context window 填充</title>");
+    s.push('<defs><pattern id="ragHatch" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">' +
+      '<rect width="6" height="6" fill="#ffffff"/><line x1="0" y1="0" x2="0" y2="6" stroke="var(--bad)" stroke-width="2"/></pattern></defs>');
+    s.push('<rect x="0" y="0" width="' + W + '" height="' + H + '" fill="#ffffff"/>');
+    s.push('<rect x="' + X0 + '" y="' + T + '" width="' + (X1 - X0) + '" height="' + (B - T) +
+      '" fill="#fafaf9" stroke="var(--border)" stroke-width="1"/>');
 
-    answerEl.textContent = s.answer;
-    answerEl.className = "rag-answer" + (s.answerTone ? " " + s.answerTone : "");
+    var y = B;
+    segs.forEach(function (sg) {
+      var hh = sg.tok * sc;
+      var top = y - hh;
+      var fill = sg.kind === "sys" ? "var(--bg-soft)" : (sg.kind === "fit" ? "var(--ok-soft)" : "url(#ragHatch)");
+      var stroke = sg.kind === "sys" ? "var(--border-strong)" : (sg.kind === "fit" ? "var(--ok)" : "var(--bad)");
+      s.push('<rect x="' + X0 + '" y="' + top.toFixed(1) + '" width="' + (X1 - X0) + '" height="' + Math.max(1.5, hh).toFixed(1) +
+        '" fill="' + fill + '" stroke="' + stroke + '" stroke-width="1.2"/>');
+      s.push('<text x="' + (X1 + 6) + '" y="' + (top + Math.max(11, hh) / 2 + 3.5).toFixed(1) +
+        '" font-family="var(--mono)" font-size="9.5" fill="' + (sg.kind === "drop" ? "var(--bad)" : "#262a2f") + '">' +
+        esc(sg.label) + " · " + sg.tok + " tok" + (sg.kind === "drop" ? "（截掉）" : "") + "</text>");
+      y = top;
+    });
 
-    setPhases(s.ph, s.tone);
-    setChunks(s.chunks, s.scores);
-
-    btnNext.disabled = stepIdx >= steps.length - 1;
+    var ly = B - m.ctxLimit * sc;
+    s.push('<line x1="' + (X0 - 14) + '" y1="' + ly.toFixed(1) + '" x2="' + (W - 6) + '" y2="' + ly.toFixed(1) +
+      '" stroke="var(--bad)" stroke-width="1.5" stroke-dasharray="5 3"/>');
+    s.push('<text x="' + (X0 - 16) + '" y="' + (ly - 5).toFixed(1) +
+      '" font-family="var(--mono)" font-size="9.5" fill="var(--bad)">上限 ' + m.ctxLimit + " tok</text>");
+    s.push('<text x="' + (X0 - 16) + '" y="' + (B - 2) +
+      '" font-family="var(--mono)" font-size="9.5" fill="#6b7076">0</text>');
+    s.push('<text x="14" y="' + ((T + B) / 2) + '" font-family="var(--mono)" font-size="10" fill="#6b7076" ' +
+      'text-anchor="middle" transform="rotate(-90 14 ' + ((T + B) / 2) + ')">tokens</text>');
+    s.push("</svg>");
+    return s.join("");
   }
 
-  function reset() {
-    stepIdx = 0;
-    render();
+  function buildFacts(m) {
+    return m.facts.map(function (f) {
+      var cls = !f.required ? "off" : (f.by ? "hit" : "miss");
+      return '<div class="rag-sw-fact ' + cls + '">' +
+        '<div class="fl">' + f.id + " · " + esc(f.label) + " · 字元 [" + f.start + ", " + f.end + ")" +
+        (f.required ? "" : " · 本題不需要") + "</div>" +
+        '<div class="fv">' + esc(f.diag) + "</div></div>";
+    }).join("");
   }
 
-  document.querySelectorAll("#demo-rag-flow .seg button").forEach(function (btn) {
-    btn.addEventListener("click", function () {
-      document.querySelectorAll("#demo-rag-flow .seg button").forEach(function (b) {
-        b.setAttribute("aria-pressed", b === btn ? "true" : "false");
+  function buildMeter(m) {
+    var cells = [
+      { l: "切塊結果（步長 " + m.stride + " 字元）", v: m.chunkCount + " 塊" },
+      { l: "召回 / 被門檻濾掉", v: m.retrievedCount + " / " + m.filteredOut },
+      { l: "context 使用", v: m.ctxTokens + " / " + m.ctxLimit + " tok（" + m.ctxUsedPct.toFixed(0) + "%）" },
+      { l: "噪音占比 / 被截掉", v: m.noisePct.toFixed(1) + "% / " + m.droppedCount + " 塊" }
+    ];
+    return cells.map(function (c) {
+      return '<div class="rag-sw-cell"><div class="ml">' + esc(c.l) + '</div><div class="mv">' + esc(c.v) + "</div></div>";
+    }).join("");
+  }
+
+  function buildPrompt(m) {
+    var lines = ["System: 只根據「上下文」回答；上下文不足就說不知道，並標註來源。", "Context:"];
+    var fits = m.chunks.filter(function (c) { return c.fit; });
+    if (!fits.length) {
+      lines.push("  （空——沒有任何 chunk 同時通過 Top-k、分數門檻與 context 上限）");
+    } else {
+      fits.forEach(function (c, i) {
+        var body = c.body.length > 58 ? c.body.slice(0, 58) + "…" : c.body;
+        lines.push("  [" + (i + 1) + "] (" + c.key + " · score " + c.score.toFixed(2) + ") " + body);
       });
-      scenario = btn.getAttribute("data-sc");
-      reset();
-    });
-  });
-
-  btnNext.addEventListener("click", function () {
-    var steps = SCENARIOS[scenario].steps;
-    if (stepIdx < steps.length - 1) {
-      stepIdx += 1;
-      render();
     }
-  });
+    lines.push("User: " + m.queryText);
+    return lines.join("\n");
+  }
 
-  btnReset.addEventListener("click", reset);
+  function render(m) {
+    OUT.size.textContent = m.chunkChars + " 字元";
+    OUT.ov.textContent = m.overlapPct + "%";
+    OUT.k.textContent = String(m.topK);
+    OUT.min.textContent = m.minScore.toFixed(2);
+    OUT.ctx.textContent = m.ctxLimit + " tok";
+    elQuery.textContent = m.queryText;
 
-  reset();
+    elLadder.innerHTML = buildLadder(m);
+    elFill.innerHTML = buildFill(m);
+    elFacts.innerHTML = buildFacts(m);
+    elMeter.innerHTML = buildMeter(m);
+    elPrompt.textContent = buildPrompt(m);
+
+    elStatus.textContent = "答案要件覆蓋 " + m.coveredCount + " / " + m.requiredCount +
+      "　→　" + (m.answerable ? "這組參數下，模型手上有回答所需的全部依據"
+        : (m.partial ? "只湊到部分依據：模型能答一半，另一半會開始編" : "沒有任何依據進到窗口：嚴格 prompt 下只能回答「不知道」")) +
+      "　·　最高分 " + m.topScore.toFixed(2) + "　·　平均每塊 " + m.avgChunkTokens + " tok";
+  }
+
+  function recompute() { render(computeRetrieval(state)); }
+
+  /* ───────────────────────── (5) 事件綁定 ───────────────────────── */
+
+  function syncControls() {
+    IN.size.value = String(state.chunkChars);
+    IN.ov.value = String(state.overlapPct);
+    IN.k.value = String(state.topK);
+    IN.min.value = String(Math.round(state.minScore * 100));
+    IN.ctx.value = String(state.ctxLimit);
+    if (segRoot) {
+      Array.prototype.forEach.call(segRoot.querySelectorAll("button[data-q]"), function (b) {
+        b.setAttribute("aria-pressed", b.getAttribute("data-q") === state.query ? "true" : "false");
+      });
+    }
+  }
+
+  function bindRange(el, key, scale) {
+    if (!el) { return; }
+    el.addEventListener("input", function () {
+      state[key] = scale ? Number(el.value) / scale : Number(el.value);
+      recompute();
+    });
+  }
+  bindRange(IN.size, "chunkChars", 0);
+  bindRange(IN.ov, "overlapPct", 0);
+  bindRange(IN.k, "topK", 0);
+  bindRange(IN.min, "minScore", 100);
+  bindRange(IN.ctx, "ctxLimit", 0);
+
+  if (segRoot) {
+    segRoot.addEventListener("click", function (ev) {
+      var btn = ev.target.closest ? ev.target.closest("button[data-q]") : null;
+      if (!btn) { return; }
+      state.query = btn.getAttribute("data-q");
+      syncControls();
+      recompute();
+    });
+  }
+  if (btnReset) {
+    btnReset.addEventListener("click", function () {
+      state.query = DEFAULTS.query;
+      state.chunkChars = DEFAULTS.chunkChars;
+      state.overlapPct = DEFAULTS.overlapPct;
+      state.topK = DEFAULTS.topK;
+      state.minScore = DEFAULTS.minScore;
+      state.ctxLimit = DEFAULTS.ctxLimit;
+      syncControls();
+      recompute();
+    });
+  }
+
+  syncControls();
+  recompute();
 })();
 </script>
 
