@@ -1378,7 +1378,7 @@
         <a href="#s4"><span class="n">04</span>SNI 與 ALPN：交握裡的兩個路由旋鈕</a>
         <a href="#s5"><span class="n">05</span>mTLS：把單向的信任變成雙向</a>
         <a href="#s6"><span class="n">06</span>Session Resumption、0-RTT 與重放風險</a>
-        <a href="#s7"><span class="n">07</span>互動 · TLS 1.3 交握模擬器</a>
+        <a href="#s7"><span class="n">07</span>互動 · 交握成本計算機</a>
         <a href="#s8"><span class="n">08</span>面試折衷與實務選型</a>
       </div>
     </nav>
@@ -1394,7 +1394,11 @@
     <!-- ===================== MAIN CONTENT ===================== -->
     <main>
       <div class="inner">
-        <!-- demo-archetype: A｜時序推進 — 讀者切換「完整交握／0-RTT resumption」與「單向驗證／mTLS」兩組開關，再按「下一步」逐則推進交握訊息，同步觀察目前流量金鑰、雙方身分、交握 RTT 與重放風險。選 A 是因為 TLS 1.3 的安全論證本身就是訊息順序：哪一則之後開始加密、憑證落在加密線的哪一側。 -->
+        <!-- demo-archetype: B｜參數掃描（主，第 7 節） — 讀者拖動網路 RTT、憑證鏈長度與 early data 大小，
+     並切換憑證演算法、吊銷檢查方式、HelloRetryRequest 與 mTLS，即時重算「完整交握／resumption／0-RTT」
+     三條成本曲線，以及交握位元組、非對稱運算次數、單核每秒可承載的交握數與 0-RTT 曝險量。
+     選 B 是因為本篇每一個機制（1-RTT、HelloRetryRequest、OCSP、短鏈、resumption、0-RTT、mTLS）最後都折算成同一個量：
+     首個應用位元組上路之前要付多少 RTT 與多少 CPU——那是一個連續的成本函數，不是一段訊息順序。 -->
 <style>
   /* 本篇專屬：tlsx-* 命名空間，不覆蓋全站 base 類別 */
   #tlsx-root {
@@ -1463,63 +1467,33 @@
   .tlsx-cert .xk { font-family: var(--mono); font-size: 11px; color: var(--text-3); margin-bottom: 7px; }
   .tlsx-cert .xs { font-size: 12.5px; color: var(--text-2); line-height: 1.6; }
 
-  /* Demo */
-  .tlsx-seg-row { display: flex; flex-wrap: wrap; gap: 8px; }
-  .tlsx-demo-controls { display: flex; flex-wrap: wrap; gap: 8px; margin: 10px 0 8px; align-items: center; }
-  .tlsx-stage { border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--bg-soft); padding: 10px 12px; margin-top: 10px; }
-  .tlsx-stage-head {
-    display: flex; justify-content: space-between; font-family: var(--mono); font-size: 11px;
-    color: var(--text-3); letter-spacing: .06em; text-transform: uppercase;
-    border-bottom: 1px dashed var(--border); padding-bottom: 6px; margin-bottom: 10px;
+  /* Demo · 交握成本計算機（tlsb-*） */
+  .tlsb-knobs { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px 16px; margin-bottom: 10px; }
+  @media (max-width: 720px) { .tlsb-knobs { grid-template-columns: 1fr; } }
+  .tlsb-knob { display: grid; grid-template-columns: 1fr auto; gap: 3px 8px; align-items: center; }
+  .tlsb-knob .kn { font-size: 12px; color: var(--text-2); }
+  .tlsb-knob .kv { font-family: var(--mono); font-size: 12px; font-weight: 700; color: var(--text); text-align: right; }
+  .tlsb-knob input[type="range"] { grid-column: 1 / -1; width: 100%; accent-color: var(--accent); }
+  .tlsb-switches { display: flex; flex-wrap: wrap; gap: 8px 14px; align-items: center; margin-bottom: 8px; }
+  .tlsb-tog { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text-2); cursor: pointer; }
+  .tlsb-tog input { accent-color: var(--accent); }
+  .tlsb-plot { border: 1px solid var(--border); border-radius: var(--radius-sm); background: #fff; padding: 8px 10px 4px; margin: 10px 0; }
+  .tlsb-reads { display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px; margin-top: 10px; }
+  @media (max-width: 640px) { .tlsb-reads { grid-template-columns: 1fr; } }
+  .tlsb-read { border: 1px solid var(--border); border-radius: var(--radius-sm); background: #fff; padding: 10px 12px; }
+  .tlsb-read .rt {
+    font-family: var(--mono); font-size: 11px; letter-spacing: .06em; text-transform: uppercase;
+    color: var(--text-3); margin-bottom: 6px;
   }
-  .tlsx-msg {
-    border: 1px solid var(--border); border-left: 4px solid var(--border-strong);
-    border-radius: var(--radius-sm); background: #fff; padding: 9px 11px; margin-bottom: 7px;
-    transition: opacity .18s, box-shadow .18s, border-color .18s;
-  }
-  .tlsx-msg.pending { opacity: .28; }
-  .tlsx-msg.cur { box-shadow: 0 0 0 3px var(--accent-soft); }
-  .tlsx-msg.c2s { margin-right: 10%; }
-  .tlsx-msg.s2c { margin-left: 10%; }
-  .tlsx-msg.sys { background: var(--bg-soft); border-style: dashed; border-left-style: dashed; }
-  .tlsx-msg .mhead { display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
-  .tlsx-msg .mdir { font-family: var(--mono); font-size: 11px; font-weight: 700; color: var(--text-3); min-width: 66px; }
-  .tlsx-msg .mname { font-family: var(--mono); font-size: 12.5px; font-weight: 700; color: var(--text); }
-  .tlsx-msg .mtag {
-    margin-left: auto; font-family: var(--mono); font-size: 10.5px; padding: 2px 8px;
-    border-radius: 999px; border: 1px solid var(--border-strong); color: var(--text-3); background: #fff;
-  }
-  .tlsx-msg .mchips { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 7px; }
-  .tlsx-msg .mchip {
-    font-family: var(--mono); font-size: 11px; padding: 3px 7px; border-radius: 6px;
-    background: var(--bg-soft); border: 1px solid var(--border); color: var(--text-2);
-  }
-  .tlsx-msg .mnote { font-size: 12.5px; color: var(--text-2); line-height: 1.6; margin-top: 7px; }
-  .tlsx-msg.e-plain { border-left-color: var(--accent); }
-  .tlsx-msg.e-plain .mtag { background: var(--accent-soft); color: var(--accent); border-color: var(--accent); }
-  .tlsx-msg.e-hs { border-left-color: var(--warn); }
-  .tlsx-msg.e-hs .mtag { background: var(--warn-soft); color: var(--warn); border-color: var(--warn); }
-  .tlsx-msg.e-app { border-left-color: var(--ok); }
-  .tlsx-msg.e-app .mtag { background: var(--ok-soft); color: var(--ok); border-color: var(--ok); }
-  .tlsx-msg.e-early { border-left-color: var(--bad); }
-  .tlsx-msg.e-early .mtag { background: var(--bad-soft); color: var(--bad); border-color: var(--bad); }
-  .tlsx-panels { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 10px; }
-  @media (max-width: 640px) { .tlsx-panels { grid-template-columns: 1fr; } }
-  .tlsx-panel { border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 12px; background: #fff; }
-  .tlsx-panel .pt {
-    font-size: 11px; color: var(--text-3); letter-spacing: .06em; text-transform: uppercase;
-    font-family: var(--mono); margin-bottom: 8px;
-  }
-  .tlsx-panel .prow {
-    display: flex; justify-content: space-between; gap: 8px; font-family: var(--mono);
-    font-size: 12px; padding: 4px 0; border-bottom: 1px dashed var(--border);
-  }
-  .tlsx-panel .prow:last-child { border-bottom: none; }
-  .tlsx-panel .pk { color: var(--text-3); white-space: nowrap; }
-  .tlsx-panel .pv { color: var(--text); font-weight: 600; text-align: right; }
-  .tlsx-panel .pv.warn { color: var(--warn); }
-  .tlsx-panel .pv.bad { color: var(--bad); }
-  .tlsx-panel .pv.ok { color: var(--ok); }
+  .tlsb-read .rb { display: grid; grid-template-columns: 80px 1fr 96px; gap: 8px; align-items: center; margin-top: 7px; }
+  .tlsb-read .rb.solo { grid-template-columns: 1fr auto; }
+  .tlsb-read .rl { font-size: 11.5px; color: var(--text-2); }
+  .tlsb-read .rbar { height: 8px; border-radius: 4px; background: var(--bg-soft); border: 1px solid var(--border); overflow: hidden; }
+  .tlsb-read .rbar i { display: block; height: 100%; background: var(--accent); }
+  .tlsb-read .rb.m-resume .rbar i { background: var(--warn); }
+  .tlsb-read .rb.m-zero .rbar i { background: var(--bad); }
+  .tlsb-read .rv { font-family: var(--mono); font-size: 12px; font-weight: 700; color: var(--text); text-align: right; }
+  .tlsb-actions { display: flex; gap: 8px; margin-top: 10px; }
 </style>
 
 <div id="tlsx-root">
@@ -1949,76 +1923,81 @@ Verify return code: 0 (ok)</code></pre>
 </section>
 
 <section id="s7">
-  <div class="sec-head"><span class="sec-num">07</span><h2>互動 · TLS 1.3 交握模擬器</h2></div>
-  <p class="sec-sub">逐則推進交握訊息，看清楚每一則攜帶什麼、從哪一則開始加密，以及 0-RTT 究竟省在哪、賠上什麼。</p>
+  <div class="sec-head"><span class="sec-num">07</span><h2>互動 · 交握成本計算機</h2></div>
+  <p class="sec-sub">把前面六節的每一個機制推到兩端，看它們各自在「第一個應用位元組上路之前」的帳單上加了多少。</p>
 
-  <p>下面的模擬器把一次 TLS 1.3 交握拆成單則訊息。左邊切換<strong>完整交握</strong>與 <strong>0-RTT session resumption</strong>，
-  右邊切換<strong>單向驗證</strong>與 <strong>mTLS</strong>。每按一次「下一步」推進一則，右側面板會同步更新當前使用的金鑰、
-  前向保密狀態、雙方身分是否已確認，以及最重要的兩個成本欄位：<strong>交握 RTT</strong> 與 <strong>第一個應用資料何時能上路</strong>。</p>
+  <p>前面六節談的東西，最後都折算成同一個量：<strong>在第一個應用位元組能送出去之前，你要等掉幾個 RTT、燒掉多少 CPU、傳掉多少位元組</strong>。
+  下面的計算機把三種模式——完整交握、resumption、resumption + 0-RTT——畫成三條成本曲線：
+  橫軸是網路 RTT，縱軸是<strong>首個應用位元組可送出前的等待時間</strong>（沿用第 8 節那條
+  <code>TCP 1-RTT + TLS 交握</code> 的算法，不含伺服器回應的那一趟）。
+  拖動 RTT 滑桿會移動曲線上的游標，其餘旋鈕則改變曲線本身的形狀。</p>
 
-  <div class="demo" id="tlsx-demo">
+  <p>曲線之外還有三筆帳：<strong>交握位元組</strong>、<strong>非對稱運算次數</strong>，以及<strong>單核每秒能收下幾條新交握</strong>。
+  這三筆是 resumption 真正省下的東西——它省的是計算與頻寬，不是那個 RTT。</p>
+
+  <div class="demo" id="tlsb-demo">
     <div class="demo-bar">
-      <span class="label">互動 · TLS 1.3 交握模擬器</span>
-      <span class="label" style="text-transform:none;font-family:var(--sans);font-size:12px;color:var(--text-2)">選好情境後按「下一步」逐則推進</span>
+      <span class="label">互動 · 交握成本計算機</span>
+      <span class="label" style="text-transform:none;font-family:var(--sans);font-size:12px;color:var(--text-2)">拖動任一參數，三條曲線與下方讀數即時重算</span>
     </div>
     <div class="demo-body">
-      <div class="tlsx-seg-row">
-        <div class="seg" role="group" aria-label="交握情境切換">
-          <button data-sc="full" aria-pressed="true">完整交握 · 1-RTT</button>
-          <button data-sc="resume" aria-pressed="false">Resumption · 0-RTT</button>
-        </div>
-        <div class="seg" role="group" aria-label="客戶端身分驗證切換">
-          <button data-auth="server" aria-pressed="true">單向驗證</button>
-          <button data-auth="mtls" aria-pressed="false">mTLS · 雙向</button>
-        </div>
+      <div class="tlsb-knobs">
+        <label class="tlsb-knob">
+          <span class="kn">網路 RTT</span><span class="kv" id="tlsb-rtt-v">60 ms</span>
+          <input type="range" id="tlsb-rtt" min="10" max="300" step="5" value="60" aria-label="網路 RTT（毫秒）">
+        </label>
+        <label class="tlsb-knob">
+          <span class="kn">憑證鏈長度</span><span class="kv" id="tlsb-chain-v">2 張</span>
+          <input type="range" id="tlsb-chain" min="2" max="4" step="1" value="2" aria-label="憑證鏈長度（張）">
+        </label>
+        <label class="tlsb-knob">
+          <span class="kn">early data 大小</span><span class="kv" id="tlsb-early-v">2 KB</span>
+          <input type="range" id="tlsb-early" min="0" max="16" step="1" value="2" aria-label="early data 大小（KB）">
+        </label>
       </div>
 
-      <div class="tlsx-demo-controls">
-        <button class="btn primary" id="tlsx-btn-next">下一步</button>
-        <button class="btn" id="tlsx-btn-reset">重置</button>
-        <div class="legend">
-          <span><i class="dot ns-idle"></i>尚未加密 / 前置條件</span>
-          <span><i class="dot ns-wait"></i>明文（中間設備可讀）</span>
-          <span><i class="dot ns-lock"></i>handshake 金鑰加密</span>
-          <span><i class="dot ns-ok"></i>application 金鑰加密</span>
-          <span><i class="dot ns-bad"></i>0-RTT early data（可重放）</span>
+      <div class="tlsb-switches">
+        <div class="seg" role="group" aria-label="憑證演算法">
+          <button data-alg="ecdsaP256" aria-pressed="true">ECDSA P-256</button>
+          <button data-alg="rsa2048" aria-pressed="false">RSA 2048</button>
         </div>
+        <div class="seg" role="group" aria-label="吊銷檢查方式">
+          <button data-rev="none" aria-pressed="false">不查吊銷</button>
+          <button data-rev="live" aria-pressed="false">即時 OCSP</button>
+          <button data-rev="stapling" aria-pressed="true">OCSP stapling</button>
+        </div>
+        <label class="tlsb-tog"><input type="checkbox" id="tlsb-hrr"> HelloRetryRequest（猜錯曲線群組）</label>
+        <label class="tlsb-tog"><input type="checkbox" id="tlsb-mtls"> mTLS（雙向驗證）</label>
       </div>
 
-      <div class="status-line" id="tlsx-status">選擇情境後按「下一步」，逐則觀看 TLS 1.3 交握。</div>
-
-      <div class="tlsx-stage">
-        <div class="tlsx-stage-head"><span>Client</span><span>Server</span></div>
-        <div id="tlsx-msgs"></div>
+      <div class="legend">
+        <span><i class="dot ns-wait"></i>完整交握</span>
+        <span><i class="dot ns-lock"></i>Resumption（PSK，仍是 1-RTT）</span>
+        <span><i class="dot ns-bad"></i>Resumption + 0-RTT early data</span>
       </div>
 
-      <div class="tlsx-panels">
-        <div class="tlsx-panel">
-          <div class="pt">金鑰與身分</div>
-          <div class="prow"><span class="pk">目前流量金鑰</span><span class="pv" id="tlsx-p-key">—</span></div>
-          <div class="prow"><span class="pk">前向保密</span><span class="pv" id="tlsx-p-fs">—</span></div>
-          <div class="prow"><span class="pk">伺服器身分</span><span class="pv" id="tlsx-p-srv">未驗證</span></div>
-          <div class="prow"><span class="pk">客戶端身分</span><span class="pv" id="tlsx-p-cli">未要求</span></div>
-        </div>
-        <div class="tlsx-panel">
-          <div class="pt">成本與風險</div>
-          <div class="prow"><span class="pk">TLS 交握 RTT</span><span class="pv" id="tlsx-p-rtt">—</span></div>
-          <div class="prow"><span class="pk">首個應用資料</span><span class="pv" id="tlsx-p-first">尚未送出</span></div>
-          <div class="prow"><span class="pk">非對稱簽章次數</span><span class="pv" id="tlsx-p-sig">0</span></div>
-          <div class="prow"><span class="pk">重放風險</span><span class="pv" id="tlsx-p-replay">無</span></div>
-        </div>
+      <div class="tlsb-plot" id="tlsb-plot"></div>
+
+      <div class="status-line" id="tlsb-status">拖動任一參數即可重算。</div>
+
+      <div class="tlsb-reads" id="tlsb-reads"></div>
+
+      <div class="tlsb-actions">
+        <button class="btn" id="tlsb-reset">重置</button>
       </div>
     </div>
   </div>
 
-  <p class="cap">三個值得停下來比對的畫面：<strong>(1)</strong> 完整交握推到 <code>ServerHello</code> 時，注意左側色條從藍（明文）換成橘（handshake 金鑰）——
-  <strong>憑證是在這條線之後才送的</strong>，這是 TLS 1.3 相對 1.2 的隱私升級。
-  <strong>(2)</strong> 切到 0-RTT：<code>ClientHello</code> 之後緊接的那一則就是紅色的 early data，面板的「首個應用資料」變成 <code>0 RTT</code>，但「重放風險」同時亮起——一次看完收益與代價。
-  <strong>(3)</strong> 打開 mTLS 再各跑一次：完整交握多出 <code>CertificateRequest</code> 與客戶端的憑證與簽章（簽章次數變成 2），
-  但在 resumption 情境下<strong>客戶端憑證不會重送</strong>——身分是從上一次完整交握隨 PSK 繼承過來的。</p>
+  <p class="cap">四個值得停下來比對的畫面（以預設的 ECDSA P-256、鏈長 2、OCSP stapling、RTT 60 ms 為起點，此時三條曲線分別是
+  <strong>121 / 120 / 60 ms</strong>）：<strong>(1)</strong> 把吊銷切成「即時 OCSP」，<strong>只有完整交握那條曲線整條抬高</strong>（60 ms 處由 121 變 193 ms），
+  另外兩條紋風不動——因為 resumption 根本不送憑證，也就沒有吊銷可查。
+  <strong>(2)</strong> 勾選 HelloRetryRequest，0-RTT 曲線由 60 ms 跳到 180 ms 並<strong>與 resumption 曲線重合</strong>：early data 被拒、必須在交握後重送，0-RTT 的收益整個消失。
+  <strong>(3)</strong> 把演算法切成 RSA 2048，等待時間幾乎不動，但「單核每秒可收下的新交握」<strong>從 1,370 條掉到 617 條</strong>——
+  RSA 簽章慢、驗章快，這個反轉在延遲上看不出來，在伺服器容量上很致命。
+  <strong>(4)</strong> 把 early data 拉到 16 KB，所有時間讀數都不變，只有「可被重放的請求數」由 3 個變成 21 個——<strong>0-RTT 的代價是曝險的量，不是延遲</strong>。</p>
 
   <div class="oneliner">
-    <b>一句話答法</b>TLS 1.3 的訊息順序就是它的安全論證：明文只到 ServerHello，之後憑證與擴充全部加密，客戶端驗完鏈就能在同一趟送出應用資料；0-RTT 把這趟也省了，換來的是一段沒有前向保密、且可被重放的資料。
+    <b>一句話答法</b>TLS 的成本可以拆成兩軸：往返數決定延遲（HelloRetryRequest 與即時 OCSP 各加一趟，0-RTT 減一趟），憑證與簽章決定頻寬與 CPU（resumption 全部省掉）；resumption 省的是計算與頻寬而不是那個 RTT，只有 0-RTT 能真的把延遲歸零，而它換來的是一段可被重放、沒有前向保密的資料。
   </div>
 </section>
 
@@ -2157,241 +2136,410 @@ Verify return code: 0 (ok)</code></pre>
 (function () {
   "use strict";
 
-  var scenario = "full";
-  var authMode = "server";
-  var stepIdx = 0;
-  var steps = [];
+  /* ================================================================
+     (1) 常數與參數表
+     ================================================================ */
 
-  var statusEl = document.getElementById("tlsx-status");
-  var listEl = document.getElementById("tlsx-msgs");
-  var btnNext = document.getElementById("tlsx-btn-next");
-  var btnReset = document.getElementById("tlsx-btn-reset");
+  /* 往返成本 */
+  var TCP_RTT         = 1;      /* TCP 三向交握固定佔掉的往返，與 TLS 無關 */
+  var OCSP_RTT_FACTOR = 1.2;    /* 即時 OCSP 要另外跑一趟到 CA，路徑通常比到來源站遠一些 */
 
-  var ENC_LABEL = {
-    none: "未加密",
-    plain: "明文",
-    hs: "handshake key",
-    app: "application key",
-    early: "early data key"
+  /* 位元組成本（單價，非輸出） */
+  var HS_FIXED      = 1400;     /* Hello / EncryptedExtensions / Finished 的固定開銷 */
+  var PSK_TICKET_B  = 200;      /* resumption 的 ClientHello 多帶的 PSK ticket */
+  var STAPLE_B      = 1500;     /* OCSP stapling 附上的已簽章狀態 */
+  var AVG_REQ_BYTES = 800;      /* 估一個 HTTP 請求的位元組數，用來換算可重放請求數 */
+  var CERT_BYTES = { ecdsaP256: 700, rsa2048: 1100 };
+  var SIGN_BYTES = { ecdsaP256: 72,  rsa2048: 256 };
+
+  /* CPU 單價（毫秒／次） */
+  var SIGN_MS       = { ecdsaP256: 0.09, rsa2048: 1.40 };
+  var VERIFY_MS     = { ecdsaP256: 0.25, rsa2048: 0.04 };
+  var ECDHE_MS      = 0.07;
+  var PSK_DERIVE_MS = 0.01;
+
+  /* 掃描軸 */
+  var X_MIN = 10, X_MAX = 300, SAMPLES = 41;
+  var MODES = ["full", "resume", "zero"];
+  var MODE_LABEL = { full: "完整交握", resume: "Resumption", zero: "0-RTT" };
+
+  /* 繪圖幾何（render 用，不參與計算） */
+  var VB_W = 720, VB_H = 300;
+  var PAD_L = 58, PAD_R = 14, PAD_T = 18, PAD_B = 42;
+  var STROKE = { full: "var(--accent)", resume: "var(--warn)", zero: "var(--bad)" };
+
+  var DEFAULTS = {
+    rttMs: 60, chainLen: 2, certAlg: "ecdsaP256", revocation: "stapling",
+    helloRetry: false, mtls: false, earlyDataKB: 2
   };
 
-  var PANEL_IDS = {
-    key: "tlsx-p-key", fs: "tlsx-p-fs", srv: "tlsx-p-srv", cli: "tlsx-p-cli",
-    rtt: "tlsx-p-rtt", first: "tlsx-p-first", sig: "tlsx-p-sig", replay: "tlsx-p-replay"
-  };
+  /* ================================================================
+     (2) compute* 純函式 —— 不得出現 document / DOM
+     ================================================================ */
 
-  var BASE_PANEL = {
-    key: "尚無", fs: "—", srv: "未驗證", cli: "未要求",
-    rtt: "0（尚未開始）", first: "尚未送出", sig: "0", replay: "無|ok"
-  };
+  function clampNum(v, lo, hi) {
+    v = Number(v);
+    if (!isFinite(v)) return lo;
+    return v < lo ? lo : (v > hi ? hi : v);
+  }
 
-  function M(side, enc, name, chips, note, set, status) {
+  function niceMax(v) {
+    if (!(v > 0)) return 1;
+    var mag = Math.pow(10, Math.floor(Math.log(v) / Math.LN10));
+    var step = mag / 2;
+    return Math.ceil(v / step) * step;
+  }
+
+  // @probe fn       computeHandshakeCost
+  // @probe baseline {"rttMs":60,"chainLen":2,"certAlg":"ecdsaP256","revocation":"stapling","helloRetry":false,"mtls":false,"earlyDataKB":2}
+  // @probe sweep    {"rttMs":[10,300],"chainLen":[2,4],"certAlg":["ecdsaP256","rsa2048"],"revocation":["none","live","stapling"],"helloRetry":[false,true],"mtls":[false,true],"earlyDataKB":[0,16]}
+  function computeHandshakeCost(p) {
+    p = p || {};
+    var alg     = (p.certAlg === "rsa2048") ? "rsa2048" : "ecdsaP256";
+    var rev     = (p.revocation === "live" || p.revocation === "none") ? p.revocation : "stapling";
+    var chain   = Math.round(clampNum(p.chainLen, 2, 4));
+    var mtls    = !!p.mtls;
+    var hrr     = !!p.helloRetry;
+    var earlyKB = clampNum(p.earlyDataKB, 0, 16);
+    var rttMs   = clampNum(p.rttMs, X_MIN, X_MAX);
+
+    /* --- 往返數：三種模式各自推導 --- */
+    var extraHrr  = hrr ? 1 : 0;
+    var extraOcsp = (rev === "live") ? OCSP_RTT_FACTOR : 0;
+    var tlsRtt = {
+      /* 完整交握才送憑證，所以只有它會被吊銷檢查加價 */
+      full:   1 + extraHrr + extraOcsp,
+      /* resumption 不送憑證 → 吊銷檢查根本不存在 */
+      resume: 1 + extraHrr
+    };
+    /* HelloRetryRequest 會讓 early data 被拒、必須在交握後重送 → 0-RTT 退化成 resumption */
+    tlsRtt.zero = hrr ? tlsRtt.resume : 0;
+
+    /* --- 非對稱運算次數 --- */
+    var signs    = 1 + (mtls ? 1 : 0);
+    var verifies = chain + (mtls ? chain : 0);
+    var asymOps = { full: signs + verifies, resume: 0, zero: 0 };
+
+    /* --- CPU（單價 × 次數） --- */
+    var cpuFull   = SIGN_MS[alg] * signs + VERIFY_MS[alg] * verifies + ECDHE_MS * 2;
+    var cpuResume = PSK_DERIVE_MS + ECDHE_MS * 2;   /* psk_dhe_ke：仍做一次 ECDHE */
+    var cpuMs = { full: cpuFull, resume: cpuResume, zero: cpuResume };
+
+    /* --- 交握位元組 --- */
+    var earlyBytes = Math.round(earlyKB * 1024);
+    var bytesResume = HS_FIXED + PSK_TICKET_B;
+    var bytes = {
+      full: HS_FIXED
+          + chain * CERT_BYTES[alg] + SIGN_BYTES[alg]
+          + (rev === "stapling" ? STAPLE_B : 0)
+          + (mtls ? chain * CERT_BYTES[alg] + SIGN_BYTES[alg] : 0),
+      resume: bytesResume,
+      zero:   bytesResume + earlyBytes
+    };
+
+    /* --- 等待時間：首個應用位元組可送出之前 --- */
+    function waitAt(mode, r) {
+      return (TCP_RTT + tlsRtt[mode]) * r + cpuMs[mode];
+    }
+
+    var waitMs = {}, hsPerCoreSec = {}, i, m;
+    for (i = 0; i < MODES.length; i++) {
+      m = MODES[i];
+      waitMs[m] = waitAt(m, rttMs);
+      hsPerCoreSec[m] = 1000 / cpuMs[m];
+    }
+
+    /* --- 相對完整交握的節省 --- */
+    var savedMs = {
+      resume: waitMs.full - waitMs.resume,
+      zero:   waitMs.full - waitMs.zero
+    };
+    var savedPct = {
+      resume: savedMs.resume / waitMs.full * 100,
+      zero:   savedMs.zero / waitMs.full * 100
+    };
+
+    /* --- 0-RTT 曝險 --- */
+    var unprotectedBytes    = (tlsRtt.zero === 0) ? earlyBytes : 0;
+    var replayableRequests  = Math.ceil(unprotectedBytes / AVG_REQ_BYTES);
+
+    /* --- 曲線：每個取樣點都用同一條公式算出來 --- */
+    var curve = { full: [], resume: [], zero: [] };
+    var stepX = (X_MAX - X_MIN) / (SAMPLES - 1);
+    var yMaxRaw = 0, x, y, k;
+    for (i = 0; i < SAMPLES; i++) {
+      x = X_MIN + stepX * i;
+      for (k = 0; k < MODES.length; k++) {
+        m = MODES[k];
+        y = waitAt(m, x);
+        curve[m].push([x, y]);
+        if (y > yMaxRaw) yMaxRaw = y;
+      }
+    }
+
     return {
-      side: side, enc: enc, name: name,
-      chips: chips ? chips.split("|") : [],
-      note: note, set: set || {}, status: status || note
+      tlsRtt: tlsRtt,
+      waitMs: waitMs,
+      bytes: bytes,
+      asymOps: asymOps,
+      cpuMs: cpuMs,
+      hsPerCoreSec: hsPerCoreSec,
+      savedMs: savedMs,
+      savedPct: savedPct,
+      unprotectedBytes: unprotectedBytes,
+      replayableRequests: replayableRequests,
+      curve: curve,
+      axis: { xMin: X_MIN, xMax: X_MAX, yMax: niceMax(yMaxRaw), cursorX: rttMs }
     };
   }
 
-  function buildFull(mtls) {
-    var s = [];
-    s.push(M("sys", "none", "TCP 三向交握完成", "SYN|SYN+ACK|ACK",
-      "TLS 還沒開始——這 1 個 RTT 是 TCP 先付掉的，與 TLS 無關。", {},
-      "TCP 連線已建立。接下來 TLS 要在這條可靠但明文的通道上，插入自己的交握。"));
-    s.push(M("c", "plain", "ClientHello",
-      "client_random|key_share（X25519 臨時公鑰）|supported_versions=1.3|cipher_suites|signature_algorithms|server_name=api.example.com|alpn=[h2, http/1.1]",
-      "整則明文。SNI 與 ALPN 提議都在這裡，路徑上的中間設備看得到你要連哪個網域。key_share 是 1-RTT 的關鍵：先把臨時公鑰押上去，不必先問一輪「你支援什麼」。",
-      { key: "尚無（明文傳輸）" },
-      "客戶端一次把版本、密碼套件、臨時公鑰、SNI 與 ALPN 全部提出——並賭伺服器接受這個曲線群組。"));
-    s.push(M("s", "plain", "ServerHello",
-      "server_random|key_share（伺服器臨時公鑰）|cipher_suite=TLS_AES_128_GCM_SHA256",
-      "最後一則明文。送完之後雙方各自用「自己的臨時私鑰 × 對方的 key_share」算出同一把 ECDHE 共享密鑰，handshake 流量金鑰就緒。",
-      { key: "handshake traffic key", fs: "有（臨時 ECDHE）|ok", rtt: "進行中（第 1 趟）" },
-      "加密起點：ServerHello 之後的每一則交握訊息都被加密，包含接下來的憑證鏈。"));
-    s.push(M("s", "hs", "{EncryptedExtensions}", "alpn=h2|SNI 已接受",
-      "ALPN 協商結果在這裡回覆——你等一下跑 HTTP/2 還是 HTTP/1.1，其實在 TLS 交握就定案了。", {},
-      "第一則加密訊息：ALPN 結果與其餘不涉及憑證的擴充都放這裡。"));
-    if (mtls) {
-      s.push(M("s", "hs", "{CertificateRequest}", "signature_algorithms|certificate_authorities",
-        "伺服器要求客戶端也出示憑證——這一則就是 mTLS 與一般 HTTPS 的唯一分歧點。",
-        { cli: "已被要求|warn" },
-        "mTLS：伺服器反過來問「你又是誰」。"));
-    }
-    s.push(M("s", "hs", "{Certificate}", "leaf：SAN=api.example.com|intermediate CA",
-      "憑證鏈本身也被加密（TLS 1.2 時代這是明文）。Root 不會被傳送——它必須已經在客戶端的信任庫裡。", {},
-      "伺服器送出憑證鏈：leaf + 中繼。漏送中繼是最常見的部署事故。"));
-    s.push(M("s", "hs", "{CertificateVerify}", "sign(transcript, 憑證私鑰)",
-      "用憑證對應的私鑰對「到目前為止的交握紀錄」簽章，證明它真的持有私鑰——把別人的憑證抄來貼上，會在這一步失敗。",
-      { sig: "1" },
-      "把「持有憑證」與「持有私鑰」綁在一起的關鍵一步。"));
-    s.push(M("s", "hs", "{Finished}", "HMAC(transcript)",
-      "交握完整性檢查：中間若有人竄改過任何一則訊息，這個值就對不上。此時伺服器已可送出應用資料。", {},
-      "伺服器方向的交握結束。"));
-    s.push(M("sys", "hs", "客戶端驗證憑證鏈",
-      "鏈可達信任錨|SAN 名稱相符|有效期|EKU serverAuth|未吊銷",
-      "五項全過才繼續。名稱比對用的就是你在 DNS 查的那個名稱——DNS 就算被劫持，攻擊者也拿不出一張含該名稱、又能鏈到公開 Root 的憑證。",
-      { srv: "已驗證|ok" },
-      "驗證失敗就在這裡中止連線；curl -k 跳過的正是這一步。"));
-    if (mtls) {
-      s.push(M("c", "hs", "{Certificate} · {CertificateVerify}",
-        "client leaf：SAN=spiffe://…/checkout|sign(transcript, 客戶端私鑰)",
-        "客戶端做完全相同的事：出示憑證，再用私鑰簽 transcript。伺服器驗完鏈就取得對端的工作負載身分。",
-        { cli: "已驗證|ok", sig: "2" },
-        "mTLS：身分綁在連線上，因此不像 token 那樣可被複製重放。"));
-    }
-    s.push(M("c", "hs", "{Finished}", "HMAC(transcript)",
-      "客戶端方向的交握結束，之後雙方改用 application 流量金鑰。",
-      { key: "application traffic key" },
-      "交握完成，金鑰切換到 application traffic key。"));
-    s.push(M("c", "app", "Application Data（第一個請求）", "GET /v1/products",
-      "不必等伺服器任何回應——從 ClientHello 算起剛好一個來回。這就是 1-RTT 的具體意思。",
-      { rtt: "1-RTT", first: "TLS 1 個 RTT 之後" },
-      "第一個應用資料上路。TCP 1 RTT + TLS 1 RTT，就是首位元組之前的固定成本。"));
-    s.push(M("s", "app", "{NewSessionTicket} ×2", "PSK ticket（STEK 加密）|max_early_data_size",
-      "交握完成「之後」伺服器才發票券，供下一條連線做 session resumption。切到左邊第二個情境，看它怎麼被花掉。", {},
-      "票券已發出——下一條連線就能省掉憑證傳輸與非對稱簽章。"));
-    return s;
+  /* ================================================================
+     (3) DOM 參照
+     ================================================================ */
+
+  var demo = document.getElementById("tlsb-demo");
+  if (!demo) return;
+
+  var elRtt     = document.getElementById("tlsb-rtt");
+  var elChain   = document.getElementById("tlsb-chain");
+  var elEarly   = document.getElementById("tlsb-early");
+  var elRttV    = document.getElementById("tlsb-rtt-v");
+  var elChainV  = document.getElementById("tlsb-chain-v");
+  var elEarlyV  = document.getElementById("tlsb-early-v");
+  var elHrr     = document.getElementById("tlsb-hrr");
+  var elMtls    = document.getElementById("tlsb-mtls");
+  var elPlot    = document.getElementById("tlsb-plot");
+  var elStatus  = document.getElementById("tlsb-status");
+  var elReads   = document.getElementById("tlsb-reads");
+  var elReset   = document.getElementById("tlsb-reset");
+
+  var state = {
+    rttMs: DEFAULTS.rttMs, chainLen: DEFAULTS.chainLen,
+    certAlg: DEFAULTS.certAlg, revocation: DEFAULTS.revocation,
+    helloRetry: DEFAULTS.helloRetry, mtls: DEFAULTS.mtls,
+    earlyDataKB: DEFAULTS.earlyDataKB
+  };
+
+  /* ================================================================
+     (4) render —— 只讀 state 與計算結果畫出來
+     ================================================================ */
+
+  function fmtInt(n) {
+    return String(Math.round(n)).replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+  }
+  function fmtRtt(n) {
+    return (Math.round(n * 10) / 10) + "";
   }
 
-  function buildResume(mtls) {
-    var s = [];
-    s.push(M("sys", "none", "前提：上一次交握留下的 PSK ticket",
-      "ticket（客戶端已快取）|resumption master secret",
-      "沒有票券就沒有 resumption。票券由伺服器的 ticket 金鑰（STEK）加密，叢集裡所有節點必須共用同一把才解得開。",
-      { srv: "待由 PSK 繼承" },
-      "本情境的前提：客戶端手上有一張還沒過期的票券。"));
-    s.push(M("sys", "none", "TCP 三向交握完成", "SYN|SYN+ACK|ACK",
-      "TCP 這 1 個 RTT 仍然躲不掉——0-RTT 指的是「TLS 不再額外增加往返」，不是「連線瞬間建立」。", {},
-      "TCP 已建立。注意 0-RTT 省的是 TLS 那一趟，不是 TCP 那一趟。"));
-    s.push(M("c", "plain", "ClientHello",
-      "pre_shared_key（出示 ticket）|psk_key_exchange_modes=psk_dhe_ke|key_share|early_data|server_name|alpn",
-      "仍然帶 key_share：交握完成後的流量要靠新的 ECDHE 重新取得前向保密。early_data 擴充則宣告「我接著就要送應用資料」。",
-      { key: "尚無（明文傳輸）" },
-      "出示票券，並宣告接下來要送 early data。"));
-    s.push(M("c", "early", "Early Data（0-RTT 應用資料）",
-      "GET /v1/products|以 PSK 導出的 early traffic key 加密",
-      "與 ClientHello 同一趟送出——延遲收益全部來自這裡。但這段沒有新鮮的 ECDHE 參與（無前向保密），伺服器在交握完成前也沒有任何新鮮性證據可以判斷它是不是舊封包的複本。",
-      { key: "early data key（PSK 導出）", fs: "無（僅 PSK）|bad",
-        first: "0 RTT（與 ClientHello 同行）|ok", replay: "高 · 只能放冪等請求|bad" },
-      "0-RTT 的收益與代價在同一則訊息裡：延遲歸零，但可被重放且無前向保密。"));
-    s.push(M("s", "plain", "ServerHello", "pre_shared_key=已選定|key_share|server_random",
-      "伺服器接受該 PSK，同時完成 ECDHE——交握完成後的流量因此重新具備前向保密。",
-      { key: "handshake traffic key", fs: "交握後恢復（psk_dhe_ke）|ok", rtt: "進行中（與應用資料並行）" },
-      "伺服器認可票券，並照常做一次 ECDHE。"));
-    s.push(M("s", "hs", "{EncryptedExtensions}", "early_data=已接受|alpn=h2",
-      "沒有 Certificate、沒有 CertificateVerify——伺服器身分由 PSK 繼承自上一次完整交握，因此省下憑證傳輸與非對稱簽章。伺服器也可以在這裡拒絕 early data，客戶端就必須在交握完成後重送。",
-      { srv: "由 PSK 繼承|ok" },
-      "resumption 真正省下的東西：整條憑證鏈與一次簽章驗證。"));
-    if (mtls) {
-      s.push(M("sys", "hs", "客戶端身分：同樣由 PSK 繼承",
-        "不重送 client Certificate|不重做 CertificateVerify",
-        "TLS 1.3 的 resumption 不會重跑客戶端驗證——身分綁在票券所代表的那一次完整交握上。因此票券的保護強度與有效期，實質上就是客戶端身分的有效期。",
-        { cli: "由 PSK 繼承|warn" },
-        "mTLS + resumption：客戶端憑證不重送，票券本身成了身分憑據。"));
+  function sx(x, ax) {
+    return PAD_L + (x - ax.xMin) / (ax.xMax - ax.xMin) * (VB_W - PAD_L - PAD_R);
+  }
+  function sy(y, ax) {
+    return (VB_H - PAD_B) - (y / ax.yMax) * (VB_H - PAD_B - PAD_T);
+  }
+
+  function svgMarkup(res) {
+    var ax = res.axis, i, m, pts, parts = [];
+    var gy, gv, gx;
+
+    parts.push('<svg viewBox="0 0 ' + VB_W + ' ' + VB_H + '" role="img" ' +
+      'style="width:100%;height:auto;display:block" preserveAspectRatio="xMidYMid meet">');
+    parts.push('<title>三種 TLS 交握模式在不同網路 RTT 下，首個應用位元組可送出前的等待時間</title>');
+    parts.push('<rect x="0" y="0" width="' + VB_W + '" height="' + VB_H + '" fill="#fff"></rect>');
+
+    /* 水平格線與 Y 軸刻度 */
+    for (i = 0; i <= 4; i++) {
+      gv = ax.yMax * i / 4;
+      gy = sy(gv, ax);
+      parts.push('<line x1="' + PAD_L + '" y1="' + gy.toFixed(1) + '" x2="' + (VB_W - PAD_R) +
+        '" y2="' + gy.toFixed(1) + '" stroke="var(--border)" stroke-width="1"></line>');
+      parts.push('<text x="' + (PAD_L - 8) + '" y="' + (gy + 4).toFixed(1) +
+        '" text-anchor="end" font-family="var(--mono)" font-size="11" fill="#6b7280">' +
+        fmtInt(gv) + '</text>');
     }
-    s.push(M("s", "hs", "{Finished}", "HMAC(transcript)",
-      "交握完整性檢查，與完整交握相同。", {},
-      "伺服器方向的交握結束。"));
-    s.push(M("c", "hs", "{EndOfEarlyData} · {Finished}", "early data 結束宣告|HMAC(transcript)",
-      "宣告早期資料結束，之後改用 application 流量金鑰。",
-      { key: "application traffic key" },
-      "早期資料結束，金鑰切換到 application traffic key。"));
-    s.push(M("c", "app", "Application Data（後續請求）", "後續請求走一般加密通道",
-      "完成。相對完整交握省下 1 個 RTT、一次非對稱簽章，以及整條憑證鏈的傳輸與驗證。",
-      { rtt: "0-RTT（TLS 未額外往返）", sig: "0" },
-      "完成：TLS 沒有為這條連線多花任何一趟往返——代價已經記在「重放風險」那一欄。"));
-    return s;
-  }
 
-  function dirLabel(side) {
-    if (side === "c") return "C → S";
-    if (side === "s") return "S → C";
-    return "——";
-  }
-
-  function esc(t) {
-    return String(t).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-  }
-
-  function renderList() {
-    if (!listEl) return;
-    listEl.innerHTML = steps.map(function (st, i) {
-      var cls = ["tlsx-msg", "e-" + st.enc];
-      cls.push(st.side === "c" ? "c2s" : st.side === "s" ? "s2c" : "sys");
-      if (i > stepIdx) cls.push("pending");
-      if (i === stepIdx) cls.push("cur");
-      var chips = st.chips.map(function (c) {
-        return '<span class="mchip">' + esc(c) + "</span>";
-      }).join("");
-      return '<div class="' + cls.join(" ") + '">' +
-        '<div class="mhead"><span class="mdir">' + dirLabel(st.side) + "</span>" +
-        '<span class="mname">' + esc(st.name) + "</span>" +
-        '<span class="mtag">' + ENC_LABEL[st.enc] + "</span></div>" +
-        '<div class="mchips">' + chips + "</div>" +
-        '<div class="mnote">' + esc(st.note) + "</div></div>";
-    }).join("");
-  }
-
-  function renderPanel() {
-    var state = {};
-    var k;
-    for (k in BASE_PANEL) { if (BASE_PANEL.hasOwnProperty(k)) state[k] = BASE_PANEL[k]; }
-    for (var i = 0; i <= stepIdx && i < steps.length; i++) {
-      var set = steps[i].set;
-      for (k in set) { if (set.hasOwnProperty(k)) state[k] = set[k]; }
+    /* X 軸刻度 */
+    var ticks = [10, 100, 200, 300];
+    for (i = 0; i < ticks.length; i++) {
+      gx = sx(ticks[i], ax);
+      parts.push('<line x1="' + gx.toFixed(1) + '" y1="' + (VB_H - PAD_B) + '" x2="' + gx.toFixed(1) +
+        '" y2="' + (VB_H - PAD_B + 5) + '" stroke="var(--border-strong)" stroke-width="1"></line>');
+      parts.push('<text x="' + gx.toFixed(1) + '" y="' + (VB_H - PAD_B + 19) +
+        '" text-anchor="middle" font-family="var(--mono)" font-size="11" fill="#6b7280">' +
+        ticks[i] + '</text>');
     }
-    for (k in PANEL_IDS) {
-      if (!PANEL_IDS.hasOwnProperty(k)) continue;
-      var el = document.getElementById(PANEL_IDS[k]);
-      if (!el) continue;
-      var parts = String(state[k]).split("|");
-      el.textContent = parts[0];
-      el.className = "pv" + (parts[1] ? " " + parts[1] : "");
+
+    /* 軸線與軸名 */
+    parts.push('<line x1="' + PAD_L + '" y1="' + (VB_H - PAD_B) + '" x2="' + (VB_W - PAD_R) +
+      '" y2="' + (VB_H - PAD_B) + '" stroke="var(--border-strong)" stroke-width="1"></line>');
+    parts.push('<text x="' + (VB_W - PAD_R) + '" y="' + (VB_H - 8) +
+      '" text-anchor="end" font-family="var(--mono)" font-size="11" fill="#6b7280">網路 RTT（ms）</text>');
+    parts.push('<text x="' + PAD_L + '" y="' + (PAD_T - 4) +
+      '" text-anchor="start" font-family="var(--mono)" font-size="11" fill="#6b7280">' +
+      '首個應用位元組可送出前的等待（ms）</text>');
+
+    /* 三條曲線 */
+    for (i = 0; i < MODES.length; i++) {
+      m = MODES[i];
+      pts = res.curve[m].map(function (pt) {
+        return sx(pt[0], ax).toFixed(1) + "," + sy(pt[1], ax).toFixed(1);
+      }).join(" ");
+      parts.push('<polyline points="' + pts + '" fill="none" stroke="' + STROKE[m] +
+        '" stroke-width="2.2" stroke-linejoin="round"></polyline>');
     }
+
+    /* 垂直游標與三個交點 */
+    var cx = sx(ax.cursorX, ax);
+    parts.push('<line x1="' + cx.toFixed(1) + '" y1="' + PAD_T + '" x2="' + cx.toFixed(1) +
+      '" y2="' + (VB_H - PAD_B) + '" stroke="var(--text-3)" stroke-width="1" stroke-dasharray="4 4"></line>');
+
+    var placed = [];
+    for (i = 0; i < MODES.length; i++) {
+      m = MODES[i];
+      var cy = sy(res.waitMs[m], ax);
+      parts.push('<circle cx="' + cx.toFixed(1) + '" cy="' + cy.toFixed(1) +
+        '" r="4.5" fill="#fff" stroke="' + STROKE[m] + '" stroke-width="2.2"></circle>');
+      /* 標籤避免重疊：若與已放置的標籤太近就往下推 */
+      var ly = cy - 9;
+      for (var j = 0; j < placed.length; j++) {
+        if (Math.abs(ly - placed[j]) < 14) ly = placed[j] + 14;
+      }
+      placed.push(ly);
+      var anchor = (cx > VB_W - 150) ? "end" : "start";
+      var lx = (anchor === "end") ? cx - 9 : cx + 9;
+      parts.push('<text x="' + lx.toFixed(1) + '" y="' + ly.toFixed(1) + '" text-anchor="' + anchor +
+        '" font-family="var(--mono)" font-size="11.5" font-weight="700" fill="' + STROKE[m] + '">' +
+        MODE_LABEL[m] + ' ' + fmtInt(res.waitMs[m]) + ' ms</text>');
+    }
+
+    parts.push('</svg>');
+    return parts.join("");
+  }
+
+  function barRow(mode, label, value, max, text) {
+    var pct = max > 0 ? (value / max * 100) : 0;
+    return '<div class="rb m-' + mode + '">' +
+      '<span class="rl">' + label + '</span>' +
+      '<span class="rbar"><i style="width:' + pct.toFixed(1) + '%"></i></span>' +
+      '<span class="rv">' + text + '</span></div>';
+  }
+
+  function readCard(title, valueOf, textOf) {
+    var max = 0, i, m;
+    for (i = 0; i < MODES.length; i++) {
+      m = MODES[i];
+      if (valueOf(m) > max) max = valueOf(m);
+    }
+    var rows = "";
+    for (i = 0; i < MODES.length; i++) {
+      m = MODES[i];
+      rows += barRow(m, MODE_LABEL[m], valueOf(m), max, textOf(m));
+    }
+    return '<div class="tlsb-read"><div class="rt">' + title + '</div>' + rows + '</div>';
   }
 
   function render() {
-    var st = steps[stepIdx];
-    if (statusEl && st) statusEl.textContent = st.status;
-    renderList();
-    renderPanel();
-    if (btnNext) btnNext.disabled = stepIdx >= steps.length - 1;
+    var res = computeHandshakeCost(state);
+
+    elRttV.textContent = state.rttMs + " ms";
+    elChainV.textContent = state.chainLen + " 張";
+    elEarlyV.textContent = state.earlyDataKB + " KB";
+
+    elPlot.innerHTML = svgMarkup(res);
+
+    var cards = "";
+    cards += readCard("交握位元組",
+      function (m) { return res.bytes[m]; },
+      function (m) { return fmtInt(res.bytes[m]) + " B"; });
+    cards += readCard("非對稱運算次數（簽 + 驗）",
+      function (m) { return res.asymOps[m]; },
+      function (m) { return res.asymOps[m] + " 次"; });
+    cards += readCard("單核每秒可收下的新交握",
+      function (m) { return res.hsPerCoreSec[m]; },
+      function (m) { return fmtInt(res.hsPerCoreSec[m]) + " 條"; });
+
+    cards += '<div class="tlsb-read"><div class="rt">節省與 0-RTT 曝險</div>' +
+      '<div class="rb solo"><span class="rl">Resumption 省下的等待</span>' +
+      '<span class="rv">' + fmtRtt(res.savedMs.resume) + ' ms（' +
+      (Math.round(res.savedPct.resume * 10) / 10) + '%）</span></div>' +
+      '<div class="rb solo"><span class="rl">0-RTT 省下的等待</span>' +
+      '<span class="rv">' + fmtRtt(res.savedMs.zero) + ' ms（' +
+      (Math.round(res.savedPct.zero * 10) / 10) + '%）</span></div>' +
+      '<div class="rb solo"><span class="rl">無前向保密的位元組</span>' +
+      '<span class="rv">' + fmtInt(res.unprotectedBytes) + ' B</span></div>' +
+      '<div class="rb solo"><span class="rl">可被重放的請求數</span>' +
+      '<span class="rv">' + res.replayableRequests + ' 個</span></div></div>';
+
+    elReads.innerHTML = cards;
+
+    elStatus.textContent =
+      "RTT " + state.rttMs + " ms：完整交握要等 " + fmtInt(res.waitMs.full) +
+      " ms（TCP 1 + TLS " + fmtRtt(res.tlsRtt.full) + " 個往返、CPU " +
+      (Math.round(res.cpuMs.full * 100) / 100) + " ms）；resumption " + fmtInt(res.waitMs.resume) +
+      " ms；0-RTT " + fmtInt(res.waitMs.zero) + " ms。" +
+      (res.tlsRtt.zero === 0
+        ? "0-RTT 省下 " + fmtRtt(res.savedMs.zero) + " ms，代價是 " + fmtInt(res.unprotectedBytes) +
+          " B 沒有前向保密、約 " + res.replayableRequests + " 個請求可被重放。"
+        : "HelloRetryRequest 讓 early data 被拒，0-RTT 已退化成 resumption，曝險歸零。");
   }
 
-  function rebuild() {
-    steps = scenario === "full" ? buildFull(authMode === "mtls") : buildResume(authMode === "mtls");
-    stepIdx = 0;
-    render();
+  /* ================================================================
+     (5) 事件綁定
+     ================================================================ */
+
+  function pressSeg(attr, value) {
+    var btns = demo.querySelectorAll('.seg button[data-' + attr + ']');
+    Array.prototype.forEach.call(btns, function (b) {
+      b.setAttribute("aria-pressed", b.getAttribute("data-" + attr) === value ? "true" : "false");
+    });
   }
 
-  function next() {
-    if (stepIdx < steps.length - 1) {
-      stepIdx += 1;
-      render();
-    }
-  }
-
-  function bindSeg(attr, onPick) {
-    var sel = '#tlsx-demo .seg button[data-' + attr + ']';
-    var btns = document.querySelectorAll(sel);
-    Array.prototype.forEach.call(btns, function (btn) {
-      btn.addEventListener("click", function () {
-        Array.prototype.forEach.call(document.querySelectorAll(sel), function (b) {
-          b.setAttribute("aria-pressed", "false");
-        });
-        btn.setAttribute("aria-pressed", "true");
-        onPick(btn.getAttribute("data-" + attr));
+  function bindSeg(attr, key) {
+    var btns = demo.querySelectorAll('.seg button[data-' + attr + ']');
+    Array.prototype.forEach.call(btns, function (b) {
+      b.addEventListener("click", function () {
+        state[key] = b.getAttribute("data-" + attr);
+        pressSeg(attr, state[key]);
+        render();
       });
     });
   }
 
-  bindSeg("sc", function (v) { scenario = v; rebuild(); });
-  bindSeg("auth", function (v) { authMode = v; rebuild(); });
+  function bindRange(el, key) {
+    el.addEventListener("input", function () {
+      state[key] = Number(el.value);
+      render();
+    });
+  }
 
-  if (btnNext) btnNext.addEventListener("click", next);
-  if (btnReset) btnReset.addEventListener("click", rebuild);
+  bindRange(elRtt, "rttMs");
+  bindRange(elChain, "chainLen");
+  bindRange(elEarly, "earlyDataKB");
+  bindSeg("alg", "certAlg");
+  bindSeg("rev", "revocation");
 
-  rebuild();
+  elHrr.addEventListener("change", function () { state.helloRetry = elHrr.checked; render(); });
+  elMtls.addEventListener("change", function () { state.mtls = elMtls.checked; render(); });
+
+  elReset.addEventListener("click", function () {
+    state.rttMs = DEFAULTS.rttMs;
+    state.chainLen = DEFAULTS.chainLen;
+    state.certAlg = DEFAULTS.certAlg;
+    state.revocation = DEFAULTS.revocation;
+    state.helloRetry = DEFAULTS.helloRetry;
+    state.mtls = DEFAULTS.mtls;
+    state.earlyDataKB = DEFAULTS.earlyDataKB;
+    elRtt.value = state.rttMs;
+    elChain.value = state.chainLen;
+    elEarly.value = state.earlyDataKB;
+    elHrr.checked = false;
+    elMtls.checked = false;
+    pressSeg("alg", state.certAlg);
+    pressSeg("rev", state.revocation);
+    render();
+  });
+
+  render();
 })();
 </script>
 
