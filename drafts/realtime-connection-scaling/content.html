@@ -1,4 +1,4 @@
-<!-- demo-archetype: A｜時序推進 — 讀者先選四個叢集情境（跨節點路由／優雅排空／硬斷與重連風暴／連線傾斜與 rebalance）之一，再按「下一步」逐步推進，觀察四個節點的連線數與 bar、registry 條目、bus 吞吐與 fan-out p99、以及事件日誌在每一步的變化。選 A 是因為本篇最核心的對照是「同一批 32k 連線在 graceful drain 與硬斷下的兩種下場」，而那個差別（總連線數曲線幾乎一樣、重連速率與 1006 佔比差 60 倍）只有沿著時間逐步走過一次才看得出來。 -->
+<!-- demo-archetype: D｜空間視覺化（主，第 7 節）＋B｜參數掃描（次，第 5 節） — 主 demo 把叢集畫成「節點 × 容量」的空間，讀者調節點台數／初始連線／連線上限、切換分配策略與下線方式，並直接點柱子排空節點，即時算出連線分佈、傾斜比、撞頂自摘與連鎖、拒絕量、爆炸半徑與重連峰值；次 demo 讓讀者掃五個參數，算出每秒新連線量與四項下游的容量利用率、哪一項先爆、以及安全的攤平時間。選 D 是因為本篇所有結論（傾斜、天花板、drain 要把連線趕去哪、爆炸半徑）都是分佈在節點空間上的形狀問題，時間軸上看不出來。 -->
 <style>
   /* 本篇專屬：rtsc-* 命名空間，不覆蓋全站 base 類別 */
   #rtsc-root {
@@ -67,51 +67,30 @@
   .rtsc-tier .tt { font-weight: 700; font-size: 13px; margin-bottom: 2px; }
   .rtsc-tier .td { font-family: var(--mono); font-size: 10.5px; color: var(--text-3); letter-spacing: .04em; margin-bottom: 6px; }
 
-  /* Demo */
-  .rtsc-ctrl { display: flex; flex-wrap: wrap; gap: 10px; margin: 10px 0 8px; align-items: center; }
-  .rtsc-bus-strip { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; justify-content: space-between; border: 1.5px dashed var(--rtsc-bus); background: var(--rtsc-bus-soft); border-radius: var(--radius-sm); padding: 8px 12px; margin: 10px 0 8px; }
-  .rtsc-bus-strip .bt { font-weight: 700; font-size: 12.5px; color: var(--rtsc-bus); }
-  .rtsc-bus-strip .bm { font-family: var(--mono); font-size: 11px; color: var(--text-2); }
-  .rtsc-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin: 0 0 4px; }
-  @media (max-width: 780px) { .rtsc-grid { grid-template-columns: 1fr 1fr; } }
-  .rtsc-node { border: 1.5px solid var(--border-strong); border-radius: var(--radius-sm); padding: 9px 10px; background: #fff; transition: background .18s, border-color .18s, box-shadow .18s, opacity .18s; }
-  .rtsc-node .nn { font-weight: 700; font-size: 12.5px; display: flex; justify-content: space-between; align-items: baseline; gap: 6px; }
-  .rtsc-node .nc { font-family: var(--mono); font-size: 11.5px; color: var(--text-2); font-weight: 600; }
-  .rtsc-node .ns { font-family: var(--mono); font-size: 10.5px; color: var(--text-3); margin-top: 5px; min-height: 15px; line-height: 1.35; }
-  .rtsc-node.hot { background: var(--accent-soft); border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
-  .rtsc-node.drain { background: var(--rtsc-ctl-soft); border-color: var(--rtsc-ctl); }
-  .rtsc-node.drain .nn { color: var(--rtsc-ctl); }
-  .rtsc-node.down { background: var(--rtsc-bad-soft); border-color: var(--rtsc-bad); opacity: .72; }
-  .rtsc-node.down .nn { color: var(--bad); }
-  .rtsc-node.over { background: var(--rtsc-bad-soft); border-color: var(--rtsc-bad); }
-  .rtsc-node.over .nn { color: var(--bad); }
-  .rtsc-bar { height: 8px; border-radius: 4px; background: var(--bg-soft); border: 1px solid var(--border); margin-top: 6px; overflow: hidden; }
-  .rtsc-bar i { display: block; height: 100%; width: 0; background: var(--rtsc-gw); transition: width .3s, background .3s; }
-  .rtsc-bar i.warn { background: var(--warn); }
-  .rtsc-bar i.bad { background: var(--bad); }
-  .rtsc-panels { display: grid; grid-template-columns: 1.15fr 1fr; gap: 10px; margin-top: 10px; }
-  @media (max-width: 700px) { .rtsc-panels { grid-template-columns: 1fr; } }
-  .rtsc-panel { border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 11px 12px; background: #fff; }
-  .rtsc-panel .pt { font-size: 11px; color: var(--text-3); letter-spacing: .06em; text-transform: uppercase; font-family: var(--mono); margin-bottom: 7px; }
-  .rtsc-panel .prow { display: flex; justify-content: space-between; gap: 8px; font-family: var(--mono); font-size: 11.5px; padding: 3px 0; border-bottom: 1px dashed var(--border); }
-  .rtsc-panel .prow:last-child { border-bottom: none; }
-  .rtsc-panel .pk { color: var(--text-3); white-space: nowrap; }
-  .rtsc-panel .pv { color: var(--text); font-weight: 600; text-align: right; }
-  .rtsc-panel .pv.good { color: var(--ok); } .rtsc-panel .pv.bad { color: var(--bad); } .rtsc-panel .pv.warn { color: var(--warn); }
-  .rtsc-panel .empty { font-family: var(--mono); font-size: 11.5px; color: var(--text-3); }
-  .rtsc-wire { border: 1px solid var(--border); border-radius: var(--radius-sm); background: #fff; padding: 8px 10px; margin-top: 10px; max-height: 236px; overflow-y: auto; }
-  .rtsc-row { display: flex; align-items: baseline; gap: 8px; font-family: var(--mono); font-size: 11.5px; padding: 4px 0; border-bottom: 1px dashed var(--border); }
-  .rtsc-row:last-child { border-bottom: none; }
-  .rtsc-row .tg { flex: none; border-radius: 4px; padding: 2px 6px; font-size: 10.5px; font-weight: 700; border: 1px solid var(--border-strong); background: var(--bg-soft); color: var(--text-3); min-width: 62px; text-align: center; }
-  .rtsc-row .tx { color: var(--text-2); line-height: 1.5; }
-  .rtsc-row.reg .tg { background: var(--rtsc-reg-soft); border-color: var(--rtsc-reg); color: var(--rtsc-reg); }
-  .rtsc-row.bus .tg { background: var(--rtsc-bus-soft); border-color: var(--rtsc-bus); color: var(--rtsc-bus); }
-  .rtsc-row.gw .tg { background: var(--rtsc-gw-soft); border-color: var(--rtsc-gw); color: var(--rtsc-gw); }
-  .rtsc-row.ctl .tg { background: var(--rtsc-ctl-soft); border-color: var(--rtsc-ctl); color: var(--rtsc-ctl); }
-  .rtsc-row.bad .tg { background: var(--rtsc-bad-soft); border-color: var(--rtsc-bad); color: var(--rtsc-bad); }
-  .rtsc-row.bad .tx { color: var(--bad); }
-  .rtsc-row.note { background: var(--bg-soft); border-radius: 4px; }
-  .rtsc-row.note .tx { color: var(--text-3); }
+  /* Demo · 連線佔用地圖（rcm-）與重連帳單（rcb-） */
+  .rcm-ctl, .rcb-ctl { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px 16px; margin: 10px 0 6px; }
+  @media (max-width: 700px) { .rcm-ctl, .rcb-ctl { grid-template-columns: 1fr; } }
+  .rcm-f, .rcb-f { display: flex; flex-direction: column; gap: 4px; }
+  .rcm-f label, .rcb-f label { font-family: var(--mono); font-size: 11px; color: var(--text-3); display: flex; justify-content: space-between; gap: 8px; }
+  .rcm-f label b, .rcb-f label b { color: var(--text); font-weight: 700; }
+  .rcm-f input[type="range"], .rcb-f input[type="range"] { width: 100%; accent-color: var(--accent); }
+  .rcm-segs { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin: 6px 0 8px; }
+  .rcm-canvas, .rcb-canvas { border: 1px solid var(--border); border-radius: var(--radius-sm); background: #fff; padding: 6px 8px 4px; margin: 8px 0 4px; }
+  .rcm-canvas svg, .rcb-canvas svg { display: block; }
+  .rcm-stats, .rcb-out { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin: 10px 0 4px; }
+  .rcb-out { grid-template-columns: repeat(2, 1fr); }
+  @media (max-width: 760px) { .rcm-stats { grid-template-columns: 1fr 1fr; } .rcb-out { grid-template-columns: 1fr; } }
+  .rcm-stat { border: 1px solid var(--border); border-radius: var(--radius-sm); background: #fff; padding: 8px 10px; }
+  .rcm-stat .sk { font-family: var(--mono); font-size: 10.5px; color: var(--text-3); letter-spacing: .03em; }
+  .rcm-stat .sv { font-family: var(--mono); font-size: 15px; font-weight: 700; color: var(--text); margin-top: 3px; }
+  .rcm-stat .sn { font-size: 11px; color: var(--text-2); margin-top: 2px; line-height: 1.4; }
+  .rcm-stat.ok { border-color: var(--ok); background: var(--ok-soft); }
+  .rcm-stat.ok .sv { color: var(--ok); }
+  .rcm-stat.warn { border-color: var(--warn); background: var(--warn-soft); }
+  .rcm-stat.warn .sv { color: var(--warn); }
+  .rcm-stat.bad { border-color: var(--bad); background: var(--bad-soft); }
+  .rcm-stat.bad .sv { color: var(--bad); }
+  .rcm-note { font-family: var(--mono); font-size: 11px; color: var(--text-3); line-height: 1.55; margin: 6px 0 0; }
 </style>
 
 <div id="rtsc-root">
@@ -222,7 +201,7 @@
     <div class="sr"><span class="sl">gw-3</span><span class="st"><i style="width:36.7%"></i></span><span class="sv">22k</span></div>
     <div class="sr"><span class="sl">gw-4</span><span class="st"><i style="width:0"></i></span><span class="sv zero">0</span></div>
   </div>
-  <p class="cap">兩組條的<strong>總長度完全相同</strong>——要看的是形狀不是總和。先重啟的節點會把後面每一台釋放出來的連線都吃進去，最後重啟的那台則是空的。<strong>沒有任何人做錯事，這是「一次性決策 + 依序重啟」的算術必然</strong>。傾斜的代價很實在：gw-1 的記憶體、fan-out 展開量、GC 停頓、以及它掛掉時的爆炸半徑都是 gw-3 的兩倍以上。</p>
+  <p class="cap">兩組條的<strong>總長度完全相同</strong>——要看的是形狀不是總和。先重啟的節點會把後面每一台釋放出來的連線都吃進去，最後重啟的那台則是空的。<strong>沒有任何人做錯事，這是「一次性決策 + 依序重啟」的算術必然</strong>。傾斜的代價很實在：gw-1 的記憶體、fan-out 展開量、GC 停頓、以及它掛掉時的爆炸半徑都是 gw-3 的兩倍以上。上面這組數字是示意；<strong>本篇的互動節可以用你自己的節點台數、連線上限與分配策略把整個過程算一遍</strong>。</p>
 
   <p>三個實務對策，通常一起用：<strong>(1) 每個節點設連線數上限</strong>，滿了就讓健康檢查回不健康、把自己從 LB 摘掉（比起被 OOM kill 好太多）；<strong>(2) 主動 rebalance</strong>——超過平均值一定比例的節點，定期小批量地把連線趕走（作法就是第 5 節的 drain，只是規模小、用 <code>1013 Try Again Later</code> 讓客戶端退避久一點）；<strong>(3) 別在尖峰滾動重啟</strong>，並且在發版後把「節點連線數的 max/min 比值」當成驗收指標看一眼。</p>
 
@@ -540,6 +519,49 @@ flush_pending_messages(); handoff_sessions()         # 4. 交棒後才真的退�
     <p>工程師直覺會去優化連線建立本身，但實測下來，重連尖峰壓垮的通常是<strong>快照 API 與它背後的資料庫</strong>——一條連線的成本是幾 KB，一份初始狀態可能是幾百 KB 而且要查三張表。<strong>先算清楚「一次重連的完整成本」再談容量</strong>，而且務必把它做成可降級的：寧可回一份三十秒前的快取，也不要回不出來。</p>
   </div>
 
+  <div class="demo" id="rcb-demo">
+    <div class="demo-bar">
+      <span class="label">互動 · 一次重連風暴的帳單</span>
+      <span class="label" style="text-transform:none;font-family:var(--sans);font-size:12px;color:var(--text-2)">拖動五個旋鈕，看四項下游裡哪一項先爆</span>
+    </div>
+    <div class="demo-body">
+      <div class="rcb-ctl">
+        <div class="rcb-f">
+          <label for="rcb-conn">同時回來的連線 <b id="rcb-conn-v">32k</b></label>
+          <input id="rcb-conn" type="range" min="5" max="60" step="1" value="32">
+        </div>
+        <div class="rcb-f">
+          <label for="rcb-spread">重連被攤平在 <b id="rcb-spread-v">30s</b></label>
+          <input id="rcb-spread" type="range" min="1" max="300" step="1" value="30">
+        </div>
+        <div class="rcb-f">
+          <label for="rcb-resume">TLS resumption 命中 <b id="rcb-resume-v">60%</b></label>
+          <input id="rcb-resume" type="range" min="0" max="100" step="1" value="60">
+        </div>
+        <div class="rcb-f">
+          <label for="rcb-token">reconnect token 命中 <b id="rcb-token-v">0%</b></label>
+          <input id="rcb-token" type="range" min="0" max="100" step="1" value="0">
+        </div>
+        <div class="rcb-f">
+          <label for="rcb-snap">每人快照大小 <b id="rcb-snap-v">180KB</b></label>
+          <input id="rcb-snap" type="range" min="10" max="800" step="10" value="180">
+        </div>
+        <div class="rcb-f" style="justify-content:flex-end">
+          <button class="btn" id="rcb-reset">重置</button>
+        </div>
+      </div>
+
+      <div class="status-line" id="rcb-status">拖動旋鈕，看這一波重連會先壓垮哪一項下游。</div>
+
+      <div class="rcb-canvas" id="rcb-canvas"></div>
+      <p class="cap">四條是四項下游的<strong>容量利用率</strong>，紅色虛線是 100%——<strong>要看的是哪一條先越線，而不是總量</strong>。最下面那條尺上，藍點是目前的攤平時間、綠點是讓四項全部壓回容量內所需的最短攤平。</p>
+
+      <div class="rcb-out" id="rcb-out"></div>
+      <p class="rcm-note">四項容量上限是本 demo 的假設值：TLS full handshake 3,000/s、認證服務 5,000 QPS、registry 20,000 writes/s、快照 API 400 MB/s。換成你自己叢集的數字再看一次，結論通常會換人。</p>
+    </div>
+  </div>
+  <p class="cap">把攤平時間拉到 2 秒（硬斷的樣子）、resumption 與 token 都歸零、快照維持 180KB，四項會同時爆掉三項，而<strong>先爆的是快照 API（703.1%）不是 TLS（533.3%）</strong>；把快照降級成 20KB，瓶頸立刻換成 TLS。這就是上面那個陷阱說的事——工程師直覺會去優化連線建立，但壓垮系統的通常是「每個人回來都要一份完整狀態」。</p>
+
   <p class="rtsc-h3">5 · 可觀測性：上面每一個機制都要能被看見</p>
 
   <p>長連線服務的黃金訊號跟 HTTP 服務完全不同。<strong>QPS 與錯誤率在這裡幾乎沒有意義</strong>——連線閒著的時候沒有 QPS，而真正的故障（訊息沒送到、連線被靜默拆掉）根本不會產生任何錯誤回應。要看的是這些：</p>
@@ -670,88 +692,61 @@ rt_drain_remaining{node}                     # gauge：發版時盯著它歸零
 </section>
 
 <section id="s7">
-  <div class="sec-head"><span class="sec-num">07</span><h2>互動 · 長連線叢集擴縮模擬器</h2></div>
-  <p class="sec-sub">四個節點、一張 registry、一條 fan-out bus：看訊息怎麼跨節點找到人，以及節點下線的兩種下場。</p>
+  <div class="sec-head"><span class="sec-num">07</span><h2>互動 · 連線佔用地圖</h2></div>
+  <p class="sec-sub">把叢集畫成「節點 × 容量」這個空間：點一台節點就排空它，看連線落到哪裡、傾斜怎麼一層層沉積出來、天花板在哪一步被撞到。</p>
 
-  <div class="demo" id="rtsc-demo">
+  <div class="demo" id="rcm-demo">
     <div class="demo-bar">
-      <span class="label">互動 · 長連線叢集</span>
-      <span class="label" style="text-transform:none;font-family:var(--sans);font-size:12px;color:var(--text-2)">選情境後按「下一步」逐步推進</span>
+      <span class="label">互動 · 連線佔用地圖</span>
+      <span class="label" style="text-transform:none;font-family:var(--sans);font-size:12px;color:var(--text-2)">點任一根柱子＝排空那一台（可連點多台，順序有意義）</span>
     </div>
     <div class="demo-body">
-      <div class="seg" role="group" aria-label="情境切換">
-        <button data-sc="route" aria-pressed="true">跨節點路由</button>
-        <button data-sc="drain" aria-pressed="false">優雅排空</button>
-        <button data-sc="hard" aria-pressed="false">硬斷與重連風暴</button>
-        <button data-sc="skew" aria-pressed="false">連線傾斜與 rebalance</button>
-      </div>
-
-      <div class="rtsc-ctrl">
-        <button class="btn primary" id="rtsc-btn-next">下一步</button>
-        <button class="btn" id="rtsc-btn-reset">重置</button>
-        <div class="legend">
-          <span><i class="dot ns-idle"></i>正常服務</span>
-          <span><i class="dot ns-wait"></i>作用中</span>
-          <span><i class="dot ns-lock"></i>排空中</span>
-          <span><i class="dot ns-bad"></i>已下線 / 過載</span>
+      <div class="rcm-ctl">
+        <div class="rcm-f">
+          <label for="rcm-nodes">節點台數 <b id="rcm-nodes-v">4</b></label>
+          <input id="rcm-nodes" type="range" min="3" max="8" step="1" value="4">
+        </div>
+        <div class="rcm-f">
+          <label for="rcm-init">每台初始連線 <b id="rcm-init-v">30k</b></label>
+          <input id="rcm-init" type="range" min="10" max="50" step="1" value="30">
+        </div>
+        <div class="rcm-f">
+          <label for="rcm-cap">每台連線上限 <b id="rcm-cap-v">80k</b></label>
+          <input id="rcm-cap" type="range" min="25" max="80" step="1" value="80">
         </div>
       </div>
 
-      <div class="status-line" id="rtsc-status">選一個情境，按「下一步」開始。</div>
-
-      <div class="rtsc-bus-strip">
-        <span class="bt">Pub/Sub bus</span>
-        <span class="bm" id="rtsc-bus-rate">throughput —</span>
-        <span class="bm" id="rtsc-bus-p99">fan-out p99 —</span>
-        <span class="bm" id="rtsc-bus-note">待命</span>
+      <div class="rcm-segs">
+        <div class="seg" role="group" aria-label="分配策略">
+          <button data-policy="0" aria-pressed="true">一次性抽籤</button>
+          <button data-policy="1" aria-pressed="false">least-connection</button>
+        </div>
+        <div class="seg" role="group" aria-label="下線方式">
+          <button data-mode="0" aria-pressed="true">Graceful drain</button>
+          <button data-mode="1" aria-pressed="false">硬斷</button>
+        </div>
+        <button class="btn" id="rcm-reset">重置</button>
       </div>
 
-      <div class="rtsc-grid" id="rtsc-grid">
-        <div class="rtsc-node" data-node="gw1">
-          <div class="nn"><span>gw-1</span><span class="nc" id="rtsc-c-gw1">30.0k</span></div>
-          <div class="rtsc-bar"><i id="rtsc-b-gw1"></i></div>
-          <div class="ns" id="rtsc-s-gw1">在線</div>
-        </div>
-        <div class="rtsc-node" data-node="gw2">
-          <div class="nn"><span>gw-2</span><span class="nc" id="rtsc-c-gw2">30.0k</span></div>
-          <div class="rtsc-bar"><i id="rtsc-b-gw2"></i></div>
-          <div class="ns" id="rtsc-s-gw2">在線</div>
-        </div>
-        <div class="rtsc-node" data-node="gw3">
-          <div class="nn"><span>gw-3</span><span class="nc" id="rtsc-c-gw3">30.0k</span></div>
-          <div class="rtsc-bar"><i id="rtsc-b-gw3"></i></div>
-          <div class="ns" id="rtsc-s-gw3">在線</div>
-        </div>
-        <div class="rtsc-node" data-node="gw4">
-          <div class="nn"><span>gw-4</span><span class="nc" id="rtsc-c-gw4">30.0k</span></div>
-          <div class="rtsc-bar"><i id="rtsc-b-gw4"></i></div>
-          <div class="ns" id="rtsc-s-gw4">在線</div>
-        </div>
-      </div>
-      <p class="cap" style="text-align:center">節點卡片上的 bar 是連線數佔比——<strong>叢集是否健康，看的是這四根 bar 的形狀而不是總和</strong>。</p>
+      <div class="status-line" id="rcm-status">4 台節點各 30.0k、上限 80k。點任一根柱子把它排空。</div>
 
-      <div class="rtsc-panels">
-        <div class="rtsc-panel">
-          <div class="pt">Connection Registry</div>
-          <div id="rtsc-reg"><div class="empty">尚未查詢</div></div>
-        </div>
-        <div class="rtsc-panel">
-          <div class="pt">叢集指標</div>
-          <div class="prow"><span class="pk">總連線數</span><span class="pv" id="rtsc-m-total">120.0k</span></div>
-          <div class="prow"><span class="pk">重連速率</span><span class="pv" id="rtsc-m-rc">0 /s</span></div>
-          <div class="prow"><span class="pk">registry 寫入</span><span class="pv" id="rtsc-m-rw">1.3k /s</span></div>
-          <div class="prow"><span class="pk">1006 佔比</span><span class="pv" id="rtsc-m-1006">0.2%</span></div>
-        </div>
+      <div class="rcm-canvas" id="rcm-canvas"></div>
+      <p class="cap">每一根柱子是一台節點的<strong>容量空間</strong>：柱高等於連線數上限，虛線就是上限本身，裡面的色帶是「這批連線是第幾波接手進來的」——<strong>要看的不是總高度，是分層</strong>。傾斜是一層層沉積出來的，不是一開始就歪。「一次性抽籤」以<strong>期望值</strong>模擬（釋放出的連線平均分給在線且未滿的節點，不看目前負載），所以同一組參數永遠得到同一張圖。</p>
+
+      <div class="legend">
+        <span><i class="dot ns-idle"></i>未達上限，還收得下</span>
+        <span><i class="dot ns-bad"></i>已達上限 · 自摘（柱子疊斜線帶）</span>
       </div>
 
-      <div class="rtsc-wire" id="rtsc-log"></div>
+      <div class="rcm-stats" id="rcm-stats"></div>
+      <p class="rcm-note" id="rcm-assume">重連峰值的分母是本 demo 的兩個假設值：graceful drain 把重連攤平在 120 秒內，硬斷則只有 2 秒的抖動窗。</p>
     </div>
   </div>
 
-  <p class="cap">三組對照值得留意：<strong>(1)</strong> 路由情境裡最後一步的 stale entry——訊息投到了正確的 channel，卻沒有人收（第 3 節的「安靜的那種後果」）；<strong>(2)</strong> 優雅排空與硬斷的總連線數曲線幾乎一樣，但重連速率與 <code>1006</code> 佔比差一到兩個量級，<strong>而後兩者才是使用者感受到的東西</strong>；<strong>(3)</strong> 傾斜情境裡沒有任何一步是錯的，最後卻長出 58k／0 的分佈——這就是第 2 節說的算術必然。</p>
+  <p class="cap">四組對照值得自己推一次：<strong>(1)</strong> 預設 4 台各 30k、上限 80k，依序點 <code>gw-4 → gw-3 → gw-2</code>，gw-1 會長到 <strong>71.1k、是平均值的 2.37 倍</strong>——沒有任何一步做錯，這就是第 2 節說的算術必然；<strong>(2)</strong> 同一組操作切到 least-connection，除了剛排空的那台是空的，其餘三台都停在 40.0k、傾斜比掉到 1.33，<strong>證明傾斜是分配演算法的產物而不是宿命</strong>；<strong>(3)</strong> 把上限降到 50k 重做一次：排空 gw-3 的那一步會讓 gw-1 與 gw-2 同時撞頂自摘、剩餘的量被重新分配一輪，等你再排空 gw-2，最後落在 <code>50.0 / 0 / 25.0 / 45.0</code>（此時只剩 gw-1 還掛著自摘）——<strong>上限擋得住 OOM，擋不住傾斜</strong>；<strong>(4)</strong> 把下線方式切到硬斷——<strong>分佈一格都不會變</strong>，但重連峰值從 444/s 跳到 26,667/s、1006 從 0 變成 123.3k。後面那兩個數字才是使用者感受到的東西。</p>
 
   <div class="oneliner">
-    <b>一句話答法</b>跨節點路由的三步是「查 registry → 投到那個節點的 channel → 節點在本地表找到 socket」；節點下線時 graceful drain 與硬斷的差別不在總連線數，而在重連是被攤平的還是同相的——後者會沿著 TLS、認證、registry、快照 API 一路連鎖。
+    <b>一句話答法</b>LB 對長連線只決策一次，所以滾動重啟會讓先重啟的節點把後面每一台釋放出來的連線都吃進去——傾斜是分配策略的算術結果，不是誰做錯；而節點連線數上限只擋得住 OOM，擋不住傾斜，撞頂之後的自摘還會把壓力推給更少的節點。至於 graceful drain 與硬斷，差別從來不在總連線數，而在重連是被攤平的還是同相的。
   </div>
 </section>
 
