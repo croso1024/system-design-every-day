@@ -2,551 +2,416 @@
 (function () {
   "use strict";
 
-  var scenario = "direct";
-  var step = 0;
+  /* ================================================================
+     (1) 常數與參數表
+     ================================================================ */
 
-  var statusEl = document.getElementById("wrt-status");
-  var wireEl = document.getElementById("wrt-wire");
-  var btnNext = document.getElementById("wrt-btn-next");
-  var btnReset = document.getElementById("wrt-btn-reset");
-  var segRoot = document.querySelector("#demo-wrt .seg");
-  var statesEl = document.getElementById("wrt-states");
+  /* RFC 8445 的 type preference：host 最高、relay 最低 */
+  var TYPE_PREF = { host: 126, srflx: 100, relay: 0 };
 
-  var mStep = document.getElementById("wrt-m-step");
-  var mPath = document.getElementById("wrt-m-path");
-  var mRtt = document.getElementById("wrt-m-rtt");
+  var TA_INTERVAL_MS = 20;    /* ICE 送出連線檢查的節拍 Ta */
+  var LAN_RTT_MS     = 2;     /* 同一 LAN 直連的往返 */
+  var TURN_HOP_MS    = 12;    /* 經 TURN 多跨一段的固定成本 */
+  var RELAY_DETOUR   = 1.6;   /* relay 繞路後的路徑放大係數 */
 
-  var aHost = document.getElementById("wrt-a-host");
-  var aSrflx = document.getElementById("wrt-a-srflx");
-  var aRelay = document.getElementById("wrt-a-relay");
-  var aIce = document.getElementById("wrt-a-ice");
+  /* 顯示用的假位址，完全不參與計算 */
+  var HOST_IPS = {
+    A: ["10.0.0.8", "192.168.1.22", "172.16.5.4"],
+    B: ["10.1.2.5", "192.168.4.9", "172.20.0.3"]
+  };
+  var SRFLX_IP = { A: "203.0.113.10", B: "198.51.100.77" };
+  var RELAY_IP = { A: "198.51.100.2", B: "198.51.100.2" };
+  var PORT_BASE = 52100;
+  var RELAY_PORT = { A: 49180, B: 49181 };
 
-  var pTried = document.getElementById("wrt-p-tried");
-  var pNom = document.getElementById("wrt-p-nom");
-  var pBytes = document.getElementById("wrt-p-bytes");
-  var pMedia = document.getElementById("wrt-p-media");
+  var NAT_LABEL = {
+    "none": "無 NAT（公網位址）",
+    "full-cone": "Full Cone",
+    "addr-restricted": "Address-Restricted",
+    "port-restricted": "Port-Restricted",
+    "symmetric": "Symmetric"
+  };
+  var TYPE_LABEL = { host: "host", srflx: "srflx", relay: "relay" };
 
-  var FRAMES = {
-    direct: [
-      {
-        phase: "new",
-        path: "—",
-        rtt: "—",
-        host: "pending",
-        srflx: "—",
-        relay: "—",
-        ice: "new",
-        tried: "—",
-        nom: "—",
-        bytes: "0",
-        media: "idle",
-        hostCls: "",
-        srflxCls: "",
-        relayCls: "",
-        iceCls: "",
-        triedCls: "",
-        nomCls: "",
-        bytesCls: "",
-        mediaCls: "",
-        status: "SDP Offer／Answer 已交換；PeerConnection 進入 ICE 蒐集。",
-        rows: [
-          { cls: "note", ar: "·", tg: "sdp", tx: "雙方 setRemoteDescription 完成 · trickle ICE 啟用" },
-          { cls: "note", ar: "·", tg: "state", tx: "iceConnectionState = new" }
-        ]
-      },
-      {
-        phase: "checking",
-        path: "—",
-        rtt: "—",
-        host: "10.0.0.8:52100",
-        srflx: "203.0.113.10:52100",
-        relay: "gathering…",
-        ice: "checking",
-        tried: "host↔host",
-        nom: "—",
-        bytes: "0",
-        media: "idle",
-        hostCls: "good",
-        srflxCls: "good",
-        relayCls: "warn",
-        iceCls: "warn",
-        triedCls: "",
-        nomCls: "",
-        bytesCls: "",
-        mediaCls: "",
-        status: "蒐集到 host 與 srflx；同時向 TURN 要 relay。開始 pair 探測。",
-        rows: [
-          { cls: "a2b", ar: "A", tg: "host", tx: "candidate: host 10.0.0.8:52100" },
-          { cls: "mid", ar: "STUN", tg: "srflx", tx: "反射位址 203.0.113.10:52100" },
-          { cls: "note", ar: "·", tg: "state", tx: "iceConnectionState = checking" }
-        ]
-      },
-      {
-        phase: "checking",
-        path: "srflx 試探",
-        rtt: "42ms",
-        host: "10.0.0.8:52100",
-        srflx: "203.0.113.10:52100",
-        relay: "198.51.100.2:3478",
-        ice: "checking",
-        tried: "srflx↔srflx",
-        nom: "—",
-        bytes: "0",
-        media: "probing",
-        hostCls: "good",
-        srflxCls: "good",
-        relayCls: "good",
-        iceCls: "warn",
-        triedCls: "warn",
-        nomCls: "",
-        bytesCls: "",
-        mediaCls: "warn",
-        status: "host 跨網失敗；srflx 配對收到 Binding Response，RTT 可接受。",
-        rows: [
-          { cls: "bad", ar: "pair", tg: "host", tx: "host↔host 超時（不同私網）" },
-          { cls: "a2b", ar: "A→B", tg: "check", tx: "STUN Binding Request via srflx" },
-          { cls: "b2a", ar: "B→A", tg: "ok", tx: "Binding Success · RTT 42ms" }
-        ]
-      },
-      {
-        phase: "connected",
-        path: "srflx↔srflx",
-        rtt: "42ms",
-        host: "10.0.0.8:52100",
-        srflx: "203.0.113.10:52100",
-        relay: "standby",
-        ice: "connected",
-        tried: "srflx↔srflx",
-        nom: "srflx↔srflx",
-        bytes: "0",
-        media: "DTLS…",
-        hostCls: "good",
-        srflxCls: "good",
-        relayCls: "",
-        iceCls: "good",
-        triedCls: "good",
-        nomCls: "good",
-        bytesCls: "good",
-        mediaCls: "warn",
-        status: "提名 srflx 路徑；媒體平面尚未加密完成。",
-        rows: [
-          { cls: "a2b", ar: "ICE", tg: "nom", tx: "nominate srflx↔srflx" },
-          { cls: "note", ar: "·", tg: "state", tx: "iceConnectionState = connected" },
-          { cls: "mid", ar: "DTLS", tg: "hs", tx: "開始 DTLS handshake（指紋已在 SDP）" }
-        ]
-      },
-      {
-        phase: "completed",
-        path: "srflx↔srflx",
-        rtt: "42ms",
-        host: "10.0.0.8:52100",
-        srflx: "203.0.113.10:52100",
-        relay: "unused",
-        ice: "completed",
-        tried: "srflx↔srflx",
-        nom: "srflx↔srflx",
-        bytes: "0",
-        media: "SRTP on",
-        hostCls: "good",
-        srflxCls: "good",
-        relayCls: "",
-        iceCls: "good",
-        triedCls: "good",
-        nomCls: "good",
-        bytesCls: "good",
-        mediaCls: "good",
-        status: "ICE completed；DTLS-SRTP 就緒，TURN 未消耗位元組。",
-        rows: [
-          { cls: "a2b", ar: "DTLS", tg: "ok", tx: "handshake done · key → SRTP" },
-          { cls: "note", ar: "·", tg: "state", tx: "iceConnectionState = completed" },
-          { cls: "last", ar: "·", tg: "bill", tx: "TURN bytes = 0（直連成功）" }
-        ]
-      }
-    ],
-    turn: [
-      {
-        phase: "new",
-        path: "—",
-        rtt: "—",
-        host: "pending",
-        srflx: "—",
-        relay: "—",
-        ice: "new",
-        tried: "—",
-        nom: "—",
-        bytes: "0",
-        media: "idle",
-        hostCls: "",
-        srflxCls: "",
-        relayCls: "",
-        iceCls: "",
-        triedCls: "",
-        nomCls: "",
-        bytesCls: "",
-        mediaCls: "",
-        status: "雙方皆在嚴格 NAT 後；SDP 已交換，開始 ICE。",
-        rows: [
-          { cls: "note", ar: "·", tg: "nat", tx: "引用 NAT 篇：Symmetric → srflx 對 peer 常失效" },
-          { cls: "note", ar: "·", tg: "state", tx: "iceConnectionState = new" }
-        ]
-      },
-      {
-        phase: "checking",
-        path: "—",
-        rtt: "—",
-        host: "10.8.1.4:44001",
-        srflx: "198.51.100.40:55112",
-        relay: "203.0.113.8:49160",
-        ice: "checking",
-        tried: "srflx↔srflx",
-        nom: "—",
-        bytes: "0",
-        media: "probing",
-        hostCls: "good",
-        srflxCls: "warn",
-        relayCls: "good",
-        iceCls: "warn",
-        triedCls: "warn",
-        nomCls: "",
-        bytesCls: "",
-        mediaCls: "warn",
-        status: "srflx 已蒐集，但 Symmetric 映射對對端探測失敗。",
-        rows: [
-          { cls: "mid", ar: "STUN", tg: "srflx", tx: "反射位址取得成功" },
-          { cls: "bad", ar: "pair", tg: "fail", tx: "srflx↔srflx Binding 無回應（映射不一致）" },
-          { cls: "a2b", ar: "TURN", tg: "alloc", tx: "Allocate relay 203.0.113.8:49160" }
-        ]
-      },
-      {
-        phase: "checking",
-        path: "relay 試探",
-        rtt: "118ms",
-        host: "10.8.1.4:44001",
-        srflx: "unusable",
-        relay: "203.0.113.8:49160",
-        ice: "checking",
-        tried: "relay↔relay",
-        nom: "—",
-        bytes: "12KB",
-        media: "probing",
-        hostCls: "",
-        srflxCls: "bad",
-        relayCls: "good",
-        iceCls: "warn",
-        triedCls: "warn",
-        nomCls: "",
-        bytesCls: "warn",
-        mediaCls: "warn",
-        status: "降級到 TURN：探測經中繼成功，RTT 明顯較高。",
-        rows: [
-          { cls: "a2b", ar: "A→T", tg: "check", tx: "Binding via relay" },
-          { cls: "b2a", ar: "B→T", tg: "ok", tx: "Success · RTT 118ms" },
-          { cls: "mid", ar: "·", tg: "cost", tx: "試探流量已計入 TURN" }
-        ]
-      },
-      {
-        phase: "connected",
-        path: "relay↔relay",
-        rtt: "118ms",
-        host: "unused",
-        srflx: "unused",
-        relay: "203.0.113.8:49160",
-        ice: "connected",
-        tried: "relay↔relay",
-        nom: "relay↔relay",
-        bytes: "12KB",
-        media: "DTLS…",
-        hostCls: "",
-        srflxCls: "",
-        relayCls: "good",
-        iceCls: "good",
-        triedCls: "good",
-        nomCls: "good",
-        bytesCls: "warn",
-        mediaCls: "warn",
-        status: "提名 relay 路徑；通話可開始，但之後每位元組都走 TURN。",
-        rows: [
-          { cls: "a2b", ar: "ICE", tg: "nom", tx: "nominate relay↔relay" },
-          { cls: "note", ar: "·", tg: "state", tx: "iceConnectionState = connected" },
-          { cls: "mid", ar: "DTLS", tg: "hs", tx: "DTLS over TURN 路徑" }
-        ]
-      },
-      {
-        phase: "completed",
-        path: "relay↔relay",
-        rtt: "118ms",
-        host: "unused",
-        srflx: "unused",
-        relay: "203.0.113.8:49160",
-        ice: "completed",
-        tried: "relay↔relay",
-        nom: "relay↔relay",
-        bytes: "48MB",
-        media: "SRTP on",
-        hostCls: "",
-        srflxCls: "",
-        relayCls: "good",
-        iceCls: "good",
-        triedCls: "good",
-        nomCls: "good",
-        bytesCls: "bad",
-        mediaCls: "good",
-        status: "連線成功但帳單啟動：10 分鐘 720p 雙向約數十 MB 級 relay。",
-        rows: [
-          { cls: "a2b", ar: "DTLS", tg: "ok", tx: "SRTP 媒體經 TURN 轉發" },
-          { cls: "note", ar: "·", tg: "state", tx: "iceConnectionState = completed" },
-          { cls: "last", ar: "·", tg: "slo", tx: "監控 relay% —— 這是 SLA 成本，不是例外" }
-        ]
-      }
-    ],
-    fail: [
-      {
-        phase: "new",
-        path: "—",
-        rtt: "—",
-        host: "pending",
-        srflx: "—",
-        relay: "—",
-        ice: "new",
-        tried: "—",
-        nom: "—",
-        bytes: "0",
-        media: "idle",
-        hostCls: "",
-        srflxCls: "",
-        relayCls: "",
-        iceCls: "",
-        triedCls: "",
-        nomCls: "",
-        bytesCls: "",
-        mediaCls: "",
-        status: "模擬：未設定 TURN，且雙方 NAT 無法打洞。",
-        rows: [
-          { cls: "note", ar: "·", tg: "cfg", tx: "iceServers = [STUN only] · 無 TURN URI" },
-          { cls: "note", ar: "·", tg: "state", tx: "iceConnectionState = new" }
-        ]
-      },
-      {
-        phase: "checking",
-        path: "—",
-        rtt: "—",
-        host: "10.0.0.8:52100",
-        srflx: "203.0.113.10:52100",
-        relay: "none",
-        ice: "checking",
-        tried: "host / srflx",
-        nom: "—",
-        bytes: "0",
-        media: "probing",
-        hostCls: "good",
-        srflxCls: "good",
-        relayCls: "bad",
-        iceCls: "warn",
-        triedCls: "warn",
-        nomCls: "",
-        bytesCls: "",
-        mediaCls: "warn",
-        status: "只有 host／srflx；配對探測開始計時。",
-        rows: [
-          { cls: "a2b", ar: "A", tg: "host", tx: "candidate host + srflx" },
-          { cls: "bad", ar: "cfg", tg: "relay", tx: "無 TURN · relay candidate 不存在" },
-          { cls: "note", ar: "·", tg: "state", tx: "iceConnectionState = checking" }
-        ]
-      },
-      {
-        phase: "checking",
-        path: "無可用 pair",
-        rtt: "timeout",
-        host: "10.0.0.8:52100",
-        srflx: "203.0.113.10:52100",
-        relay: "none",
-        ice: "checking",
-        tried: "all timed out",
-        nom: "—",
-        bytes: "0",
-        media: "idle",
-        hostCls: "",
-        srflxCls: "bad",
-        relayCls: "bad",
-        iceCls: "warn",
-        triedCls: "bad",
-        nomCls: "",
-        bytesCls: "",
-        mediaCls: "",
-        status: "所有 pair 超時；狀態仍可能短暫停留在 checking。",
-        rows: [
-          { cls: "bad", ar: "pair", tg: "fail", tx: "host↔* 失敗" },
-          { cls: "bad", ar: "pair", tg: "fail", tx: "srflx↔srflx 失敗（Symmetric／防火牆）" },
-          { cls: "note", ar: "·", tg: "wait", tx: "尚無 nominated pair" }
-        ]
-      },
-      {
-        phase: "failed",
-        path: "—",
-        rtt: "—",
-        host: "exhausted",
-        srflx: "exhausted",
-        relay: "none",
-        ice: "failed",
-        tried: "exhausted",
-        nom: "none",
-        bytes: "0",
-        media: "blocked",
-        hostCls: "bad",
-        srflxCls: "bad",
-        relayCls: "bad",
-        iceCls: "bad",
-        triedCls: "bad",
-        nomCls: "bad",
-        bytesCls: "",
-        mediaCls: "bad",
-        status: "iceConnectionState = failed。產品應提示網路限制並引導重試（含 TURN）。",
-        rows: [
-          { cls: "bad", ar: "ICE", tg: "fail", tx: "iceConnectionState = failed" },
-          { cls: "note", ar: "·", tg: "ux", tx: "顯示「無法建立媒體連線」· 建議切換網路／啟用 TURN" },
-          { cls: "last", ar: "·", tg: "fix", tx: "不要與 disconnected（可恢復）混為同一告警" }
-        ]
-      }
-    ]
+  /* 繪圖幾何（render 用，不參與計算） */
+  var CELL = 62, OX = 176, OY = 64, PAD_R = 28, PAD_B = 36;
+
+  var DEFAULTS = {
+    natA: "port-restricted", natB: "port-restricted",
+    sameLan: false, turnAvailable: true,
+    nicsA: 2, nicsB: 1, baseRttMs: 40, bitrateKbps: 1200
   };
 
-  function setText(el, text, cls) {
-    if (!el) return;
-    el.textContent = text;
-    el.classList.remove("good", "bad", "warn");
-    if (cls) el.classList.add(cls);
+  /* ================================================================
+     (2) compute* 純函式 —— 不得出現 document / DOM
+     ================================================================ */
+
+  function clampInt(v, lo, hi) {
+    v = Math.round(Number(v));
+    if (!isFinite(v)) return lo;
+    return v < lo ? lo : (v > hi ? hi : v);
   }
 
-  function paintStates(phase) {
-    var nodes = statesEl.querySelectorAll(".wrt-st");
-    var order = ["new", "checking", "connected", "completed"];
-    var fail = phase === "failed";
-    var idx = order.indexOf(phase === "failed" ? "checking" : phase);
-    if (phase === "completed") idx = 3;
-    if (phase === "connected") idx = 2;
-    if (phase === "checking") idx = 1;
-    if (phase === "new") idx = 0;
+  function normNat(v) {
+    return NAT_LABEL.hasOwnProperty(v) ? v : "port-restricted";
+  }
 
-    for (var i = 0; i < nodes.length; i++) {
-      var n = nodes[i];
-      n.classList.remove("on", "done", "dead");
-      var key = n.getAttribute("data-st");
-      if (key === "terminal") {
-        if (fail) {
-          n.classList.add("dead");
-          n.querySelector(".sn").textContent = "failed";
-        } else if (phase === "completed") {
-          n.classList.add("done");
-          n.querySelector(".sn").textContent = "completed";
-        } else {
-          n.querySelector(".sn").textContent = "completed／failed";
-        }
-        if (!fail && phase === "completed") n.classList.add("on");
-        if (fail) n.classList.add("on");
-        continue;
-      }
-      var my = order.indexOf(key);
-      if (fail) {
-        if (my < 2) n.classList.add("done");
-        if (key === "checking") n.classList.add("on");
-      } else {
-        if (my < idx) n.classList.add("done");
-        if (my === idx) n.classList.add("on");
-        if (phase === "completed" && key === "connected") n.classList.add("done");
+  /* RFC 8445 §5.1.2：priority = 2^24·typePref + 2^8·localPref + (256 − componentId) */
+  function candPriority(type, localPref) {
+    return 16777216 * TYPE_PREF[type] + 256 * localPref + 255;
+  }
+
+  function buildCands(side, nics, nat, turn) {
+    var list = [], i;
+    for (i = 0; i < nics; i++) {
+      list.push({
+        type: "host", idx: i,
+        addr: HOST_IPS[side][i] + ":" + (PORT_BASE + i),
+        localPref: 65535 - i * 256
+      });
+    }
+    /* 沒有 NAT 時，反射位址與 host 位址相同 → ICE 會把重複的 srflx 去掉 */
+    if (nat !== "none") {
+      list.push({ type: "srflx", idx: 0, addr: SRFLX_IP[side] + ":" + PORT_BASE, localPref: 65535 });
+    }
+    if (turn) {
+      list.push({ type: "relay", idx: 0, addr: RELAY_IP[side] + ":" + RELAY_PORT[side], localPref: 65535 });
+    }
+    for (i = 0; i < list.length; i++) {
+      list[i].priority = candPriority(list[i].type, list[i].localPref);
+    }
+    return list;
+  }
+
+  /* NAT 行為規則（不是情境表）：四條判斷式作用在任意大小的候選外積上 */
+  function canPunch(a, b, natA, natB, sameLan) {
+    if (a.type === "relay" || b.type === "relay") return true;        /* 中繼一端永遠收得到 */
+    if (a.type === "host" && b.type === "host") return sameLan;       /* 私網位址只有同網段才通 */
+
+    /* 沒有 NAT 的一端，它的 host 位址本身就是公網位址 */
+    var effA = (a.type === "host" && natA === "none") ? "public" : a.type;
+    var effB = (b.type === "host" && natB === "none") ? "public" : b.type;
+    /* 私網位址配公網位址：本模擬省略 peer-reflexive，一律判為不通 */
+    if (effA === "host" || effB === "host") return false;
+
+    /* 兩端皆公網可見：只有 symmetric 遇上「另一個 symmetric」或「port-restricted」才打不通 */
+    var symA = natA === "symmetric", symB = natB === "symmetric";
+    if (symA && symB) return false;
+    if (symA && natB === "port-restricted") return false;
+    if (symB && natA === "port-restricted") return false;
+    return true;
+  }
+
+  function pathKind(a, b) {
+    if (a.type === "relay" || b.type === "relay") return "relay";
+    if (a.type === "host" && b.type === "host") return "lan";
+    return "direct";
+  }
+
+  // @probe fn       computeIceSpace
+  // @probe baseline {"natA":"port-restricted","natB":"port-restricted","sameLan":false,"turnAvailable":true,"nicsA":2,"nicsB":1,"baseRttMs":40,"bitrateKbps":1200}
+  // @probe sweep    {"natA":["none","symmetric"],"natB":["none","symmetric"],"sameLan":[false,true],"turnAvailable":[true,false],"nicsA":[1,3],"nicsB":[1,3],"baseRttMs":[5,250],"bitrateKbps":[300,3000]}
+  function computeIceSpace(p) {
+    p = p || {};
+    var natA = normNat(p.natA), natB = normNat(p.natB);
+    var sameLan = !!p.sameLan, turn = !!p.turnAvailable;
+    var nicsA = clampInt(p.nicsA, 1, 3), nicsB = clampInt(p.nicsB, 1, 3);
+    var baseRtt = clampInt(p.baseRttMs, 5, 250);
+    var bitrate = clampInt(p.bitrateKbps, 300, 3000);
+
+    var candsA = buildCands("A", nicsA, natA, turn);
+    var candsB = buildCands("B", nicsB, natB, turn);
+
+    /* 外積：每一格是一對 candidate pair。Peer A 為 controlling agent */
+    var order = [], i, j, a, b, G, D;
+    for (i = 0; i < candsA.length; i++) {
+      for (j = 0; j < candsB.length; j++) {
+        a = candsA[i]; b = candsB[j];
+        G = a.priority; D = b.priority;
+        order.push({
+          ai: i, bi: j,
+          hi: Math.min(G, D), lo: Math.max(G, D), tb: G > D ? 1 : 0,
+          /* RFC 8445 §6.1.2.3：2^32·min + 2·max + (G>D?1:0)。
+             此處以 Number 呈現，排序另用 (hi, lo, tb) 三元組確保精確 */
+          priority: Math.min(G, D) * 4294967296 + Math.max(G, D) * 2 + (G > D ? 1 : 0),
+          reach: canPunch(a, b, natA, natB, sameLan),
+          kind: pathKind(a, b)
+        });
       }
     }
-  }
 
-  function renderWire(rows) {
-    wireEl.innerHTML = "";
-    for (var i = 0; i < rows.length; i++) {
-      var r = rows[i];
-      var div = document.createElement("div");
-      div.className = "wrt-row " + r.cls + (i === rows.length - 1 ? " last" : "");
-      div.innerHTML =
-        '<span class="ar">' + r.ar + "</span>" +
-        '<span class="tg">' + r.tg + "</span>" +
-        '<span class="tx">' + r.tx + "</span>";
-      wireEl.appendChild(div);
-    }
-    wireEl.scrollTop = wireEl.scrollHeight;
-  }
-
-  function applyFrame(frame) {
-    mStep.textContent = String(step);
-    mPath.textContent = frame.path;
-    mRtt.textContent = frame.rtt;
-    setText(aHost, frame.host, frame.hostCls);
-    setText(aSrflx, frame.srflx, frame.srflxCls);
-    setText(aRelay, frame.relay, frame.relayCls);
-    setText(aIce, frame.ice, frame.iceCls);
-    setText(pTried, frame.tried, frame.triedCls);
-    setText(pNom, frame.nom, frame.nomCls);
-    setText(pBytes, frame.bytes, frame.bytesCls);
-    setText(pMedia, frame.media, frame.mediaCls);
-    statusEl.textContent = frame.status;
-    paintStates(frame.phase);
-    renderWire(frame.rows);
-    btnNext.disabled = step >= FRAMES[scenario].length;
-    if (btnNext.disabled) btnNext.textContent = "結束";
-    else btnNext.textContent = "下一步";
-  }
-
-  function resetToIdle() {
-    step = 0;
-    mStep.textContent = "0";
-    mPath.textContent = "—";
-    mRtt.textContent = "—";
-    setText(aHost, "—", "");
-    setText(aSrflx, "—", "");
-    setText(aRelay, "—", "");
-    setText(aIce, "new", "");
-    setText(pTried, "—", "");
-    setText(pNom, "—", "");
-    setText(pBytes, "0", "");
-    setText(pMedia, "idle", "");
-    statusEl.textContent = "選擇情境後按「下一步」，從 SDP 交換後的 ICE 蒐集開始。";
-    paintStates("new");
-    wireEl.innerHTML = "";
-    btnNext.disabled = false;
-    btnNext.textContent = "下一步";
-    var nodes = statesEl.querySelectorAll(".wrt-st");
-    for (var i = 0; i < nodes.length; i++) {
-      nodes[i].classList.remove("on", "done", "dead");
-      if (nodes[i].getAttribute("data-st") === "terminal") {
-        nodes[i].querySelector(".sn").textContent = "completed／failed";
-      }
-    }
-    nodes[0].classList.add("on");
-  }
-
-  function onNext() {
-    var frames = FRAMES[scenario];
-    if (step >= frames.length) return;
-    step += 1;
-    applyFrame(frames[step - 1]);
-  }
-
-  function onReset() {
-    resetToIdle();
-  }
-
-  if (segRoot) {
-    segRoot.addEventListener("click", function (e) {
-      var btn = e.target.closest("button[data-sc]");
-      if (!btn) return;
-      var buttons = segRoot.querySelectorAll("button[data-sc]");
-      for (var i = 0; i < buttons.length; i++) {
-        buttons[i].setAttribute("aria-pressed", buttons[i] === btn ? "true" : "false");
-      }
-      scenario = btn.getAttribute("data-sc");
-      resetToIdle();
+    order.sort(function (x, y) {
+      if (x.hi !== y.hi) return y.hi - x.hi;
+      if (x.lo !== y.lo) return y.lo - x.lo;
+      return y.tb - x.tb;
     });
+
+    /* 熱度：把 pair priority 正規化到 0..1，供著色用 */
+    var maxP = order.length ? order[0].priority : 1;
+    var minP = order.length ? order[order.length - 1].priority : 0;
+    var span = maxP - minP;
+
+    var nominatedIdx = -1;
+    for (i = 0; i < order.length; i++) {
+      order[i].rank = i;
+      order[i].norm = span > 0 ? (order[i].priority - minP) / span : 1;
+      if (nominatedIdx < 0 && order[i].reach) nominatedIdx = i;
+    }
+
+    var nominated = nominatedIdx >= 0 ? order[nominatedIdx] : null;
+    var checksTried = nominatedIdx >= 0 ? nominatedIdx + 1 : order.length;
+
+    var selectedRttMs = 0;
+    if (nominated) {
+      if (nominated.kind === "lan") selectedRttMs = LAN_RTT_MS;
+      else if (nominated.kind === "relay") selectedRttMs = baseRtt * RELAY_DETOUR + TURN_HOP_MS;
+      else selectedRttMs = baseRtt;
+    }
+    var convergeMs = checksTried * TA_INTERVAL_MS + selectedRttMs;
+
+    /* 雙向中繼：TURN 進出各算一次 */
+    var relayExposureGBPerHour = bitrate * 3600 / 8 / 1e6 * 2;
+
+    /* 給 render 用的格子查表（rows × cols），內容全部是上面推導出來的 */
+    var cells = [], row;
+    for (i = 0; i < candsA.length; i++) {
+      row = [];
+      for (j = 0; j < candsB.length; j++) row.push(null);
+      cells.push(row);
+    }
+    for (i = 0; i < order.length; i++) {
+      var o = order[i];
+      cells[o.ai][o.bi] = {
+        rank: o.rank, reach: o.reach, norm: o.norm, kind: o.kind, priority: o.priority,
+        status: nominatedIdx < 0 ? "failed"
+              : (o.rank === nominatedIdx ? "nominated"
+              : (o.rank < nominatedIdx ? "failed" : "skipped"))
+      };
+    }
+
+    return {
+      natA: natA, natB: natB,
+      candsA: candsA, candsB: candsB,
+      rows: candsA.length, cols: candsB.length,
+      pairCount: order.length,
+      order: order,
+      cells: cells,
+      nominatedIdx: nominatedIdx,
+      nominated: nominated,
+      nominatedPriority: nominated ? nominated.priority : 0,
+      nominatedKind: nominated ? nominated.kind : "none",
+      checksTried: checksTried,
+      selectedRttMs: selectedRttMs,
+      convergeMs: convergeMs,
+      relayExposureGBPerHour: relayExposureGBPerHour,
+      state: nominated ? "connected" : "failed"
+    };
   }
 
-  if (btnNext) btnNext.addEventListener("click", onNext);
-  if (btnReset) btnReset.addEventListener("click", onReset);
+  /* ================================================================
+     (3) DOM 參照
+     ================================================================ */
 
-  resetToIdle();
+  var demo = document.getElementById("wpx-demo");
+  if (!demo) return;
+
+  var elNatA  = document.getElementById("wpx-nat-a");
+  var elNatB  = document.getElementById("wpx-nat-b");
+  var elLan   = document.getElementById("wpx-lan");
+  var elTurn  = document.getElementById("wpx-turn");
+  var elNicA  = document.getElementById("wpx-nic-a");
+  var elNicB  = document.getElementById("wpx-nic-b");
+  var elRtt   = document.getElementById("wpx-rtt");
+  var elBr    = document.getElementById("wpx-br");
+  var elNicAV = document.getElementById("wpx-nic-a-v");
+  var elNicBV = document.getElementById("wpx-nic-b-v");
+  var elRttV  = document.getElementById("wpx-rtt-v");
+  var elBrV   = document.getElementById("wpx-br-v");
+  var elSpace = document.getElementById("wpx-space");
+  var elReads = document.getElementById("wpx-reads");
+  var elStatus= document.getElementById("wpx-status");
+  var elReset = document.getElementById("wpx-reset");
+
+  var state = {
+    natA: DEFAULTS.natA, natB: DEFAULTS.natB,
+    sameLan: DEFAULTS.sameLan, turnAvailable: DEFAULTS.turnAvailable,
+    nicsA: DEFAULTS.nicsA, nicsB: DEFAULTS.nicsB,
+    baseRttMs: DEFAULTS.baseRttMs, bitrateKbps: DEFAULTS.bitrateKbps
+  };
+
+  /* ================================================================
+     (4) render —— 只讀 state 與計算結果畫出來
+     ================================================================ */
+
+  function esc(t) {
+    return String(t).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  }
+  function round1(n) { return Math.round(n * 10) / 10; }
+
+  function candName(c) {
+    return TYPE_LABEL[c.type] + (c.type === "host" ? " #" + (c.idx + 1) : "");
+  }
+
+  function cellCx(bi) { return OX + bi * CELL + CELL / 2; }
+  function cellCy(ai) { return OY + ai * CELL + CELL / 2; }
+
+  function spaceMarkup(res) {
+    var W = OX + res.cols * CELL + PAD_R;
+    var H = OY + res.rows * CELL + PAD_B;
+    var out = [], i, j, c;
+
+    out.push('<svg viewBox="0 0 ' + W + ' ' + H + '" role="img" ' +
+      'style="width:100%;min-width:' + Math.min(W, 560) + 'px;height:auto;display:block">');
+    out.push('<title>Peer A 候選與 Peer B 候選的外積平面：每一格是一對 candidate pair，' +
+      '顏色深淺代表 pair priority，框線代表探測結果</title>');
+    out.push('<defs><marker id="wpx-ah" viewBox="0 0 8 8" refX="6" refY="4" markerWidth="6" ' +
+      'markerHeight="6" orient="auto"><path d="M0 0 L8 4 L0 8 z" fill="#8b8f96"></path></marker></defs>');
+    out.push('<rect x="0" y="0" width="' + W + '" height="' + H + '" fill="#fff"></rect>');
+
+    /* 軸名 */
+    out.push('<text x="' + (OX - 10) + '" y="' + (OY - 40) + '" text-anchor="end" ' +
+      'font-family="var(--mono)" font-size="11" fill="#6b7280">Peer A（controlling）↓</text>');
+    out.push('<text x="' + OX + '" y="' + (OY - 40) + '" text-anchor="start" ' +
+      'font-family="var(--mono)" font-size="11" fill="#6b7280">Peer B →</text>');
+
+    /* 欄標籤 */
+    for (j = 0; j < res.cols; j++) {
+      c = res.candsB[j];
+      out.push('<text x="' + cellCx(j) + '" y="' + (OY - 20) + '" text-anchor="middle" ' +
+        'font-family="var(--mono)" font-size="12" font-weight="700" fill="#262a2f">' +
+        esc(candName(c)) + '</text>');
+      out.push('<text x="' + cellCx(j) + '" y="' + (OY - 7) + '" text-anchor="middle" ' +
+        'font-family="var(--mono)" font-size="11" fill="#8b8f96">' + TYPE_PREF[c.type] + '</text>');
+    }
+
+    /* 列標籤 */
+    for (i = 0; i < res.rows; i++) {
+      c = res.candsA[i];
+      out.push('<text x="' + (OX - 12) + '" y="' + (cellCy(i) - 3) + '" text-anchor="end" ' +
+        'font-family="var(--mono)" font-size="12" font-weight="700" fill="#262a2f">' +
+        esc(candName(c)) + '</text>');
+      out.push('<text x="' + (OX - 12) + '" y="' + (cellCy(i) + 12) + '" text-anchor="end" ' +
+        'font-family="var(--mono)" font-size="11" fill="#8b8f96">' + esc(c.addr) + '</text>');
+    }
+
+    /* 格子 */
+    for (i = 0; i < res.rows; i++) {
+      for (j = 0; j < res.cols; j++) {
+        c = res.cells[i][j];
+        var x = OX + j * CELL + 3, y = OY + i * CELL + 3, side = CELL - 6;
+        var op = 0.05 + 0.33 * c.norm;
+        var stroke = "var(--border)", sw = 1;
+        if (c.status === "nominated") { stroke = "var(--ok)"; sw = 2.6; }
+        else if (c.status === "failed") { stroke = "var(--bad)"; sw = 1.4; }
+        out.push('<rect x="' + x + '" y="' + y + '" width="' + side + '" height="' + side +
+          '" rx="6" fill="#3f6188" fill-opacity="' + op.toFixed(3) +
+          '" stroke="' + stroke + '" stroke-width="' + sw + '"></rect>');
+        out.push('<text x="' + (x + 6) + '" y="' + (y + 15) + '" font-family="var(--mono)" ' +
+          'font-size="11" fill="#6b7280">#' + (c.rank + 1) + '</text>');
+        var glyph = c.status === "nominated" ? "✓" : (c.status === "failed" ? "✕" : "–");
+        var gfill = c.status === "nominated" ? "var(--ok)" : (c.status === "failed" ? "var(--bad)" : "#8b8f96");
+        out.push('<text x="' + (x + side / 2) + '" y="' + (y + side / 2 + 9) + '" text-anchor="middle" ' +
+          'font-family="var(--mono)" font-size="19" font-weight="700" fill="' + gfill + '">' + glyph + '</text>');
+      }
+    }
+
+    /* 掃描軌跡：依優先度由高到低，走到被提名的那一格（失敗時走完全部） */
+    var end = res.nominatedIdx >= 0 ? res.nominatedIdx : res.order.length - 1;
+    if (end > 0) {
+      var pts = [];
+      for (i = 0; i <= end; i++) {
+        pts.push(cellCx(res.order[i].bi).toFixed(1) + "," + cellCy(res.order[i].ai).toFixed(1));
+      }
+      out.push('<polyline points="' + pts.join(" ") + '" fill="none" stroke="#8b8f96" ' +
+        'stroke-width="1.4" stroke-dasharray="5 4" marker-end="url(#wpx-ah)" opacity="0.85"></polyline>');
+    }
+
+    out.push('<text x="' + OX + '" y="' + (H - 12) + '" font-family="var(--mono)" font-size="11" ' +
+      'fill="#6b7280">虛線＝依 pair priority 由高到低的檢查順序；欄／列標籤下的數字是 type preference</text>');
+    out.push('</svg>');
+    return out.join("");
+  }
+
+  function readCard(cls, key, value) {
+    return '<div class="wpx-read' + (cls ? " " + cls : "") + '">' +
+      '<div class="rk">' + key + '</div><div class="rv">' + value + '</div></div>';
+  }
+
+  function render() {
+    var res = computeIceSpace(state);
+
+    elNicAV.textContent = state.nicsA + " 張";
+    elNicBV.textContent = state.nicsB + " 張";
+    elRttV.textContent = state.baseRttMs + " ms";
+    elBrV.textContent = state.bitrateKbps + " kbps";
+
+    elSpace.innerHTML = spaceMarkup(res);
+
+    var nomText = res.nominated
+      ? candName(res.candsA[res.nominated.ai]) + " ↔ " + candName(res.candsB[res.nominated.bi])
+      : "無（全部打不通）";
+    var kindText = { lan: "同網段直連", direct: "P2P 直連", relay: "TURN 中繼", none: "—" }[res.nominatedKind];
+
+    var cards = "";
+    cards += readCard("", "配對空間", res.rows + " × " + res.cols + " = " + res.pairCount + " 格");
+    cards += readCard(res.state === "connected" ? "ok" : "bad", "iceConnectionState", res.state);
+    cards += readCard("", "提名前的探測次數", res.checksTried + " 次");
+    cards += readCard("", "被提名的 pair", nomText);
+    cards += readCard(res.nominatedKind === "relay" ? "warn" : "", "選定路徑 · RTT",
+      kindText + (res.nominated ? " · " + round1(res.selectedRttMs) + " ms" : ""));
+    cards += readCard("", "ICE 收斂時間", round1(res.convergeMs) + " ms");
+    cards += readCard("", "被提名的 pair priority",
+      res.nominated ? res.nominatedPriority.toExponential(3) : "—");
+    cards += readCard("warn", "TURN 曝險（假設全程走 relay）",
+      round1(res.relayExposureGBPerHour) + " GB/h");
+    cards += readCard("", "候選數（A / B）", res.rows + " / " + res.cols);
+    elReads.innerHTML = cards;
+
+    elStatus.textContent = res.nominated
+      ? ("A 端 " + NAT_LABEL[res.natA] + "、B 端 " + NAT_LABEL[res.natB] + "："
+         + res.pairCount + " 格裡掃到第 " + res.checksTried + " 格才通，提名 "
+         + nomText + "（" + kindText + "，RTT " + round1(res.selectedRttMs) + " ms），"
+         + "收斂 " + round1(res.convergeMs) + " ms。")
+      : ("A 端 " + NAT_LABEL[res.natA] + "、B 端 " + NAT_LABEL[res.natB] + "："
+         + res.pairCount + " 格全部打不通，掃完 " + res.checksTried
+         + " 次後 iceConnectionState 進入 failed——這正是 TURN 要當保底的理由。");
+  }
+
+  /* ================================================================
+     (5) 事件綁定
+     ================================================================ */
+
+  function bindSelect(el, key) {
+    el.addEventListener("change", function () { state[key] = el.value; render(); });
+  }
+  function bindRange(el, key) {
+    el.addEventListener("input", function () { state[key] = Number(el.value); render(); });
+  }
+  function bindCheck(el, key) {
+    el.addEventListener("change", function () { state[key] = el.checked; render(); });
+  }
+
+  bindSelect(elNatA, "natA");
+  bindSelect(elNatB, "natB");
+  bindCheck(elLan, "sameLan");
+  bindCheck(elTurn, "turnAvailable");
+  bindRange(elNicA, "nicsA");
+  bindRange(elNicB, "nicsB");
+  bindRange(elRtt, "baseRttMs");
+  bindRange(elBr, "bitrateKbps");
+
+  elReset.addEventListener("click", function () {
+    state.natA = DEFAULTS.natA; state.natB = DEFAULTS.natB;
+    state.sameLan = DEFAULTS.sameLan; state.turnAvailable = DEFAULTS.turnAvailable;
+    state.nicsA = DEFAULTS.nicsA; state.nicsB = DEFAULTS.nicsB;
+    state.baseRttMs = DEFAULTS.baseRttMs; state.bitrateKbps = DEFAULTS.bitrateKbps;
+    elNatA.value = state.natA; elNatB.value = state.natB;
+    elLan.checked = state.sameLan; elTurn.checked = state.turnAvailable;
+    elNicA.value = state.nicsA; elNicB.value = state.nicsB;
+    elRtt.value = state.baseRttMs; elBr.value = state.bitrateKbps;
+    render();
+  });
+
+  render();
 })();
 </script>
