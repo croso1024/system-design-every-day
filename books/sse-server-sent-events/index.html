@@ -1378,7 +1378,7 @@
         <a href="#s4"><span class="n">04</span>為何 HTTP/2 之後 SSE 復活，以及「SSE 推 + HTTP 寫」</a>
         <a href="#s5"><span class="n">05</span>Proxy、CDN 緩衝與逾時實務</a>
         <a href="#s6"><span class="n">06</span>LLM Token Streaming：只談協定層背壓與取消</a>
-        <a href="#s7"><span class="n">07</span>互動 · EventSource 生命週期與續接</a>
+        <a href="#s7"><span class="n">07</span>互動 · 斷線切點、補送窗口與心跳成本</a>
         <a href="#s8"><span class="n">08</span>面試折衷與邊界</a>
       </div>
     </nav>
@@ -1394,7 +1394,11 @@
     <!-- ===================== MAIN CONTENT ===================== -->
     <main>
       <div class="inner">
-        <style>
+        <!-- demo-archetype: F｜拆解器（主，第 2 節）＋B｜參數掃描（次，第 7 節） — 讀者可自由改寫一段 text/event-stream
+     原始文字（含註解心跳、多行 data、空 id、未知欄位、缺尾空行），系統按 SSE 行解析規則逐行拆出欄位、事件邊界、
+     data 拼接、Last-Event-ID 游標與 bytes 開銷；次 demo 再拖動斷線位元組位置、id 頻率、保留窗口與 retry，算出補送／
+     重複／遺失筆數。選 F 是因為本篇的核心是「一段文字依明文規則變成一串事件」，那是結構拆解，不是流程播放。 -->
+<style>
   /* 本篇專屬：ssex-* 命名空間，不覆蓋全站 base 類別 */
   #ssex-root {
     --ssex-c: #3f6188; --ssex-c-soft: #eef2f7;
@@ -1457,73 +1461,71 @@
   .ssex-layer .ss { font-family: var(--mono); font-size: 11px; color: var(--text-3); margin-bottom: 8px; letter-spacing: .04em; }
   .ssex-layer ul { margin: 0; padding-left: 1.15em; font-size: 13px; color: var(--text-2); line-height: 1.65; }
 
-  .ssex-ctrl { display: flex; flex-wrap: wrap; gap: 10px; margin: 10px 0 8px; align-items: center; }
-  .ssex-states { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin: 10px 0 4px; }
-  @media (max-width: 520px) { .ssex-states { grid-template-columns: 1fr; } }
-  .ssex-st {
-    border: 1.5px solid var(--border-strong); border-radius: var(--radius-sm);
-    padding: 9px 8px; background: #fff; text-align: center;
-    transition: background .18s, border-color .18s, box-shadow .18s;
-  }
-  .ssex-st .sn { font-weight: 700; font-size: 12.5px; letter-spacing: .03em; }
-  .ssex-st .sv { font-family: var(--mono); font-size: 10.5px; color: var(--text-3); margin-top: 2px; }
-  .ssex-st.on { background: var(--accent-soft); border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
-  .ssex-st.on .sn { color: var(--accent); }
-  .ssex-st.done { background: var(--ok-soft); border-color: var(--ok); }
-  .ssex-st.dead { background: var(--bad-soft); border-color: var(--bad); }
-  .ssex-st.dead .sn { color: var(--bad); }
+  /* ---------- 主 demo：串流拆解器（sxp-） ---------- */
+  .sxp-grid { display: grid; grid-template-columns: minmax(0, 300px) minmax(0, 1fr); gap: 14px; align-items: start; margin: 12px 0 6px; }
+  @media (max-width: 760px) { .sxp-grid { grid-template-columns: 1fr; } }
+  .sxp-lb { font-family: var(--mono); font-size: 11px; color: var(--text-3); letter-spacing: .05em; text-transform: uppercase; margin: 0 0 5px; }
+  #sxp-raw { width: 100%; box-sizing: border-box; font-family: var(--mono); font-size: 12px; line-height: 1.6; padding: 9px 10px; border: 1px solid var(--border-strong); border-radius: 6px; background: var(--code-bg); color: var(--text); resize: vertical; min-height: 210px; }
+  .sxp-opts { display: grid; gap: 6px; margin: 9px 0; font-size: 12px; color: var(--text-2); }
+  .sxp-opts label { display: flex; align-items: center; gap: 6px; cursor: pointer; line-height: 1.45; }
 
-  .ssex-wire {
-    border: 1px solid var(--border); border-radius: var(--radius-sm);
-    background: #fff; padding: 8px 10px; margin-top: 10px; max-height: 280px; overflow-y: auto;
-  }
-  .ssex-row {
-    display: flex; align-items: baseline; gap: 8px;
-    font-family: var(--mono); font-size: 11.5px; padding: 4px 0;
-    border-bottom: 1px dashed var(--border);
-  }
-  .ssex-row:last-child { border-bottom: none; }
-  .ssex-row .ar { width: 34px; flex: none; text-align: center; color: var(--text-3); font-weight: 700; }
-  .ssex-row .tg {
-    flex: none; border-radius: 4px; padding: 2px 6px; font-size: 10.5px; font-weight: 700;
-    border: 1px solid var(--border-strong); background: var(--bg-soft); color: var(--text-3);
-  }
-  .ssex-row .tx { color: var(--text-2); line-height: 1.5; }
-  .ssex-row.s2c .ar { color: var(--ssex-s); }
-  .ssex-row.s2c .tg { background: var(--ssex-s-soft); border-color: var(--ssex-s); color: var(--ssex-s); }
-  .ssex-row.c2s .ar { color: var(--ssex-c); }
-  .ssex-row.c2s .tg { background: var(--ssex-c-soft); border-color: var(--ssex-c); color: var(--ssex-c); }
-  .ssex-row.mid .tg { background: var(--ssex-ctl-soft); border-color: var(--ssex-ctl); color: var(--ssex-ctl); }
-  .ssex-row.bad .tg { background: var(--ssex-bad-soft); border-color: var(--ssex-bad); color: var(--ssex-bad); }
-  .ssex-row.bad .tx { color: var(--bad); }
-  .ssex-row.note { background: var(--bg-soft); border-radius: 4px; }
-  .ssex-row.note .tx { color: var(--text-3); }
-  .ssex-row.last .tx { color: var(--text); font-weight: 600; }
+  .sxp-led { border: 1px solid var(--border); border-radius: var(--radius-sm); background: #fff; padding: 6px; max-height: 440px; overflow-y: auto; }
+  .sxp-blk { border-left: 3px solid var(--border-strong); border-radius: 0 5px 5px 0; padding: 4px 0 4px 8px; margin-bottom: 7px; background: var(--bg-soft); }
+  .sxp-blk:last-child { margin-bottom: 0; }
+  .sxp-blk.fired { border-left-color: var(--ok); background: var(--ok-soft); }
+  .sxp-blk.quiet { border-left-color: var(--warn); background: var(--warn-soft); }
+  .sxp-blk.openblk { border-left-color: var(--bad); border-left-style: dashed; background: var(--bad-soft); }
+  .sxp-row { display: grid; grid-template-columns: 26px minmax(0, 1fr) 42px; gap: 6px; align-items: baseline; padding: 3px 5px; }
+  .sxp-row .ln { font-family: var(--mono); font-size: 10.5px; color: var(--text-3); text-align: right; }
+  .sxp-row .src { font-family: var(--mono); font-size: 12px; word-break: break-all; line-height: 1.5; }
+  .sxp-row .by { font-family: var(--mono); font-size: 10.5px; color: var(--text-3); text-align: right; }
+  .sxp-row .act { grid-column: 2 / 4; font-size: 11px; color: var(--text-2); line-height: 1.45; }
+  .sxp-row i { font-style: normal; }
+  .sxp-row .fd { font-weight: 700; color: var(--ssex-c); }
+  .sxp-row .cl { color: var(--text-3); }
+  .sxp-row .vl { color: var(--ssex-s); }
+  .sxp-row .cm { color: var(--ssex-ctl); }
+  .sxp-row .bl { color: var(--text-3); }
+  .sxp-row.k-ignored .fd, .sxp-row.k-ignored .vl { color: var(--ssex-bad); text-decoration: line-through; }
+  .sxp-row.k-pending .vl { color: var(--ssex-bad); }
 
-  .ssex-panels { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 12px; }
-  @media (max-width: 640px) { .ssex-panels { grid-template-columns: 1fr; } }
-  .ssex-panel { border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 12px; background: #fff; }
-  .ssex-panel .pt {
-    font-size: 11px; color: var(--text-3); letter-spacing: .06em; text-transform: uppercase;
-    font-family: var(--mono); margin-bottom: 8px;
-  }
-  .ssex-panel .prow {
-    display: flex; justify-content: space-between; gap: 8px;
-    font-family: var(--mono); font-size: 12px; padding: 4px 0;
-    border-bottom: 1px dashed var(--border);
-  }
-  .ssex-panel .prow:last-child { border-bottom: none; }
-  .ssex-panel .pk { color: var(--text-3); white-space: nowrap; }
-  .ssex-panel .pv { color: var(--text); font-weight: 600; text-align: right; }
-  .ssex-panel .pv.good { color: var(--ok); }
-  .ssex-panel .pv.bad { color: var(--bad); }
-  .ssex-panel .pv.warn { color: var(--warn); }
+  .sxp-evs { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 10px; margin: 8px 0 6px; }
+  .sxp-ev { border: 1px solid var(--border); border-top: 3px solid var(--ssex-s); border-radius: var(--radius-sm); background: #fff; padding: 10px 12px; }
+  .sxp-ev .et { font-family: var(--mono); font-size: 12px; font-weight: 700; color: var(--text); }
+  .sxp-ev .em { font-size: 11px; color: var(--text-3); margin: 3px 0 6px; line-height: 1.5; }
+  .sxp-ev .ed { margin: 0; font-family: var(--mono); font-size: 11.5px; background: var(--code-bg); border-radius: 5px; padding: 7px 8px; white-space: pre-wrap; word-break: break-all; color: var(--text); }
+  .sxp-empty { font-size: 12.5px; color: var(--text-3); margin: 0; padding: 6px; }
 
-  .ssex-metric {
-    display: flex; flex-wrap: wrap; gap: 14px; margin: 8px 0 4px;
-    font-size: 13px; color: var(--text-2);
-  }
-  .ssex-metric strong { color: var(--text); font-family: var(--mono); font-size: 12.5px; }
+  .sxp-tbl { width: 100%; border-collapse: collapse; margin: 8px 0 4px; font-size: 12.5px; }
+  .sxp-tbl th, .sxp-tbl td { border: 1px solid var(--border); padding: 6px 9px; text-align: left; vertical-align: top; }
+  .sxp-tbl th { background: var(--bg-soft); color: var(--text-2); font-weight: 600; white-space: nowrap; width: 30%; }
+  .sxp-tbl td { font-family: var(--mono); font-size: 12px; color: var(--text); }
+  .sxp-tbl td.big { font-size: 15px; font-weight: 700; }
+
+  /* ---------- 次 demo：斷線切點與補送窗口（sxr-） ---------- */
+  .sxr-knobs { display: grid; grid-template-columns: 1fr 1fr; gap: 9px 18px; margin: 10px 0 8px; }
+  @media (max-width: 640px) { .sxr-knobs { grid-template-columns: 1fr; } }
+  .sxr-knob { display: grid; grid-template-columns: 104px minmax(0, 1fr) auto; gap: 8px; align-items: center; font-size: 12px; color: var(--text-2); }
+  .sxr-knob input[type="range"] { width: 100%; }
+  .sxr-knob .kv2 { font-family: var(--mono); font-size: 11.5px; color: var(--text); min-width: 62px; text-align: right; }
+
+  .sxr-band { display: flex; height: 26px; border: 1px solid var(--border-strong); border-radius: 5px; overflow: hidden; background: #fff; margin: 12px 0 0; }
+  .sxr-seg { display: block; height: 100%; border-right: 1px solid #fff; }
+  .sxr-seg.ev { background: var(--ssex-c-soft); }
+  .sxr-seg.ev.id { background: var(--ssex-c); }
+  .sxr-seg.hb { background: var(--ssex-ctl-soft); }
+  .sxr-seg.gone { opacity: .26; }
+  .sxr-seg.cut { background: var(--bg-soft); }
+  .sxr-seg.cut i { display: block; height: 100%; background: var(--ssex-c-soft); border-right: 2px solid var(--ssex-bad); }
+  .sxr-evband { display: flex; gap: 1px; height: 14px; margin-top: 7px; }
+  .sxr-cell { flex: 1 1 0; border-radius: 2px; background: var(--bg-soft); }
+  .sxr-cell.acked { background: var(--ok); }
+  .sxr-cell.dup { background: var(--warn); }
+  .sxr-cell.resend { background: var(--accent); }
+  .sxr-cell.lost { background: var(--bad); }
+  .sxr-cell.future { background: var(--border); }
+  .sxr-axis { display: flex; justify-content: space-between; gap: 10px; font-family: var(--mono); font-size: 10.5px; color: var(--text-3); margin-top: 5px; }
+  .sxr-ctrl { display: flex; flex-wrap: wrap; gap: 10px; margin: 10px 0 4px; align-items: center; }
 </style>
 
 <div id="ssex-root">
@@ -1598,6 +1600,55 @@
       <div class="fs">伺服器可動態改瀏覽器的重連等待。這是「建議值」，不是嚴格 SLA；真正的退避策略仍要在服務端配合。</div>
     </div>
   </div>
+
+  <p class="ssex-sub">2 · 互動：把一段串流餵進解析器</p>
+  <div class="demo" id="demo-sxp">
+    <div class="demo-bar">
+      <span class="label">互動 · text/event-stream 拆解器</span>
+      <span class="label" style="text-transform:none;font-family:var(--sans);font-size:12px;color:var(--text-2)">左邊改一個字，右邊整份重新拆解</span>
+    </div>
+    <div class="demo-body">
+      <p style="margin:0 0 10px;font-size:13px;color:var(--text-2);line-height:1.55;">右邊每一行都照 SSE 的規則真的跑一次：以 <code>CRLF</code>／<code>CR</code>／<code>LF</code> 切行、<code>:</code> 開頭是註解、其餘在第一個冒號切成欄位名與值（值的前導單一空格要剝掉）、空行才 dispatch。底下的位元組帳也是逐行算出來的。</p>
+
+      <div class="seg" role="group" aria-label="載入樣本" id="sxp-seg">
+        <button data-sample="std" aria-pressed="true">標準進度流</button>
+        <button data-sample="hb" aria-pressed="false">心跳密集</button>
+        <button data-sample="broken" aria-pressed="false">壞掉的流</button>
+      </div>
+
+      <div class="sxp-grid">
+        <div>
+          <p class="sxp-lb"><label for="sxp-raw">原始串流（可直接編輯）</label></p>
+          <textarea id="sxp-raw" spellcheck="false" autocomplete="off" rows="12"></textarea>
+          <div class="sxp-opts">
+            <label><input type="checkbox" id="sxp-bom"> 回應前面多了 UTF-8 BOM（+3 bytes）</label>
+            <label><input type="checkbox" id="sxp-crlf"> 行終止符用 CRLF（每行多 1 byte）</label>
+            <label><input type="checkbox" id="sxp-tail"> 幫最後一塊補上收尾空行</label>
+          </div>
+          <button class="btn" id="sxp-reset">重置</button>
+        </div>
+        <div>
+          <p class="sxp-lb">逐行拆解台帳（每個色框是一個事件塊）</p>
+          <div class="sxp-led" id="sxp-led"></div>
+        </div>
+      </div>
+
+      <div class="legend">
+        <span><i class="dot ns-ok"></i>這一塊有 dispatch</span>
+        <span><i class="dot ns-lock"></i>這一塊沒有 data，不觸發</span>
+        <span><i class="dot ns-bad"></i>這一塊沒有收尾空行，卡在緩衝區</span>
+      </div>
+
+      <p class="sxp-lb" style="margin-top:12px">解析器吐出來的事件</p>
+      <div class="sxp-evs" id="sxp-evs"></div>
+
+      <p class="sxp-lb">位元組帳</p>
+      <table class="sxp-tbl"><tbody id="sxp-tally"></tbody></table>
+
+      <div class="status-line" id="sxp-status"></div>
+    </div>
+  </div>
+  <p class="cap">三個最容易踩的規則都可以在這裡當場驗：<strong>(1)</strong> 把某則的 <code>id: 42</code> 改成只剩 <code>id:</code>，游標不是「維持原值」而是被<strong>重設成空字串</strong>，而且後面的事件都跟著沒有 id。<strong>(2)</strong> 刪掉某個空行，那一塊就永遠停在緩衝區——台帳最後一個框會變成紅色虛線，位元組帳的「結尾未終止」會告訴你卡了幾 bytes。<strong>(3)</strong> 切換 CRLF 不會改變任何一則事件的內容，只會改變位元組數：三種行終止符在規範裡是等價的，但帳單不同。</p>
 
   <p class="ssex-sub">2 · 回應標頭的最低配置</p>
   <div class="ssex-flow">
@@ -1777,75 +1828,81 @@
 </section>
 
 <section id="s7">
-  <div class="sec-head"><span class="sec-num">07</span><h2>互動 · EventSource 生命週期與續接</h2></div>
-  <p class="sec-sub">三個劇本：正常收流、斷線後用 Last-Event-ID 補洞、以及 proxy 緩衝把首包延遲放大。</p>
+  <div class="sec-head"><span class="sec-num">07</span><h2>互動 · 斷線切點、補送窗口與心跳成本</h2></div>
+  <p class="sec-sub">同一條串流，斷在不同的位元組、id 發得多疏、伺服器保留多深，決定了補送幾筆、重複幾筆、真正丟掉幾筆。</p>
 
-  <div class="demo" id="demo-ssex">
+  <div class="demo" id="demo-sxr">
     <div class="demo-bar">
-      <span class="label">互動 · SSE / EventSource</span>
-      <span class="label" style="text-transform:none;font-family:var(--sans);font-size:12px;color:var(--text-2)">選劇本後按「下一步」，觀察狀態機與補洞</span>
+      <span class="label">互動 · 斷線與續接</span>
+      <span class="label" style="text-transform:none;font-family:var(--sans);font-size:12px;color:var(--text-2)">拖動任一個旋鈕，補送／重複／遺失即時重算</span>
     </div>
     <div class="demo-body">
-      <p style="margin:0 0 8px;font-size:13px;color:var(--text-2);line-height:1.55;">場景：進度事件流（id 1…n）。對照「乾淨收流／斷線續接／邊緣緩衝」三種結果。數字與時間為教學示意。</p>
+      <p style="margin:0 0 10px;font-size:13px;color:var(--text-2);line-height:1.55;">上面那條是<strong>位元組尺</strong>：一段一則事件，寬度就是它在線上的實際長度，細段是心跳註解；深色代表這一則帶了 <code>id</code>。紅線是斷線位置。下面那條是<strong>事件序號帶</strong>，一格一則，顏色說明它重連後會怎麼樣。</p>
 
-      <div class="seg" role="group" aria-label="情境切換">
-        <button data-sc="clean" aria-pressed="true">正常串流</button>
-        <button data-sc="resume" aria-pressed="false">斷線 · Last-Event-ID 補洞</button>
-        <button data-sc="buffer" aria-pressed="false">Proxy 緩衝延遲</button>
+      <div class="seg" role="group" aria-label="伺服器重放能力" id="sxr-seg">
+        <button data-retain="0" aria-pressed="false">不能重放</button>
+        <button data-retain="12" aria-pressed="true">有限窗口</button>
+        <button data-retain="40" aria-pressed="false">游標外置</button>
       </div>
 
-      <div class="ssex-ctrl">
-        <button class="btn primary" id="ssex-btn-next">下一步</button>
-        <button class="btn" id="ssex-btn-reset">重置</button>
-        <div class="legend">
-          <span><i class="dot ns-wait"></i>目前狀態</span>
-          <span><i class="dot ns-ok"></i>已送达</span>
-          <span><i class="dot ns-lock"></i>緩衝／等待</span>
-          <span><i class="dot ns-bad"></i>中斷／缺口</span>
+      <div class="sxr-knobs">
+        <div class="sxr-knob">
+          <label for="sxr-count">事件數</label>
+          <input type="range" id="sxr-count" min="5" max="60" step="1" value="24">
+          <span class="kv2" id="sxr-count-v">24 則</span>
         </div>
-      </div>
-
-      <div class="ssex-metric">
-        <span>步驟 <strong id="ssex-m-step">0</strong></span>
-        <span>客戶端 last id <strong id="ssex-m-last">—</strong></span>
-        <span>已收事件 <strong id="ssex-m-recv">0</strong></span>
-        <span>缺口／延遲 <strong id="ssex-m-gap">—</strong></span>
-      </div>
-
-      <div class="ssex-states" id="ssex-states">
-        <div class="ssex-st" data-st="connecting"><div class="sn">CONNECTING</div><div class="sv">readyState 0</div></div>
-        <div class="ssex-st" data-st="open"><div class="sn">OPEN</div><div class="sv">readyState 1</div></div>
-        <div class="ssex-st" data-st="closed"><div class="sn">CLOSED</div><div class="sv">readyState 2</div></div>
-      </div>
-      <p class="cap" style="text-align:center">注意：SSE 沒有 <code>CLOSING</code>。閃斷時模型會回到 <code>CONNECTING</code> 並帶上 <code>Last-Event-ID</code>，而不是停在半開的 OPEN。</p>
-
-      <div class="ssex-wire" id="ssex-wire"></div>
-
-      <div class="ssex-panels">
-        <div class="ssex-panel">
-          <div class="pt">Client · EventSource</div>
-          <div class="prow"><span class="pk">readyState</span><span class="pv" id="ssex-p-rs">—</span></div>
-          <div class="prow"><span class="pk">Last-Event-ID</span><span class="pv" id="ssex-p-leid">—</span></div>
-          <div class="prow"><span class="pk">重連次數</span><span class="pv" id="ssex-p-retry">0</span></div>
-          <div class="prow"><span class="pk">UI 進度</span><span class="pv" id="ssex-p-ui">—</span></div>
+        <div class="sxr-knob">
+          <label for="sxr-data">每則 data</label>
+          <input type="range" id="sxr-data" min="8" max="512" step="8" value="48">
+          <span class="kv2" id="sxr-data-v">48 B</span>
         </div>
-        <div class="ssex-panel">
-          <div class="pt">Path · Server / Proxy</div>
-          <div class="prow"><span class="pk">伺服器游標</span><span class="pv" id="ssex-p-scur">—</span></div>
-          <div class="prow"><span class="pk">proxy buffer</span><span class="pv" id="ssex-p-buf">—</span></div>
-          <div class="prow"><span class="pk">flush / 心跳</span><span class="pv" id="ssex-p-flush">—</span></div>
-          <div class="prow"><span class="pk">補洞重放</span><span class="pv" id="ssex-p-replay">—</span></div>
+        <div class="sxr-knob">
+          <label for="sxr-hb">心跳頻率</label>
+          <input type="range" id="sxr-hb" min="0" max="10" step="1" value="4">
+          <span class="kv2" id="sxr-hb-v">每 4 則</span>
         </div>
+        <div class="sxr-knob">
+          <label for="sxr-id">多久發一次 id</label>
+          <input type="range" id="sxr-id" min="0" max="8" step="1" value="1">
+          <span class="kv2" id="sxr-id-v">每 1 則</span>
+        </div>
+        <div class="sxr-knob">
+          <label for="sxr-cut">斷線位置</label>
+          <input type="range" id="sxr-cut" min="1" max="99" step="1" value="62">
+          <span class="kv2" id="sxr-cut-v">62%</span>
+        </div>
+        <div class="sxr-knob">
+          <label for="sxr-retain">伺服器保留</label>
+          <input type="range" id="sxr-retain" min="0" max="40" step="1" value="12">
+          <span class="kv2" id="sxr-retain-v">12 則</span>
+        </div>
+        <div class="sxr-knob">
+          <label for="sxr-retry">重連等待</label>
+          <input type="range" id="sxr-retry" min="0" max="10000" step="250" value="3000">
+          <span class="kv2" id="sxr-retry-v">3000 ms</span>
+        </div>
+        <div class="sxr-ctrl"><button class="btn" id="sxr-reset">重置</button></div>
       </div>
 
-      <div class="status-line" id="ssex-status">選擇劇本後按「下一步」。觀察 id 游標、重連標頭與緩衝如何改變「即時」體感。</div>
+      <div class="sxr-band" id="sxr-band"></div>
+      <div class="sxr-axis"><span>byte 0</span><span>↑ 紅線＝斷線位置</span><span>串流結尾</span></div>
+      <div class="sxr-evband" id="sxr-evband"></div>
+      <div class="legend">
+        <span><i class="dot ns-ok"></i>在游標之內，不會重送</span>
+        <span><i class="dot ns-lock"></i>已顯示過但會再收一次（重複）</span>
+        <span><i class="dot ns-wait"></i>需要補送</span>
+        <span><i class="dot ns-bad"></i>掉出保留窗口（遺失）</span>
+        <span><i class="dot ns-idle"></i>尚未產生</span>
+      </div>
+
+      <table class="sxp-tbl"><tbody id="sxr-out"></tbody></table>
+      <div class="status-line" id="sxr-status"></div>
     </div>
   </div>
-
-  <p class="cap">三個對照點：<strong>(1)</strong> 正常串流裡每則帶 <code>id</code>，客戶端 last id 單調前進。<strong>(2)</strong> 斷線劇本在缺口期間伺服器仍前進游標；重連時 <code>Last-Event-ID</code> 觸發重放，UI 才補齊。<strong>(3)</strong> Proxy 緩衝劇本事件其實已產生，但邊緣節點捂住位元組——直到 flush／緩衝滿，首包延遲才釋放。</p>
+  <p class="cap">最值得動手的是「多久發一次 id」：把它從每則調成每 5 則，客戶端手上的 <code>Last-Event-ID</code> 會倒退，重複筆數立刻從 0 跳起來——這就是為什麼「續接」不是瀏覽器自動重連給的，而是<strong>每則事件都發 id</strong> 加上伺服器能依游標重放才成立。調到 0（完全不發 id）更極端：重連時帶不出任何游標，伺服器只能從保留窗口的頭開始重播。兩個模型假設要講明：伺服器在缺口期間仍以 <strong>4 則/秒</strong> 的假設速率繼續產生事件（所以重連等待越久、要補的越多）；重複筆數的算法假設 <code>id</code> 是連續序號，實務上若用不連續的 offset／ULID，結論相同但要換成「游標之後有幾筆」。</p>
 
   <div class="oneliner">
-    <b>一句話答法</b>Demo 要記住的機制：自動重連只是手段，<code>id</code> + 服務端重放才是補洞；緩衝則是「協定正確但仍不即時」的常見真兇。
+    <b>一句話答法</b>自動重連只是把連線接回來；真正補洞的是 <code>id</code> + 伺服器依 <code>Last-Event-ID</code> 重放，而重放窗口的深度決定了「補得回來」還是「只是看起來有重連」。
   </div>
 </section>
 
@@ -1976,470 +2033,559 @@
 (function () {
   "use strict";
 
-  var scenario = "clean";
-  var step = 0;
-
-  var statusEl = document.getElementById("ssex-status");
-  var wireEl = document.getElementById("ssex-wire");
-  var btnNext = document.getElementById("ssex-btn-next");
-  var btnReset = document.getElementById("ssex-btn-reset");
-  var segRoot = document.querySelector("#demo-ssex .seg");
-  var statesEl = document.getElementById("ssex-states");
-
-  var mStep = document.getElementById("ssex-m-step");
-  var mLast = document.getElementById("ssex-m-last");
-  var mRecv = document.getElementById("ssex-m-recv");
-  var mGap = document.getElementById("ssex-m-gap");
-
-  var pRs = document.getElementById("ssex-p-rs");
-  var pLeid = document.getElementById("ssex-p-leid");
-  var pRetry = document.getElementById("ssex-p-retry");
-  var pUi = document.getElementById("ssex-p-ui");
-  var pScur = document.getElementById("ssex-p-scur");
-  var pBuf = document.getElementById("ssex-p-buf");
-  var pFlush = document.getElementById("ssex-p-flush");
-  var pReplay = document.getElementById("ssex-p-replay");
-
-  var FRAMES = {
-    clean: [
-      {
-        state: "connecting",
-        rs: "CONNECTING (0)",
-        last: "—",
-        recv: 0,
-        gap: "—",
-        leid: "—",
-        retry: 0,
-        ui: "—",
-        scur: "0",
-        buf: "bypass",
-        flush: "ready",
-        replay: "—",
-        status: "建立 EventSource：GET /events，Accept: text/event-stream。",
-        rows: [
-          { cls: "c2s", ar: "C→S", tg: "GET", tx: "GET /events · Accept: text/event-stream" },
-          { cls: "note", ar: "·", tg: "note", tx: "readyState = CONNECTING" }
-        ]
-      },
-      {
-        state: "open",
-        rs: "OPEN (1)",
-        last: "—",
-        recv: 0,
-        gap: "—",
-        leid: "—",
-        retry: 0,
-        ui: "0%",
-        scur: "0",
-        buf: "bypass",
-        flush: "200 + headers",
-        replay: "—",
-        status: "伺服器回 200 + text/event-stream，連線進入 OPEN。",
-        rows: [
-          { cls: "s2c", ar: "S→C", tg: "200", tx: "Content-Type: text/event-stream · Cache-Control: no-cache" },
-          { cls: "note", ar: "·", tg: "note", tx: "readyState = OPEN" }
-        ]
-      },
-      {
-        state: "open",
-        rs: "OPEN (1)",
-        last: "1",
-        recv: 1,
-        gap: "0",
-        leid: "1",
-        retry: 0,
-        ui: "20%",
-        scur: "1",
-        buf: "bypass",
-        flush: "event flushed",
-        replay: "—",
-        status: "事件 id=1 到達；客戶端記住 last id。",
-        rows: [
-          { cls: "s2c", ar: "S→C", tg: "id", tx: "id:1 · event:progress · data:{\"pct\":20}" },
-          { cls: "note", ar: "·", tg: "UI", tx: "dispatch progress → UI 20%" }
-        ]
-      },
-      {
-        state: "open",
-        rs: "OPEN (1)",
-        last: "2",
-        recv: 2,
-        gap: "0",
-        leid: "2",
-        retry: 0,
-        ui: "55%",
-        scur: "2",
-        buf: "bypass",
-        flush: "event flushed",
-        replay: "—",
-        status: "事件 id=2；游標單調前進，無缺口。",
-        rows: [
-          { cls: "s2c", ar: "S→C", tg: "id", tx: "id:2 · event:progress · data:{\"pct\":55}" }
-        ]
-      },
-      {
-        state: "open",
-        rs: "OPEN (1)",
-        last: "3",
-        recv: 3,
-        gap: "0",
-        leid: "3",
-        retry: 0,
-        ui: "100%",
-        scur: "3",
-        buf: "bypass",
-        flush: "done event",
-        replay: "—",
-        status: "具名事件 done；伺服器結束 body。乾淨收流完成。",
-        rows: [
-          { cls: "s2c", ar: "S→C", tg: "done", tx: "id:3 · event:done · data:{\"pct\":100}" },
-          { cls: "note", ar: "·", tg: "end", tx: "server closes response body" }
-        ]
-      },
-      {
-        state: "closed",
-        rs: "CLOSED (2)",
-        last: "3",
-        recv: 3,
-        gap: "0",
-        leid: "3",
-        retry: 0,
-        ui: "100%",
-        scur: "3",
-        buf: "—",
-        flush: "—",
-        replay: "—",
-        status: "流結束 → CLOSED。若非呼叫 close() 且非致命錯誤，實作也可能自動重連；此劇本示範正常收尾。",
-        rows: [
-          { cls: "note last", ar: "·", tg: "OK", tx: "recv=3 · last-id=3 · gap=0" }
-        ]
-      }
-    ],
-    resume: [
-      {
-        state: "connecting",
-        rs: "CONNECTING (0)",
-        last: "—",
-        recv: 0,
-        gap: "—",
-        leid: "—",
-        retry: 0,
-        ui: "—",
-        scur: "0",
-        buf: "bypass",
-        flush: "ready",
-        replay: "—",
-        status: "開始訂閱進度流。",
-        rows: [
-          { cls: "c2s", ar: "C→S", tg: "GET", tx: "GET /events · 首次連線（無 Last-Event-ID）" }
-        ]
-      },
-      {
-        state: "open",
-        rs: "OPEN (1)",
-        last: "2",
-        recv: 2,
-        gap: "0",
-        leid: "2",
-        retry: 0,
-        ui: "40%",
-        scur: "2",
-        buf: "bypass",
-        flush: "ok",
-        replay: "—",
-        status: "已收到 id=1、2。客戶端 last id = 2。",
-        rows: [
-          { cls: "s2c", ar: "S→C", tg: "id", tx: "id:1 · data:{\"pct\":15}" },
-          { cls: "s2c", ar: "S→C", tg: "id", tx: "id:2 · data:{\"pct\":40}" }
-        ]
-      },
-      {
-        state: "connecting",
-        rs: "CONNECTING (0)",
-        last: "2",
-        recv: 2,
-        gap: "缺口形成中",
-        leid: "2",
-        retry: 0,
-        ui: "40%（停住）",
-        scur: "4",
-        buf: "—",
-        flush: "—",
-        replay: "pending",
-        status: "網路中斷。伺服器仍繼續產生 id=3、4，但客戶端收不到。",
-        rows: [
-          { cls: "bad", ar: "×", tg: "drop", tx: "TCP reset / idle path failure" },
-          { cls: "note", ar: "·", tg: "srv", tx: "server cursor → 3, 4（客戶端未知）" },
-          { cls: "note", ar: "·", tg: "ES", tx: "EventSource → CONNECTING（自動重試）" }
-        ]
-      },
-      {
-        state: "connecting",
-        rs: "CONNECTING (0)",
-        last: "2",
-        recv: 2,
-        gap: "缺 3–4",
-        leid: "2",
-        retry: 1,
-        ui: "40%",
-        scur: "4",
-        buf: "bypass",
-        flush: "—",
-        replay: "requesting",
-        status: "重連請求帶上 Last-Event-ID: 2。",
-        rows: [
-          { cls: "c2s last", ar: "C→S", tg: "GET", tx: "GET /events · Last-Event-ID: 2" }
-        ]
-      },
-      {
-        state: "open",
-        rs: "OPEN (1)",
-        last: "4",
-        recv: 4,
-        gap: "已補齊",
-        leid: "4",
-        retry: 1,
-        ui: "100%",
-        scur: "4",
-        buf: "bypass",
-        flush: "replay+live",
-        replay: "3, 4",
-        status: "伺服器自游標之後重放 3、4；UI 補洞完成（at-least-once）。",
-        rows: [
-          { cls: "s2c", ar: "S→C", tg: "replay", tx: "id:3 · data:{\"pct\":70}（重放）" },
-          { cls: "s2c", ar: "S→C", tg: "replay", tx: "id:4 · event:done · data:{\"pct\":100}" },
-          { cls: "note last", ar: "·", tg: "OK", tx: "缺口 3–4 補齊；應用層可依冪等鍵去重" }
-        ]
-      }
-    ],
-    buffer: [
-      {
-        state: "connecting",
-        rs: "CONNECTING (0)",
-        last: "—",
-        recv: 0,
-        gap: "首包延遲 ?",
-        leid: "—",
-        retry: 0,
-        ui: "—",
-        scur: "0",
-        buf: "ON (proxy)",
-        flush: "blocked",
-        replay: "—",
-        status: "連線建立中。邊緣節點預設開啟 response buffering。",
-        rows: [
-          { cls: "c2s", ar: "C→S", tg: "GET", tx: "GET /events" },
-          { cls: "mid", ar: "via", tg: "CDN", tx: "proxy_buffering = on" }
-        ]
-      },
-      {
-        state: "open",
-        rs: "OPEN (1)",
-        last: "—",
-        recv: 0,
-        gap: "≈ 0ms 產生 / 未送達",
-        leid: "—",
-        retry: 0,
-        ui: "等待…",
-        scur: "2",
-        buf: "holding 2 events",
-        flush: "waiting full buffer",
-        replay: "—",
-        status: "伺服器已寫出 id=1、2，但 proxy 把位元組捂在緩衝區——瀏覽器仍無事件。",
-        rows: [
-          { cls: "s2c", ar: "S→P", tg: "write", tx: "id:1 · id:2 已寫入上游" },
-          { cls: "mid", ar: "P", tg: "buf", tx: "edge buffer holds bytes · client sees nothing" },
-          { cls: "bad", ar: "×", tg: "UI", tx: "EventSource OPEN，但 onmessage 尚未觸發" }
-        ]
-      },
-      {
-        state: "open",
-        rs: "OPEN (1)",
-        last: "—",
-        recv: 0,
-        gap: "≈ 8s 體感延遲",
-        leid: "—",
-        retry: 0,
-        ui: "仍等待",
-        scur: "2",
-        buf: "holding + idle risk",
-        flush: "still blocked",
-        replay: "—",
-        status: "協定沒錯、狀態也是 OPEN，但產品體感是「SSE 壞了」。",
-        rows: [
-          { cls: "note", ar: "·", tg: "symptom", tx: "curl 直連 upstream 看得到；經 CDN 看不到" }
-        ]
-      },
-      {
-        state: "open",
-        rs: "OPEN (1)",
-        last: "2",
-        recv: 2,
-        gap: "延遲已釋放",
-        leid: "2",
-        retry: 0,
-        ui: "40%",
-        scur: "2",
-        buf: "flushed",
-        flush: "X-Accel-Buffering: no",
-        replay: "—",
-        status: "關閉緩衝／強制 flush 後，累積事件一次湧入。",
-        rows: [
-          { cls: "mid", ar: "ops", tg: "fix", tx: "disable proxy buffer · flush each event" },
-          { cls: "s2c", ar: "P→C", tg: "burst", tx: "id:1 與 id:2 同瞬送達" },
-          { cls: "note", ar: "·", tg: "hb", tx: "之後以 ': ping' 註解重置 idle timeout" }
-        ]
-      },
-      {
-        state: "open",
-        rs: "OPEN (1)",
-        last: "3",
-        recv: 3,
-        gap: "後續即時",
-        leid: "3",
-        retry: 0,
-        ui: "100%",
-        scur: "3",
-        buf: "OFF",
-        flush: "per-event + heartbeat",
-        replay: "—",
-        status: "緩衝關閉後，後續事件恢復近即時；心跳註解餵給中間層而非業務。",
-        rows: [
-          { cls: "s2c", ar: "S→C", tg: "id", tx: "id:3 · event:done" },
-          { cls: "mid", ar: "S→P", tg: ":", tx: ": keepalive · 不觸發 message" },
-          { cls: "note last", ar: "·", tg: "OK", tx: "延遲真兇是緩衝，不是 EventSource" }
-        ]
-      }
-    ]
+  /* ============================================================
+     (1) 常數與參數表
+     ============================================================ */
+  var SSE_FIELDS = { data: 1, event: 1, id: 1, retry: 1 };  /* 規範認得的四個欄位名 */
+  var DEFAULT_TYPE = "message";
+  var BOM_BYTES = 3;              /* UTF-8 BOM 的位元組長度 */
+  var GEN_RATE = 4;               /* 假設值：伺服器每秒產生 4 則事件 */
+  var HB_BYTES = 8;               /* 一則心跳 ": ping\n\n" 的位元組數 */
+  var SAMPLES = {
+    std: ": ping\nid: 41\nevent: progress\ndata: {\"pct\":40}\ndata: encode\n\nid: 42\ndata: done\n\nfoo: bar\ndata: tail",
+    hb: ": keepalive\n: keepalive\n: keepalive\nid: 7\ndata: 1\n\n: keepalive\n: keepalive\nid: 8\ndata: 2\n\n: keepalive\n",
+    broken: "event: progress\ndata: {\"pct\":10}\nid: 5\nevent: progress\ndata: {\"pct\":20}\n\nid: \ndata: 重設游標之後\n\nretry: soon\nX-Trace: abc\ndata: 這一塊沒有收尾空行"
   };
 
-  function setSeg(sc) {
-    if (!segRoot) return;
-    var buttons = segRoot.querySelectorAll("button[data-sc]");
-    for (var i = 0; i < buttons.length; i++) {
-      var b = buttons[i];
-      b.setAttribute("aria-pressed", b.getAttribute("data-sc") === sc ? "true" : "false");
+  /* ============================================================
+     (2) compute* 純函式（不碰 DOM）
+     ============================================================ */
+
+  function utf8Len(str) {
+    var n = 0;
+    for (var i = 0; i < str.length; i++) {
+      var c = str.charCodeAt(i);
+      if (c >= 0xd800 && c <= 0xdbff && i + 1 < str.length) {
+        var c2 = str.charCodeAt(i + 1);
+        if (c2 >= 0xdc00 && c2 <= 0xdfff) { n += 4; i++; continue; }
+      }
+      if (c < 0x80) n += 1;
+      else if (c < 0x800) n += 2;
+      else n += 3;
     }
+    return n;
   }
 
-  function setState(name) {
-    if (!statesEl) return;
-    var nodes = statesEl.querySelectorAll(".ssex-st");
-    var order = ["connecting", "open", "closed"];
-    var idx = order.indexOf(name);
-    for (var i = 0; i < nodes.length; i++) {
-      var n = nodes[i];
-      var key = n.getAttribute("data-st");
-      n.classList.remove("on", "done", "dead");
-      var ki = order.indexOf(key);
-      if (key === name) {
-        n.classList.add(name === "closed" && scenario !== "clean" ? "on" : (name === "closed" ? "dead" : "on"));
-        if (name === "closed") n.classList.add("dead");
-      } else if (ki > -1 && idx > -1 && ki < idx) {
-        n.classList.add("done");
-      }
+  // @probe fn       computeStreamParse
+  // @probe baseline {"raw":": ping\nid: 41\nevent: progress\ndata: {\"pct\":40}\ndata: encode\n\nid: 42\ndata: done\n\nfoo: bar\ndata: tail","bom":false,"crlf":false,"trailingBlank":false}
+  // @probe sweep    {"raw":[": ping\nid: 7\ndata: a\n\n","event: x\ndata: 1\ndata: 2\n\nid: \ndata: 3\n\n"],"bom":[false,true],"crlf":[false,true],"trailingBlank":[false,true]}
+  function computeStreamParse(p) {
+    var raw = String(p.raw == null ? "" : p.raw);
+    var eolBytes = p.crlf ? 2 : 1;
+    var bomBytes = p.bom ? BOM_BYTES : 0;
+    var i;
+
+    /* 規範的行終止符有三種：CRLF、CR、LF——三者等價 */
+    var parts = raw.split(/\r\n|\r|\n/);
+    var lines = [];
+    for (i = 0; i < parts.length - 1; i++) lines.push({ text: parts[i], term: true });
+    var tail = parts[parts.length - 1];
+    if (tail !== "") lines.push({ text: tail, term: false });
+
+    var lastL = lines.length ? lines[lines.length - 1] : null;
+    var blockOpen = lastL !== null && !(lastL.term && lastL.text === "");
+    if (p.trailingBlank && blockOpen) {
+      lastL.term = true;
+      lines.push({ text: "", term: true });
     }
-    // resume 閃斷時 connecting 可能從 open 退回：清掉 open.done
-    if (name === "connecting" && step > 0) {
-      for (var j = 0; j < nodes.length; j++) {
-        if (nodes[j].getAttribute("data-st") === "open") {
-          nodes[j].classList.remove("done", "on");
+
+    var dataBuf = "", typeBuf = "", lastId = "", retryMs = null;
+    var events = [], ledger = [];
+    var dispatched = 0, swallowed = 0, ignoredLines = 0;
+    var commentLines = 0, commentBytes = 0;
+    var totalBytes = bomBytes, payloadBytes = 0, pendingBytes = 0;
+    var fieldLines = 0, blockFrom = 1, lastDispatchIdx = 0;
+
+    for (i = 0; i < lines.length; i++) {
+      var L = lines[i];
+      var lineBytes = utf8Len(L.text) + (L.term ? eolBytes : 0);
+      totalBytes += lineBytes;
+      var row = {
+        n: i + 1, text: L.text, bytes: lineBytes, term: L.term,
+        kind: "", field: "", value: "", action: "", ev: -1, blockFrom: blockFrom
+      };
+
+      if (!L.term) {
+        row.kind = "pending";
+        row.action = "沒有行終止符 → 整行留在解析器緩衝區，等下一批位元組";
+        ledger.push(row);
+        continue;
+      }
+
+      if (L.text === "") {
+        row.kind = "blank";
+        if (fieldLines === 0) {
+          row.action = "空塊，解析器什麼也不做";
+        } else if (dataBuf === "") {
+          swallowed++;
+          row.action = "data 緩衝是空的 → 不觸發任何事件，只清掉 event 型別";
+          typeBuf = "";
+        } else {
+          var data = dataBuf.replace(/\n$/, "");
+          var ev = {
+            idx: events.length,
+            type: typeBuf || DEFAULT_TYPE,
+            named: typeBuf !== "",
+            data: data,
+            dataBytes: utf8Len(data),
+            dataLines: data.split("\n").length,
+            lastEventId: lastId,
+            fromLine: blockFrom,
+            toLine: i + 1
+          };
+          events.push(ev);
+          payloadBytes += ev.dataBytes;
+          dispatched++;
+          row.ev = ev.idx;
+          row.action = "事件邊界 → dispatch「" + ev.type + "」，data 共 " + ev.dataBytes + " bytes";
+          dataBuf = ""; typeBuf = "";
+        }
+        fieldLines = 0; blockFrom = i + 2; lastDispatchIdx = i + 1;
+        ledger.push(row);
+        continue;
+      }
+
+      if (L.text.charAt(0) === ":") {
+        commentLines++; commentBytes += lineBytes;
+        fieldLines++;
+        row.kind = "comment";
+        row.action = "註解行：重置中間層的 idle 計時器，不會觸發事件";
+        ledger.push(row);
+        continue;
+      }
+
+      fieldLines++;
+      var ci = L.text.indexOf(":");
+      var field, value;
+      if (ci === -1) { field = L.text; value = ""; }
+      else {
+        field = L.text.substring(0, ci);
+        value = L.text.substring(ci + 1);
+        if (value.charAt(0) === " ") value = value.substring(1);
+      }
+      row.field = field; row.value = value; row.colonAt = ci;
+
+      if (!SSE_FIELDS[field]) {
+        ignoredLines++;
+        row.kind = "ignored";
+        row.action = "「" + field + "」不是規範認得的欄位名 → 整行丟棄";
+      } else if (field === "data") {
+        dataBuf += value + "\n";
+        row.kind = "data";
+        row.action = "data 緩衝 += 值 + \\n（目前累積 " + utf8Len(dataBuf.replace(/\n$/, "")) + " bytes）";
+      } else if (field === "event") {
+        typeBuf = value;
+        row.kind = "event";
+        row.action = value === ""
+          ? "型別設成空字串 → dispatch 時退回預設的 message"
+          : "本塊事件型別 =「" + value + "」，客戶端要用 addEventListener 接";
+      } else if (field === "id") {
+        if (value.indexOf("\u0000") === -1) {
+          lastId = value;
+          row.kind = "id";
+          row.action = value === ""
+            ? "id 是空值 → 游標被重設為空字串（是重設，不是忽略）"
+            : "游標 lastEventId =「" + value + "」，之後的事件都沿用到下一個 id";
+        } else {
+          ignoredLines++;
+          row.kind = "ignored";
+          row.action = "id 值含 U+0000 → 整行忽略，游標不動";
+        }
+      } else {
+        if (/^\d+$/.test(value)) {
+          retryMs = parseInt(value, 10);
+          row.kind = "retry";
+          row.action = "重連間隔建議改成 " + retryMs + " ms";
+        } else {
+          ignoredLines++;
+          row.kind = "ignored";
+          row.action = "retry 值不是全數字 → 整行忽略，沿用原本的重連間隔";
         }
       }
-      var conn = statesEl.querySelector('.ssex-st[data-st="connecting"]');
-      if (conn) {
-        conn.classList.add("on");
-        conn.classList.remove("done", "dead");
+      ledger.push(row);
+    }
+
+    for (i = lastDispatchIdx; i < ledger.length; i++) pendingBytes += ledger[i].bytes;
+
+    var overheadBytes = totalBytes - payloadBytes;
+    return {
+      events: events,
+      ledger: ledger,
+      lineCount: lines.length,
+      dispatched: dispatched,
+      swallowed: swallowed,
+      ignoredLines: ignoredLines,
+      commentLines: commentLines,
+      commentBytes: commentBytes,
+      totalBytes: totalBytes,
+      payloadBytes: payloadBytes,
+      overheadBytes: overheadBytes,
+      overheadPct: totalBytes ? Math.round(overheadBytes / totalBytes * 1000) / 10 : 0,
+      commentPct: totalBytes ? Math.round(commentBytes / totalBytes * 1000) / 10 : 0,
+      pendingBytes: pendingBytes,
+      unterminated: pendingBytes > 0,
+      finalLastEventId: lastId,
+      retryMs: retryMs,
+      bomBytes: bomBytes,
+      eolBytes: eolBytes
+    };
+  }
+
+  // @probe fn       computeResume
+  // @probe baseline {"eventCount":24,"dataBytes":48,"heartbeatEvery":4,"cutPct":62,"idEvery":1,"retain":12,"retryMs":3000}
+  // @probe sweep    {"eventCount":[5,60],"dataBytes":[8,512],"heartbeatEvery":[0,10],"cutPct":[5,95],"idEvery":[0,8],"retain":[0,40],"retryMs":[500,10000]}
+  function computeResume(p) {
+    var eventCount = Math.max(1, Math.min(60, Math.round(p.eventCount)));
+    var dataBytes = Math.max(1, Math.min(512, Math.round(p.dataBytes)));
+    var hbEvery = Math.max(0, Math.min(10, Math.round(p.heartbeatEvery)));
+    var cutPct = Math.max(1, Math.min(99, Math.round(p.cutPct)));
+    var idEvery = Math.max(0, Math.min(8, Math.round(p.idEvery)));
+    var retain = Math.max(0, Math.min(40, Math.round(p.retain)));
+    var retryMs = Math.max(0, Math.min(10000, Math.round(p.retryMs)));
+    var i;
+
+    /* 逐則把線上的位元組組出來：id 行 + data 行 + 收尾空行，心跳另計 */
+    var segs = [], at = 0, hbCount = 0, hbBytes = 0;
+    for (i = 1; i <= eventCount; i++) {
+      var withId = idEvery > 0 && (i % idEvery) === 0;
+      var bytes = (withId ? ("id: " + i).length + 1 : 0) + ("data: ").length + dataBytes + 1 + 1;
+      segs.push({ kind: "ev", index: i, withId: withId, from: at, bytes: bytes });
+      at += bytes;
+      if (hbEvery > 0 && i % hbEvery === 0 && i < eventCount) {
+        segs.push({ kind: "hb", index: i, withId: false, from: at, bytes: HB_BYTES });
+        at += HB_BYTES;
+        hbCount++; hbBytes += HB_BYTES;
       }
     }
-  }
+    var streamBytes = at;
+    var payloadBytes = eventCount * dataBytes;
 
-  function renderRows(rows) {
-    if (!wireEl) return;
-    wireEl.innerHTML = "";
-    for (var i = 0; i < rows.length; i++) {
-      var r = rows[i];
-      var div = document.createElement("div");
-      div.className = "ssex-row " + (r.cls || "");
-      div.innerHTML =
-        '<span class="ar">' + r.ar + "</span>" +
-        '<span class="tg">' + r.tg + "</span>" +
-        '<span class="tx">' + r.tx + "</span>";
-      wireEl.appendChild(div);
+    var cutByte = Math.round(streamBytes * cutPct / 100);
+    var deliveredEvents = 0, lastCompleteEnd = 0, partial = 0, cutSeg = -1;
+    for (i = 0; i < segs.length; i++) {
+      var s = segs[i];
+      var end = s.from + s.bytes;
+      if (end <= cutByte) {
+        lastCompleteEnd = end;
+        if (s.kind === "ev") deliveredEvents = s.index;
+      } else if (s.from < cutByte) {
+        cutSeg = i;
+        if (s.kind === "ev") partial = 1;
+        break;
+      } else break;
     }
-    wireEl.scrollTop = wireEl.scrollHeight;
-  }
+    var truncatedBytes = cutByte - lastCompleteEnd;
 
-  function applyFrame(frame) {
-    if (!frame) return;
-    setState(frame.state);
-    if (mStep) mStep.textContent = String(step);
-    if (mLast) mLast.textContent = frame.last;
-    if (mRecv) mRecv.textContent = String(frame.recv);
-    if (mGap) mGap.textContent = frame.gap;
-    if (pRs) pRs.textContent = frame.rs;
-    if (pLeid) pLeid.textContent = frame.leid;
-    if (pRetry) pRetry.textContent = String(frame.retry);
-    if (pUi) pUi.textContent = frame.ui;
-    if (pScur) pScur.textContent = frame.scur;
-    if (pBuf) {
-      pBuf.textContent = frame.buf;
-      pBuf.className = "pv" + (frame.buf && frame.buf.indexOf("holding") !== -1 ? " warn" : "");
+    var clientLastEventId = 0;
+    if (idEvery > 0) {
+      for (i = deliveredEvents; i >= 1; i--) { if ((i % idEvery) === 0) { clientLastEventId = i; break; } }
     }
-    if (pFlush) pFlush.textContent = frame.flush;
-    if (pReplay) {
-      pReplay.textContent = frame.replay;
-      pReplay.className = "pv" + (frame.replay && frame.replay !== "—" && frame.replay !== "pending" ? " good" : "");
+
+    var gapEvents = Math.ceil(retryMs / 1000 * GEN_RATE);
+    var serverCursor = deliveredEvents + partial + gapEvents;
+    var resendFrom = clientLastEventId + 1;
+    var resendCount = serverCursor - clientLastEventId;
+    var duplicateCount = deliveredEvents - clientLastEventId;
+    var lostCount = Math.max(0, resendCount - retain);
+    var replayFrom = resendFrom + lostCount;
+
+    return {
+      segments: segs,
+      eventCount: eventCount,
+      streamBytes: streamBytes,
+      payloadBytes: payloadBytes,
+      heartbeatCount: hbCount,
+      heartbeatBytes: hbBytes,
+      overheadBytes: streamBytes - payloadBytes,
+      overheadPct: Math.round((streamBytes - payloadBytes) / streamBytes * 1000) / 10,
+      heartbeatPct: Math.round(hbBytes / streamBytes * 1000) / 10,
+      cutByte: cutByte,
+      cutSegment: cutSeg,
+      deliveredEvents: deliveredEvents,
+      truncatedBytes: truncatedBytes,
+      clientLastEventId: clientLastEventId,
+      gapEvents: gapEvents,
+      serverCursor: serverCursor,
+      resendFrom: resendFrom,
+      resendCount: resendCount,
+      duplicateCount: duplicateCount,
+      lostCount: lostCount,
+      replayFrom: replayFrom,
+      verdictKind: lostCount > 0 ? "有缺口，資料遺失"
+        : (duplicateCount > 0 ? "有重複，需要冪等" : "完整補送")
+    };
+  }
+
+  function escapeHtml(s) {
+    return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  }
+
+  /* ============================================================
+     (3) DOM 參照
+     ============================================================ */
+  var pDemo = document.getElementById("demo-sxp");
+  var pRaw = pDemo && document.getElementById("sxp-raw");
+  var pBom = pDemo && document.getElementById("sxp-bom");
+  var pCrlf = pDemo && document.getElementById("sxp-crlf");
+  var pTail = pDemo && document.getElementById("sxp-tail");
+  var pSeg = pDemo && document.getElementById("sxp-seg");
+  var pReset = pDemo && document.getElementById("sxp-reset");
+  var pLed = pDemo && document.getElementById("sxp-led");
+  var pEvs = pDemo && document.getElementById("sxp-evs");
+  var pTally = pDemo && document.getElementById("sxp-tally");
+  var pStatus = pDemo && document.getElementById("sxp-status");
+
+  var rDemo = document.getElementById("demo-sxr");
+  var rSeg = rDemo && document.getElementById("sxr-seg");
+  var rCount = rDemo && document.getElementById("sxr-count");
+  var rCountV = rDemo && document.getElementById("sxr-count-v");
+  var rData = rDemo && document.getElementById("sxr-data");
+  var rDataV = rDemo && document.getElementById("sxr-data-v");
+  var rHb = rDemo && document.getElementById("sxr-hb");
+  var rHbV = rDemo && document.getElementById("sxr-hb-v");
+  var rCut = rDemo && document.getElementById("sxr-cut");
+  var rCutV = rDemo && document.getElementById("sxr-cut-v");
+  var rId = rDemo && document.getElementById("sxr-id");
+  var rIdV = rDemo && document.getElementById("sxr-id-v");
+  var rRetain = rDemo && document.getElementById("sxr-retain");
+  var rRetainV = rDemo && document.getElementById("sxr-retain-v");
+  var rRetry = rDemo && document.getElementById("sxr-retry");
+  var rRetryV = rDemo && document.getElementById("sxr-retry-v");
+  var rReset = rDemo && document.getElementById("sxr-reset");
+  var rBand = rDemo && document.getElementById("sxr-band");
+  var rEvs = rDemo && document.getElementById("sxr-evband");
+  var rOut = rDemo && document.getElementById("sxr-out");
+  var rStatus = rDemo && document.getElementById("sxr-status");
+
+  var R_DEFAULT = { count: 24, data: 48, hb: 4, cut: 62, id: 1, retain: 12, retry: 3000 };
+
+  /* ============================================================
+     (4) render —— 只把算好的 state 畫出來
+     ============================================================ */
+
+  function renderParse(st) {
+    var html = "", open = false, buf = "", blockClass = "", i;
+
+    function flush() {
+      if (!open) return;
+      html += '<div class="sxp-blk ' + blockClass + '">' + buf + "</div>";
+      buf = ""; open = false; blockClass = "";
     }
-    if (statusEl) statusEl.textContent = frame.status;
-    renderRows(frame.rows || []);
-  }
 
-  function reset() {
-    step = 0;
-    if (wireEl) wireEl.innerHTML = "";
-    setSeg(scenario);
-    setState("");
-    if (mStep) mStep.textContent = "0";
-    if (mLast) mLast.textContent = "—";
-    if (mRecv) mRecv.textContent = "0";
-    if (mGap) mGap.textContent = "—";
-    if (pRs) pRs.textContent = "—";
-    if (pLeid) pLeid.textContent = "—";
-    if (pRetry) pRetry.textContent = "0";
-    if (pUi) pUi.textContent = "—";
-    if (pScur) pScur.textContent = "—";
-    if (pBuf) { pBuf.textContent = "—"; pBuf.className = "pv"; }
-    if (pFlush) pFlush.textContent = "—";
-    if (pReplay) { pReplay.textContent = "—"; pReplay.className = "pv"; }
-    if (statusEl) {
-      statusEl.textContent = "選擇劇本後按「下一步」。觀察 id 游標、重連標頭與緩衝如何改變「即時」體感。";
+    for (i = 0; i < st.ledger.length; i++) {
+      var row = st.ledger[i];
+      var src;
+      if (row.kind === "blank") src = '<i class="bl">（空行）</i>';
+      else if (row.kind === "comment") src = '<i class="cm">' + escapeHtml(row.text) + "</i>";
+      else if (row.colonAt >= 0 && row.field !== "") {
+        src = '<i class="fd">' + escapeHtml(row.field) + '</i><i class="cl">:</i><i class="vl">'
+            + escapeHtml(row.text.substring(row.colonAt + 1)) + "</i>";
+      } else src = '<i class="vl">' + escapeHtml(row.text) + "</i>";
+
+      buf += '<div class="sxp-row k-' + row.kind + '">'
+        + '<span class="ln">' + row.n + "</span>"
+        + '<span class="src">' + src + "</span>"
+        + '<span class="by">' + row.bytes + "B</span>"
+        + '<span class="act">' + escapeHtml(row.action) + "</span>"
+        + "</div>";
+      open = true;
+
+      if (row.kind === "blank") {
+        blockClass = row.ev >= 0 ? "fired" : "quiet";
+        flush();
+      }
     }
-    if (btnNext) btnNext.disabled = false;
+    if (open) { blockClass = "openblk"; flush(); }
+    if (pLed) pLed.innerHTML = html || '<p class="sxp-empty">左邊沒有任何內容。</p>';
+
+    var e = "";
+    for (i = 0; i < st.events.length; i++) {
+      var ev = st.events[i];
+      e += '<div class="sxp-ev">'
+        + '<div class="et">#' + (i + 1) + " · " + escapeHtml(ev.type) + (ev.named ? "" : "（未指定，退回預設）") + "</div>"
+        + '<div class="em">來源行 ' + ev.fromLine + "–" + ev.toLine + " · data " + ev.dataBytes
+        + " bytes · " + ev.dataLines + " 行拼接 · 事件 id "
+        + (ev.lastEventId === "" ? "（空）" : escapeHtml(ev.lastEventId)) + "</div>"
+        + '<pre class="ed">' + escapeHtml(ev.data) + "</pre>"
+        + "</div>";
+    }
+    if (pEvs) pEvs.innerHTML = e || '<p class="sxp-empty">目前沒有任何事件被 dispatch。</p>';
+
+    var t = "";
+    t += "<tr><th>總位元組</th><td>" + st.totalBytes + " B（其中 BOM " + st.bomBytes
+       + " B、每個行終止符 " + st.eolBytes + " B × " + st.lineCount + " 行）</td></tr>";
+    t += "<tr><th>真正的 payload</th><td>" + st.payloadBytes + " B</td></tr>";
+    t += '<tr><th>協定開銷</th><td class="big">' + st.overheadPct + "%</td></tr>";
+    t += "<tr><th>註解／心跳</th><td>" + st.commentLines + " 行 · " + st.commentBytes
+       + " B（佔全部 " + st.commentPct + "%），不觸發任何事件</td></tr>";
+    t += "<tr><th>dispatch 的事件</th><td>" + st.dispatched + " 則；另有 " + st.swallowed
+       + " 個塊因為沒有 data 而不觸發</td></tr>";
+    t += "<tr><th>被忽略的行</th><td>" + st.ignoredLines + " 行（欄位名不在 data／event／id／retry 之列）</td></tr>";
+    t += "<tr><th>結尾未終止</th><td>" + (st.unterminated
+       ? (st.pendingBytes + " B 卡在緩衝區，永遠不會 dispatch")
+       : "無，最後一則已被空行收尾") + "</td></tr>";
+    t += "<tr><th>最終游標</th><td>lastEventId = "
+       + (st.finalLastEventId === "" ? "（空）" : escapeHtml(st.finalLastEventId))
+       + " · retry = " + (st.retryMs === null ? "未指定" : st.retryMs + " ms") + "</td></tr>";
+    if (pTally) pTally.innerHTML = t;
+
+    if (pStatus) {
+      pStatus.textContent = st.lineCount + " 行進去，" + st.dispatched + " 則事件出來；"
+        + st.overheadPct + "% 的位元組花在欄位名、行終止符與註解上"
+        + (st.unterminated ? "，而且最後 " + st.pendingBytes + " B 因為少了收尾空行而卡住。" : "。");
+    }
   }
 
-  function next() {
-    var frames = FRAMES[scenario] || [];
-    if (step >= frames.length) return;
-    step += 1;
-    applyFrame(frames[step - 1]);
-    if (step >= frames.length && btnNext) btnNext.disabled = true;
+  function renderResume(st) {
+    var i, html = "";
+    for (i = 0; i < st.segments.length; i++) {
+      var s = st.segments[i];
+      var cls = s.kind === "hb" ? "hb" : (s.withId ? "ev id" : "ev");
+      if (i === st.cutSegment) {
+        var pct = (st.cutByte - s.from) / s.bytes * 100;
+        html += '<span class="sxr-seg ' + cls + ' cut" style="flex-grow:' + s.bytes + '" title="'
+          + (s.kind === "hb" ? "心跳" : "事件 " + s.index) + '"><i style="width:' + pct.toFixed(1) + '%"></i></span>';
+      } else {
+        html += '<span class="sxr-seg ' + cls + (s.from >= st.cutByte ? " gone" : "")
+          + '" style="flex-grow:' + s.bytes + '" title="'
+          + (s.kind === "hb" ? "心跳 " + HB_BYTES + " B" : "事件 " + s.index + " · " + s.bytes + " B") + '"></span>';
+      }
+    }
+    if (rBand) rBand.innerHTML = html;
+
+    var total = Math.max(st.eventCount, st.serverCursor);
+    var e = "";
+    for (i = 1; i <= total; i++) {
+      var k;
+      if (i >= st.resendFrom && i < st.replayFrom) k = "lost";
+      else if (i <= st.clientLastEventId) k = "acked";
+      else if (i <= st.deliveredEvents) k = "dup";
+      else if (i <= st.serverCursor) k = "resend";
+      else k = "future";
+      e += '<span class="sxr-cell ' + k + '" title="事件 ' + i + '"></span>';
+    }
+    if (rEvs) rEvs.innerHTML = e;
+
+    var o = "";
+    o += "<tr><th>整條串流</th><td>" + st.streamBytes + " B</td><td>payload " + st.payloadBytes
+       + " B · 心跳 " + st.heartbeatCount + " 則共 " + st.heartbeatBytes + " B</td></tr>";
+    o += '<tr><th>協定開銷</th><td class="big">' + st.overheadPct + "%</td><td>其中心跳單獨佔 "
+       + st.heartbeatPct + "%</td></tr>";
+    o += "<tr><th>斷線位置</th><td>第 " + st.cutByte + " 個 byte</td><td>完整送達 "
+       + st.deliveredEvents + " 則；另有 " + st.truncatedBytes + " B 是半則事件，沒有空行收尾所以不會 dispatch</td></tr>";
+    o += "<tr><th>客戶端手上的游標</th><td>Last-Event-ID = "
+       + (st.clientLastEventId === 0 ? "（沒有）" : st.clientLastEventId) + "</td><td>"
+       + (st.clientLastEventId < st.deliveredEvents
+          ? "比實際看到的第 " + st.deliveredEvents + " 則舊了 " + st.duplicateCount + " 則"
+          : "正好等於最後看到的那一則") + "</td></tr>";
+    o += "<tr><th>重連時伺服器的游標</th><td>" + st.serverCursor + "</td><td>缺口期間又產生了 "
+       + st.gapEvents + " 則（" + GEN_RATE + " 則/秒 × 重連等待）</td></tr>";
+    o += "<tr><th>伺服器要補送</th><td>" + st.resendCount + " 則</td><td>從第 " + st.resendFrom
+       + " 則起算</td></tr>";
+    o += '<tr><th>其中重複</th><td>' + st.duplicateCount + " 則</td><td>客戶端已經顯示過，會再收一次 → 必須冪等</td></tr>";
+    o += '<tr><th>其中遺失</th><td class="big">' + st.lostCount + " 則</td><td>"
+       + (st.lostCount > 0
+          ? "第 " + st.resendFrom + "–" + (st.replayFrom - 1) + " 則已掉出保留窗口，補不回來"
+          : "補送範圍還在保留窗口內") + "</td></tr>";
+    if (rOut) rOut.innerHTML = o;
+
+    if (rStatus) rStatus.textContent = "判定：" + st.verdictKind + "。"
+      + (st.clientLastEventId === 0
+         ? "伺服器沒發 id，客戶端重連時帶不出 Last-Event-ID，只能從保留窗口的頭開始重播。"
+         : "客戶端會帶 Last-Event-ID: " + st.clientLastEventId + " 回來。");
   }
 
-  if (segRoot) {
-    segRoot.addEventListener("click", function (ev) {
+  /* ============================================================
+     (5) 事件綁定
+     ============================================================ */
+
+  function pParams() {
+    return { raw: pRaw.value, bom: pBom.checked, crlf: pCrlf.checked, trailingBlank: pTail.checked };
+  }
+
+  function pSync() {
+    renderParse(computeStreamParse(pParams()));
+  }
+
+  function pLoad(name) {
+    pRaw.value = SAMPLES[name] || SAMPLES.std;
+    var btns = pSeg.querySelectorAll("button");
+    for (var i = 0; i < btns.length; i++) {
+      btns[i].setAttribute("aria-pressed", btns[i].getAttribute("data-sample") === name ? "true" : "false");
+    }
+    pSync();
+  }
+
+  if (pDemo && pRaw) {
+    pRaw.addEventListener("input", pSync);
+    [pBom, pCrlf, pTail].forEach(function (el) { el.addEventListener("change", pSync); });
+    pSeg.addEventListener("click", function (ev) {
       var t = ev.target;
       if (!t || !t.getAttribute) return;
-      var sc = t.getAttribute("data-sc");
-      if (!sc || !FRAMES[sc]) return;
-      scenario = sc;
-      reset();
+      var name = t.getAttribute("data-sample");
+      if (!name || !SAMPLES[name]) return;
+      pLoad(name);
     });
+    if (pReset) pReset.addEventListener("click", function () {
+      pBom.checked = false; pCrlf.checked = false; pTail.checked = false;
+      pLoad("std");
+    });
+    pLoad("std");
   }
-  if (btnNext) btnNext.addEventListener("click", next);
-  if (btnReset) btnReset.addEventListener("click", reset);
 
-  reset();
+  function rParams() {
+    return {
+      eventCount: Number(rCount.value),
+      dataBytes: Number(rData.value),
+      heartbeatEvery: Number(rHb.value),
+      cutPct: Number(rCut.value),
+      idEvery: Number(rId.value),
+      retain: Number(rRetain.value),
+      retryMs: Number(rRetry.value)
+    };
+  }
+
+  function rSync() {
+    rCountV.textContent = rCount.value + " 則";
+    rDataV.textContent = rData.value + " B";
+    rHbV.textContent = Number(rHb.value) === 0 ? "關閉" : "每 " + rHb.value + " 則";
+    rCutV.textContent = rCut.value + "%";
+    rIdV.textContent = Number(rId.value) === 0 ? "完全不發" : "每 " + rId.value + " 則";
+    rRetainV.textContent = Number(rRetain.value) === 0 ? "不能重放" : rRetain.value + " 則";
+    rRetryV.textContent = rRetry.value + " ms";
+    var v = Number(rRetain.value);
+    var btns = rSeg.querySelectorAll("button");
+    for (var i = 0; i < btns.length; i++) {
+      var want = Number(btns[i].getAttribute("data-retain"));
+      btns[i].setAttribute("aria-pressed", want === v ? "true" : "false");
+    }
+    renderResume(computeResume(rParams()));
+  }
+
+  if (rDemo && rCount) {
+    [rCount, rData, rHb, rCut, rId, rRetain, rRetry].forEach(function (el) {
+      el.addEventListener("input", rSync);
+    });
+    rSeg.addEventListener("click", function (ev) {
+      var t = ev.target;
+      if (!t || !t.getAttribute) return;
+      var want = t.getAttribute("data-retain");
+      if (want === null) return;
+      rRetain.value = want;
+      rSync();
+    });
+    if (rReset) rReset.addEventListener("click", function () {
+      rCount.value = String(R_DEFAULT.count);
+      rData.value = String(R_DEFAULT.data);
+      rHb.value = String(R_DEFAULT.hb);
+      rCut.value = String(R_DEFAULT.cut);
+      rId.value = String(R_DEFAULT.id);
+      rRetain.value = String(R_DEFAULT.retain);
+      rRetry.value = String(R_DEFAULT.retry);
+      rSync();
+    });
+    rSync();
+  }
 })();
 </script>
 
