@@ -1,4 +1,8 @@
-<!-- demo-archetype: A｜時序推進 — 讀者切換「完整交握／0-RTT resumption」與「單向驗證／mTLS」兩組開關，再按「下一步」逐則推進交握訊息，同步觀察目前流量金鑰、雙方身分、交握 RTT 與重放風險。選 A 是因為 TLS 1.3 的安全論證本身就是訊息順序：哪一則之後開始加密、憑證落在加密線的哪一側。 -->
+<!-- demo-archetype: B｜參數掃描（主，第 7 節） — 讀者拖動網路 RTT、憑證鏈長度與 early data 大小，
+     並切換憑證演算法、吊銷檢查方式、HelloRetryRequest 與 mTLS，即時重算「完整交握／resumption／0-RTT」
+     三條成本曲線，以及交握位元組、非對稱運算次數、單核每秒可承載的交握數與 0-RTT 曝險量。
+     選 B 是因為本篇每一個機制（1-RTT、HelloRetryRequest、OCSP、短鏈、resumption、0-RTT、mTLS）最後都折算成同一個量：
+     首個應用位元組上路之前要付多少 RTT 與多少 CPU——那是一個連續的成本函數，不是一段訊息順序。 -->
 <style>
   /* 本篇專屬：tlsx-* 命名空間，不覆蓋全站 base 類別 */
   #tlsx-root {
@@ -67,63 +71,33 @@
   .tlsx-cert .xk { font-family: var(--mono); font-size: 11px; color: var(--text-3); margin-bottom: 7px; }
   .tlsx-cert .xs { font-size: 12.5px; color: var(--text-2); line-height: 1.6; }
 
-  /* Demo */
-  .tlsx-seg-row { display: flex; flex-wrap: wrap; gap: 8px; }
-  .tlsx-demo-controls { display: flex; flex-wrap: wrap; gap: 8px; margin: 10px 0 8px; align-items: center; }
-  .tlsx-stage { border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--bg-soft); padding: 10px 12px; margin-top: 10px; }
-  .tlsx-stage-head {
-    display: flex; justify-content: space-between; font-family: var(--mono); font-size: 11px;
-    color: var(--text-3); letter-spacing: .06em; text-transform: uppercase;
-    border-bottom: 1px dashed var(--border); padding-bottom: 6px; margin-bottom: 10px;
+  /* Demo · 交握成本計算機（tlsb-*） */
+  .tlsb-knobs { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px 16px; margin-bottom: 10px; }
+  @media (max-width: 720px) { .tlsb-knobs { grid-template-columns: 1fr; } }
+  .tlsb-knob { display: grid; grid-template-columns: 1fr auto; gap: 3px 8px; align-items: center; }
+  .tlsb-knob .kn { font-size: 12px; color: var(--text-2); }
+  .tlsb-knob .kv { font-family: var(--mono); font-size: 12px; font-weight: 700; color: var(--text); text-align: right; }
+  .tlsb-knob input[type="range"] { grid-column: 1 / -1; width: 100%; accent-color: var(--accent); }
+  .tlsb-switches { display: flex; flex-wrap: wrap; gap: 8px 14px; align-items: center; margin-bottom: 8px; }
+  .tlsb-tog { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text-2); cursor: pointer; }
+  .tlsb-tog input { accent-color: var(--accent); }
+  .tlsb-plot { border: 1px solid var(--border); border-radius: var(--radius-sm); background: #fff; padding: 8px 10px 4px; margin: 10px 0; }
+  .tlsb-reads { display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px; margin-top: 10px; }
+  @media (max-width: 640px) { .tlsb-reads { grid-template-columns: 1fr; } }
+  .tlsb-read { border: 1px solid var(--border); border-radius: var(--radius-sm); background: #fff; padding: 10px 12px; }
+  .tlsb-read .rt {
+    font-family: var(--mono); font-size: 11px; letter-spacing: .06em; text-transform: uppercase;
+    color: var(--text-3); margin-bottom: 6px;
   }
-  .tlsx-msg {
-    border: 1px solid var(--border); border-left: 4px solid var(--border-strong);
-    border-radius: var(--radius-sm); background: #fff; padding: 9px 11px; margin-bottom: 7px;
-    transition: opacity .18s, box-shadow .18s, border-color .18s;
-  }
-  .tlsx-msg.pending { opacity: .28; }
-  .tlsx-msg.cur { box-shadow: 0 0 0 3px var(--accent-soft); }
-  .tlsx-msg.c2s { margin-right: 10%; }
-  .tlsx-msg.s2c { margin-left: 10%; }
-  .tlsx-msg.sys { background: var(--bg-soft); border-style: dashed; border-left-style: dashed; }
-  .tlsx-msg .mhead { display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
-  .tlsx-msg .mdir { font-family: var(--mono); font-size: 11px; font-weight: 700; color: var(--text-3); min-width: 66px; }
-  .tlsx-msg .mname { font-family: var(--mono); font-size: 12.5px; font-weight: 700; color: var(--text); }
-  .tlsx-msg .mtag {
-    margin-left: auto; font-family: var(--mono); font-size: 10.5px; padding: 2px 8px;
-    border-radius: 999px; border: 1px solid var(--border-strong); color: var(--text-3); background: #fff;
-  }
-  .tlsx-msg .mchips { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 7px; }
-  .tlsx-msg .mchip {
-    font-family: var(--mono); font-size: 11px; padding: 3px 7px; border-radius: 6px;
-    background: var(--bg-soft); border: 1px solid var(--border); color: var(--text-2);
-  }
-  .tlsx-msg .mnote { font-size: 12.5px; color: var(--text-2); line-height: 1.6; margin-top: 7px; }
-  .tlsx-msg.e-plain { border-left-color: var(--accent); }
-  .tlsx-msg.e-plain .mtag { background: var(--accent-soft); color: var(--accent); border-color: var(--accent); }
-  .tlsx-msg.e-hs { border-left-color: var(--warn); }
-  .tlsx-msg.e-hs .mtag { background: var(--warn-soft); color: var(--warn); border-color: var(--warn); }
-  .tlsx-msg.e-app { border-left-color: var(--ok); }
-  .tlsx-msg.e-app .mtag { background: var(--ok-soft); color: var(--ok); border-color: var(--ok); }
-  .tlsx-msg.e-early { border-left-color: var(--bad); }
-  .tlsx-msg.e-early .mtag { background: var(--bad-soft); color: var(--bad); border-color: var(--bad); }
-  .tlsx-panels { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 10px; }
-  @media (max-width: 640px) { .tlsx-panels { grid-template-columns: 1fr; } }
-  .tlsx-panel { border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 12px; background: #fff; }
-  .tlsx-panel .pt {
-    font-size: 11px; color: var(--text-3); letter-spacing: .06em; text-transform: uppercase;
-    font-family: var(--mono); margin-bottom: 8px;
-  }
-  .tlsx-panel .prow {
-    display: flex; justify-content: space-between; gap: 8px; font-family: var(--mono);
-    font-size: 12px; padding: 4px 0; border-bottom: 1px dashed var(--border);
-  }
-  .tlsx-panel .prow:last-child { border-bottom: none; }
-  .tlsx-panel .pk { color: var(--text-3); white-space: nowrap; }
-  .tlsx-panel .pv { color: var(--text); font-weight: 600; text-align: right; }
-  .tlsx-panel .pv.warn { color: var(--warn); }
-  .tlsx-panel .pv.bad { color: var(--bad); }
-  .tlsx-panel .pv.ok { color: var(--ok); }
+  .tlsb-read .rb { display: grid; grid-template-columns: 80px 1fr 96px; gap: 8px; align-items: center; margin-top: 7px; }
+  .tlsb-read .rb.solo { grid-template-columns: 1fr auto; }
+  .tlsb-read .rl { font-size: 11.5px; color: var(--text-2); }
+  .tlsb-read .rbar { height: 8px; border-radius: 4px; background: var(--bg-soft); border: 1px solid var(--border); overflow: hidden; }
+  .tlsb-read .rbar i { display: block; height: 100%; background: var(--accent); }
+  .tlsb-read .rb.m-resume .rbar i { background: var(--warn); }
+  .tlsb-read .rb.m-zero .rbar i { background: var(--bad); }
+  .tlsb-read .rv { font-family: var(--mono); font-size: 12px; font-weight: 700; color: var(--text); text-align: right; }
+  .tlsb-actions { display: flex; gap: 8px; margin-top: 10px; }
 </style>
 
 <div id="tlsx-root">
@@ -553,76 +527,81 @@ Verify return code: 0 (ok)</code></pre>
 </section>
 
 <section id="s7">
-  <div class="sec-head"><span class="sec-num">07</span><h2>互動 · TLS 1.3 交握模擬器</h2></div>
-  <p class="sec-sub">逐則推進交握訊息，看清楚每一則攜帶什麼、從哪一則開始加密，以及 0-RTT 究竟省在哪、賠上什麼。</p>
+  <div class="sec-head"><span class="sec-num">07</span><h2>互動 · 交握成本計算機</h2></div>
+  <p class="sec-sub">把前面六節的每一個機制推到兩端，看它們各自在「第一個應用位元組上路之前」的帳單上加了多少。</p>
 
-  <p>下面的模擬器把一次 TLS 1.3 交握拆成單則訊息。左邊切換<strong>完整交握</strong>與 <strong>0-RTT session resumption</strong>，
-  右邊切換<strong>單向驗證</strong>與 <strong>mTLS</strong>。每按一次「下一步」推進一則，右側面板會同步更新當前使用的金鑰、
-  前向保密狀態、雙方身分是否已確認，以及最重要的兩個成本欄位：<strong>交握 RTT</strong> 與 <strong>第一個應用資料何時能上路</strong>。</p>
+  <p>前面六節談的東西，最後都折算成同一個量：<strong>在第一個應用位元組能送出去之前，你要等掉幾個 RTT、燒掉多少 CPU、傳掉多少位元組</strong>。
+  下面的計算機把三種模式——完整交握、resumption、resumption + 0-RTT——畫成三條成本曲線：
+  橫軸是網路 RTT，縱軸是<strong>首個應用位元組可送出前的等待時間</strong>（沿用第 8 節那條
+  <code>TCP 1-RTT + TLS 交握</code> 的算法，不含伺服器回應的那一趟）。
+  拖動 RTT 滑桿會移動曲線上的游標，其餘旋鈕則改變曲線本身的形狀。</p>
 
-  <div class="demo" id="tlsx-demo">
+  <p>曲線之外還有三筆帳：<strong>交握位元組</strong>、<strong>非對稱運算次數</strong>，以及<strong>單核每秒能收下幾條新交握</strong>。
+  這三筆是 resumption 真正省下的東西——它省的是計算與頻寬，不是那個 RTT。</p>
+
+  <div class="demo" id="tlsb-demo">
     <div class="demo-bar">
-      <span class="label">互動 · TLS 1.3 交握模擬器</span>
-      <span class="label" style="text-transform:none;font-family:var(--sans);font-size:12px;color:var(--text-2)">選好情境後按「下一步」逐則推進</span>
+      <span class="label">互動 · 交握成本計算機</span>
+      <span class="label" style="text-transform:none;font-family:var(--sans);font-size:12px;color:var(--text-2)">拖動任一參數，三條曲線與下方讀數即時重算</span>
     </div>
     <div class="demo-body">
-      <div class="tlsx-seg-row">
-        <div class="seg" role="group" aria-label="交握情境切換">
-          <button data-sc="full" aria-pressed="true">完整交握 · 1-RTT</button>
-          <button data-sc="resume" aria-pressed="false">Resumption · 0-RTT</button>
-        </div>
-        <div class="seg" role="group" aria-label="客戶端身分驗證切換">
-          <button data-auth="server" aria-pressed="true">單向驗證</button>
-          <button data-auth="mtls" aria-pressed="false">mTLS · 雙向</button>
-        </div>
+      <div class="tlsb-knobs">
+        <label class="tlsb-knob">
+          <span class="kn">網路 RTT</span><span class="kv" id="tlsb-rtt-v">60 ms</span>
+          <input type="range" id="tlsb-rtt" min="10" max="300" step="5" value="60" aria-label="網路 RTT（毫秒）">
+        </label>
+        <label class="tlsb-knob">
+          <span class="kn">憑證鏈長度</span><span class="kv" id="tlsb-chain-v">2 張</span>
+          <input type="range" id="tlsb-chain" min="2" max="4" step="1" value="2" aria-label="憑證鏈長度（張）">
+        </label>
+        <label class="tlsb-knob">
+          <span class="kn">early data 大小</span><span class="kv" id="tlsb-early-v">2 KB</span>
+          <input type="range" id="tlsb-early" min="0" max="16" step="1" value="2" aria-label="early data 大小（KB）">
+        </label>
       </div>
 
-      <div class="tlsx-demo-controls">
-        <button class="btn primary" id="tlsx-btn-next">下一步</button>
-        <button class="btn" id="tlsx-btn-reset">重置</button>
-        <div class="legend">
-          <span><i class="dot ns-idle"></i>尚未加密 / 前置條件</span>
-          <span><i class="dot ns-wait"></i>明文（中間設備可讀）</span>
-          <span><i class="dot ns-lock"></i>handshake 金鑰加密</span>
-          <span><i class="dot ns-ok"></i>application 金鑰加密</span>
-          <span><i class="dot ns-bad"></i>0-RTT early data（可重放）</span>
+      <div class="tlsb-switches">
+        <div class="seg" role="group" aria-label="憑證演算法">
+          <button data-alg="ecdsaP256" aria-pressed="true">ECDSA P-256</button>
+          <button data-alg="rsa2048" aria-pressed="false">RSA 2048</button>
         </div>
+        <div class="seg" role="group" aria-label="吊銷檢查方式">
+          <button data-rev="none" aria-pressed="false">不查吊銷</button>
+          <button data-rev="live" aria-pressed="false">即時 OCSP</button>
+          <button data-rev="stapling" aria-pressed="true">OCSP stapling</button>
+        </div>
+        <label class="tlsb-tog"><input type="checkbox" id="tlsb-hrr"> HelloRetryRequest（猜錯曲線群組）</label>
+        <label class="tlsb-tog"><input type="checkbox" id="tlsb-mtls"> mTLS（雙向驗證）</label>
       </div>
 
-      <div class="status-line" id="tlsx-status">選擇情境後按「下一步」，逐則觀看 TLS 1.3 交握。</div>
-
-      <div class="tlsx-stage">
-        <div class="tlsx-stage-head"><span>Client</span><span>Server</span></div>
-        <div id="tlsx-msgs"></div>
+      <div class="legend">
+        <span><i class="dot ns-wait"></i>完整交握</span>
+        <span><i class="dot ns-lock"></i>Resumption（PSK，仍是 1-RTT）</span>
+        <span><i class="dot ns-bad"></i>Resumption + 0-RTT early data</span>
       </div>
 
-      <div class="tlsx-panels">
-        <div class="tlsx-panel">
-          <div class="pt">金鑰與身分</div>
-          <div class="prow"><span class="pk">目前流量金鑰</span><span class="pv" id="tlsx-p-key">—</span></div>
-          <div class="prow"><span class="pk">前向保密</span><span class="pv" id="tlsx-p-fs">—</span></div>
-          <div class="prow"><span class="pk">伺服器身分</span><span class="pv" id="tlsx-p-srv">未驗證</span></div>
-          <div class="prow"><span class="pk">客戶端身分</span><span class="pv" id="tlsx-p-cli">未要求</span></div>
-        </div>
-        <div class="tlsx-panel">
-          <div class="pt">成本與風險</div>
-          <div class="prow"><span class="pk">TLS 交握 RTT</span><span class="pv" id="tlsx-p-rtt">—</span></div>
-          <div class="prow"><span class="pk">首個應用資料</span><span class="pv" id="tlsx-p-first">尚未送出</span></div>
-          <div class="prow"><span class="pk">非對稱簽章次數</span><span class="pv" id="tlsx-p-sig">0</span></div>
-          <div class="prow"><span class="pk">重放風險</span><span class="pv" id="tlsx-p-replay">無</span></div>
-        </div>
+      <div class="tlsb-plot" id="tlsb-plot"></div>
+
+      <div class="status-line" id="tlsb-status">拖動任一參數即可重算。</div>
+
+      <div class="tlsb-reads" id="tlsb-reads"></div>
+
+      <div class="tlsb-actions">
+        <button class="btn" id="tlsb-reset">重置</button>
       </div>
     </div>
   </div>
 
-  <p class="cap">三個值得停下來比對的畫面：<strong>(1)</strong> 完整交握推到 <code>ServerHello</code> 時，注意左側色條從藍（明文）換成橘（handshake 金鑰）——
-  <strong>憑證是在這條線之後才送的</strong>，這是 TLS 1.3 相對 1.2 的隱私升級。
-  <strong>(2)</strong> 切到 0-RTT：<code>ClientHello</code> 之後緊接的那一則就是紅色的 early data，面板的「首個應用資料」變成 <code>0 RTT</code>，但「重放風險」同時亮起——一次看完收益與代價。
-  <strong>(3)</strong> 打開 mTLS 再各跑一次：完整交握多出 <code>CertificateRequest</code> 與客戶端的憑證與簽章（簽章次數變成 2），
-  但在 resumption 情境下<strong>客戶端憑證不會重送</strong>——身分是從上一次完整交握隨 PSK 繼承過來的。</p>
+  <p class="cap">四個值得停下來比對的畫面（以預設的 ECDSA P-256、鏈長 2、OCSP stapling、RTT 60 ms 為起點，此時三條曲線分別是
+  <strong>121 / 120 / 60 ms</strong>）：<strong>(1)</strong> 把吊銷切成「即時 OCSP」，<strong>只有完整交握那條曲線整條抬高</strong>（60 ms 處由 121 變 193 ms），
+  另外兩條紋風不動——因為 resumption 根本不送憑證，也就沒有吊銷可查。
+  <strong>(2)</strong> 勾選 HelloRetryRequest，0-RTT 曲線由 60 ms 跳到 180 ms 並<strong>與 resumption 曲線重合</strong>：early data 被拒、必須在交握後重送，0-RTT 的收益整個消失。
+  <strong>(3)</strong> 把演算法切成 RSA 2048，等待時間幾乎不動，但「單核每秒可收下的新交握」<strong>從 1,370 條掉到 617 條</strong>——
+  RSA 簽章慢、驗章快，這個反轉在延遲上看不出來，在伺服器容量上很致命。
+  <strong>(4)</strong> 把 early data 拉到 16 KB，所有時間讀數都不變，只有「可被重放的請求數」由 3 個變成 21 個——<strong>0-RTT 的代價是曝險的量，不是延遲</strong>。</p>
 
   <div class="oneliner">
-    <b>一句話答法</b>TLS 1.3 的訊息順序就是它的安全論證：明文只到 ServerHello，之後憑證與擴充全部加密，客戶端驗完鏈就能在同一趟送出應用資料；0-RTT 把這趟也省了，換來的是一段沒有前向保密、且可被重放的資料。
+    <b>一句話答法</b>TLS 的成本可以拆成兩軸：往返數決定延遲（HelloRetryRequest 與即時 OCSP 各加一趟，0-RTT 減一趟），憑證與簽章決定頻寬與 CPU（resumption 全部省掉）；resumption 省的是計算與頻寬而不是那個 RTT，只有 0-RTT 能真的把延遲歸零，而它換來的是一段可被重放、沒有前向保密的資料。
   </div>
 </section>
 
