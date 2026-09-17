@@ -1,4 +1,7 @@
-<!-- demo-archetype: A｜時序推進 — 讀者選「Slot 遷移」或「maxmemory 淘汰」，按「下一步」逐步重放：前者看客戶端先收 ASK（不改對照表）再收 MOVED（改表），後者在同一份工作集下比較 noeviction／allkeys-lru／allkeys-lfu／volatile-ttl 各自踢掉誰。選 A 是因為 ASK 與 MOVED 的差別本質上就是「發生在第幾步」，把順序抽掉之後兩者看起來一模一樣。 -->
+<!-- demo-archetype: D｜空間視覺化（主，第 6 節）＋B｜參數掃描（次，第 8 節） — 讀者在 canvas 上的 16384 格 slot
+     空間調節點數、增減節點、設定遷移區段與進度並輸入 key（真跑 CRC16 mod 16384 與 hash tag 規則），即時看到每格歸屬、
+     每節點 slot 數與傾斜、reshard 搬遷量，以及每把 key 被判成 HIT／ASK／MOVED 的理由；次 demo 掃 maxmemory 參數算出
+     淘汰誰與命中率變化。選 D 是因為 Cluster 的命題是「一個固定大小的位址空間怎麼被切、怎麼搬」，那是面積問題。 -->
 <style>
   /* 本篇專屬：ra-* 命名空間，不覆蓋全站 base 類別 */
   #ra-root {
@@ -37,124 +40,71 @@
   .ra-pane .ss { font-family: var(--mono); font-size: 11px; color: var(--text-3); margin-bottom: 8px; letter-spacing: .04em; }
   .ra-pane ul { margin: 0; padding-left: 1.15em; font-size: 13px; color: var(--text-2); line-height: 1.65; }
 
-  .ra-ctrl { display: flex; flex-wrap: wrap; gap: 10px; margin: 10px 0 8px; align-items: center; }
-  .ra-metric { display: flex; flex-wrap: wrap; gap: 14px; margin: 8px 0 4px; font-size: 13px; color: var(--text-2); }
-  .ra-metric strong { color: var(--text); font-family: var(--mono); font-size: 12.5px; }
+  /* ---------- 主 demo：16384 slot 空間（rk-） ---------- */
+  .rk-wrap { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 300px); gap: 16px; align-items: start; margin: 12px 0 4px; }
+  @media (max-width: 760px) { .rk-wrap { grid-template-columns: 1fr; } }
+  .rk-cvbox { border: 1px solid var(--border-strong); border-radius: var(--radius-sm); background: #fff; padding: 8px; }
+  #rk-cv { display: block; width: 100%; max-width: 512px; height: auto; margin: 0 auto; image-rendering: pixelated; cursor: crosshair; }
+  .rk-axis { display: flex; justify-content: space-between; font-family: var(--mono); font-size: 10.5px; color: var(--text-3); margin-top: 5px; }
+  .rk-pick { font-family: var(--mono); font-size: 11.5px; color: var(--text-2); margin: 6px 0 0; line-height: 1.5; }
 
-  .ra-actors { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin: 12px 0 6px; }
-  @media (max-width: 760px) { .ra-actors { grid-template-columns: 1fr 1fr; } }
-  @media (max-width: 480px) { .ra-actors { grid-template-columns: 1fr; } }
-  .ra-actor {
-    border: 1.5px solid var(--border-strong); border-radius: var(--radius-sm);
-    padding: 12px 12px 10px; background: #fff; text-align: center;
-    transition: background .18s, border-color .18s, box-shadow .18s;
-  }
-  .ra-actor .an { font-weight: 700; font-size: 13px; letter-spacing: .03em; }
-  .ra-actor .al { font-family: var(--mono); font-size: 10.5px; color: var(--text-3); margin-top: 2px; }
-  .ra-actor .av { font-family: var(--mono); font-size: 14px; font-weight: 700; margin-top: 8px; color: var(--text); word-break: break-all; }
-  .ra-actor .ah { font-size: 11.5px; color: var(--text-2); margin-top: 4px; min-height: 1.4em; }
-  .ra-actor.on { background: var(--accent-soft); border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
-  .ra-actor.on .an { color: var(--accent); }
-  .ra-actor.ok { background: var(--ok-soft); border-color: var(--ok); }
-  .ra-actor.ok .an { color: var(--ok); }
-  .ra-actor.dirty { background: var(--warn-soft); border-color: var(--warn); }
-  .ra-actor.dirty .an { color: var(--warn); }
-  .ra-actor.bad { background: var(--bad-soft); border-color: var(--bad); }
-  .ra-actor.bad .an { color: var(--bad); }
+  .rk-knobs { display: grid; gap: 9px; }
+  .rk-knob { display: grid; grid-template-columns: 76px minmax(0, 1fr) auto; gap: 8px; align-items: center; font-size: 12.5px; color: var(--text-2); }
+  .rk-knob > label { font-size: 12px; }
+  .rk-knob input[type="range"] { width: 100%; }
+  .rk-knob .kv2 { font-family: var(--mono); font-size: 11.5px; color: var(--text); min-width: 56px; text-align: right; }
+  .rk-knob select { font-family: var(--mono); font-size: 12px; padding: 4px 6px; border: 1px solid var(--border-strong); border-radius: 5px; background: #fff; color: var(--text); width: 100%; }
+  .rk-keyin { width: 100%; font-family: var(--mono); font-size: 12px; padding: 6px 8px; border: 1px solid var(--border-strong); border-radius: 6px; background: #fff; color: var(--text); box-sizing: border-box; }
+  .rk-btns { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 2px; }
+  .rk-hint { font-size: 11.5px; color: var(--text-3); line-height: 1.5; margin: 2px 0 0; }
 
-  .ra-slots {
-    display: grid; grid-template-columns: repeat(16, 1fr); gap: 4px;
-    margin: 8px 0 4px;
-  }
-  @media (max-width: 720px) { .ra-slots { grid-template-columns: repeat(8, 1fr); } }
-  .ra-slot {
-    font-family: var(--mono); font-size: 10px; padding: 8px 2px;
-    border: 1.5px solid var(--border-strong); border-radius: 5px;
-    background: #fff; color: var(--text-2); text-align: center;
-    transition: background .18s, border-color .18s, color .18s;
-  }
-  .ra-slot .sn { display: block; font-weight: 700; font-size: 11px; color: var(--text); }
-  .ra-slot.n1 { background: var(--ra-c-soft); border-color: var(--ra-c); color: var(--ra-c); }
-  .ra-slot.n1 .sn { color: var(--ra-c); }
-  .ra-slot.n2 { background: var(--ra-alt-soft); border-color: var(--ra-alt); color: var(--ra-alt); }
-  .ra-slot.n2 .sn { color: var(--ra-alt); }
-  .ra-slot.n3 { background: var(--ra-s-soft); border-color: var(--ra-s); color: var(--ra-s); }
-  .ra-slot.n3 .sn { color: var(--ra-s); }
-  .ra-slot.mig { background: var(--ra-w-soft); border-color: var(--ra-w); color: var(--ra-w); box-shadow: 0 0 0 2px var(--ra-w-soft); }
-  .ra-slot.mig .sn { color: var(--ra-w); }
-  .ra-slot.hit { box-shadow: 0 0 0 2px var(--accent-soft); }
-  .ra-slot.empty { color: var(--text-3); border-style: dashed; background: var(--bg-soft); }
+  .rk-leg { display: flex; flex-wrap: wrap; gap: 12px; margin: 8px 0 2px; font-size: 11.5px; color: var(--text-2); align-items: center; }
+  .rk-sw { width: 10px; height: 10px; border-radius: 2px; display: inline-block; border: 1px solid rgba(0,0,0,.12); }
+  .rk-leg span { display: inline-flex; align-items: center; gap: 5px; }
 
-  .ra-keys {
-    display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0 4px; min-height: 36px;
-  }
-  .ra-key {
-    font-family: var(--mono); font-size: 11px; padding: 6px 8px;
-    border: 1.5px solid var(--border-strong); border-radius: 6px; background: #fff; color: var(--text-2);
-  }
-  .ra-key b { color: var(--text); font-weight: 700; margin-right: 4px; }
-  .ra-key.hot { background: var(--ra-c-soft); border-color: var(--ra-c); color: var(--ra-c); }
-  .ra-key.hot b { color: var(--ra-c); }
-  .ra-key.cold { background: var(--bg-soft); }
-  .ra-key.gone { background: var(--ra-bad-soft); border-color: var(--ra-bad); color: var(--ra-bad); text-decoration: line-through; }
-  .ra-key.gone b { color: var(--ra-bad); }
-  .ra-key.now { box-shadow: 0 0 0 3px var(--accent-soft); border-color: var(--accent); }
-  .ra-key.oom { background: var(--ra-bad-soft); border-color: var(--ra-bad); color: var(--ra-bad); border-style: dashed; }
+  .rk-bars { display: grid; gap: 4px; margin: 10px 0 4px; }
+  .rk-bar { display: grid; grid-template-columns: 110px minmax(0, 1fr) 54px; gap: 8px; align-items: center; }
+  .rk-bar .bn { font-family: var(--mono); font-size: 11.5px; color: var(--text-2); display: flex; align-items: center; gap: 5px; white-space: nowrap; }
+  .rk-bar .bt { display: block; height: 10px; background: var(--bg-soft); border-radius: 3px; overflow: hidden; }
+  .rk-bar .bt i { display: block; height: 100%; }
+  .rk-bar .bv { font-family: var(--mono); font-size: 11.5px; color: var(--text); text-align: right; }
 
-  .ra-panels { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 12px; }
-  @media (max-width: 640px) { .ra-panels { grid-template-columns: 1fr; } }
-  .ra-panel { border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 12px; background: #fff; }
-  .ra-panel .pt {
-    font-size: 11px; color: var(--text-3); letter-spacing: .06em; text-transform: uppercase;
-    font-family: var(--mono); margin-bottom: 8px;
-  }
-  .ra-panel .prow {
-    display: flex; justify-content: space-between; gap: 8px;
-    font-family: var(--mono); font-size: 12px; padding: 4px 0;
-    border-bottom: 1px dashed var(--border);
-  }
-  .ra-panel .prow:last-child { border-bottom: none; }
-  .ra-panel .pk { color: var(--text-3); white-space: nowrap; }
-  .ra-panel .pv { color: var(--text); font-weight: 600; text-align: right; word-break: break-all; }
-  .ra-panel .pv.good { color: var(--ok); }
-  .ra-panel .pv.bad { color: var(--bad); }
-  .ra-panel .pv.warn { color: var(--warn); }
+  .rk-tbl { width: 100%; border-collapse: collapse; margin: 10px 0 4px; font-size: 12.5px; }
+  .rk-tbl th, .rk-tbl td { border: 1px solid var(--border); padding: 6px 9px; text-align: left; vertical-align: top; }
+  .rk-tbl th { background: var(--bg-soft); color: var(--text-2); font-weight: 600; width: 38%; white-space: nowrap; }
+  .rk-tbl td { font-family: var(--mono); font-size: 12px; color: var(--text); }
+  .rk-tbl td.big { font-size: 15px; font-weight: 700; }
 
-  .ra-wire {
-    border: 1px solid var(--border); border-radius: var(--radius-sm);
-    background: #fff; padding: 8px 10px; margin-top: 10px; max-height: 280px; overflow-y: auto;
-  }
-  .ra-row {
-    display: flex; align-items: baseline; gap: 8px;
-    font-family: var(--mono); font-size: 11.5px; padding: 4px 0;
-    border-bottom: 1px dashed var(--border);
-  }
-  .ra-row:last-child { border-bottom: none; }
-  .ra-row .ar { width: 42px; flex: none; text-align: center; color: var(--text-3); font-weight: 700; }
-  .ra-row .tg {
-    flex: none; border-radius: 4px; padding: 2px 6px; font-size: 10.5px; font-weight: 700;
-    border: 1px solid var(--border-strong); background: var(--bg-soft); color: var(--text-3);
-  }
-  .ra-row .tx { color: var(--text-2); line-height: 1.5; }
-  .ra-row.read .tg { background: var(--ra-c-soft); border-color: var(--ra-c); color: var(--ra-c); }
-  .ra-row.ok .tg { background: var(--ra-s-soft); border-color: var(--ra-s); color: var(--ra-s); }
-  .ra-row.warn .tg { background: var(--ra-w-soft); border-color: var(--ra-w); color: var(--ra-w); }
-  .ra-row.bad .tg { background: var(--ra-bad-soft); border-color: var(--ra-bad); color: var(--ra-bad); }
+  .rk-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 10px; margin: 10px 0 4px; }
+  .rk-card { border: 1px solid var(--border); border-left-width: 4px; border-radius: var(--radius-sm); background: #fff; padding: 10px 12px; }
+  .rk-card.hit { border-left-color: var(--ok); }
+  .rk-card.ask { border-left-color: var(--warn); }
+  .rk-card.moved { border-left-color: var(--accent); }
+  .rk-card .kk { font-family: var(--mono); font-size: 12px; font-weight: 700; color: var(--text); word-break: break-all; }
+  .rk-card .kr { display: flex; justify-content: space-between; gap: 6px; font-size: 11px; color: var(--text-3); margin-top: 3px; }
+  .rk-card .kr b { font-family: var(--mono); font-size: 11px; color: var(--text); font-weight: 600; text-align: right; word-break: break-all; }
+  .rk-card .kv { margin-top: 7px; font-family: var(--mono); font-size: 13px; font-weight: 700; }
+  .rk-card.hit .kv { color: var(--ok); }
+  .rk-card.ask .kv { color: var(--warn); }
+  .rk-card.moved .kv { color: var(--accent); }
+  .rk-card .kw { font-size: 11.5px; color: var(--text-2); line-height: 1.5; margin-top: 4px; }
+  .rk-empty { font-size: 12.5px; color: var(--text-3); margin: 0; }
 
-  .ra-verdict {
-    margin-top: 10px; padding: 10px 12px; border-radius: var(--radius-sm);
-    border: 1px solid var(--border); background: var(--bg-soft);
-    font-size: 13px; color: var(--text-2); line-height: 1.55;
-  }
-  .ra-verdict.tone-ok { border-left: 3px solid var(--ok); background: var(--ok-soft); color: var(--text); }
-  .ra-verdict.tone-lock { border-left: 3px solid var(--warn); background: var(--warn-soft); color: var(--text); }
-  .ra-verdict.tone-bad { border-left: 3px solid var(--bad); background: var(--bad-soft); color: var(--text); }
+  /* ---------- 次 demo：maxmemory 撞牆（rm-） ---------- */
+  .rm-knobs { display: grid; grid-template-columns: 1fr 1fr; gap: 9px 18px; margin: 10px 0 6px; }
+  @media (max-width: 640px) { .rm-knobs { grid-template-columns: 1fr; } }
+  .rm-knob { display: grid; grid-template-columns: 96px minmax(0, 1fr) auto; gap: 8px; align-items: center; font-size: 12px; color: var(--text-2); }
+  .rm-knob input[type="range"] { width: 100%; }
+  .rm-knob .kv2 { font-family: var(--mono); font-size: 11.5px; color: var(--text); min-width: 56px; text-align: right; }
 
-  .ra-mode-hint { font-size: 12.5px; color: var(--text-2); margin: 8px 0 4px; line-height: 1.55; }
-
-  /* display 覆寫 UA hidden；切換面板必須成對寫 display:none */
-  .ra-view { display: block; }
-  .ra-view[hidden] { display: none; }
+  .rm-scale { margin: 14px 0 4px; }
+  .rm-track { display: flex; height: 22px; border: 1px solid var(--border-strong); border-radius: 5px; background: var(--bg-soft); overflow: hidden; }
+  .rm-track i { display: block; height: 100%; }
+  .rm-track .pin { background: #6b6f9a; }
+  .rm-track .vol { background: #a3743e; }
+  .rm-need { height: 7px; margin-top: 4px; background: var(--bg-soft); border-radius: 3px; overflow: hidden; }
+  .rm-need i { display: block; height: 100%; background: var(--ra-bad); }
+  .rm-lbl { display: flex; justify-content: space-between; gap: 10px; font-family: var(--mono); font-size: 10.5px; color: var(--text-3); margin-top: 4px; }
 </style>
 
 <div id="ra-root">
@@ -353,6 +303,7 @@ flowchart LR
       </ul>
     </div>
   </div>
+  <p class="cap">左欄是選型時該按的順序（先問操作、再選型別、最後才看編碼閾值），右欄是同一個決定在記憶體上的代價。對照著看會發現：真正讓 RSS 跳一截的不是 payload，而是超過閾值後從 listpack／intset 換成 hashtable／skiplist 所帶來的指標開銷。</p>
 
   <div class="callout accent">
     <div class="c-title"><span class="ic">關鍵</span>Big key 往往是選型錯誤，不是流量錯誤</div>
@@ -396,6 +347,7 @@ flowchart LR
       </ul>
     </div>
   </div>
+  <p class="cap">兩欄的分野是「崩潰之後還剩什麼」：RDB 給的是一個完整但過去的時間點，AOF 給的是一條可重放的命令流。看 AOF 那欄的 <code>appendfsync</code> 三行——資料安全的刻度就在那裡，其餘都是還原速度與檔案大小的取捨。</p>
 
   <div class="tbl-wrap">
     <table>
@@ -500,6 +452,7 @@ flowchart TD
       </ul>
     </div>
   </div>
+  <p class="cap">左欄是讓「多數派存在且唯一」的設定，右欄是這組設定沒做對時的長相。重點在右欄第一行：腦裂的成因不是 Sentinel 數量不夠，而是舊主在分區另一側<strong>仍然接受寫入</strong>——所以要靠 <code>min-replicas-to-write</code> 這類寫入保護把它自己關掉。</p>
 
   <div class="callout accent">
     <div class="c-title"><span class="ic">關鍵</span>Sentinel 管角色，不管 slot</div>
@@ -584,6 +537,82 @@ sequenceDiagram
   </pre>
   <p class="cap">兩趟都先打到 A，差別在回程之後：<code>ASK</code> 不改對照表，下一次仍先問 A；<code>MOVED</code> 才讓客戶端把 slot 7 記到 C。所以 ASK 是「這一次借道」，MOVED 是「歸屬換人」。</p>
 
+  <p class="ra-sub">3 · 互動：在 16384 格上看歸屬、傾斜與重定向</p>
+  <div class="demo" id="demo-rk">
+    <div class="demo-bar">
+      <span class="label">互動 · 16384 slot 空間</span>
+      <span class="label" style="text-transform:none;font-family:var(--sans);font-size:12px;color:var(--text-2)">調節點數與遷移，輸入 key 看它落在哪一格</span>
+    </div>
+    <div class="demo-body">
+      <p style="margin:0 0 10px;font-size:13px;color:var(--text-2);line-height:1.55;">下面這張格帶就是完整的 keyspace：128 欄 × 128 列 = 16384 格，<strong>一格一個 slot</strong>（左上是 slot 0，右下是 slot 16383），顏色是歸屬節點。key 的 slot 由 CRC16 當場算出，不是查表。</p>
+
+      <div class="rk-wrap">
+        <div>
+          <div class="rk-cvbox">
+            <canvas id="rk-cv" width="512" height="512" aria-label="16384 個 slot 的歸屬格帶"></canvas>
+            <div class="rk-axis"><span>slot 0</span><span>每列 128 格</span><span>slot 16383</span></div>
+          </div>
+          <div class="rk-leg">
+            <span><i class="rk-sw" style="background:#3f6188"></i>N1</span>
+            <span><i class="rk-sw" style="background:#4d7d68"></i>N2</span>
+            <span><i class="rk-sw" style="background:#a3743e"></i>N3</span>
+            <span><i class="rk-sw" style="background:#6b6f9a"></i>N4+</span>
+            <span><i class="rk-sw" style="background:#c2cfdd"></i>排隊待遷（仍屬來源）</span>
+            <span><i class="rk-sw" style="background:#c98a2e"></i>正在搬（MIGRATING／IMPORTING）</span>
+          </div>
+          <p class="rk-pick" id="rk-pick">在格帶上點一下，可查該格的 slot 號與歸屬。</p>
+        </div>
+
+        <div class="rk-knobs">
+          <div class="rk-knob">
+            <label for="rk-nodes">主節點數</label>
+            <input type="range" id="rk-nodes" min="3" max="9" step="1" value="3">
+            <span class="kv2" id="rk-nodes-v">3 台</span>
+          </div>
+          <div class="rk-btns">
+            <button class="btn" id="rk-add">＋ 加入一台</button>
+            <button class="btn" id="rk-drop">− 移除一台</button>
+          </div>
+          <div class="rk-knob">
+            <label for="rk-src">遷移來源</label>
+            <select id="rk-src"></select>
+            <span class="kv2">MIGRATING</span>
+          </div>
+          <div class="rk-knob">
+            <label for="rk-dst">遷移目標</label>
+            <select id="rk-dst"></select>
+            <span class="kv2">IMPORTING</span>
+          </div>
+          <div class="rk-knob">
+            <label for="rk-span">遷移槽數</label>
+            <input type="range" id="rk-span" min="0" max="4096" step="32" value="512">
+            <span class="kv2" id="rk-span-v">512 格</span>
+          </div>
+          <div class="rk-knob">
+            <label for="rk-prog">遷移進度</label>
+            <input type="range" id="rk-prog" min="0" max="100" step="1" value="40">
+            <span class="kv2" id="rk-prog-v">40%</span>
+          </div>
+          <div>
+            <label for="rk-keys" style="font-size:12px;color:var(--text-2)">key（逗號分隔，最多 6 把）</label>
+            <input type="text" class="rk-keyin" id="rk-keys" spellcheck="false" autocomplete="off">
+          </div>
+          <div class="rk-btns">
+            <button class="btn primary" id="rk-sample">填一把落在遷移段的 key</button>
+            <button class="btn" id="rk-reset">重置</button>
+          </div>
+          <p class="rk-hint">「填一把落在遷移段的 key」是真的從 <code>job:1</code> 開始逐一算 CRC16，優先找落在<strong>正在搬的那一格</strong>、而且會拿到 <code>ASK</code> 的那一把（搜尋上限 20 萬把，按下去大約要等 0.3 秒）。</p>
+        </div>
+      </div>
+
+      <div class="rk-bars" id="rk-bars"></div>
+      <table class="rk-tbl"><tbody id="rk-facts"></tbody></table>
+      <div class="rk-cards" id="rk-cards"></div>
+      <div class="status-line" id="rk-status"></div>
+    </div>
+  </div>
+  <p class="cap">三個可驗的點：<strong>(1)</strong> 加一台的搬遷量正好是 <code>16384 ÷ 新節點數</code>——Redis 只從既有各節點的尾端切走要給新節點的那一份，其餘 slot 不動，所以新節點在格帶上是<strong>好幾段同色</strong>而不是一整條；這與一致性雜湊的鄰近重映射殊途同歸，但靠的是固定對照表。<strong>(2)</strong> 同一把 key 在遷移進度 0%／中途／100% 會依序得到 <code>HIT</code>、<code>ASK</code>、<code>MOVED</code>，三者由「它的 slot 排在遷移清單的第幾格」算出。<strong>(3)</strong> 「正在搬的那一格裡，這把 key 到底搬走了沒」現實中取決於 <code>MIGRATE</code> 跑到哪；本 demo 為了可重現，改用該 key 的 CRC16 落在 slot 索引之外的高位當代理規則（低 14 位就是 slot 本身，對同一格的所有 key 都相同，拿來當代理會讓整格答案一致）——所以同一格裡不同的 key 會拿到不同答案，這正是遷移窗口裡 <code>MGET</code> 會一半 ASK、一半本地的原因。</p>
+
   <div class="callout warn">
     <div class="c-title"><span class="ic">陷阱</span>遷移窗口的多 key 操作與「以為 hash ring 會自動平衡」</div>
     <p>MIGRATING 時，同一槽裡有的 key 在 A、有的在 C。客戶端若對兩把 key 做一次 <code>MGET</code>，可能一半 ASK、一半本地——這就是為什麼遷移期要避免跨 key 批次，或接受重試。另外：新增節點<strong>不會</strong>自動把熱 slot 拆開。熱 key 若都落在同一槽（沒設計 hash tag），那一槽再怎麼遷，流量仍綁在一台。熱槽要靠拆 key，不是靠多加節點。</p>
@@ -664,6 +693,7 @@ sequenceDiagram
       </ul>
     </div>
   </div>
+  <p class="cap">左右兩欄是兩種不同的病：左邊是<strong>單鍵太大</strong>（一次命令就卡住整條迴圈，複寫與 RDB 也被它拖住），右邊是<strong>單鍵太熱</strong>（key 不大，但流量全壓在同一個 slot 的同一台主節點）。看處置那一列就知道差別：大 key 要拆結構，熱 key 要複製或打散，兩者都不是加節點能解的。</p>
 
   <div class="callout accent">
     <div class="c-title"><span class="ic">關鍵</span>熱 key 的應用層互斥重建不是本篇的題</div>
@@ -678,113 +708,79 @@ sequenceDiagram
 <section id="s8">
   <div class="sec-head">
     <span class="sec-num">08</span>
-    <h2>互動 Demo：slot 遷移與淘汰政策</h2>
+    <h2>互動 · maxmemory 撞牆：誰被踢、命中率掉多少</h2>
   </div>
-  <p class="sec-sub">同一個叢集畫布。先看 slot 7 從 N1 遷到 N3 時客戶端收到 ASK 再收到 MOVED；再看同一份工作集在四種 maxmemory 政策下誰被踢、誰 OOM。</p>
+  <p class="sec-sub">同一份工作集、同一條存取軌跡，只換政策就換一整組犧牲者。這裡把「候選集合是誰」造成的差別算出來。</p>
 
-  <div class="demo" id="demo-ra">
+  <div class="demo" id="demo-rm">
     <div class="demo-bar">
-      <span class="label">互動 · Redis 叢集與記憶體</span>
-      <span class="label" style="text-transform:none;font-family:var(--sans);font-size:12px;color:var(--text-2)">切模式後按「下一步」逐步重放</span>
+      <span class="label">互動 · maxmemory 與淘汰政策</span>
+      <span class="label" style="text-transform:none;font-family:var(--sans);font-size:12px;color:var(--text-2)">拖動參數，命中率與犧牲者即時重算</span>
     </div>
     <div class="demo-body">
-      <p class="ra-mode-hint" id="ra-mode-hint">Slot 遷移：16 格代表 16384 slot。客戶端先打快取中的節點，觀察 ASK（暫借）與 MOVED（改表）。</p>
+      <p style="margin:0 0 10px;font-size:13px;color:var(--text-2);line-height:1.55;">模擬條件：一條 4000 次存取的軌跡，主要依 Zipf 熱度分佈抽 key，另外每 500 次插入一段 150 次的<strong>冷 key 掃描</strong>（模擬跑在旁邊的批次作業）。下面所有數字都是這條軌跡跑完後的計數。</p>
 
-      <div class="seg" role="group" aria-label="實驗模式" id="ra-seg-mode">
-        <button data-mode="slot" aria-pressed="true">Slot 遷移 · MOVED／ASK</button>
-        <button data-mode="evict" aria-pressed="false">maxmemory 淘汰</button>
+      <div class="seg" role="group" aria-label="淘汰政策" id="rm-seg">
+        <button data-policy="noeviction" aria-pressed="false">noeviction</button>
+        <button data-policy="allkeys-lru" aria-pressed="false">allkeys-lru</button>
+        <button data-policy="allkeys-lfu" aria-pressed="false">allkeys-lfu</button>
+        <button data-policy="volatile-lru" aria-pressed="true">volatile-lru</button>
+        <button data-policy="volatile-ttl" aria-pressed="false">volatile-ttl</button>
       </div>
 
-      <div id="ra-slot-view" class="ra-view">
-        <p class="ra-mode-hint" style="margin-top:8px">三台主節點，slot 7（<code>cart:42</code>）將從 N1 遷到 N3。客戶端對照表一開始是對的；遷移期它會過時。</p>
-      </div>
-
-      <div id="ra-evict-view" class="ra-view" hidden>
-        <div class="seg" role="group" aria-label="淘汰政策" id="ra-seg-policy" style="margin-top:8px">
-          <button data-policy="noeviction" aria-pressed="true">noeviction</button>
-          <button data-policy="allkeys-lru" aria-pressed="false">allkeys-lru</button>
-          <button data-policy="allkeys-lfu" aria-pressed="false">allkeys-lfu</button>
-          <button data-policy="volatile-ttl" aria-pressed="false">volatile-ttl</button>
+      <div class="rm-knobs">
+        <div class="rm-knob">
+          <label for="rm-keys">工作集 key 數</label>
+          <input type="range" id="rm-keys" min="500" max="20000" step="100" value="4000">
+          <span class="kv2" id="rm-keys-v">4000 把</span>
         </div>
-        <p class="ra-mode-hint" style="margin-top:8px"><code>maxmemory = 6</code>。H1／H2 先被連續 GET 加溫（高頻），H3 只寫一次。C 鍵帶 TTL。第 11 步 <code>SET C4</code> 才撞牆：比較 LRU 踢誰、LFU 踢誰、volatile-ttl 只動哪一把。</p>
+        <div class="rm-knob">
+          <label for="rm-bytes">每鍵 bytes</label>
+          <input type="range" id="rm-bytes" min="64" max="4096" step="64" value="512">
+          <span class="kv2" id="rm-bytes-v">512 B</span>
+        </div>
+        <div class="rm-knob">
+          <label for="rm-mem">maxmemory</label>
+          <input type="range" id="rm-mem" min="64" max="8192" step="32" value="256">
+          <span class="kv2" id="rm-mem-v">256 KB</span>
+        </div>
+        <div class="rm-knob">
+          <label for="rm-ttl">設了 TTL 的比例</label>
+          <input type="range" id="rm-ttl" min="0" max="100" step="5" value="40">
+          <span class="kv2" id="rm-ttl-v">40%</span>
+        </div>
+        <div class="rm-knob">
+          <label for="rm-zipf">熱度傾斜 s</label>
+          <input type="range" id="rm-zipf" min="4" max="20" step="1" value="11">
+          <span class="kv2" id="rm-zipf-v">1.1</span>
+        </div>
+        <div class="rm-knob" style="grid-template-columns:auto">
+          <button class="btn" id="rm-reset">重置</button>
+        </div>
       </div>
 
-      <div class="ra-ctrl">
-        <button class="btn primary" id="ra-btn-next">下一步</button>
-        <button class="btn" id="ra-btn-reset">重置</button>
+      <div class="rm-scale">
+        <div class="rm-track" id="rm-gauge"></div>
+        <div class="rm-need"><i id="rm-need"></i></div>
+        <div class="rm-lbl">
+          <span id="rm-needtx">工作集需求</span>
+          <span id="rm-maxtx">maxmemory</span>
+        </div>
       </div>
-
-      <div class="ra-metric">
-        <span>步 <strong id="ra-m-step">0</strong> / <span id="ra-m-total">8</span></span>
-        <span>HIT／成功 <strong id="ra-m-ok">0</strong></span>
-        <span>ASK <strong id="ra-m-ask">0</strong></span>
-        <span>MOVED <strong id="ra-m-moved">0</strong></span>
-        <span>OOM／驅逐 <strong id="ra-m-evict">0</strong></span>
-      </div>
-
       <div class="legend">
-        <span><i class="dot ns-idle"></i>待命</span>
-        <span><i class="dot ns-wait"></i>本步作用中</span>
-        <span><i class="dot ns-lock"></i>MIGRATING／有 TTL</span>
-        <span><i class="dot ns-ok"></i>服務成功／命中</span>
-        <span><i class="dot ns-bad"></i>MOVED／OOM／被踢</span>
+        <span><i class="dot ns-wait"></i>常駐的無 TTL key（volatile-* 永遠踢不掉）</span>
+        <span><i class="dot ns-lock"></i>常駐的有 TTL key（唯一的候選集合）</span>
+        <span><i class="dot ns-bad"></i>下方細條：工作集本來需要多少</span>
       </div>
 
-      <div class="ra-actors" id="ra-actors" aria-live="polite">
-        <div class="ra-actor" data-role="cli">
-          <div class="an">Client</div>
-          <div class="al" id="ra-cli-al">對照表</div>
-          <div class="av" id="ra-cli-val">—</div>
-          <div class="ah" id="ra-cli-hint">待命</div>
-        </div>
-        <div class="ra-actor" data-role="n1">
-          <div class="an">N1</div>
-          <div class="al" id="ra-n1-al">slot 0–7</div>
-          <div class="av" id="ra-n1-val">—</div>
-          <div class="ah" id="ra-n1-hint">待命</div>
-        </div>
-        <div class="ra-actor" data-role="n2">
-          <div class="an">N2</div>
-          <div class="al" id="ra-n2-al">slot 8–11</div>
-          <div class="av" id="ra-n2-val">—</div>
-          <div class="ah" id="ra-n2-hint">待命</div>
-        </div>
-        <div class="ra-actor" data-role="n3">
-          <div class="an">N3</div>
-          <div class="al" id="ra-n3-al">slot 12–15</div>
-          <div class="av" id="ra-n3-val">—</div>
-          <div class="ah" id="ra-n3-hint">待命</div>
-        </div>
-      </div>
-
-      <div id="ra-slots" class="ra-slots" aria-label="slot 歸屬"></div>
-      <div id="ra-keys" class="ra-keys" aria-label="key 狀態"></div>
-
-      <div class="ra-panels">
-        <div class="ra-panel">
-          <div class="pt">本步語義</div>
-          <div class="prow"><span class="pk">操作</span><span class="pv" id="ra-p-op">—</span></div>
-          <div class="prow"><span class="pk">回應</span><span class="pv" id="ra-p-resp">—</span></div>
-          <div class="prow"><span class="pk">對照表／政策</span><span class="pv" id="ra-p-map">—</span></div>
-          <div class="prow"><span class="pk">犧牲者</span><span class="pv" id="ra-p-victim">—</span></div>
-        </div>
-        <div class="ra-panel">
-          <div class="pt">累計</div>
-          <div class="prow"><span class="pk">成功次數</span><span class="pv" id="ra-p-ok">0</span></div>
-          <div class="prow"><span class="pk">重定向</span><span class="pv" id="ra-p-redir">ASK 0 · MOVED 0</span></div>
-          <div class="prow"><span class="pk">OOM / 驅逐</span><span class="pv" id="ra-p-ev">0</span></div>
-          <div class="prow"><span class="pk">備註</span><span class="pv" id="ra-p-note">—</span></div>
-        </div>
-      </div>
-
-      <div class="status-line" id="ra-status">選擇模式後按「下一步」。Slot 實驗 8 步；淘汰實驗 12 步（第 11 步才撞 maxmemory）。</div>
-      <div class="ra-verdict" id="ra-verdict">判定尚未產生——走完一輪後會摘要 ASK／MOVED 或各政策踢了誰。</div>
-      <div class="ra-wire" id="ra-wire" aria-label="事件日誌"></div>
+      <table class="rk-tbl"><tbody id="rm-out"></tbody></table>
+      <div class="status-line" id="rm-status"></div>
     </div>
   </div>
+  <p class="cap">預設就停在最經典的誤配上：政策是 <code>volatile-lru</code>，但只有 40% 的 key 設了 expire——無 TTL 的那 60% 會慢慢佔滿記憶體且永遠不被選中，於是驅逐與 OOM 同時出現。把 TTL 比例拉到 0，數字會與 <code>noeviction</code> 一模一樣；切到 <code>volatile-ttl</code>，「被踢的是熱鍵嗎」那一列會跳上去，因為它挑的是 TTL 最短的，不是最冷的。另外兩點要誠實說明：真實 Redis 的 LRU／LFU 是 <code>maxmemory-samples</code> 取樣近似，本模擬用的是精確排序，所以實機的誤殺通常比這裡更多；「業務讀取命中率」刻意把掃描批次的存取排除，因為掃描本來就必然 miss，混在一起會蓋掉政策之間的差別。</p>
 
   <div class="oneliner">
-    <b>一句話答法</b>遷移中來源沒有那把 key 就回 ASK，客戶端不改表；歸屬切完才 MOVED。同樣 6 格上限，noeviction 拒寫，allkeys-lru 連持久熱鍵都可能踢，volatile-ttl 只動有過期的。
+    <b>一句話答法</b>淘汰政策的差別不在演算法名字，在<strong>候選集合</strong>：<code>allkeys-*</code> 全部可踢，<code>volatile-*</code> 只踢有 expire 的，沒有候選就回 OOM；<code>volatile-ttl</code> 挑的是活得最短的，不是最冷的，所以它會誤殺熱鍵。
   </div>
 </section>
 
