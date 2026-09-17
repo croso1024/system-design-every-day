@@ -1377,7 +1377,7 @@
         <a href="#s3"><span class="n">03</span>Rate Limit、Quota 與成本控管</a>
         <a href="#s4"><span class="n">04</span>跨供應商 Fallback：可用性大於單一模型忠誠度</a>
         <a href="#s5"><span class="n">05</span>Semantic Cache：用「意思相近」省 token 與延遲</a>
-        <a href="#s6"><span class="n">06</span>互動 Demo：路由決策與語意快取命中</a>
+        <a href="#s6"><span class="n">06</span>互動 · 准入與路由決策</a>
         <a href="#s7"><span class="n">07</span>面試折衷與邊界</a>
       </div>
     </nav>
@@ -1393,7 +1393,7 @@
     <!-- ===================== MAIN CONTENT ===================== -->
     <main>
       <div class="inner">
-        <!-- demo-archetype: C｜並排對照 — 讀者在「直打貴模型／智慧路由／路由 + 語意快取」三種 Gateway 策略間切換，同一批 5 筆請求（含兩筆語意相近的 FAQ）逐筆送進去，對照累計成本、快取命中與 fallback 次數。選 C 是因為本篇的賣點是「同樣的流量換一套策略會便宜多少」，沒有對照組就沒有說服力。 -->
+        <!-- demo-archetype: E｜決策器（主，第 6 節） — 讀者調整一筆請求的任務型態、輸入／輸出 token、延遲預算，以及 Gateway 側的租戶層級、今日已用預算、語意快取相似度與 τ、供應商健康，即時算出四個後端池與快取候選各自的准入預留、預估延遲與出局規則，導出 SERVE_FROM_CACHE／ROUTE／FALLBACK／DEGRADE／DENY 其中一個判定並附帶數字理由。選 E 是因為本篇第 2 到第 5 節講的全是規則（路由維度、配額失敗行為、fallback 觸發條件、相似度閾值），而這些規則的產物就是「這一筆請求最後走哪裡、為什麼」——那是一個判定問題，不是一段流程。 -->
 <style>
   /* 本篇專屬：lgw-* 命名空間（llm-gateway），不覆蓋全站 base 類別 */
   #lgw-root {
@@ -1459,71 +1459,61 @@
   }
   .lgw-layer ul { margin: 0; padding-left: 1.15em; font-size: 13px; color: var(--text-2); line-height: 1.65; }
 
-  .lgw-demo-controls {
-    display: flex; flex-wrap: wrap; gap: 8px; margin: 10px 0 8px; align-items: center;
+  /* ── 第 6 節 決策器：lgw-dp-*（decision plane），本輪新寫 ───────────── */
+  .lgw-dp-knobs {
+    display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin: 12px 0;
   }
-  .lgw-metric {
-    display: flex; flex-wrap: wrap; gap: 14px; margin: 8px 0 12px;
-    font-size: 13px; color: var(--text-2);
-  }
-  .lgw-metric strong { color: var(--text); font-family: var(--mono); font-size: 12.5px; }
-  .lgw-panels {
-    display: grid; grid-template-columns: 1.15fr 1fr; gap: 12px; margin: 10px 0;
-  }
-  @media (max-width: 720px) { .lgw-panels { grid-template-columns: 1fr; } }
-  .lgw-panel {
+  @media (max-width: 720px) { .lgw-dp-knobs { grid-template-columns: 1fr; } }
+  .lgw-dp-group {
     border: 1px solid var(--border); border-radius: var(--radius-sm);
-    background: #fff; padding: 12px;
+    background: #fff; padding: 11px 12px;
   }
-  .lgw-panel .pt {
+  .lgw-dp-group .gt {
     font-family: var(--mono); font-size: 11px; color: var(--text-3);
-    letter-spacing: .04em; margin-bottom: 8px; font-weight: 600;
+    letter-spacing: .04em; font-weight: 600; margin-bottom: 9px;
   }
-  .lgw-req-list { display: flex; flex-direction: column; gap: 6px; }
-  .lgw-req {
-    border: 1px solid var(--border-strong); border-radius: 6px;
-    padding: 8px 10px; font-size: 12.5px; background: var(--bg-soft); color: var(--text-2);
-    display: flex; flex-wrap: wrap; gap: 8px; align-items: center; justify-content: space-between;
+  .lgw-dp-knob { display: grid; grid-template-columns: 1fr auto; gap: 2px 8px; align-items: center; margin-bottom: 10px; }
+  .lgw-dp-knob:last-child { margin-bottom: 0; }
+  .lgw-dp-knob .kl { font-size: 12.5px; color: var(--text-2); }
+  .lgw-dp-knob .kv { font-family: var(--mono); font-size: 12px; font-weight: 700; color: var(--text); justify-self: end; }
+  .lgw-dp-knob input[type="range"] { grid-column: 1 / -1; width: 100%; margin: 2px 0 0; accent-color: var(--accent); }
+  .lgw-dp-knob select {
+    grid-column: 1 / -1; width: 100%; margin-top: 2px;
+    font-family: var(--mono); font-size: 12px; padding: 4px 6px;
+    border: 1px solid var(--border-strong); border-radius: 6px; background: #fff; color: var(--text);
   }
-  .lgw-req.active { border-color: var(--lgw-route); background: var(--lgw-route-soft); color: var(--lgw-route); font-weight: 600; }
-  .lgw-req.hit { border-color: var(--lgw-cache); background: var(--lgw-cache-soft); color: var(--lgw-cache); font-weight: 600; }
-  .lgw-req.fall { border-color: var(--lgw-fall); background: var(--lgw-fall-soft); color: var(--lgw-fall); font-weight: 600; }
-  .lgw-req.deny { border-color: var(--bad); background: var(--bad-soft); color: var(--bad); font-weight: 600; }
-  .lgw-req.done { opacity: .7; }
-  .lgw-req .rid { font-family: var(--mono); font-size: 11.5px; }
-  .lgw-req .meta { font-size: 11px; color: inherit; opacity: .85; }
-  .lgw-provider-row {
-    display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px;
-  }
-  .lgw-prov {
-    border: 1px solid var(--border-strong); border-radius: 6px;
-    padding: 8px 10px; min-width: 88px; text-align: center;
-    font-family: var(--mono); font-size: 11.5px; background: var(--bg-soft); color: var(--text-2);
-  }
-  .lgw-prov.selected { background: var(--lgw-route-soft); border-color: var(--lgw-route); color: var(--lgw-route); font-weight: 700; }
-  .lgw-prov.down { opacity: .45; border-style: dashed; }
-  .lgw-prov.fallback { background: var(--lgw-fall-soft); border-color: var(--lgw-fall); color: var(--lgw-fall); font-weight: 700; }
-  .lgw-cache-bar {
-    height: 18px; border-radius: 6px; background: var(--bg-soft);
-    border: 1px solid var(--border); overflow: hidden; display: flex; margin: 8px 0 4px;
-  }
-  .lgw-cache-bar span { display: block; height: 100%; }
-  .lgw-cache-bar .hit { background: var(--lgw-cache); }
-  .lgw-cache-bar .miss { background: var(--lgw-route); opacity: .45; }
-  .lgw-timeline {
+
+  .lgw-dp-plane {
     border: 1px solid var(--border); border-radius: var(--radius-sm);
-    background: var(--bg-soft); padding: 10px 12px; margin-top: 8px;
-    font-family: var(--mono); font-size: 11.5px; line-height: 1.7; color: var(--text-2);
-    max-height: 160px; overflow-y: auto;
+    background: #fff; padding: 8px 6px 4px; margin: 10px 0 6px;
   }
-  .lgw-timeline .ev { color: var(--text); }
-  .lgw-verdict {
+  .lgw-dp-plane svg { width: 100%; height: auto; display: block; }
+
+  .lgw-dp-call {
+    border: 1px solid var(--border); border-left: 3px solid var(--border-strong);
+    border-radius: var(--radius-sm); background: #fff; padding: 12px; margin: 10px 0;
+  }
+  .lgw-dp-call .cc { font-family: var(--mono); font-size: 12.5px; font-weight: 700; letter-spacing: .05em; }
+  .lgw-dp-call .ch { font-size: 13.5px; color: var(--text); margin: 4px 0 8px; line-height: 1.55; }
+  .lgw-dp-call ul { margin: 0; padding-left: 1.1em; font-size: 12.5px; color: var(--text-2); line-height: 1.65; }
+  .lgw-dp-call.d-cache { border-left-color: var(--ok); background: var(--ok-soft); }
+  .lgw-dp-call.d-route { border-left-color: var(--accent); background: var(--accent-soft); }
+  .lgw-dp-call.d-warn  { border-left-color: var(--warn); background: var(--warn-soft); }
+  .lgw-dp-call.d-bad   { border-left-color: var(--bad); background: var(--bad-soft); }
+
+  .lgw-dp-meter { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin: 10px 0; }
+  @media (max-width: 640px) { .lgw-dp-meter { grid-template-columns: 1fr 1fr; } }
+  .lgw-dp-cell {
     border: 1px solid var(--border); border-radius: var(--radius-sm);
-    padding: 12px; margin: 8px 0; background: #fff; font-size: 13.5px; line-height: 1.6;
+    background: var(--bg-soft); padding: 9px 10px;
   }
-  .lgw-verdict.tone-ok { border-left: 3px solid var(--ok); background: var(--ok-soft); }
-  .lgw-verdict.tone-lock { border-left: 3px solid var(--warn); background: var(--warn-soft); }
-  .lgw-verdict.tone-bad { border-left: 3px solid var(--bad); background: var(--bad-soft); }
+  .lgw-dp-cell .ml { font-size: 11px; color: var(--text-3); line-height: 1.4; }
+  .lgw-dp-cell .mv { font-family: var(--mono); font-size: 14px; font-weight: 700; color: var(--text); margin-top: 3px; }
+
+  .lgw-dp-tbl td.num { font-family: var(--mono); font-size: 12px; white-space: nowrap; }
+  .lgw-dp-tbl tr.win td { background: var(--ok-soft); }
+  .lgw-dp-tbl tr.out td { color: var(--text-3); }
+  .lgw-dp-tbl td.st { font-family: var(--mono); font-size: 11.5px; }
 </style>
 
 <div id="lgw-root">
@@ -1563,6 +1553,7 @@
       <div class="lgw-box b-fall"><div class="bn">Fallback</div><div class="bs">逾時／5xx<br>跨供應商切換</div></div>
     </div>
   </div>
+  <p class="cap">這四個盒是本篇後續四節的骨架，也是同一筆請求會依序遭遇的四類規則；看的時候記住它們的<strong>計量單位不同</strong>——Route 看能力與延遲、Quota 看美元、SemCache 看相似度、Fallback 看供應商健康。</p>
 
   <div class="callout accent">
     <div class="c-title"><span class="ic">座標</span>與鄰近主題的切分</div>
@@ -1605,6 +1596,8 @@
   </div>
 
   <p>好的路由表會把「產品意圖」與「供應商細節」解耦：應用寫 <code>model: chat-balanced</code>，Gateway 決定今天是 GPT 小杯還是自架 Llama。面試時要講清楚：路由決策應可配置、可回放、可對成本歸因，而不是散落在業務程式碼的字串常數。</p>
+
+  <p>實務上會先把後端池分出<strong>能力級距</strong>：短分類與 FAQ 這種任務只需要最低一級；程式碼生成需要中間一級；長鏈推理才需要最高一級。這個級距是路由的<strong>硬前提</strong>——能力不足的池即使更便宜、更快，也不能拿來承接，只能在「沒有任何能力足夠的池可用」時當作降級選項（見第 4 節）。</p>
 
   <div class="lgw-pipeline">
     <div class="lgw-pipe-row">
@@ -1680,7 +1673,7 @@
 
   <div class="callout accent">
     <div class="c-title"><span class="ic">關鍵</span>預估 token 與實際 token</div>
-    <p>准入時往往只能用 tokenizer 近似或歷史均值做<strong>預留</strong>；完成後再按實際 usage 結算。預留過緊會誤殺；過鬆會超賣。實務是 soft reserve + 完成後校正，並對異常長輸出設硬上限。</p>
+    <p>准入時往往只能用 tokenizer 近似或歷史均值做<strong>預留</strong>；完成後再按實際 usage 結算。預留過緊會誤殺；過鬆會超賣。實務是 soft reserve + 完成後校正，並對異常長輸出設硬上限。<strong>擋下請求的是預留金額、不是最後的帳單</strong>——這兩個數字不一樣，而被拿去和剩餘預算比較的永遠是前者。</p>
   </div>
 
   <div class="oneliner">
@@ -1696,6 +1689,8 @@
   <p class="sec-sub">逾時、配額用盡、區域故障時，Gateway 應能依政策切到備援供應商或較小模型。</p>
 
   <p>Fallback 鏈常見順序：同供應商次級模型 → 另一供應商同級模型 → 降級回答（較短、較便宜）→ 快取／模板兜底。關鍵不是「永遠成功」，而是<strong>失敗可預期、行為可宣告</strong>（例如回應標頭標明實際模型與是否降級）。</p>
+
+  <p>這條鏈上有兩個常被混用的詞，面試時要分清楚：<strong>Fallback</strong> 指首選後端因<em>健康問題</em>（逾時、5xx、熔斷）出局，改由<strong>另一個能力同樣足夠</strong>的後端承接，答案品質不打折，代價通常是成本或延遲上升；<strong>Degrade（降級）</strong>指<em>沒有任何能力足夠的後端可用</em>（被延遲預算、context 上限或預算擋掉），只好用<strong>低一級</strong>的模型作答，品質確實會打折，因此必須在回應標頭標註。前者換家、後者換級。</p>
 
   <div class="lgw-pipeline">
     <div class="lgw-pipe-row">
@@ -1795,7 +1790,7 @@
 
   <div class="callout accent">
     <div class="c-title"><span class="ic">關鍵</span>命中率不是唯一 KPI</div>
-    <p>還要盯「錯命中率」（語意近但答案不該共用）與節省的 $／延遲。一個高命中但常回過期答案的快取，比低命中更危險。</p>
+    <p>還要盯「錯命中率」（語意近但答案不該共用）與節省的 $／延遲。一個高命中但常回過期答案的快取，比低命中更危險。實務會把「可接受的錯命中率」做成<strong>租戶等級的政策</strong>：內部與高價層容忍度低、免費層容忍度高——同一個相似度分數，在不同租戶下可以得到不同的放行結論。</p>
   </div>
 
   <div class="oneliner">
@@ -1806,71 +1801,107 @@
 <section id="s6">
   <div class="sec-head">
     <span class="sec-num">06</span>
-    <h2>互動 Demo：路由決策與語意快取命中</h2>
+    <h2>互動 · 准入與路由決策</h2>
   </div>
-  <p class="sec-sub">同一批請求，切換 Gateway 策略，觀察路由目標、快取命中、fallback 與累計成本。</p>
+  <p class="sec-sub">前面四節是規則，這一節把規則跑起來：同一筆請求，改一個旋鈕就換一個結論。</p>
 
-  <div class="demo" id="demo-lgw-gateway">
+  <p>下面的決策器把第 2 到第 5 節的規則寫成一次判定。左邊調請求本身，右邊調 Gateway 當下的狀態；四個後端池與 Semantic Cache 會被畫成平面上的五個候選點，兩條約束線切出可行域，最後導出一個判定碼與它的數字理由。</p>
+
+  <div class="demo" id="demo-lgw-admit">
     <div class="demo-bar">
-      <span class="label">互動 · LLM Gateway</span>
-      <span class="label" style="text-transform:none;font-family:var(--sans);font-size:12px;color:var(--text-2)">切換策略後按「處理下一筆」，看路由與語意快取</span>
+      <span class="label">互動 · 准入與路由決策</span>
+      <span class="label" style="text-transform:none;font-family:var(--sans);font-size:12px;color:var(--text-2)">拖任一個旋鈕，判定與理由即時重算</span>
     </div>
     <div class="demo-body">
-      <p style="margin:0 0 8px;font-size:13px;color:var(--text-2);line-height:1.55;">場景：5 筆請求（短 FAQ ×2 語意相近、程式碼生成、長推理、尖峰超額）。供應商池：Cheap／Balanced／Premium；Premium 在部分步驟會「故障」以展示 fallback。數字為教學示意。</p>
-
-      <div class="seg" role="group" aria-label="Gateway 策略">
-        <button data-sc="direct" aria-pressed="true">直打貴模型</button>
-        <button data-sc="routed" aria-pressed="false">智慧路由</button>
-        <button data-sc="cached" aria-pressed="false">路由 + 語意快取</button>
+      <div class="seg" role="group" aria-label="任務型態">
+        <button data-task="faq" aria-pressed="true">短 FAQ（需 L1）</button>
+        <button data-task="codegen" aria-pressed="false">程式碼生成（需 L2）</button>
+        <button data-task="longreason" aria-pressed="false">長推理（需 L3）</button>
       </div>
 
-      <div class="lgw-demo-controls">
-        <button class="btn primary" id="lgw-btn-step">處理下一筆</button>
-        <button class="btn" id="lgw-btn-reset">重置</button>
-      </div>
-
-      <div class="lgw-metric">
-        <span>步驟 <strong id="lgw-m-step">0</strong></span>
-        <span>累計成本 <strong id="lgw-m-cost">$0.00</strong></span>
-        <span>快取命中 <strong id="lgw-m-hits">0</strong></span>
-        <span>Fallback <strong id="lgw-m-falls">0</strong></span>
-        <span>省下 token（示意） <strong id="lgw-m-saved">0</strong></span>
-      </div>
-
-      <div class="lgw-panels">
-        <div class="lgw-panel">
-          <div class="pt">REQUEST QUEUE</div>
-          <div class="lgw-req-list" id="lgw-reqs"></div>
-          <div class="legend" style="margin-top:10px">
-            <span><i class="dot ns-wait"></i>處理中</span>
-            <span><i class="dot ns-ok"></i>快取命中</span>
-            <span><i class="dot ns-lock"></i>Fallback</span>
-            <span><i class="dot ns-bad"></i>拒單／超額</span>
+      <div class="lgw-dp-knobs">
+        <div class="lgw-dp-group">
+          <div class="gt">請求屬性</div>
+          <div class="lgw-dp-knob">
+            <span class="kl">輸入 token</span><span class="kv" id="lgw-dp-v-prompt">600</span>
+            <input type="range" id="lgw-dp-prompt" min="200" max="8000" step="100" value="600" aria-label="輸入 token">
+          </div>
+          <div class="lgw-dp-knob">
+            <span class="kl">輸出 token</span><span class="kv" id="lgw-dp-v-out">250</span>
+            <input type="range" id="lgw-dp-out" min="50" max="2000" step="50" value="250" aria-label="輸出 token">
+          </div>
+          <div class="lgw-dp-knob">
+            <span class="kl">延遲預算</span><span class="kv" id="lgw-dp-v-lat">3,500 ms</span>
+            <input type="range" id="lgw-dp-lat" min="500" max="45000" step="500" value="3500" aria-label="延遲預算">
           </div>
         </div>
-        <div class="lgw-panel">
-          <div class="pt">PROVIDER POOLS</div>
-          <div class="lgw-provider-row" id="lgw-providers"></div>
-          <div class="pt" style="margin-top:12px">CACHE HIT RATIO（本回合）</div>
-          <div class="lgw-cache-bar" id="lgw-cache-bar" aria-hidden="true">
-            <span class="hit" style="width:0%"></span>
-            <span class="miss" style="width:0%"></span>
+        <div class="lgw-dp-group">
+          <div class="gt">Gateway 狀態</div>
+          <div class="lgw-dp-knob">
+            <span class="kl">租戶層級</span><span class="kv" id="lgw-dp-v-tier">Pro</span>
+            <select id="lgw-dp-tier" aria-label="租戶層級">
+              <option value="free">Free（日預算 $0.50、錯命中容忍 8%）</option>
+              <option value="pro" selected>Pro（日預算 $20、容忍 4%）</option>
+              <option value="internal">Internal（日預算 $200、容忍 2%）</option>
+            </select>
           </div>
-          <div class="legend">
-            <span><i class="dot ns-ok"></i>Hit</span>
-            <span><i class="dot ns-wait"></i>Miss（打模型）</span>
+          <div class="lgw-dp-knob">
+            <span class="kl">今日已用預算</span><span class="kv" id="lgw-dp-v-spent">40%</span>
+            <input type="range" id="lgw-dp-spent" min="0" max="100" step="1" value="40" aria-label="今日已用預算">
+          </div>
+          <div class="lgw-dp-knob">
+            <span class="kl">最近鄰快取相似度</span><span class="kv" id="lgw-dp-v-sim">0.93</span>
+            <input type="range" id="lgw-dp-sim" min="50" max="99" step="1" value="93" aria-label="最近鄰快取相似度">
+          </div>
+          <div class="lgw-dp-knob">
+            <span class="kl">相似度閾值 τ</span><span class="kv" id="lgw-dp-v-tau">0.90</span>
+            <input type="range" id="lgw-dp-tau" min="70" max="98" step="1" value="90" aria-label="相似度閾值">
+          </div>
+          <div class="lgw-dp-knob">
+            <span class="kl">供應商健康</span><span class="kv" id="lgw-dp-v-outage">全部正常</span>
+            <select id="lgw-dp-outage" aria-label="供應商健康">
+              <option value="none" selected>全部正常</option>
+              <option value="premium">Premium 池逾時／5xx</option>
+              <option value="balanced">Balanced 池逾時／5xx</option>
+            </select>
           </div>
         </div>
       </div>
 
-      <div class="status-line" id="lgw-status">選擇策略後按「處理下一筆」。對照三種策略的成本與命中差異。</div>
-      <div class="lgw-verdict" id="lgw-verdict">判定尚未產生——處理完佇列後會摘要成本／命中／fallback。</div>
-      <div class="lgw-timeline" id="lgw-timeline" aria-live="polite"></div>
+      <div class="lgw-dp-plane" id="lgw-dp-plane"></div>
+      <p class="cap">橫軸是<strong>准入預留</strong>（被拿去和剩餘預算比較的那個數，不是最後帳單），縱軸是預估延遲，兩軸都是對數刻度。左下角填色矩形＝兩條量化約束切出的可行域；<strong>能力級距、context 上限與供應商健康不是座標軸</strong>，違反它們的候選會留在原位但畫成空心並標出是哪一條規則擋的。看的時候先找雙環的勝出點，再看被擋在哪條線外。</p>
+
+      <div class="legend">
+        <span><i class="dot ns-ok"></i>可行</span>
+        <span><i class="dot ns-wait"></i>勝出</span>
+        <span><i class="dot ns-lock"></i>能力不足（可當降級候選）</span>
+        <span><i class="dot ns-bad"></i>出局</span>
+      </div>
+
+      <div class="lgw-dp-call" id="lgw-dp-call"></div>
+
+      <div class="tbl-wrap">
+        <table class="lgw-dp-tbl">
+          <thead>
+            <tr><th>候選後端</th><th>能力</th><th>准入預留</th><th>實際成本</th><th>預估延遲</th><th>判定</th></tr>
+          </thead>
+          <tbody id="lgw-dp-rows"></tbody>
+        </table>
+      </div>
+      <p class="cap">預留與實際成本的差距就是第 3 節說的 soft reserve：預留用 <code>輸出 token × 1.3</code> 抓保險係數，完成後再按實際 usage 結算並退回差額。</p>
+
+      <div class="lgw-dp-meter" id="lgw-dp-meter"></div>
+
+      <div class="status-line" id="lgw-dp-status"></div>
+
+      <div style="margin-top:10px">
+        <button class="btn" id="lgw-dp-reset">重置為預設請求</button>
+      </div>
     </div>
   </div>
 
   <div class="oneliner">
-    <b>一句話答法</b>Demo 要看的是機制：直打貴模型最穩也最貴；路由降本；語意快取在重複 FAQ 上把延遲與 token 一起砍掉。
+    <b>一句話答法</b>Gateway 的准入是一次多約束判定：能力級距、context、延遲預算、剩餘預算與快取相似度一起決定這筆請求走快取、正常路由、換家、降級，還是直接 429。
   </div>
 </section>
 
@@ -1901,6 +1932,10 @@
         <tr>
           <td>Semantic cache 何時不該用？</td>
           <td>高時效、個人化、含 PII、或答案依賴即時工具結果的請求。</td>
+        </tr>
+        <tr>
+          <td>Fallback 與 Degrade 差在哪？</td>
+          <td>Fallback 換家、能力不降；Degrade 換級、品質打折且必須在回應標頭標註。</td>
         </tr>
         <tr>
           <td>Fallback 如何避免雪崩？</td>
@@ -2003,414 +2038,514 @@
 (function () {
   "use strict";
 
-  var strategy = "direct";
-  var step = 0;
+  /* ───────────────────────── (1) 常數與參數表 ───────────────────────── */
 
-  var statusEl = document.getElementById("lgw-status");
-  var verdictEl = document.getElementById("lgw-verdict");
-  var reqsEl = document.getElementById("lgw-reqs");
-  var providersEl = document.getElementById("lgw-providers");
-  var cacheBarEl = document.getElementById("lgw-cache-bar");
-  var timelineEl = document.getElementById("lgw-timeline");
-  var btnStep = document.getElementById("lgw-btn-step");
-  var btnReset = document.getElementById("lgw-btn-reset");
-  var mStep = document.getElementById("lgw-m-step");
-  var mCost = document.getElementById("lgw-m-cost");
-  var mHits = document.getElementById("lgw-m-hits");
-  var mFalls = document.getElementById("lgw-m-falls");
-  var mSaved = document.getElementById("lgw-m-saved");
-  var segRoot = document.querySelector("#demo-lgw-gateway .seg");
-
-  var REQS = [
-    { id: "R1", label: "FAQ：重設密碼步驟", kind: "faq", tokens: 420 },
-    { id: "R2", label: "FAQ：forgot password how-to", kind: "faq-sim", tokens: 400 },
-    { id: "R3", label: "產生 Python 單元測試", kind: "codegen", tokens: 900 },
-    { id: "R4", label: "長推理：容量規劃推導", kind: "reason", tokens: 2200 },
-    { id: "R5", label: "尖峰：免費層第 N+1 次", kind: "burst", tokens: 500 }
+  /* 後端池規格：費率 USD/1k tokens、TTFT ms、輸出 tokens/s、能力級距、context 上限。
+     這是「產品規格表」，不是輸出——輸出是它與使用者輸入運算後的結果。 */
+  var PROVIDERS = [
+    { key: "cheap",    name: "Cheap 池",    inK: 0.10, outK: 0.30,  ttft: 180, tps: 140, cap: 1, ctx: 16000 },
+    { key: "balanced", name: "Balanced 池", inK: 0.50, outK: 1.50,  ttft: 300, tps: 90,  cap: 2, ctx: 128000 },
+    { key: "premium",  name: "Premium 池",  inK: 3.00, outK: 15.00, ttft: 700, tps: 55,  cap: 3, ctx: 200000 },
+    { key: "selfhost", name: "自架 vLLM",   inK: 0.04, outK: 0.04,  ttft: 900, tps: 45,  cap: 1, ctx: 8000 }
   ];
+  var TIERS = {
+    free:     { name: "Free",     budget: 0.50, tol: 8 },
+    pro:      { name: "Pro",      budget: 20,   tol: 4 },
+    internal: { name: "Internal", budget: 200,  tol: 2 }
+  };
+  var TASKS = {
+    faq:        { name: "短 FAQ",     need: 1, cacheable: true },
+    codegen:    { name: "程式碼生成", need: 2, cacheable: false },
+    longreason: { name: "長推理",     need: 3, cacheable: true }
+  };
+  /* 語意漂移曲線與預留係數 */
+  var SAFE_SIM = 0.98, DRIFT_K = 60, RESERVE_HEADROOM = 1.3, CACHE_LAT = 40;
 
-  /* Per strategy: one frame per request processed (and a final summary frame via last) */
-  var FRAMES = {
-    direct: [
-      {
-        idx: 0,
-        state: "active",
-        providers: { cheap: "", balanced: "", premium: "selected" },
-        cost: 0.042,
-        hits: 0,
-        falls: 0,
-        saved: 0,
-        hitRatio: [0, 1],
-        status: "R1 直打 Premium。答案正確，但短 FAQ 也燒旗艦價。",
-        log: "t0  R1 → premium · miss · $0.042"
-      },
-      {
-        idx: 1,
-        state: "active",
-        providers: { cheap: "", balanced: "", premium: "selected" },
-        cost: 0.082,
-        hits: 0,
-        falls: 0,
-        saved: 0,
-        hitRatio: [0, 2],
-        status: "R2 與 R1 語意極近，但仍再次打 Premium——沒有語意快取。",
-        log: "t1  R2 → premium · miss（本可命中）· +$0.040"
-      },
-      {
-        idx: 2,
-        state: "active",
-        providers: { cheap: "", balanced: "", premium: "selected" },
-        cost: 0.172,
-        hits: 0,
-        falls: 0,
-        saved: 0,
-        hitRatio: [0, 3],
-        status: "R3 程式碼生成也走 Premium。品質高，單位成本同樣高。",
-        log: "t2  R3 → premium · miss · +$0.090"
-      },
-      {
-        idx: 3,
-        state: "fall",
-        providers: { cheap: "", balanced: "fallback", premium: "down" },
-        cost: 0.262,
-        hits: 0,
-        falls: 1,
-        saved: 0,
-        hitRatio: [0, 4],
-        status: "R4 需要長推理，Premium 逾時；臨時 fallback 到 Balanced（仍偏貴）。",
-        log: "t3  R4 → premium timeout → balanced fallback · +$0.090"
-      },
-      {
-        idx: 4,
-        state: "active",
-        providers: { cheap: "", balanced: "", premium: "selected" },
-        cost: 0.312,
-        hits: 0,
-        falls: 1,
-        saved: 0,
-        hitRatio: [0, 5],
-        status: "R5 免費層尖峰仍打 Premium——沒有租戶配額閘門。",
-        log: "t4  R5 → premium · 無 quota 擋下 · +$0.050"
-      },
-      {
-        idx: -1,
-        state: "done",
-        providers: { cheap: "", balanced: "", premium: "" },
-        cost: 0.312,
-        hits: 0,
-        falls: 1,
-        saved: 0,
-        hitRatio: [0, 5],
-        status: "回合結束：直打貴模型路徑簡單，但 FAQ 重複與免費層尖峰都會把帳單拉高。",
-        log: "done  cost=$0.312 · hits=0 · fallback=1 · saved_tokens=0",
-        verdict: "直打 Premium：實作最省事，成本最差。重複 FAQ 零命中，尖峰也無配額保護。",
-        tone: "tone-bad"
-      }
-    ],
-    routed: [
-      {
-        idx: 0,
-        state: "active",
-        providers: { cheap: "selected", balanced: "", premium: "" },
-        cost: 0.006,
-        hits: 0,
-        falls: 0,
-        saved: 0,
-        hitRatio: [0, 1],
-        status: "R1 FAQ → 路由到 Cheap 池。任務分級開始生效。",
-        log: "t0  R1 → cheap（faq 策略）· miss · $0.006"
-      },
-      {
-        idx: 1,
-        state: "active",
-        providers: { cheap: "selected", balanced: "", premium: "" },
-        cost: 0.012,
-        hits: 0,
-        falls: 0,
-        saved: 0,
-        hitRatio: [0, 2],
-        status: "R2 仍判為 FAQ，再打 Cheap。有路由但尚未語意快取，仍付第二次推論。",
-        log: "t1  R2 → cheap · miss（語意近但未快取）· +$0.006"
-      },
-      {
-        idx: 2,
-        state: "active",
-        providers: { cheap: "", balanced: "selected", premium: "" },
-        cost: 0.042,
-        hits: 0,
-        falls: 0,
-        saved: 0,
-        hitRatio: [0, 3],
-        status: "R3 codegen → Balanced。比 Premium 便宜，能力足夠。",
-        log: "t2  R3 → balanced（codegen）· miss · +$0.030"
-      },
-      {
-        idx: 3,
-        state: "fall",
-        providers: { cheap: "", balanced: "fallback", premium: "down" },
-        cost: 0.092,
-        hits: 0,
-        falls: 1,
-        saved: 0,
-        hitRatio: [0, 4],
-        status: "R4 先選 Premium 長推理；供應商故障 → fallback Balanced，並標記降級。",
-        log: "t3  R4 → premium down → balanced fallback · +$0.050"
-      },
-      {
-        idx: 4,
-        state: "deny",
-        providers: { cheap: "down", balanced: "", premium: "" },
-        cost: 0.092,
-        hits: 0,
-        falls: 1,
-        saved: 0,
-        hitRatio: [0, 4],
-        status: "R5 觸發免費層 token quota → 429。成本被硬閘門保住。",
-        log: "t4  R5 → DENY 429 quota exceeded · +$0"
-      },
-      {
-        idx: -1,
-        state: "done",
-        providers: { cheap: "", balanced: "", premium: "" },
-        cost: 0.092,
-        hits: 0,
-        falls: 1,
-        saved: 0,
-        hitRatio: [0, 4],
-        status: "回合結束：智慧路由把多數流量離開 Premium，quota 擋住尖峰；但相近 FAQ 仍付兩次。",
-        log: "done  cost=$0.092 · hits=0 · fallback=1 · saved_tokens=0",
-        verdict: "智慧路由：成本約降為直打的 1/3，並有配額保護。下一步用語意快取消掉重複 FAQ。",
-        tone: "tone-lock"
-      }
-    ],
-    cached: [
-      {
-        idx: 0,
-        state: "active",
-        providers: { cheap: "selected", balanced: "", premium: "" },
-        cost: 0.006,
-        hits: 0,
-        falls: 0,
-        saved: 0,
-        hitRatio: [0, 1],
-        status: "R1 FAQ miss → Cheap 生成並寫入 semantic cache。",
-        log: "t0  R1 → cheap · miss · write cache · $0.006"
-      },
-      {
-        idx: 1,
-        state: "hit",
-        providers: { cheap: "", balanced: "", premium: "" },
-        cost: 0.006,
-        hits: 1,
-        falls: 0,
-        saved: 400,
-        hitRatio: [1, 1],
-        status: "R2 與 R1 相似度 ≥ τ → 快取命中，跳過模型，延遲與 token 雙降。",
-        log: "t1  R2 → SEMANTIC HIT（≈R1）· +$0 · saved≈400 tokens"
-      },
-      {
-        idx: 2,
-        state: "active",
-        providers: { cheap: "", balanced: "selected", premium: "" },
-        cost: 0.036,
-        hits: 1,
-        falls: 0,
-        saved: 400,
-        hitRatio: [1, 2],
-        status: "R3 codegen → Balanced（不快取：輸出個人化／易過期策略可關）。",
-        log: "t2  R3 → balanced · miss（政策：codegen 不入 cache）· +$0.030"
-      },
-      {
-        idx: 3,
-        state: "fall",
-        providers: { cheap: "", balanced: "fallback", premium: "down" },
-        cost: 0.086,
-        hits: 1,
-        falls: 1,
-        saved: 400,
-        hitRatio: [1, 3],
-        status: "R4 Premium 故障 → Balanced fallback；長推理結果可選短 TTL 入庫。",
-        log: "t3  R4 → premium down → balanced fallback · +$0.050"
-      },
-      {
-        idx: 4,
-        state: "deny",
-        providers: { cheap: "down", balanced: "", premium: "" },
-        cost: 0.086,
-        hits: 1,
-        falls: 1,
-        saved: 400,
-        hitRatio: [1, 3],
-        status: "R5 仍被 quota 擋住。快取不能繞過租戶硬上限（除非政策允許「只讀快取」模式）。",
-        log: "t4  R5 → DENY 429 · cache 不放行超額租戶"
-      },
-      {
-        idx: -1,
-        state: "done",
-        providers: { cheap: "", balanced: "", premium: "" },
-        cost: 0.086,
-        hits: 1,
-        falls: 1,
-        saved: 400,
-        hitRatio: [1, 3],
-        status: "回合結束：路由 + 語意快取在重複 FAQ 上省下一次完整推論，總成本最低且仍保有 fallback／quota。",
-        log: "done  cost=$0.086 · hits=1 · fallback=1 · saved_tokens≈400",
-        verdict: "路由 + Semantic Cache：重複問題零模型成本；配額與 fallback 仍生效。這是 Gateway 最常見的成本槓桿組合。",
-        tone: "tone-ok"
-      }
-    ]
+  var DEFAULTS = {
+    task: "faq", promptTok: 600, outTok: 250, latMs: 3500,
+    tier: "pro", spentPct: 40, sim: 0.93, tau: 0.90, outage: "none"
   };
 
-  function money(n) {
-    return "$" + n.toFixed(3);
-  }
+  /* 決策碼 → 判定條色調與中文標題（純顯示對照，不參與運算） */
+  var CODE_META = {
+    SERVE_FROM_CACHE: { cls: "d-cache", label: "SERVE_FROM_CACHE" },
+    ROUTE:            { cls: "d-route", label: "ROUTE" },
+    FALLBACK:         { cls: "d-warn",  label: "FALLBACK" },
+    DEGRADE:          { cls: "d-warn",  label: "DEGRADE" },
+    DENY:             { cls: "d-bad",   label: "DENY · 429" }
+  };
+  var GATE_LABEL = {
+    health: "供應商熔斷", cap: "能力不足", ctx: "context 放不下",
+    lat: "延遲超標", budget: "預算不足", policy: "政策不快取",
+    sim: "相似度未達 τ", risk: "錯命中風險過高"
+  };
 
-  function renderProviders(map) {
-    var names = [
-      { k: "cheap", label: "Cheap" },
-      { k: "balanced", label: "Balanced" },
-      { k: "premium", label: "Premium" }
-    ];
-    providersEl.innerHTML = names.map(function (n) {
-      var cls = "lgw-prov" + (map[n.k] ? " " + map[n.k] : "");
-      return '<div class="' + cls + '">' + n.label + "</div>";
-    }).join("");
-  }
+  /* ────────────────── (2) compute* 純函式（不得碰 DOM） ────────────────── */
 
-  function renderReqs(frame) {
-    var html = REQS.map(function (r, i) {
-      var cls = "lgw-req";
-      var meta = r.kind;
-      if (frame.idx === -1) {
-        cls += " done";
-        meta = "done";
-      } else if (i < frame.idx) {
-        cls += " done";
-        meta = "done";
-      } else if (i === frame.idx) {
-        if (frame.state === "hit") cls += " hit";
-        else if (frame.state === "fall") cls += " fall";
-        else if (frame.state === "deny") cls += " deny";
-        else cls += " active";
-        meta = frame.state;
+  function clampN(v, lo, hi, dflt) {
+    v = Number(v);
+    if (!isFinite(v)) { return dflt; }
+    return Math.min(hi, Math.max(lo, v));
+  }
+  function fmtInt(n) {
+    var s = String(Math.round(n)), out = "", i, c = 0;
+    for (i = s.length - 1; i >= 0; i--) {
+      out = s.charAt(i) + out;
+      c++;
+      if (c % 3 === 0 && i > 0) { out = "," + out; }
+    }
+    return out;
+  }
+  function usd(n) { return "$" + n.toFixed(3); }
+
+  // @probe fn       computeAdmission
+  // @probe baseline {"task":"faq","promptTok":600,"outTok":250,"latMs":3500,"tier":"pro","spentPct":40,"sim":0.93,"tau":0.90,"outage":"none"}
+  // @probe sweep    {"task":["codegen","longreason"],"promptTok":[200,8000],"outTok":[50,2000],"latMs":[500,45000],"tier":["free","internal"],"spentPct":[0,100],"sim":[0.50,0.99],"tau":[0.70,0.98],"outage":["premium","balanced"]}
+  function computeAdmission(p) {
+    p = p || {};
+    var taskKey = TASKS[p.task] ? p.task : DEFAULTS.task, task = TASKS[taskKey];
+    var tierKey = TIERS[p.tier] ? p.tier : DEFAULTS.tier, tier = TIERS[tierKey];
+    var outage = (p.outage === "premium" || p.outage === "balanced") ? p.outage : "none";
+    var promptTok = Math.round(clampN(p.promptTok, 200, 8000, DEFAULTS.promptTok));
+    var outTok = Math.round(clampN(p.outTok, 50, 2000, DEFAULTS.outTok));
+    var latMs = Math.round(clampN(p.latMs, 500, 45000, DEFAULTS.latMs));
+    var spentPct = clampN(p.spentPct, 0, 100, DEFAULTS.spentPct);
+    var sim = clampN(p.sim, 0.50, 0.99, DEFAULTS.sim);
+    var tau = clampN(p.tau, 0.70, 0.98, DEFAULTS.tau);
+
+    /* 今日剩餘預算，與這一筆請求的錯命中風險 */
+    var remainBefore = tier.budget * (1 - spentPct / 100);
+    var falseHitPct = Math.min(100, Math.max(0, (SAFE_SIM - sim) * DRIFT_K));
+
+    /* 四個後端池：成本、延遲、准入預留，以及第一條擋下它的規則 */
+    var cands = PROVIDERS.map(function (pv) {
+      var cost = promptTok / 1000 * pv.inK + outTok / 1000 * pv.outK;
+      var lat = pv.ttft + outTok / pv.tps * 1000;
+      var reserve = promptTok / 1000 * pv.inK + outTok * RESERVE_HEADROOM / 1000 * pv.outK;
+      var c = {
+        key: pv.key, name: pv.name, cap: pv.cap,
+        cost: cost, lat: lat, reserve: reserve,
+        capOk: pv.cap >= task.need, hardOk: true, ok: false, gate: "", why: ""
+      };
+      if (outage === pv.key) {
+        c.hardOk = false; c.gate = "health"; c.why = "逾時／5xx，熔斷中";
+      } else if (promptTok + outTok > pv.ctx) {
+        c.hardOk = false; c.gate = "ctx";
+        c.why = fmtInt(promptTok + outTok) + " tok ＞ context 上限 " + fmtInt(pv.ctx);
+      } else if (lat > latMs) {
+        c.hardOk = false; c.gate = "lat";
+        c.why = fmtInt(lat) + " ms ＞ 延遲預算 " + fmtInt(latMs) + " ms";
+      } else if (reserve > remainBefore) {
+        c.hardOk = false; c.gate = "budget";
+        c.why = "預留 " + usd(reserve) + " ＞ 今日剩餘 " + usd(remainBefore);
       }
-      return (
-        '<div class="' + cls + '">' +
-          '<span class="rid">' + r.id + " · " + r.label + "</span>" +
-          '<span class="meta">' + meta + " · ~" + r.tokens + " tok</span>" +
-        "</div>"
-      );
-    }).join("");
-    reqsEl.innerHTML = html;
-  }
+      if (c.hardOk && !c.capOk) {
+        c.gate = "cap";
+        c.why = "能力 L" + pv.cap + " ＜ " + task.name + " 需要 L" + task.need;
+      }
+      c.ok = c.hardOk && c.capOk;
+      if (c.ok) { c.why = "可行"; }
+      return c;
+    });
 
-  function renderCacheBar(pair) {
-    var hits = pair[0];
-    var misses = pair[1];
-    var total = hits + misses;
-    var hPct = total ? (hits / total) * 100 : 0;
-    var mPct = total ? (misses / total) * 100 : 0;
-    cacheBarEl.innerHTML =
-      '<span class="hit" style="width:' + hPct + '%"></span>' +
-      '<span class="miss" style="width:' + mPct + '%"></span>';
-  }
-
-  function appendLog(line) {
-    var div = document.createElement("div");
-    div.innerHTML = '<span class="ev">' + line + "</span>";
-    timelineEl.appendChild(div);
-    timelineEl.scrollTop = timelineEl.scrollHeight;
-  }
-
-  function applyFrame(frame, withLog) {
-    mStep.textContent = String(step);
-    mCost.textContent = money(frame.cost);
-    mHits.textContent = String(frame.hits);
-    mFalls.textContent = String(frame.falls);
-    mSaved.textContent = String(frame.saved);
-    statusEl.textContent = frame.status;
-    renderProviders(frame.providers);
-    renderReqs(frame);
-    renderCacheBar(frame.hitRatio);
-
-    if (frame.verdict) {
-      verdictEl.textContent = frame.verdict;
-      verdictEl.className = "lgw-verdict " + (frame.tone || "");
+    /* Semantic Cache 當作第五個候選：成本 0、延遲只剩查表 */
+    var simOk = sim >= tau, tolOk = falseHitPct <= tier.tol;
+    var cache = {
+      key: "cache", name: "Semantic Cache", cap: task.need,
+      cost: 0, lat: CACHE_LAT, reserve: 0,
+      capOk: true, hardOk: true, ok: task.cacheable && simOk && tolOk, gate: "", why: ""
+    };
+    if (!task.cacheable) {
+      cache.hardOk = false; cache.gate = "policy"; cache.why = task.name + " 依政策不入快取";
+    } else if (!simOk) {
+      cache.hardOk = false; cache.gate = "sim";
+      cache.why = "相似度 " + sim.toFixed(2) + " ＜ 閾值 τ " + tau.toFixed(2);
+    } else if (!tolOk) {
+      cache.hardOk = false; cache.gate = "risk";
+      cache.why = "錯命中風險 " + falseHitPct.toFixed(1) + "% ＞ " + tier.name + " 容忍 " + tier.tol + "%";
     } else {
-      verdictEl.textContent = "判定尚未產生——處理完佇列後會摘要成本／命中／fallback。";
-      verdictEl.className = "lgw-verdict";
+      cache.why = "命中：整次推論省下，且不扣預算";
     }
 
-    if (withLog && frame.log) appendLog(frame.log);
+    var byCost = function (a, b) { return a.cost - b.cost; };
+    var admissible = cands.filter(function (c) { return c.ok; });
+    var degradable = cands.filter(function (c) { return c.hardOk && c.cap === task.need - 1; });
+    var capable = cands.filter(function (c) { return c.capOk; }).slice().sort(byCost);
+    var firstChoice = capable.length ? capable[0] : null;
 
-    var frames = FRAMES[strategy];
-    btnStep.disabled = step >= frames.length;
+    var winner = null, code = "", headline = "";
+    if (cache.ok) {
+      winner = cache;
+      code = "SERVE_FROM_CACHE";
+      headline = "語意快取命中：整次推論跳過，延遲只剩查表時間。";
+    } else if (admissible.length) {
+      winner = admissible.slice().sort(byCost)[0];
+      if (firstChoice && firstChoice.gate === "health" && firstChoice.key !== winner.key) {
+        code = "FALLBACK";
+        headline = "首選供應商熔斷，改由另一個能力同樣足夠的後端承接——換家，不換級。";
+      } else {
+        code = "ROUTE";
+        headline = "正常路由：在能力足夠的後端裡取成本最低者。";
+      }
+    } else if (degradable.length) {
+      winner = degradable.slice().sort(byCost)[0];
+      code = "DEGRADE";
+      headline = "沒有能力足夠的後端可用，降一級作答——換級，品質會打折，回應標頭必須標註 degraded。";
+    } else {
+      code = "DENY";
+      winner = null;
+      headline = cands.filter(function (c) { return c.gate === "budget"; }).length
+        ? "預算硬上限擋下：回 429 並附 Retry-After。"
+        : "四個池都被能力、context 或延遲擋住，快速失敗比硬撐好。";
+    }
+    var denyKind = code !== "DENY" ? ""
+      : (cands.filter(function (c) { return c.gate === "budget"; }).length ? "budget" : "infeasible");
+
+    /* soft reserve → 完成後結算 */
+    var settle = winner ? winner.cost : 0;
+    var reserve = winner ? winner.reserve : 0;
+    var overReservePct = settle > 0 ? (reserve - settle) / settle * 100 : 0;
+    var remainAfter = remainBefore - settle;
+    var servableMore = settle > 0 ? Math.max(0, Math.floor(remainAfter / settle)) : null;
+
+    var reasons = [];
+    if (code === "SERVE_FROM_CACHE") {
+      reasons.push("相似度 " + sim.toFixed(2) + " ≥ τ " + tau.toFixed(2) +
+        "，高出 " + ((sim - tau) * 100).toFixed(0) + " 個百分點");
+      reasons.push("錯命中風險 (0.98 − " + sim.toFixed(2) + ") × 60 = " + falseHitPct.toFixed(1) +
+        "%，未超過 " + tier.name + " 容忍 " + tier.tol + "%");
+      reasons.push("本次計費 $0.000，今日剩餘維持 " + usd(remainBefore) + "（快取命中不動用配額）");
+    } else if (winner) {
+      reasons.push("勝出：" + winner.name + "（能力 L" + winner.cap + "）　實際成本 " + usd(winner.cost) +
+        "　預估延遲 " + fmtInt(winner.lat) + " ms");
+      if (code === "DEGRADE") {
+        reasons.push("降級依據：能力 L" + task.need + " 的後端全數不可用 —— " +
+          capable.map(function (c) { return c.name + "（" + c.why + "）"; }).join("；") +
+          "；改由能力 L" + winner.cap + " 的" + winner.name + "承接");
+      } else if (code === "FALLBACK") {
+        var rest = cands.filter(function (c) {
+          return !c.ok && c.key !== winner.key && (!firstChoice || c.key !== firstChoice.key);
+        });
+        reasons.push("Fallback 依據：首選 " + firstChoice.name + " " + firstChoice.why +
+          (rest.length ? "；其餘出局：" + rest.map(function (c) { return c.name + "（" + c.why + "）"; }).join("；") : ""));
+      } else {
+        var outs = cands.filter(function (c) { return !c.ok && c.key !== winner.key; });
+        reasons.push(outs.length
+          ? ("出局：" + outs.map(function (c) { return c.name + "（" + c.why + "）"; }).join("；"))
+          : "四個池全部可行，取成本最低者");
+      }
+      reasons.push("准入預留 " + usd(reserve) + " → 實際結算 " + usd(settle) +
+        "（超預留 " + overReservePct.toFixed(1) + "%），今日剩餘 " + usd(remainAfter) +
+        "，同樣的請求還能再服務 " + servableMore + " 次");
+    } else {
+      reasons.push(denyKind === "budget"
+        ? "最便宜的池其預留金額仍超過今日剩餘預算，依 Budget cap 政策硬停"
+        : "沒有任何後端同時滿足能力、context 與延遲三條約束");
+      cands.forEach(function (c) { reasons.push(c.name + "：" + c.why); });
+      reasons.push("Semantic Cache：" + cache.why);
+    }
+
+    return {
+      task: taskKey, taskName: task.name, tier: tierKey, tierName: tier.name, outage: outage,
+      promptTok: promptTok, outTok: outTok, latMs: latMs, sim: sim, tau: tau, spentPct: spentPct,
+      needCap: task.need, cacheable: task.cacheable, falseHitPct: falseHitPct, tolPct: tier.tol,
+      budget: tier.budget, remainBefore: remainBefore,
+      candidates: cands, cache: cache,
+      code: code, denyKind: denyKind, headline: headline,
+      winnerKey: winner ? winner.key : null, winnerName: winner ? winner.name : "—",
+      settleUSD: settle, reserveUSD: reserve, overReservePct: overReservePct,
+      remainAfter: remainAfter, servableMore: servableMore,
+      feasibleCount: admissible.length + (cache.ok ? 1 : 0),
+      reasons: reasons
+    };
   }
 
-  function reset(keepStrategy) {
-    step = 0;
-    timelineEl.innerHTML = "";
-    if (!keepStrategy) strategy = "direct";
+  /* ───────────────────────── (3) DOM 參照 ───────────────────────── */
+
+  var demo = document.getElementById("demo-lgw-admit");
+  if (!demo) { return; }
+
+  var segRoot = demo.querySelector(".seg");
+  var elPlane = document.getElementById("lgw-dp-plane");
+  var elCall = document.getElementById("lgw-dp-call");
+  var elRows = document.getElementById("lgw-dp-rows");
+  var elMeter = document.getElementById("lgw-dp-meter");
+  var elStatus = document.getElementById("lgw-dp-status");
+  var btnReset = document.getElementById("lgw-dp-reset");
+
+  var IN = {
+    prompt: document.getElementById("lgw-dp-prompt"),
+    out: document.getElementById("lgw-dp-out"),
+    lat: document.getElementById("lgw-dp-lat"),
+    tier: document.getElementById("lgw-dp-tier"),
+    spent: document.getElementById("lgw-dp-spent"),
+    sim: document.getElementById("lgw-dp-sim"),
+    tau: document.getElementById("lgw-dp-tau"),
+    outage: document.getElementById("lgw-dp-outage")
+  };
+  var OUT = {
+    prompt: document.getElementById("lgw-dp-v-prompt"),
+    out: document.getElementById("lgw-dp-v-out"),
+    lat: document.getElementById("lgw-dp-v-lat"),
+    tier: document.getElementById("lgw-dp-v-tier"),
+    spent: document.getElementById("lgw-dp-v-spent"),
+    sim: document.getElementById("lgw-dp-v-sim"),
+    tau: document.getElementById("lgw-dp-v-tau"),
+    outage: document.getElementById("lgw-dp-v-outage")
+  };
+
+  var state = {
+    task: DEFAULTS.task, promptTok: DEFAULTS.promptTok, outTok: DEFAULTS.outTok,
+    latMs: DEFAULTS.latMs, tier: DEFAULTS.tier, spentPct: DEFAULTS.spentPct,
+    sim: DEFAULTS.sim, tau: DEFAULTS.tau, outage: DEFAULTS.outage
+  };
+
+  /* ─────────────── (4) render(state)：只讀 model 畫出來 ─────────────── */
+
+  var LOG10 = function (v) { return Math.log(v) / Math.LN10; };
+
+  function decadeBounds(values) {
+    var pos = values.filter(function (v) { return v > 0 && isFinite(v); });
+    if (!pos.length) { return { lo: 1, hi: 100 }; }
+    var lo = Math.pow(10, Math.floor(LOG10(Math.min.apply(null, pos))));
+    var hi = Math.pow(10, Math.ceil(LOG10(Math.max.apply(null, pos))));
+    if (hi <= lo) { hi = lo * 10; }
+    if (hi / lo < 100) { hi = lo * 100; }
+    return { lo: lo, hi: hi };
+  }
+  function esc(s) {
+    return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  }
+  function msLabel(v) {
+    if (v >= 1000) { return (v / 1000) + " s"; }
+    return v + " ms";
+  }
+  function usdLabel(v) {
+    if (v >= 1) { return "$" + v; }
+    return "$" + v.toFixed(String(v).length > 4 ? 3 : 2);
+  }
+
+  function buildPlane(m) {
+    var W = 470, H = 300;
+    var GUT = 74, L = GUT + 26, R = 452, T = 16, B = 244;
+    var pts = m.candidates.concat([m.cache]);
+    var xb = decadeBounds(pts.map(function (c) { return c.reserve; }).concat([m.remainBefore]));
+    var yb = decadeBounds(pts.map(function (c) { return c.lat; }).concat([m.latMs]));
+
+    function px(v) {
+      if (!(v > 0)) { return GUT + 8; }
+      var t = (LOG10(v) - LOG10(xb.lo)) / (LOG10(xb.hi) - LOG10(xb.lo));
+      return L + Math.max(0, Math.min(1, t)) * (R - L);
+    }
+    function py(v) {
+      var t = (LOG10(Math.max(v, yb.lo)) - LOG10(yb.lo)) / (LOG10(yb.hi) - LOG10(yb.lo));
+      return B - Math.max(0, Math.min(1, t)) * (B - T);
+    }
+
+    var s = [];
+    s.push('<svg viewBox="0 0 ' + W + ' ' + H + '" role="img" aria-label="候選後端在准入預留與預估延遲平面上的位置">');
+    s.push('<title>准入預留 × 預估延遲 決策平面</title>');
+    s.push('<rect x="0" y="0" width="' + W + '" height="' + H + '" fill="#fafaf9"/>');
+
+    /* 可行域：兩條量化約束切出的左下矩形 */
+    var bx = px(m.remainBefore), by = py(m.latMs);
+    s.push('<rect x="' + (GUT + 2) + '" y="' + by.toFixed(1) + '" width="' + (bx - GUT - 2).toFixed(1) +
+      '" height="' + (B - by).toFixed(1) + '" fill="var(--ok-soft)" stroke="none"/>');
+
+    /* 網格與刻度 */
+    var e;
+    for (e = LOG10(xb.lo); e <= LOG10(xb.hi) + 0.001; e += 1) {
+      var xv = Math.pow(10, Math.round(e)), xp = px(xv);
+      s.push('<line x1="' + xp.toFixed(1) + '" y1="' + T + '" x2="' + xp.toFixed(1) + '" y2="' + B +
+        '" stroke="var(--border)" stroke-width="1"/>');
+      s.push('<text x="' + xp.toFixed(1) + '" y="' + (B + 15) + '" font-family="var(--mono)" font-size="11" fill="#6b7076" text-anchor="middle">' +
+        usdLabel(xv) + '</text>');
+    }
+    for (e = LOG10(yb.lo); e <= LOG10(yb.hi) + 0.001; e += 1) {
+      var yv = Math.pow(10, Math.round(e)), yp = py(yv);
+      s.push('<line x1="' + (GUT + 2) + '" y1="' + yp.toFixed(1) + '" x2="' + R + '" y2="' + yp.toFixed(1) +
+        '" stroke="var(--border)" stroke-width="1"/>');
+      s.push('<text x="' + (GUT - 4) + '" y="' + (yp + 4).toFixed(1) + '" font-family="var(--mono)" font-size="11" fill="#6b7076" text-anchor="end">' +
+        msLabel(yv) + '</text>');
+    }
+
+    /* 左側 $0 專用槽（對數軸放不下 0，單獨畫一格並標示） */
+    s.push('<line x1="' + (GUT + 16) + '" y1="' + T + '" x2="' + (GUT + 16) + '" y2="' + B +
+      '" stroke="var(--border-strong)" stroke-width="1" stroke-dasharray="2 3"/>');
+    s.push('<text x="' + (GUT + 8) + '" y="' + (B + 15) + '" font-family="var(--mono)" font-size="11" fill="#6b7076" text-anchor="middle">$0</text>');
+
+    /* 兩條約束線 */
+    s.push('<line x1="' + bx.toFixed(1) + '" y1="' + T + '" x2="' + bx.toFixed(1) + '" y2="' + B +
+      '" stroke="var(--bad)" stroke-width="1.5" stroke-dasharray="5 3"/>');
+    s.push('<text x="' + Math.min(bx + 5, R - 92).toFixed(1) + '" y="' + (T + 11) +
+      '" font-family="var(--mono)" font-size="10.5" fill="var(--bad)">剩餘預算 ' + usd(m.remainBefore) + '</text>');
+    s.push('<line x1="' + (GUT + 2) + '" y1="' + by.toFixed(1) + '" x2="' + R + '" y2="' + by.toFixed(1) +
+      '" stroke="var(--bad)" stroke-width="1.5" stroke-dasharray="5 3"/>');
+    s.push('<text x="' + R + '" y="' + Math.max(by - 5, T + 10).toFixed(1) +
+      '" font-family="var(--mono)" font-size="10.5" fill="var(--bad)" text-anchor="end">延遲預算 ' + fmtInt(m.latMs) + ' ms</text>');
+
+    /* 邊框 */
+    s.push('<rect x="' + (GUT + 2) + '" y="' + T + '" width="' + (R - GUT - 2) + '" height="' + (B - T) +
+      '" fill="none" stroke="var(--border-strong)" stroke-width="1"/>');
+
+    /* 候選點 */
+    pts.forEach(function (c) {
+      var cx = px(c.reserve), cy = py(c.lat);
+      var over = c.lat > yb.hi || c.reserve > xb.hi;
+      var stroke = c.ok ? "var(--ok)" : (c.gate === "cap" ? "var(--warn)" : "var(--bad)");
+      var fill = c.ok ? "var(--ok-soft)" : "#ffffff";
+      if (c.key === m.winnerKey) {
+        s.push('<circle cx="' + cx.toFixed(1) + '" cy="' + cy.toFixed(1) +
+          '" r="10.5" fill="none" stroke="var(--accent)" stroke-width="1.5"/>');
+        stroke = "var(--accent)";
+        fill = "var(--accent-soft)";
+      }
+      s.push('<circle cx="' + cx.toFixed(1) + '" cy="' + cy.toFixed(1) + '" r="5.5" fill="' + fill +
+        '" stroke="' + stroke + '" stroke-width="2"' + (c.ok || c.key === m.winnerKey ? "" : ' stroke-dasharray="3 2"') + '/>');
+      var anchor = cx > (L + R) / 2 ? "end" : "start";
+      var tx = anchor === "end" ? cx - 9 : cx + 9;
+      s.push('<text x="' + tx.toFixed(1) + '" y="' + (cy - 8).toFixed(1) +
+        '" font-family="var(--mono)" font-size="10.5" fill="#262a2f" text-anchor="' + anchor + '">' + esc(c.name) + '</text>');
+      s.push('<text x="' + tx.toFixed(1) + '" y="' + (cy + 12).toFixed(1) +
+        '" font-family="var(--mono)" font-size="10" fill="' + (c.ok ? "#4a7a5e" : "#8a6a3a") +
+        '" text-anchor="' + anchor + '">' + (c.ok ? "可行" : esc(GATE_LABEL[c.gate] || "出局")) + '</text>');
+      if (over) {
+        s.push('<text x="' + tx.toFixed(1) + '" y="' + (cy + 24).toFixed(1) +
+          '" font-family="var(--mono)" font-size="10" fill="var(--bad)" text-anchor="' + anchor +
+          '">▲ 實際 ' + fmtInt(c.lat) + ' ms（超出圖框）</text>');
+      }
+    });
+
+    /* 軸名 */
+    s.push('<text x="' + ((GUT + R) / 2) + '" y="' + (H - 6) +
+      '" font-family="var(--mono)" font-size="11" fill="#6b7076" text-anchor="middle">准入預留 USD / 次（對數）</text>');
+    s.push('<text x="12" y="' + ((T + B) / 2) + '" font-family="var(--mono)" font-size="11" fill="#6b7076" ' +
+      'text-anchor="middle" transform="rotate(-90 12 ' + ((T + B) / 2) + ')">預估延遲 ms（對數）</text>');
+    s.push('</svg>');
+    return s.join("");
+  }
+
+  function buildRows(m) {
+    return m.candidates.concat([m.cache]).map(function (c) {
+      var cls = c.key === m.winnerKey ? "win" : (c.ok ? "" : "out");
+      var stTxt = c.ok ? (c.key === m.winnerKey ? "勝出" : "可行")
+        : (GATE_LABEL[c.gate] || "出局") + "：" + c.why;
+      return '<tr class="' + cls + '">' +
+        "<td>" + esc(c.name) + "</td>" +
+        '<td class="num">L' + c.cap + "</td>" +
+        '<td class="num">' + usd(c.reserve) + "</td>" +
+        '<td class="num">' + usd(c.cost) + "</td>" +
+        '<td class="num">' + fmtInt(c.lat) + " ms</td>" +
+        '<td class="st">' + esc(stTxt) + "</td>" +
+        "</tr>";
+    }).join("");
+  }
+
+  function buildMeter(m) {
+    var cells = [
+      { l: "准入預留（拿去比對預算的數）", v: m.winnerKey ? usd(m.reserveUSD) : "—" },
+      { l: "完成後實際結算", v: m.winnerKey ? usd(m.settleUSD) : "$0.000" },
+      { l: "超預留比例", v: m.settleUSD > 0 ? m.overReservePct.toFixed(1) + "%" : "—" },
+      { l: "今日剩餘 / 還能服務", v: usd(m.remainAfter) + (m.servableMore === null ? " / 不扣額" : " / " + m.servableMore + " 次") }
+    ];
+    return cells.map(function (c) {
+      return '<div class="lgw-dp-cell"><div class="ml">' + esc(c.l) + '</div><div class="mv">' + esc(c.v) + "</div></div>";
+    }).join("");
+  }
+
+  function render(m) {
+    OUT.prompt.textContent = fmtInt(m.promptTok);
+    OUT.out.textContent = fmtInt(m.outTok);
+    OUT.lat.textContent = fmtInt(m.latMs) + " ms";
+    OUT.tier.textContent = m.tierName;
+    OUT.spent.textContent = Math.round(m.spentPct) + "%";
+    OUT.sim.textContent = m.sim.toFixed(2);
+    OUT.tau.textContent = m.tau.toFixed(2);
+    OUT.outage.textContent = m.outage === "none" ? "全部正常" : (m.outage === "premium" ? "Premium 熔斷" : "Balanced 熔斷");
+
+    elPlane.innerHTML = buildPlane(m);
+    elRows.innerHTML = buildRows(m);
+    elMeter.innerHTML = buildMeter(m);
+
+    var meta = CODE_META[m.code];
+    elCall.className = "lgw-dp-call " + meta.cls;
+    elCall.innerHTML =
+      '<div class="cc">' + esc(meta.label) + (m.winnerKey ? " → " + esc(m.winnerName) : "") + "</div>" +
+      '<div class="ch">' + esc(m.headline) + "</div>" +
+      "<ul>" + m.reasons.map(function (r) { return "<li>" + esc(r) + "</li>"; }).join("") + "</ul>";
+
+    elStatus.textContent = m.taskName + "（需能力 L" + m.needCap + "）· " + m.tierName + " 租戶 · 五個候選中 " +
+      m.feasibleCount + " 個通過全部約束 · 錯命中風險 " + m.falseHitPct.toFixed(1) +
+      "%（容忍 " + m.tolPct + "%）";
+  }
+
+  function recompute() { render(computeAdmission(state)); }
+
+  /* ───────────────────────── (5) 事件綁定 ───────────────────────── */
+
+  function syncControls() {
+    IN.prompt.value = String(state.promptTok);
+    IN.out.value = String(state.outTok);
+    IN.lat.value = String(state.latMs);
+    IN.tier.value = state.tier;
+    IN.spent.value = String(state.spentPct);
+    IN.sim.value = String(Math.round(state.sim * 100));
+    IN.tau.value = String(Math.round(state.tau * 100));
+    IN.outage.value = state.outage;
     if (segRoot) {
-      var buttons = segRoot.querySelectorAll("button[data-sc]");
-      buttons.forEach(function (b) {
-        b.setAttribute("aria-pressed", b.getAttribute("data-sc") === strategy ? "true" : "false");
+      Array.prototype.forEach.call(segRoot.querySelectorAll("button[data-task]"), function (b) {
+        b.setAttribute("aria-pressed", b.getAttribute("data-task") === state.task ? "true" : "false");
       });
     }
-    var idle = {
-      idx: -2,
-      state: "idle",
-      providers: { cheap: "", balanced: "", premium: "" },
-      cost: 0,
-      hits: 0,
-      falls: 0,
-      saved: 0,
-      hitRatio: [0, 0],
-      status: "選擇策略後按「處理下一筆」。對照三種策略的成本與命中差異。"
-    };
-    /* show empty queue state */
-    mStep.textContent = "0";
-    mCost.textContent = "$0.000";
-    mHits.textContent = "0";
-    mFalls.textContent = "0";
-    mSaved.textContent = "0";
-    statusEl.textContent = idle.status;
-    verdictEl.textContent = "判定尚未產生——處理完佇列後會摘要成本／命中／fallback。";
-    verdictEl.className = "lgw-verdict";
-    renderProviders(idle.providers);
-    renderCacheBar([0, 0]);
-    reqsEl.innerHTML = REQS.map(function (r) {
-      return (
-        '<div class="lgw-req">' +
-          '<span class="rid">' + r.id + " · " + r.label + "</span>" +
-          '<span class="meta">' + r.kind + " · ~" + r.tokens + " tok</span>" +
-        "</div>"
-      );
-    }).join("");
-    btnStep.disabled = false;
   }
 
-  function onStep() {
-    var frames = FRAMES[strategy];
-    if (step >= frames.length) return;
-    var frame = frames[step];
-    step += 1;
-    applyFrame(frame, true);
+  function bindRange(el, key, scale) {
+    if (!el) { return; }
+    el.addEventListener("input", function () {
+      state[key] = scale ? Number(el.value) / scale : Number(el.value);
+      recompute();
+    });
   }
+  bindRange(IN.prompt, "promptTok", 0);
+  bindRange(IN.out, "outTok", 0);
+  bindRange(IN.lat, "latMs", 0);
+  bindRange(IN.spent, "spentPct", 0);
+  bindRange(IN.sim, "sim", 100);
+  bindRange(IN.tau, "tau", 100);
 
+  if (IN.tier) {
+    IN.tier.addEventListener("change", function () { state.tier = IN.tier.value; recompute(); });
+  }
+  if (IN.outage) {
+    IN.outage.addEventListener("change", function () { state.outage = IN.outage.value; recompute(); });
+  }
   if (segRoot) {
-    segRoot.addEventListener("click", function (e) {
-      var btn = e.target.closest("button[data-sc]");
-      if (!btn) return;
-      strategy = btn.getAttribute("data-sc");
-      reset(true);
+    segRoot.addEventListener("click", function (ev) {
+      var btn = ev.target.closest ? ev.target.closest("button[data-task]") : null;
+      if (!btn) { return; }
+      state.task = btn.getAttribute("data-task");
+      syncControls();
+      recompute();
+    });
+  }
+  if (btnReset) {
+    btnReset.addEventListener("click", function () {
+      state.task = DEFAULTS.task;
+      state.promptTok = DEFAULTS.promptTok;
+      state.outTok = DEFAULTS.outTok;
+      state.latMs = DEFAULTS.latMs;
+      state.tier = DEFAULTS.tier;
+      state.spentPct = DEFAULTS.spentPct;
+      state.sim = DEFAULTS.sim;
+      state.tau = DEFAULTS.tau;
+      state.outage = DEFAULTS.outage;
+      syncControls();
+      recompute();
     });
   }
 
-  if (btnStep) btnStep.addEventListener("click", onStep);
-  if (btnReset) btnReset.addEventListener("click", function () { reset(true); });
-
-  reset(false);
+  syncControls();
+  recompute();
 })();
 </script>
 
