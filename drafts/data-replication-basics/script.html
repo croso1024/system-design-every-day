@@ -1,312 +1,473 @@
-<style>
-  svg circle {
-    transition: fill 0.3s, stroke 0.3s;
-  }
-  svg circle.ns-idle { fill: #ffffff; stroke: var(--border-strong); }
-  svg circle.ns-lock { fill: var(--warn-soft); stroke: var(--warn); }
-  svg circle.ns-ok { fill: var(--ok-soft); stroke: var(--ok); }
-  svg circle.ns-bad { fill: var(--bad-soft); stroke: var(--bad); }
-  svg circle.ns-wait { fill: var(--accent-soft); stroke: var(--accent); }
-  
-  circle#packet-write, circle#packet-f1, circle#packet-f2, circle#packet-read {
-    filter: drop-shadow(0px 1px 2px rgba(0,0,0,0.15));
-  }
-  
-  .tl-scenarios {
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
-    margin-bottom: 16px;
-  }
-  
-  .tl-opt {
-    display: flex;
-    gap: 12px;
-    align-items: flex-start;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-sm);
-    padding: 12px 14px;
-    cursor: pointer;
-    background: #fff;
-    transition: border-color 0.15s, background 0.15s;
-    text-align: left;
-    width: 100%;
-  }
-  
-  .tl-opt:hover {
-    background: var(--bg-soft);
-  }
-  
-  .tl-opt[aria-pressed="true"] {
-    border-color: var(--accent);
-    background: var(--accent-soft);
-  }
-  
-  .tl-opt .tlname {
-    font-weight: 700;
-    font-size: 14px;
-    color: var(--text);
-  }
-  
-  .tl-opt .tldesc {
-    font-size: 12.5px;
-    color: var(--text-2);
-    margin-top: 4px;
-    line-height: 1.5;
-  }
-  
-  .tl-opt .tlbadge {
-    font-family: var(--mono);
-    font-size: 10px;
-    border: 1px solid var(--border-strong);
-    border-radius: 4px;
-    padding: 1px 6px;
-    color: var(--text-3);
-    flex: 0 0 auto;
-    margin-top: 2px;
-  }
-</style>
-
 <script>
-(function() {
-  // State variables
-  let scenario = 'normal'; // 'normal', 'stale-read', 'guard'
-  let isWriting = false;
-  let isReading = false;
-  let writeCompleted = false;
-  let f2Lagging = false;
-  
-  // DOM Elements
-  const btnWrite = document.getElementById('btn-write');
-  const btnRead = document.getElementById('btn-read');
-  const btnReset = document.getElementById('btn-reset');
-  const statusLine = document.getElementById('demo-status');
-  
-  const clientVal = document.getElementById('client-val');
-  const leaderVal = document.getElementById('leader-val');
-  const f1Val = document.getElementById('f1-val');
-  const f2Val = document.getElementById('f2-val');
-  
-  const lineClientLeader = document.getElementById('line-client-leader');
-  const lineLeaderF1 = document.getElementById('line-leader-f1');
-  const lineLeaderF2 = document.getElementById('line-leader-f2');
-  const lineClientF2 = document.getElementById('line-client-f2');
-  const lineClientLeaderRead = document.getElementById('line-client-leader-read');
-  
-  // Animation utility
-  function animateAlongPath(packetId, pathId, duration, reverse, onComplete) {
-    const packet = document.getElementById(packetId);
-    const path = document.getElementById(pathId);
-    if (!packet || !path) return;
+(function () {
+  "use strict";
 
-    packet.style.display = 'block';
-    const pathLength = path.getTotalLength();
-    const startTime = performance.now();
+  /* ================= (1) 常數與參數表 ================= */
 
-    function update(time) {
-      const elapsed = time - startTime;
-      let progress = elapsed / duration;
-      if (progress > 1) progress = 1;
+  var LOCAL_MS = 5;             /* Leader 本機寫入成本 */
+  var SHARD2_FACTOR = 0.35;     /* 第二個分片的複寫串流較快的倍率 */
+  var N_WRITES = 3;
+  var CAUSE_SEQ = 2;            /* 貼文 #2 */
+  var REPLY_SEQ = 3;            /* 回覆，因果上依賴貼文 #2 */
+  var WRITE_LABEL = ["貼文 #1「Hello」", "貼文 #2「World」", "回覆「吃飽了」"];
+  var ROUTES = ["rr", "sticky", "guard"];
+  var ROUTE_NAME = { rr: "輪詢（1→A、2→B）", sticky: "黏性（都讀 A）", guard: "讀寫守護（讀 Leader）" };
 
-      const currentProgress = reverse ? (1 - progress) : progress;
-      const point = path.getPointAtLength(currentProgress * pathLength);
-      packet.setAttribute('cx', point.x);
-      packet.setAttribute('cy', point.y);
+  var LIM = {
+    gapMs: [20, 200], lagA: [0, 400], lagB: [0, 400],
+    readDelay1: [0, 400], readGap: [20, 400]
+  };
+  var BASE = {
+    gapMs: 60, lagA: 110, lagB: 280,
+    readDelay1: 40, readGap: 60, route: "rr", crossShard: true
+  };
 
-      if (progress < 1) {
-        requestAnimationFrame(update);
-      } else {
-        packet.style.display = 'none';
-        if (onComplete) onComplete();
+  /* SVG 幾何 */
+  var PX0 = 40, PX1 = 318, PY0 = 20, PY1 = 140;
+  var C_LEADER = "#3f6188", C_A = "#4d7d68", C_B = "#a3743e";
+  var C_BAD = "#a8554f", C_GRID = "#ecebe8", C_AXIS = "#dedcd8", C_MUTE = "#9aa0a8";
+
+  /* ================= (2) compute* 純函式（不得碰 DOM） ================= */
+
+  function clampInt(v, lo, hi, dflt) {
+    var n = Math.round(Number(v));
+    if (!isFinite(n)) n = dflt;
+    if (n < lo) n = lo;
+    if (n > hi) n = hi;
+    return n;
+  }
+
+  // @probe fn       computeReplication
+  // @probe baseline {"gapMs":60,"lagA":110,"lagB":280,"readDelay1":40,"readGap":60,"route":"rr","crossShard":true}
+  // @probe sweep    {"gapMs":[20,200],"lagA":[0,400],"lagB":[0,400],"readDelay1":[0,400],"readGap":[20,400],"route":["rr","guard"],"crossShard":[true,false]}
+  function computeReplication(p) {
+    p = p || {};
+    var gapMs = clampInt(p.gapMs, LIM.gapMs[0], LIM.gapMs[1], BASE.gapMs);
+    var lagA = clampInt(p.lagA, LIM.lagA[0], LIM.lagA[1], BASE.lagA);
+    var lagB = clampInt(p.lagB, LIM.lagB[0], LIM.lagB[1], BASE.lagB);
+    var readDelay1 = clampInt(p.readDelay1, LIM.readDelay1[0], LIM.readDelay1[1], BASE.readDelay1);
+    var readGap = clampInt(p.readGap, LIM.readGap[0], LIM.readGap[1], BASE.readGap);
+    var route = ROUTES.indexOf(String(p.route)) === -1 ? BASE.route : String(p.route);
+    var crossShard = p.crossShard == null ? BASE.crossShard : !!p.crossShard;
+
+    var i, j, k;
+
+    /* 寫入序列：時刻由 gapMs 算，分片由 crossShard 決定 */
+    var writes = [];
+    for (i = 1; i <= N_WRITES; i += 1) {
+      writes.push({
+        seq: i,
+        at: (i - 1) * gapMs,
+        shard: (crossShard && i === REPLY_SEQ) ? 2 : 1,
+        label: WRITE_LABEL[i - 1]
+      });
+    }
+
+    var replicas = [
+      { id: "leader", name: "Leader", lag: 0 },
+      { id: "a", name: "Follower A", lag: lagA },
+      { id: "b", name: "Follower B", lag: lagB }
+    ];
+
+    /* ---- 唯一的抵達時刻函式：ack、可見前綴、遺失窗、階梯線全部走它 ---- */
+    function effLag(lag, shard) {
+      return shard === 2 ? Math.round(lag * SHARD2_FACTOR) : lag;
+    }
+    function arrivalAt(seq, lag) {
+      var w = writes[seq - 1];
+      return w.at + effLag(lag, w.shard);
+    }
+    /* 前 k 筆「全部」到齊的時刻（前綴語意，對 k 單調不減） */
+    function prefixDoneAt(kk, lag) {
+      var m = 0, a, q;
+      for (q = 1; q <= kk; q += 1) { a = arrivalAt(q, lag); if (a > m) m = a; }
+      return m;
+    }
+    function prefixSeen(lag, t) {
+      var n = 0, q;
+      for (q = 1; q <= N_WRITES; q += 1) {
+        if (prefixDoneAt(q, lag) <= t) { n = q; } else { break; }
       }
+      return n;
     }
-    requestAnimationFrame(update);
-  }
-
-  function setNodeState(nodeId, stateClass) {
-    const node = document.getElementById(nodeId);
-    if (!node) return;
-    const circle = node.querySelector('circle');
-    if (circle) {
-      circle.className.baseVal = stateClass;
+    /* 階梯線：[[t, level], ...]，每一步先水平再垂直 */
+    function stair(lag) {
+      var pts = [[0, 0]], q, tk;
+      for (q = 1; q <= N_WRITES; q += 1) {
+        tk = prefixDoneAt(q, lag);
+        pts.push([tk, q - 1]);
+        pts.push([tk, q]);
+      }
+      return pts;
     }
-  }
 
-  // Initialize nodes
-  function init() {
-    isWriting = false;
-    isReading = false;
-    writeCompleted = false;
-    
-    btnWrite.disabled = false;
-    btnRead.disabled = true;
-    
-    clientVal.textContent = 'x = ?';
-    leaderVal.textContent = 'x = 0';
-    f1Val.textContent = 'x = 0';
-    f2Val.textContent = 'x = 0';
-    
-    setNodeState('node-client', 'ns-idle');
-    setNodeState('node-leader', 'ns-idle');
-    setNodeState('node-f1', 'ns-idle');
-    setNodeState('node-f2', scenario === 'normal' ? 'ns-idle' : 'ns-bad');
-    
-    lineClientLeader.setAttribute('stroke', '#dedcd8');
-    lineLeaderF1.setAttribute('stroke', '#dedcd8');
-    lineLeaderF2.setAttribute('stroke', '#dedcd8');
-    lineClientF2.setAttribute('stroke', '#dedcd8');
-    lineClientLeaderRead.style.display = 'none';
-    
-    if (scenario === 'normal') {
-      statusLine.textContent = '請點擊「1. 發送寫入 Write(x=10)」開始模擬正常同步與異步複寫。';
-    } else if (scenario === 'stale-read') {
-      statusLine.textContent = 'Follower 2 處於 Lag 狀態。請點擊「1. 發送寫入 Write(x=10)」觀察寫入流程。';
-    } else {
-      statusLine.textContent = '啟用守護模式。請點擊「1. 發送寫入 Write(x=10)」觀察一致性守護如何防禦 Stale Read。';
+    function replicaFor(n) {
+      if (route === "guard") return replicas[0];
+      if (route === "sticky") return replicas[1];
+      return n === 1 ? replicas[1] : replicas[2];
     }
-  }
 
-  // Scenario Selection
-  document.querySelectorAll('[data-scenario]').forEach(button => {
-    button.addEventListener('click', function() {
-      if (isWriting || isReading) return; // Prevent switching during animation
-      
-      document.querySelectorAll('[data-scenario]').forEach(btn => {
-        btn.setAttribute('aria-pressed', 'false');
-      });
-      this.setAttribute('aria-pressed', 'true');
-      scenario = this.getAttribute('data-scenario');
-      init();
-    });
-  });
+    function buildSide(mode) {
+      var ackAt = [], ackLatency = [], q;
+      for (q = 1; q <= N_WRITES; q += 1) {
+        /* 半同步＝等最快的一個副本；全異步＝寫完本地就回。兩者都用同一個 arrivalAt */
+        ackAt.push(mode === "semi"
+          ? LOCAL_MS + Math.min(arrivalAt(q, lagA), arrivalAt(q, lagB))
+          : writes[q - 1].at + LOCAL_MS);
+        ackLatency.push(ackAt[q - 1] - writes[q - 1].at);
+      }
+      var writeDoneAt = Math.max.apply(null, ackAt);
+      var ackLatencyMax = Math.max.apply(null, ackLatency);
+      var readAt = [writeDoneAt + readDelay1, writeDoneAt + readDelay1 + readGap];
 
-  // Write Action
-  btnWrite.addEventListener('click', function() {
-    if (isWriting || writeCompleted) return;
-    isWriting = true;
-    btnWrite.disabled = true;
-    
-    statusLine.textContent = 'Client 發送 Write(x=10) 寫入請求給 Leader...';
-    setNodeState('node-client', 'ns-wait');
-    lineClientLeader.setAttribute('stroke', 'var(--accent)');
-    
-    // Step 1: Client to Leader
-    animateAlongPath('packet-write', 'line-client-leader', 800, false, function() {
-      statusLine.textContent = 'Leader 寫入本地，並併發向 Follower 1 (Sync) 與 Follower 2 (Async) 發送複寫請求...';
-      setNodeState('node-leader', 'ns-lock');
-      leaderVal.textContent = 'x = 10';
-      lineLeaderF1.setAttribute('stroke', 'var(--accent)');
-      lineLeaderF2.setAttribute('stroke', 'var(--accent)');
-      
-      let syncCompleted = false;
-      let asyncCompleted = false;
-      
-      // Step 2a: Leader to Follower 1 (Sync)
-      animateAlongPath('packet-f1', 'line-leader-f1', 600, false, function() {
-        setNodeState('node-f1', 'ns-lock');
-        f1Val.textContent = 'x = 10';
-        statusLine.textContent = 'Follower 1 (Sync) 寫入成功，回傳 ACK 給 Leader...';
-        
-        // Step 3a: Follower 1 ACK to Leader
-        animateAlongPath('packet-f1', 'line-leader-f1', 600, true, function() {
-          setNodeState('node-f1', 'ns-ok');
-          syncCompleted = true;
-          checkWriteAcknowledge();
+      var reads = [], n, rep, t, seen, leaderSeen, acked, replyVis, causeVis;
+      for (n = 1; n <= 2; n += 1) {
+        rep = replicaFor(n);
+        t = readAt[n - 1];
+        seen = prefixSeen(rep.lag, t);
+        leaderSeen = prefixSeen(0, t);
+        replyVis = arrivalAt(REPLY_SEQ, rep.lag) <= t;
+        causeVis = arrivalAt(CAUSE_SEQ, rep.lag) <= t;
+        acked = 0;
+        for (q = 0; q < N_WRITES; q += 1) { if (ackAt[q] <= t) acked += 1; }
+        reads.push({
+          n: n, at: t, replicaId: rep.id, replicaName: rep.name,
+          seen: seen, leaderSeen: leaderSeen, behind: leaderSeen - seen, acked: acked,
+          /* 快照落後多少毫秒＝第一筆漏掉的寫入，在 Leader 上已經存在了多久 */
+          staleMs: seen >= leaderSeen ? 0 : t - writes[seen].at,
+          replyVisible: replyVis, causeVisible: causeVis,
+          ryw: seen < acked,
+          prefix: replyVis && !causeVis
         });
-      });
-      
-      // Step 2b: Leader to Follower 2 (Async)
-      let asyncDuration = scenario === 'normal' ? 1200 : 8000; // Simulate lag in stale-read & guard
-      animateAlongPath('packet-f2', 'line-leader-f2', asyncDuration, false, function() {
-        setNodeState('node-f2', 'ns-ok');
-        f2Val.textContent = 'x = 10';
-        asyncCompleted = true;
-        if (writeCompleted && scenario !== 'normal') {
-          statusLine.textContent = '背景任務：Follower 2 (Async) 終於完成了異步同步，數據達到最終一致。';
-        }
-      });
-      
-      function checkWriteAcknowledge() {
-        if (syncCompleted) {
-          statusLine.textContent = 'Leader 收到 Sync 副本確認，立刻向 Client 返回「寫入成功」！此時 Follower 2 仍在背景同步中...';
-          setNodeState('node-leader', 'ns-ok');
-          lineClientLeader.setAttribute('stroke', 'var(--ok)');
-          
-          // Step 4: Leader returns success to Client
-          animateAlongPath('packet-write', 'line-client-leader', 800, true, function() {
-            setNodeState('node-client', 'ns-ok');
-            clientVal.textContent = 'x = 10';
-            writeCompleted = true;
-            isWriting = false;
-            btnRead.disabled = false;
-            
-            if (scenario === 'normal') {
-              statusLine.textContent = '寫入成功！現在你可以點擊「2. 發送讀取 Read(x)」來測試讀取。';
-            } else if (scenario === 'stale-read') {
-              statusLine.textContent = '寫入成功！此時 Follower 2 仍處於 Lag 狀態。請立刻點擊「2. 發送讀取 Read(x)」，看看會發生什麼！';
-            } else {
-              statusLine.textContent = '寫入成功！Follower 2 仍處於 Lag 狀態。請點擊「2. 發送讀取 Read(x)」，看一致性守護如何運作。';
-            }
-          });
+      }
+
+      var monoDrop = reads[0].seen - reads[1].seen;
+
+      /* 遺失窗：在「三筆都回成功」的那一刻崩潰，
+         已向 Client 承諾、卻連一個 Follower 都還沒收到的寫入。
+         與可見前綴、階梯線共用同一個 arrivalAt。 */
+      var tCrash = writeDoneAt;
+      var lossList = [];
+      for (q = 1; q <= N_WRITES; q += 1) {
+        if (ackAt[q - 1] <= tCrash &&
+            arrivalAt(q, lagA) > tCrash &&
+            arrivalAt(q, lagB) > tCrash) {
+          lossList.push(q);
         }
       }
-    });
-  });
 
-  // Read Action
-  btnRead.addEventListener('click', function() {
-    if (isReading || !writeCompleted) return;
-    isReading = true;
-    btnRead.disabled = true;
-    
-    if (scenario === 'normal') {
-      statusLine.textContent = 'Client 發送 Read(x) 讀取請求，由負載均衡隨機路由到 Follower 2 (Async)...';
-      lineClientF2.setAttribute('stroke', 'var(--accent)');
-      
-      animateAlongPath('packet-read', 'line-client-f2', 800, false, function() {
-        statusLine.textContent = 'Follower 2 已完成同步，回傳最新值 x = 10 給 Client...';
-        
-        animateAlongPath('packet-read', 'line-client-f2', 800, true, function() {
-          statusLine.textContent = '讀取成功！Client 成功讀取最新值 x = 10。';
-          setNodeState('node-client', 'ns-ok');
-          isReading = false;
-        });
-      });
-    } else if (scenario === 'stale-read') {
-      statusLine.textContent = 'Client 發送 Read(x) 讀取請求，被負載均衡路由到落後的 Follower 2...';
-      lineClientF2.setAttribute('stroke', 'var(--accent)');
-      
-      animateAlongPath('packet-read', 'line-client-f2', 800, false, function() {
-        statusLine.textContent = 'Follower 2 尚未收到最新變更（x = 0），回傳舊數據給 Client...';
-        
-        animateAlongPath('packet-read', 'line-client-f2', 800, true, function() {
-          statusLine.textContent = '🚨 異常觸發！Client 讀到了舊值 x = 0 (Stale Read)！這違反了 Read-after-write 一致性。';
-          clientVal.textContent = 'x = 0';
-          setNodeState('node-client', 'ns-bad');
-          isReading = false;
-        });
-      });
-    } else if (scenario === 'guard') {
-      statusLine.textContent = 'Client 發送 Read(x) 讀取請求。系統檢測到該 Client 剛剛進行過寫入，啟動 Read-after-write 守護，強制將請求路由至 Leader...';
-      lineClientLeaderRead.style.display = 'block';
-      
-      animateAlongPath('packet-read', 'line-client-leader-read', 800, false, function() {
-        statusLine.textContent = 'Leader 回傳最新值 x = 10 給 Client...';
-        
-        animateAlongPath('packet-read', 'line-client-leader-read', 800, true, function() {
-          statusLine.textContent = '🎉 守護成功！Client 成功讀取最新值 x = 10，完美繞過了 Lag 的 Follower 2！';
-          clientVal.textContent = 'x = 10';
-          setNodeState('node-client', 'ns-ok');
-          isReading = false;
-        });
+      var anomalies =
+        ((reads[0].ryw || reads[1].ryw) ? 1 : 0) +
+        (monoDrop > 0 ? 1 : 0) +
+        ((reads[0].prefix || reads[1].prefix) ? 1 : 0);
+
+      return {
+        mode: mode,
+        ackAt: ackAt, ackLatency: ackLatency, ackLatencyMax: ackLatencyMax,
+        writeDoneAt: writeDoneAt, readAt: readAt, reads: reads,
+        mono: monoDrop > 0, monoDrop: monoDrop > 0 ? monoDrop : 0,
+        ryw: reads[0].ryw || reads[1].ryw,
+        prefixBroken: reads[0].prefix || reads[1].prefix,
+        anomalies: anomalies,
+        crashAt: tCrash, lossList: lossList, lossCount: lossList.length,
+        stairs: {
+          leader: stair(0), a: stair(lagA), b: stair(lagB)
+        },
+        replyAt: {
+          leader: arrivalAt(REPLY_SEQ, 0),
+          a: arrivalAt(REPLY_SEQ, lagA),
+          b: arrivalAt(REPLY_SEQ, lagB)
+        }
+      };
+    }
+
+    var semi = buildSide("semi");
+    var asyn = buildSide("asyn");
+
+    /* 共用的 X 尺度：兩側同尺度才能並排比 */
+    var raw = 0;
+    for (k = 1; k <= N_WRITES; k += 1) {
+      raw = Math.max(raw, arrivalAt(k, lagA), arrivalAt(k, lagB), writes[k - 1].at);
+    }
+    raw = Math.max(raw, semi.readAt[1], asyn.readAt[1]);
+    var tMax = Math.max(1, Math.ceil(raw * 1.06));
+
+    return {
+      params: {
+        gapMs: gapMs, lagA: lagA, lagB: lagB,
+        readDelay1: readDelay1, readGap: readGap,
+        route: route, crossShard: crossShard
+      },
+      writes: writes,
+      shard2LagA: effLag(lagA, 2),
+      shard2LagB: effLag(lagB, 2),
+      tMax: tMax,
+      semi: semi,
+      asyn: asyn,
+      latencyCostMs: semi.ackLatencyMax - asyn.ackLatencyMax,
+      lossSaved: asyn.lossCount - semi.lossCount,
+      anomalyGap: asyn.anomalies - semi.anomalies
+    };
+  }
+
+  /* ================= (3) DOM 參照 ================= */
+
+  var demo = document.getElementById("demo-dr");
+  if (!demo) return;
+
+  var elGap = document.getElementById("dr-gap");
+  var elLa = document.getElementById("dr-la");
+  var elLb = document.getElementById("dr-lb");
+  var elRd = document.getElementById("dr-rd");
+  var elRg = document.getElementById("dr-rg");
+  var elCross = document.getElementById("dr-cross");
+  var elReset = document.getElementById("dr-reset");
+  var segBtns = demo.querySelectorAll(".seg button");
+
+  var vGap = document.getElementById("dr-v-gap");
+  var vLa = document.getElementById("dr-v-la");
+  var vLb = document.getElementById("dr-v-lb");
+  var vRd = document.getElementById("dr-v-rd");
+  var vRg = document.getElementById("dr-v-rg");
+
+  var svgSemi = document.getElementById("dr-svg-semi");
+  var svgAsyn = document.getElementById("dr-svg-asyn");
+  var psSemi = document.getElementById("dr-ps-semi");
+  var psAsyn = document.getElementById("dr-ps-asyn");
+  var cmpEl = document.getElementById("dr-cmp");
+  var statusEl = document.getElementById("dr-status");
+
+  var state = {
+    gapMs: BASE.gapMs, lagA: BASE.lagA, lagB: BASE.lagB,
+    readDelay1: BASE.readDelay1, readGap: BASE.readGap,
+    route: BASE.route, crossShard: BASE.crossShard
+  };
+
+  /* ================= (4) render(state)：只讀結果畫出來 ================= */
+
+  function sx(t, tMax) { return PX0 + (t / tMax) * (PX1 - PX0); }
+  function sy(level) { return PY1 - (level / N_WRITES) * (PY1 - PY0); }
+
+  function polyPoints(pts, tMax) {
+    var out = [], q;
+    for (q = 0; q < pts.length; q += 1) {
+      out.push(sx(pts[q][0], tMax).toFixed(1) + "," + sy(pts[q][1]).toFixed(1));
+    }
+    out.push(sx(tMax, tMax).toFixed(1) + "," + sy(N_WRITES).toFixed(1));
+    return out.join(" ");
+  }
+
+  function stairPath(pts, tMax, color, dash) {
+    return '<polyline points="' + polyPoints(pts, tMax) + '" fill="none" stroke="' + color +
+      '" stroke-width="2" stroke-linejoin="round"' + (dash ? ' stroke-dasharray="' + dash + '"' : "") + ' />';
+  }
+
+  function tri(x, color) {
+    return '<polygon points="' + x.toFixed(1) + ',150 ' + (x - 4.5).toFixed(1) + ',158 ' +
+      (x + 4.5).toFixed(1) + ',158" fill="' + color + '" />';
+  }
+
+  function colorOf(id) {
+    return id === "leader" ? C_LEADER : (id === "a" ? C_A : C_B);
+  }
+
+  function buildSvg(side, tMax, title) {
+    var s = ['<title>' + title + '</title>'];
+    var lv, y, q, r, x, cy, prev;
+
+    for (lv = 0; lv <= N_WRITES; lv += 1) {
+      y = sy(lv);
+      s.push('<line x1="' + PX0 + '" y1="' + y + '" x2="' + PX1 + '" y2="' + y +
+        '" stroke="' + (lv === 0 ? C_AXIS : C_GRID) + '" stroke-width="' + (lv === 0 ? 1.5 : 1) + '" />');
+      s.push('<text x="34" y="' + (y + 4) + '" text-anchor="end" font-size="11" font-family="var(--mono)" fill="' +
+        C_MUTE + '">' + lv + '</text>');
+    }
+    s.push('<text x="' + (PX0 + 2) + '" y="134" font-size="11" font-family="var(--mono)" fill="' + C_MUTE + '">0 ms</text>');
+    s.push('<text x="' + PX1 + '" y="134" text-anchor="end" font-size="11" font-family="var(--mono)" fill="' +
+      C_MUTE + '">' + tMax + ' ms</text>');
+
+    s.push(stairPath(side.stairs.b, tMax, C_B, ""));
+    s.push(stairPath(side.stairs.a, tMax, C_A, ""));
+    s.push(stairPath(side.stairs.leader, tMax, C_LEADER, "5,3"));
+
+    s.push(tri(sx(side.replyAt.b, tMax), C_B));
+    s.push(tri(sx(side.replyAt.a, tMax), C_A));
+    s.push(tri(sx(side.replyAt.leader, tMax), C_LEADER));
+    s.push('<text x="34" y="157" text-anchor="end" font-size="11" fill="' + C_MUTE + '">回覆</text>');
+
+    prev = null;
+    for (q = 0; q < side.reads.length; q += 1) {
+      r = side.reads[q];
+      x = sx(r.at, tMax);
+      cy = sy(r.seen);
+      s.push('<line x1="' + x.toFixed(1) + '" y1="' + (PY0 - 6) + '" x2="' + x.toFixed(1) + '" y2="' +
+        (PY1 + 6) + '" stroke="' + C_LEADER + '" stroke-width="1" stroke-dasharray="3,3" opacity="0.55" />');
+      if (prev) {
+        s.push('<polyline points="' + prev + ' ' + x.toFixed(1) + ',' + cy.toFixed(1) +
+          '" fill="none" stroke="' + (side.mono ? C_BAD : C_LEADER) +
+          '" stroke-width="1.5" stroke-dasharray="4,3" />');
+      }
+      prev = x.toFixed(1) + "," + cy.toFixed(1);
+    }
+    for (q = 0; q < side.reads.length; q += 1) {
+      r = side.reads[q];
+      x = sx(r.at, tMax);
+      cy = sy(r.seen);
+      s.push('<circle cx="' + x.toFixed(1) + '" cy="' + cy.toFixed(1) + '" r="4.5" fill="#ffffff" stroke="' +
+        ((r.ryw || r.prefix) ? C_BAD : colorOf(r.replicaId)) + '" stroke-width="2.5" />');
+      s.push('<text x="' + Math.min(Math.max(x, PX0 + 26), PX1 - 26).toFixed(1) + '" y="' + (q === 0 ? 170 : 184) +
+        '" text-anchor="middle" font-size="11" font-family="var(--mono)" fill="' +
+        ((r.ryw || r.prefix) ? C_BAD : C_MUTE) + '">讀' + r.n + ' ' + r.at + 'ms · ' +
+        (r.replicaId === "leader" ? "L" : r.replicaId.toUpperCase()) + ' · ' + r.seen + '筆</text>');
+    }
+    return s.join("");
+  }
+
+  function flag(broken, okText, badText) {
+    return broken
+      ? '<span class="cv bad">違反<span class="cn">' + badText + "</span></span>"
+      : '<span class="cv ok">正常<span class="cn">' + okText + "</span></span>";
+  }
+
+  function readCell(r) {
+    return '<span class="cv">' + r.at + " ms · " + r.replicaName +
+      '<span class="cn">讀到 ' + r.seen + " / " + N_WRITES + " 筆　落後 " + r.staleMs + " ms</span></span>";
+  }
+
+  function lossCell(side, res) {
+    var names = [], q;
+    for (q = 0; q < side.lossList.length; q += 1) {
+      names.push(res.writes[side.lossList[q] - 1].label);
+    }
+    return '<span class="cv ' + (side.lossCount > 0 ? "bad" : "ok") + '">' + side.lossCount +
+      ' 筆<span class="cn">' + (side.lossCount > 0 ? names.join("、") : "已承諾的寫入至少各有一個副本持有") +
+      "</span></span>";
+  }
+
+  function render(res) {
+    vGap.textContent = res.params.gapMs + " ms";
+    vLa.textContent = res.params.lagA + " ms";
+    vLb.textContent = res.params.lagB + " ms";
+    vRd.textContent = res.params.readDelay1 + " ms";
+    vRg.textContent = res.params.readGap + " ms";
+
+    var q;
+    for (q = 0; q < segBtns.length; q += 1) {
+      segBtns[q].setAttribute("aria-pressed",
+        segBtns[q].getAttribute("data-route") === res.params.route ? "true" : "false");
+    }
+
+    psSemi.textContent = "等最快副本 ACK · 寫入 +" + res.semi.ackLatencyMax + " ms";
+    psAsyn.textContent = "寫完本地立刻回 · 寫入 +" + res.asyn.ackLatencyMax + " ms";
+
+    svgSemi.innerHTML = buildSvg(res.semi, res.tMax, "半同步側：三個副本的可見前綴階梯線與兩次讀取落點");
+    svgAsyn.innerHTML = buildSvg(res.asyn, res.tMax, "全異步側：三個副本的可見前綴階梯線與兩次讀取落點");
+
+    var rows = [
+      ['<div class="ch">指標</div>', '<div class="ch">半同步</div>', '<div class="ch">全異步</div>'],
+      ['<div class="cr">寫入延遲（最大）</div>',
+        '<div><span class="cv warn">' + res.semi.ackLatencyMax + ' ms<span class="cn">崩潰觀測點 ' + res.semi.crashAt + ' ms</span></span></div>',
+        '<div><span class="cv ok">' + res.asyn.ackLatencyMax + ' ms<span class="cn">崩潰觀測點 ' + res.asyn.crashAt + ' ms</span></span></div>'],
+      ['<div class="cr">三筆全部回成功的時刻</div>',
+        '<div><span class="cv">' + res.semi.writeDoneAt + ' ms</span></div>',
+        '<div><span class="cv">' + res.asyn.writeDoneAt + ' ms</span></div>'],
+      ['<div class="cr">第 1 次讀取</div>',
+        "<div>" + readCell(res.semi.reads[0]) + "</div>",
+        "<div>" + readCell(res.asyn.reads[0]) + "</div>"],
+      ['<div class="cr">第 2 次讀取</div>',
+        "<div>" + readCell(res.semi.reads[1]) + "</div>",
+        "<div>" + readCell(res.asyn.reads[1]) + "</div>"],
+      ['<div class="cr">讀寫一致性<br>Read-after-write</div>',
+        "<div>" + flag(res.semi.ryw, "讀得到自己已收到成功回應的每一筆",
+          "已 ack " + res.semi.reads[0].acked + " 筆，卻只讀到 " +
+          Math.min(res.semi.reads[0].seen, res.semi.reads[1].seen) + " 筆") + "</div>",
+        "<div>" + flag(res.asyn.ryw, "讀得到自己已收到成功回應的每一筆",
+          "已 ack " + res.asyn.reads[0].acked + " 筆，卻只讀到 " +
+          Math.min(res.asyn.reads[0].seen, res.asyn.reads[1].seen) + " 筆") + "</div>"],
+      ['<div class="cr">單調讀取<br>Monotonic reads</div>',
+        "<div>" + flag(res.semi.mono, "第 2 次讀沒有比第 1 次少",
+          "從 " + res.semi.reads[0].seen + " 筆倒退到 " + res.semi.reads[1].seen + " 筆（少 " +
+          res.semi.monoDrop + " 筆）") + "</div>",
+        "<div>" + flag(res.asyn.mono, "第 2 次讀沒有比第 1 次少",
+          "從 " + res.asyn.reads[0].seen + " 筆倒退到 " + res.asyn.reads[1].seen + " 筆（少 " +
+          res.asyn.monoDrop + " 筆）") + "</div>"],
+      ['<div class="cr">一致前綴<br>Consistent prefix</div>',
+        "<div>" + flag(res.semi.prefixBroken, "沒有出現「看得到回覆、看不到貼文 #2」",
+          "回覆已可見，但它回的貼文 #2 還沒到") + "</div>",
+        "<div>" + flag(res.asyn.prefixBroken, "沒有出現「看得到回覆、看不到貼文 #2」",
+          "回覆已可見，但它回的貼文 #2 還沒到") + "</div>"],
+      ['<div class="cr">三筆都回成功的那一刻<br>Leader 崩潰的遺失窗</div>',
+        "<div>" + lossCell(res.semi, res) + "</div>",
+        "<div>" + lossCell(res.asyn, res) + "</div>"]
+    ];
+    var html = [];
+    for (q = 0; q < rows.length; q += 1) { html.push(rows[q].join("")); }
+    cmpEl.innerHTML = html.join("");
+
+    statusEl.textContent =
+      "路由：" + ROUTE_NAME[res.params.route] +
+      "　│　半同步 寫入 +" + res.semi.ackLatencyMax + " ms、遺失窗 " + res.semi.lossCount +
+      " 筆、成立 " + res.semi.anomalies + " 種異常" +
+      "　│　全異步 寫入 +" + res.asyn.ackLatencyMax + " ms、遺失窗 " + res.asyn.lossCount +
+      " 筆、成立 " + res.asyn.anomalies + " 種異常" +
+      "　│　半同步多付 " + res.latencyCostMs + " ms，換到少遺失 " + res.lossSaved +
+      " 筆、少 " + res.anomalyGap + " 種異常。";
+  }
+
+  /* ================= (5) 事件綁定 ================= */
+
+  function refresh() { render(computeReplication(state)); }
+
+  function bindRange(el, key) {
+    if (!el) return;
+    el.addEventListener("input", function () {
+      state[key] = Number(el.value);
+      refresh();
+    });
+  }
+
+  bindRange(elGap, "gapMs");
+  bindRange(elLa, "lagA");
+  bindRange(elLb, "lagB");
+  bindRange(elRd, "readDelay1");
+  bindRange(elRg, "readGap");
+
+  if (elCross) {
+    elCross.addEventListener("change", function () {
+      state.crossShard = !!elCross.checked;
+      refresh();
+    });
+  }
+
+  (function () {
+    var q;
+    for (q = 0; q < segBtns.length; q += 1) {
+      segBtns[q].addEventListener("click", function () {
+        state.route = this.getAttribute("data-route");
+        refresh();
       });
     }
-  });
+  })();
 
-  // Reset Action
-  btnReset.addEventListener('click', init);
+  if (elReset) {
+    elReset.addEventListener("click", function () {
+      state.gapMs = BASE.gapMs;
+      state.lagA = BASE.lagA;
+      state.lagB = BASE.lagB;
+      state.readDelay1 = BASE.readDelay1;
+      state.readGap = BASE.readGap;
+      state.route = BASE.route;
+      state.crossShard = BASE.crossShard;
+      elGap.value = BASE.gapMs;
+      elLa.value = BASE.lagA;
+      elLb.value = BASE.lagB;
+      elRd.value = BASE.readDelay1;
+      elRg.value = BASE.readGap;
+      elCross.checked = BASE.crossShard;
+      refresh();
+    });
+  }
 
-  // Initialize on load
-  init();
+  refresh();
 })();
 </script>

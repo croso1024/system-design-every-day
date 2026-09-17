@@ -1,3 +1,55 @@
+<!-- demo-archetype: C｜並排對照（主，第 5 節「互動演示」） — 讀者拖動寫入間隔、兩個 Follower 的複寫延遲、讀取時刻與間隔，
+     並切換讀取路由（輪詢／黏性／讀寫守護）與「回覆是否寫到另一個分片」；同一組寫入同時餵給「半同步」與「全異步」兩側，
+     兩側各自算出寫入延遲、每個副本的可見前綴階梯線、兩次讀取實際讀到第幾筆、落後毫秒數、遺失窗，
+     以及讀寫一致性／單調讀取／一致前綴三種異常是否真的發生（全部由抵達時刻與值比較判定，無任何預寫敘事）。
+     選 C 是因為本篇第 3 節與第 4 節的命題是「同一組寫入換一種複寫時序，結果差在哪」——那是一個對照問題，
+     而且「半同步買掉的是遺失窗、不是單調讀」這個常見誤解，只有把兩側並排才看得出來。 -->
+<style>
+  #dr-root {
+    --dr-leader: #3f6188;
+    --dr-a: #4d7d68;
+    --dr-b: #a3743e;
+  }
+
+  /* 旋鈕列 */
+  .dr-knobs { display: grid; grid-template-columns: repeat(3, 1fr); gap: 11px 14px; margin: 4px 0 12px; }
+  @media (max-width: 720px) { .dr-knobs { grid-template-columns: 1fr 1fr; } }
+  @media (max-width: 460px) { .dr-knobs { grid-template-columns: 1fr; } }
+  .dr-knob { display: grid; grid-template-columns: 1fr auto; gap: 2px 8px; align-items: center; }
+  .dr-knob .kl { font-size: 12.5px; color: var(--text-2); }
+  .dr-knob .kv { font-family: var(--mono); font-size: 12px; font-weight: 700; color: var(--text); justify-self: end; }
+  .dr-knob input[type="range"] { grid-column: 1 / -1; width: 100%; margin: 2px 0 0; accent-color: var(--accent); }
+  .dr-chk { display: flex; align-items: center; gap: 7px; font-size: 12.5px; color: var(--text-2); cursor: pointer; align-self: end; padding-bottom: 3px; }
+  .dr-chk input { accent-color: var(--accent); width: 15px; height: 15px; margin: 0; }
+
+  /* 並排兩側 */
+  .dr-panes { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin: 12px 0 6px; }
+  @media (max-width: 720px) { .dr-panes { grid-template-columns: 1fr; } }
+  .dr-pane { border: 1px solid var(--border); border-radius: var(--radius-sm); background: #fff; padding: 9px 8px 6px; min-width: 0; }
+  .dr-pane.semi { border-top: 3px solid var(--ok); }
+  .dr-pane.asyn { border-top: 3px solid var(--warn); }
+  .dr-pane .pt { font-weight: 700; font-size: 13px; text-align: center; }
+  .dr-pane .ps { font-family: var(--mono); font-size: 11px; color: var(--text-3); text-align: center; margin: 2px 0 6px; }
+  .dr-pane svg { width: 100%; height: auto; display: block; }
+
+  /* 兩欄對照數字 */
+  .dr-cmp {
+    display: grid; grid-template-columns: 1.15fr 1fr 1fr; gap: 1px;
+    background: var(--border); border: 1px solid var(--border);
+    border-radius: var(--radius-sm); overflow: hidden; margin: 12px 0 6px;
+  }
+  .dr-cmp > div { background: #fff; padding: 7px 9px; font-size: 12px; line-height: 1.5; }
+  .dr-cmp .ch { background: var(--bg-soft); font-family: var(--mono); font-size: 10.5px; font-weight: 700; color: var(--text-2); letter-spacing: .04em; }
+  .dr-cmp .cr { background: var(--bg-soft); font-size: 11.5px; color: var(--text-2); }
+  .dr-cmp .cv { font-family: var(--mono); font-size: 12px; color: var(--text); }
+  .dr-cmp .cv.ok { color: var(--ok); }
+  .dr-cmp .cv.warn { color: var(--warn); }
+  .dr-cmp .cv.bad { color: var(--bad); background: var(--bad-soft); }
+  .dr-cmp .cn { display: block; font-size: 11px; color: var(--text-3); margin-top: 1px; }
+  @media (max-width: 560px) { .dr-cmp > div { padding: 6px 6px; font-size: 11px; } .dr-cmp .cv { font-size: 11px; } }
+
+  .dr-note { font-size: 12px; color: var(--text-2); line-height: 1.6; margin: 8px 0 0; }
+</style>
 <header class="hero">
   <div class="eyebrow">系統設計 · 基礎手冊</div>
   <h1>資料複寫基礎概念：高可用與一致性的權衡</h1>
@@ -214,124 +266,90 @@
 <section id="s5">
   <div class="sec-head">
     <span class="sec-num">05</span>
-    <h2>互動演示：複寫延遲與一致性模擬器</h2>
+    <h2>互動演示：同一組寫入，半同步側與全異步側並排</h2>
   </div>
-  <p class="sec-sub">點選不同情境，親身體驗同步/異步複寫的時序，以及 Replication Lag 帶來的 Stale Read 衝擊與防禦機制。</p>
+  <p class="sec-sub">拖動複寫延遲與讀取時刻，看三種異常是否真的發生，以及寫入延遲與遺失窗各付出多少。</p>
 
-  <p>在分散式系統中，網路延遲（Network Latency）與節點負載是不可避免的現實。當我們使用異步複寫時，Follower 節點的更新進度會落後於 Leader，這段時間差稱為 <strong>Replication Lag</strong>。以下模擬器將展示三種情境，協助你直觀理解其運作行為與防禦手段。</p>
+  <p>前面兩節把取捨講完了，但「半同步到底買到了什麼」很容易被誤會。下面這個模擬器把<strong>同一組寫入</strong>同時餵給兩側：左邊是<strong>半同步</strong>（Leader 等最快的一個副本確認才回 Client），右邊是<strong>全異步</strong>（Leader 寫完本地立刻回）。兩側的副本複寫速度完全相同，唯一的差別是 <strong>Client 何時收到「成功」</strong>——而這個時間差會連帶推遲讀取的時刻，這正是半同步看起來「比較不會讀到舊值」的真正原因，而不是因為它把副本變快了。</p>
 
-  <div class="demo" id="demo-replication">
+  <p>三筆寫入依序是：貼文 #1「Hello」、貼文 #2「World」，以及一則<strong>回覆</strong>（因果上依賴貼文 #2）。打開「回覆寫到另一個分片」時，回覆會走第二條複寫串流，而該串流較快——這正是一致前綴讀取異常的溫床。</p>
+
+  <div class="demo" id="demo-dr">
     <div class="demo-bar">
-      <span class="label">互動 · 複寫延遲與一致性模擬器</span>
-      <span class="label" style="text-transform:none;font-family:var(--sans);font-size:12px;color:var(--text-2)">點選情境並操作寫入/讀取</span>
+      <span class="label">互動 · 半同步 vs 全異步</span>
+      <span class="label" style="text-transform:none;font-family:var(--sans);font-size:12px;color:var(--text-2)">同一組輸入同時推到兩側</span>
     </div>
-    <div class="demo-body">
-      <!-- Scenario Selector -->
-      <div class="tl-scenarios">
-        <button class="tl-opt" data-scenario="normal" aria-pressed="true">
-          <div style="flex: 1 1 0%;">
-            <div class="tlname">情境 A：正常同步/異步複寫 (Sync & Async)</div>
-            <div class="tldesc">Leader 同步複製到 Follower 1 (Sync)，異步複製到 Follower 2 (Async)。Leader 收到 Follower 1 的確認後即向 Client 返回成功。</div>
-          </div>
-          <span class="tlbadge">Normal</span>
-        </button>
-        <button class="tl-opt" data-scenario="stale-read" aria-pressed="false">
-          <div style="flex: 1 1 0%;">
-            <div class="tlname">情境 B：Replication Lag 導致的 Stale Read 異常</div>
-            <div class="tldesc">Follower 2 發生嚴重延遲。Client 寫入成功後立刻讀取，請求被路由到 Follower 2，讀到了舊數據（Stale Read）。</div>
-          </div>
-          <span class="tlbadge" style="color:var(--bad);border-color:var(--bad-strong);background:var(--bad-soft)">Anomaly</span>
-        </button>
-        <button class="tl-opt" data-scenario="guard" aria-pressed="false">
-          <div style="flex: 1 1 0%;">
-            <div class="tlname">情境 C：啟用 Read-after-write 一致性守護</div>
-            <div class="tldesc">相同的延遲情境，但系統檢測到是該 Client 剛剛寫入的 key，強制將其讀取請求路由至 Leader，成功防禦 Stale Read。</div>
-          </div>
-          <span class="tlbadge" style="color:var(--ok);border-color:var(--border-strong);background:var(--ok-soft)">Guard</span>
-        </button>
+    <div class="demo-body" id="dr-root">
+
+      <div class="dr-knobs">
+        <div class="dr-knob">
+          <span class="kl">寫入間隔</span><span class="kv" id="dr-v-gap">60 ms</span>
+          <input type="range" id="dr-gap" min="20" max="200" step="10" value="60" aria-label="寫入間隔">
+        </div>
+        <div class="dr-knob">
+          <span class="kl">Follower A 複寫延遲</span><span class="kv" id="dr-v-la">110 ms</span>
+          <input type="range" id="dr-la" min="0" max="400" step="10" value="110" aria-label="Follower A 複寫延遲">
+        </div>
+        <div class="dr-knob">
+          <span class="kl">Follower B 複寫延遲</span><span class="kv" id="dr-v-lb">280 ms</span>
+          <input type="range" id="dr-lb" min="0" max="400" step="10" value="280" aria-label="Follower B 複寫延遲">
+        </div>
+        <div class="dr-knob">
+          <span class="kl">寫完多久後重新整理</span><span class="kv" id="dr-v-rd">40 ms</span>
+          <input type="range" id="dr-rd" min="0" max="400" step="10" value="40" aria-label="寫完多久後第一次讀取">
+        </div>
+        <div class="dr-knob">
+          <span class="kl">第二次讀的間隔</span><span class="kv" id="dr-v-rg">60 ms</span>
+          <input type="range" id="dr-rg" min="20" max="400" step="10" value="60" aria-label="第二次讀取的間隔">
+        </div>
+        <label class="dr-chk">
+          <input type="checkbox" id="dr-cross" checked>
+          <span>回覆寫到另一個分片（較快的串流）</span>
+        </label>
       </div>
 
-      <!-- Control Buttons -->
-      <div style="display: flex; gap: 12px; margin: 16px 0;">
-        <button class="btn primary" id="btn-write">1. 發送寫入 Write(x=10)</button>
-        <button class="btn" id="btn-read" disabled>2. 發送讀取 Read(x)</button>
-        <button class="btn" id="btn-reset">重置</button>
+      <div class="seg" role="group" aria-label="讀取路由策略">
+        <button data-route="rr" aria-pressed="true">輪詢：第 1 次讀 A、第 2 次讀 B</button>
+        <button data-route="sticky" aria-pressed="false">黏性：兩次都讀 A</button>
+        <button data-route="guard" aria-pressed="false">讀寫守護：強制讀 Leader</button>
       </div>
 
-      <!-- Status Line -->
-      <div class="status-line" id="demo-status">
-        請選擇上方情境，然後點擊「1. 發送寫入 Write(x=10)」開始模擬。
+      <div class="dr-panes">
+        <div class="dr-pane semi">
+          <div class="pt">半同步</div>
+          <div class="ps" id="dr-ps-semi">等最快的一個副本 ACK</div>
+          <svg id="dr-svg-semi" viewBox="0 0 330 190" role="img" aria-label="半同步側的副本可見前綴階梯線"></svg>
+        </div>
+        <div class="dr-pane asyn">
+          <div class="pt">全異步</div>
+          <div class="ps" id="dr-ps-asyn">Leader 寫完本地立刻回</div>
+          <svg id="dr-svg-asyn" viewBox="0 0 330 190" role="img" aria-label="全異步側的副本可見前綴階梯線"></svg>
+        </div>
       </div>
 
-      <!-- Visual Canvas (SVG) -->
-      <div class="sim-canvas-container" style="position:relative; background:var(--bg-soft); border:1px solid var(--border); border-radius:var(--radius-sm); padding:20px; margin-top:16px; overflow:hidden;">
-        <svg id="sim-svg" width="100%" height="280" viewBox="0 0 600 280" style="display:block;">
-          <!-- Connection Lines -->
-          <!-- Client to Leader -->
-          <path id="line-client-leader" d="M 80,140 L 250,60" stroke="#dedcd8" stroke-width="2" stroke-dasharray="5,5" fill="none" />
-          <!-- Leader to Follower 1 -->
-          <path id="line-leader-f1" d="M 290,60 L 450,60" stroke="#dedcd8" stroke-width="2" stroke-dasharray="5,5" fill="none" />
-          <!-- Leader to Follower 2 -->
-          <path id="line-leader-f2" d="M 290,60 L 450,220" stroke="#dedcd8" stroke-width="2" stroke-dasharray="5,5" fill="none" />
-          <!-- Client to Follower 2 (Read path) -->
-          <path id="line-client-f2" d="M 80,140 L 450,220" stroke="#dedcd8" stroke-width="2" stroke-dasharray="5,5" fill="none" />
-          <!-- Client to Leader (Read path for Guard) -->
-          <path id="line-client-leader-read" d="M 80,140 L 250,60" stroke="#3f6188" stroke-width="2" stroke-dasharray="5,5" fill="none" style="display:none;" />
+      <div class="dr-cmp" id="dr-cmp"></div>
 
-          <!-- Packets (Animated dots) -->
-          <circle id="packet-write" r="6" fill="var(--accent)" style="display:none;" />
-          <circle id="packet-f1" r="6" fill="var(--ok)" style="display:none;" />
-          <circle id="packet-f2" r="6" fill="var(--warn)" style="display:none;" />
-          <circle id="packet-read" r="6" fill="var(--accent)" style="display:none;" />
+      <div class="status-line" id="dr-status"></div>
 
-          <!-- Nodes -->
-          <!-- Client Node -->
-          <g id="node-client" transform="translate(80,140)">
-            <circle r="32" fill="#ffffff" stroke="var(--border-strong)" stroke-width="2" />
-            <text text-anchor="middle" y="-4" font-weight="bold" font-size="12" fill="var(--text)">Client</text>
-            <text id="client-val" text-anchor="middle" y="14" font-family="var(--mono)" font-size="11" fill="var(--text-2)">x = ?</text>
-          </g>
-
-          <!-- Leader Node -->
-          <g id="node-leader" transform="translate(270,60)">
-            <circle r="32" fill="#ffffff" stroke="var(--border-strong)" stroke-width="2" />
-            <text text-anchor="middle" y="-4" font-weight="bold" font-size="12" fill="var(--text)">Leader</text>
-            <text id="leader-val" text-anchor="middle" y="14" font-family="var(--mono)" font-size="11" fill="var(--text-2)">x = 0</text>
-            <text text-anchor="middle" y="-38" font-family="var(--mono)" font-size="10" fill="var(--text-3)">PRIMARY</text>
-          </g>
-
-          <!-- Follower 1 (Sync) Node -->
-          <g id="node-f1" transform="translate(480,60)">
-            <circle r="32" fill="#ffffff" stroke="var(--border-strong)" stroke-width="2" />
-            <text text-anchor="middle" y="-4" font-weight="bold" font-size="12" fill="var(--text)">Follower 1</text>
-            <text id="f1-val" text-anchor="middle" y="14" font-family="var(--mono)" font-size="11" fill="var(--text-2)">x = 0</text>
-            <text text-anchor="middle" y="-38" font-family="var(--mono)" font-size="10" fill="var(--ok)">SYNC</text>
-          </g>
-
-          <!-- Follower 2 (Async) Node -->
-          <g id="node-f2" transform="translate(480,220)">
-            <circle r="32" fill="#ffffff" stroke="var(--border-strong)" stroke-width="2" />
-            <text text-anchor="middle" y="-4" font-weight="bold" font-size="12" fill="var(--text)">Follower 2</text>
-            <text id="f2-val" text-anchor="middle" y="14" font-family="var(--mono)" font-size="11" fill="var(--text-2)">x = 0</text>
-            <text text-anchor="middle" y="-38" font-family="var(--mono)" font-size="10" fill="var(--warn)">ASYNC</text>
-          </g>
-        </svg>
+      <div class="legend">
+        <span><i class="dot" style="background:#eef2f7;border-color:#3f6188"></i>Leader</span>
+        <span><i class="dot" style="background:#eef4f1;border-color:#4d7d68"></i>Follower A</span>
+        <span><i class="dot" style="background:#f6f0e7;border-color:#a3743e"></i>Follower B</span>
+        <span><i class="dot ns-wait"></i>讀取時刻</span>
+        <span><i class="dot ns-bad"></i>異常成立</span>
       </div>
 
-      <!-- Legend -->
-      <div class="legend mt-4">
-        <span><i class="dot ns-idle"></i>待命 (Idle)</span>
-        <span><i class="dot ns-wait"></i>傳輸中 (Pending)</span>
-        <span><i class="dot ns-lock"></i>寫入中 (Writing)</span>
-        <span><i class="dot ns-ok"></i>成功/已同步 (OK)</span>
-        <span><i class="dot ns-bad"></i>延遲/異常 (Lagging)</span>
+      <p class="dr-note">階梯線的 Y 軸是<b>該副本已看得見的「連續前綴」長度</b>（0～3 筆）——第 2 筆沒到，就算第 3 筆先到了，前綴仍停在 1。虛線是兩次讀取的時刻，圓點落在被路由到的那條線上，兩點之間那條連線就是<b>讀者感知</b>：<b>它往下掉一階，單調讀取異常就成立了</b>。線下的小三角是「回覆」抵達各副本的時刻。</p>
+
+      <div style="margin-top:12px;display:flex;gap:8px;flex-wrap:wrap;">
+        <button class="btn" id="dr-reset">重置為預設參數</button>
       </div>
     </div>
   </div>
-  <p class="cap">時序洞察：在異步複寫下，寫入操作的 Latency 僅受限於 Leader 與 Sync 節點；但若沒有額外的一致性守護，讀取 Async 節點極易遭遇 Stale Read 異常。</p>
+  <p class="cap">先看兩側的<b>讀者感知連線</b>：預設參數下，全異步側第一次就只讀到 1 筆（自己剛發的貼文不見了），半同步側第一次讀到 3 筆完整——但兩側的第二次讀都掉到 0 筆，<b>單調讀取異常在半同步側照樣成立</b>。半同步真正買到的是「遺失窗恆為 0」那一列，不是異常欄。路由選「輪詢」時第 1 次固定讀 A、第 2 次固定讀 B（不是隨機），這樣兩次讀的差異才歸因於副本進度而不是運氣。</p>
 
   <div class="oneliner">
-    <b>一句話答法</b>Replication Lag 是異步複寫的必然代價；面對 Stale Read 異常，可透過「讀寫一致性守護」將特定讀取請求路由回 Leader，在 AP 的架構下局部實現強一致的用戶體驗。
+    <b>一句話答法</b>半同步用寫入延遲換掉的是<strong>資料遺失窗</strong>，不是 Stale Read——只要讀取還會落到落後的副本，單調讀與一致前綴異常照樣發生；真正修掉讀取異常的是路由策略（黏性路由、讀寫守護），兩者解決的是不同的問題。
   </div>
 </section>
 
