@@ -1,4 +1,4 @@
-<!-- demo-archetype: C｜並排對照 — 讀者在「直打貴模型／智慧路由／路由 + 語意快取」三種 Gateway 策略間切換，同一批 5 筆請求（含兩筆語意相近的 FAQ）逐筆送進去，對照累計成本、快取命中與 fallback 次數。選 C 是因為本篇的賣點是「同樣的流量換一套策略會便宜多少」，沒有對照組就沒有說服力。 -->
+<!-- demo-archetype: E｜決策器（主，第 6 節） — 讀者調整一筆請求的任務型態、輸入／輸出 token、延遲預算，以及 Gateway 側的租戶層級、今日已用預算、語意快取相似度與 τ、供應商健康，即時算出四個後端池與快取候選各自的准入預留、預估延遲與出局規則，導出 SERVE_FROM_CACHE／ROUTE／FALLBACK／DEGRADE／DENY 其中一個判定並附帶數字理由。選 E 是因為本篇第 2 到第 5 節講的全是規則（路由維度、配額失敗行為、fallback 觸發條件、相似度閾值），而這些規則的產物就是「這一筆請求最後走哪裡、為什麼」——那是一個判定問題，不是一段流程。 -->
 <style>
   /* 本篇專屬：lgw-* 命名空間（llm-gateway），不覆蓋全站 base 類別 */
   #lgw-root {
@@ -64,71 +64,61 @@
   }
   .lgw-layer ul { margin: 0; padding-left: 1.15em; font-size: 13px; color: var(--text-2); line-height: 1.65; }
 
-  .lgw-demo-controls {
-    display: flex; flex-wrap: wrap; gap: 8px; margin: 10px 0 8px; align-items: center;
+  /* ── 第 6 節 決策器：lgw-dp-*（decision plane），本輪新寫 ───────────── */
+  .lgw-dp-knobs {
+    display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin: 12px 0;
   }
-  .lgw-metric {
-    display: flex; flex-wrap: wrap; gap: 14px; margin: 8px 0 12px;
-    font-size: 13px; color: var(--text-2);
-  }
-  .lgw-metric strong { color: var(--text); font-family: var(--mono); font-size: 12.5px; }
-  .lgw-panels {
-    display: grid; grid-template-columns: 1.15fr 1fr; gap: 12px; margin: 10px 0;
-  }
-  @media (max-width: 720px) { .lgw-panels { grid-template-columns: 1fr; } }
-  .lgw-panel {
+  @media (max-width: 720px) { .lgw-dp-knobs { grid-template-columns: 1fr; } }
+  .lgw-dp-group {
     border: 1px solid var(--border); border-radius: var(--radius-sm);
-    background: #fff; padding: 12px;
+    background: #fff; padding: 11px 12px;
   }
-  .lgw-panel .pt {
+  .lgw-dp-group .gt {
     font-family: var(--mono); font-size: 11px; color: var(--text-3);
-    letter-spacing: .04em; margin-bottom: 8px; font-weight: 600;
+    letter-spacing: .04em; font-weight: 600; margin-bottom: 9px;
   }
-  .lgw-req-list { display: flex; flex-direction: column; gap: 6px; }
-  .lgw-req {
-    border: 1px solid var(--border-strong); border-radius: 6px;
-    padding: 8px 10px; font-size: 12.5px; background: var(--bg-soft); color: var(--text-2);
-    display: flex; flex-wrap: wrap; gap: 8px; align-items: center; justify-content: space-between;
+  .lgw-dp-knob { display: grid; grid-template-columns: 1fr auto; gap: 2px 8px; align-items: center; margin-bottom: 10px; }
+  .lgw-dp-knob:last-child { margin-bottom: 0; }
+  .lgw-dp-knob .kl { font-size: 12.5px; color: var(--text-2); }
+  .lgw-dp-knob .kv { font-family: var(--mono); font-size: 12px; font-weight: 700; color: var(--text); justify-self: end; }
+  .lgw-dp-knob input[type="range"] { grid-column: 1 / -1; width: 100%; margin: 2px 0 0; accent-color: var(--accent); }
+  .lgw-dp-knob select {
+    grid-column: 1 / -1; width: 100%; margin-top: 2px;
+    font-family: var(--mono); font-size: 12px; padding: 4px 6px;
+    border: 1px solid var(--border-strong); border-radius: 6px; background: #fff; color: var(--text);
   }
-  .lgw-req.active { border-color: var(--lgw-route); background: var(--lgw-route-soft); color: var(--lgw-route); font-weight: 600; }
-  .lgw-req.hit { border-color: var(--lgw-cache); background: var(--lgw-cache-soft); color: var(--lgw-cache); font-weight: 600; }
-  .lgw-req.fall { border-color: var(--lgw-fall); background: var(--lgw-fall-soft); color: var(--lgw-fall); font-weight: 600; }
-  .lgw-req.deny { border-color: var(--bad); background: var(--bad-soft); color: var(--bad); font-weight: 600; }
-  .lgw-req.done { opacity: .7; }
-  .lgw-req .rid { font-family: var(--mono); font-size: 11.5px; }
-  .lgw-req .meta { font-size: 11px; color: inherit; opacity: .85; }
-  .lgw-provider-row {
-    display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px;
-  }
-  .lgw-prov {
-    border: 1px solid var(--border-strong); border-radius: 6px;
-    padding: 8px 10px; min-width: 88px; text-align: center;
-    font-family: var(--mono); font-size: 11.5px; background: var(--bg-soft); color: var(--text-2);
-  }
-  .lgw-prov.selected { background: var(--lgw-route-soft); border-color: var(--lgw-route); color: var(--lgw-route); font-weight: 700; }
-  .lgw-prov.down { opacity: .45; border-style: dashed; }
-  .lgw-prov.fallback { background: var(--lgw-fall-soft); border-color: var(--lgw-fall); color: var(--lgw-fall); font-weight: 700; }
-  .lgw-cache-bar {
-    height: 18px; border-radius: 6px; background: var(--bg-soft);
-    border: 1px solid var(--border); overflow: hidden; display: flex; margin: 8px 0 4px;
-  }
-  .lgw-cache-bar span { display: block; height: 100%; }
-  .lgw-cache-bar .hit { background: var(--lgw-cache); }
-  .lgw-cache-bar .miss { background: var(--lgw-route); opacity: .45; }
-  .lgw-timeline {
+
+  .lgw-dp-plane {
     border: 1px solid var(--border); border-radius: var(--radius-sm);
-    background: var(--bg-soft); padding: 10px 12px; margin-top: 8px;
-    font-family: var(--mono); font-size: 11.5px; line-height: 1.7; color: var(--text-2);
-    max-height: 160px; overflow-y: auto;
+    background: #fff; padding: 8px 6px 4px; margin: 10px 0 6px;
   }
-  .lgw-timeline .ev { color: var(--text); }
-  .lgw-verdict {
+  .lgw-dp-plane svg { width: 100%; height: auto; display: block; }
+
+  .lgw-dp-call {
+    border: 1px solid var(--border); border-left: 3px solid var(--border-strong);
+    border-radius: var(--radius-sm); background: #fff; padding: 12px; margin: 10px 0;
+  }
+  .lgw-dp-call .cc { font-family: var(--mono); font-size: 12.5px; font-weight: 700; letter-spacing: .05em; }
+  .lgw-dp-call .ch { font-size: 13.5px; color: var(--text); margin: 4px 0 8px; line-height: 1.55; }
+  .lgw-dp-call ul { margin: 0; padding-left: 1.1em; font-size: 12.5px; color: var(--text-2); line-height: 1.65; }
+  .lgw-dp-call.d-cache { border-left-color: var(--ok); background: var(--ok-soft); }
+  .lgw-dp-call.d-route { border-left-color: var(--accent); background: var(--accent-soft); }
+  .lgw-dp-call.d-warn  { border-left-color: var(--warn); background: var(--warn-soft); }
+  .lgw-dp-call.d-bad   { border-left-color: var(--bad); background: var(--bad-soft); }
+
+  .lgw-dp-meter { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin: 10px 0; }
+  @media (max-width: 640px) { .lgw-dp-meter { grid-template-columns: 1fr 1fr; } }
+  .lgw-dp-cell {
     border: 1px solid var(--border); border-radius: var(--radius-sm);
-    padding: 12px; margin: 8px 0; background: #fff; font-size: 13.5px; line-height: 1.6;
+    background: var(--bg-soft); padding: 9px 10px;
   }
-  .lgw-verdict.tone-ok { border-left: 3px solid var(--ok); background: var(--ok-soft); }
-  .lgw-verdict.tone-lock { border-left: 3px solid var(--warn); background: var(--warn-soft); }
-  .lgw-verdict.tone-bad { border-left: 3px solid var(--bad); background: var(--bad-soft); }
+  .lgw-dp-cell .ml { font-size: 11px; color: var(--text-3); line-height: 1.4; }
+  .lgw-dp-cell .mv { font-family: var(--mono); font-size: 14px; font-weight: 700; color: var(--text); margin-top: 3px; }
+
+  .lgw-dp-tbl td.num { font-family: var(--mono); font-size: 12px; white-space: nowrap; }
+  .lgw-dp-tbl tr.win td { background: var(--ok-soft); }
+  .lgw-dp-tbl tr.out td { color: var(--text-3); }
+  .lgw-dp-tbl td.st { font-family: var(--mono); font-size: 11.5px; }
 </style>
 
 <div id="lgw-root">
@@ -168,6 +158,7 @@
       <div class="lgw-box b-fall"><div class="bn">Fallback</div><div class="bs">逾時／5xx<br>跨供應商切換</div></div>
     </div>
   </div>
+  <p class="cap">這四個盒是本篇後續四節的骨架，也是同一筆請求會依序遭遇的四類規則；看的時候記住它們的<strong>計量單位不同</strong>——Route 看能力與延遲、Quota 看美元、SemCache 看相似度、Fallback 看供應商健康。</p>
 
   <div class="callout accent">
     <div class="c-title"><span class="ic">座標</span>與鄰近主題的切分</div>
@@ -210,6 +201,8 @@
   </div>
 
   <p>好的路由表會把「產品意圖」與「供應商細節」解耦：應用寫 <code>model: chat-balanced</code>，Gateway 決定今天是 GPT 小杯還是自架 Llama。面試時要講清楚：路由決策應可配置、可回放、可對成本歸因，而不是散落在業務程式碼的字串常數。</p>
+
+  <p>實務上會先把後端池分出<strong>能力級距</strong>：短分類與 FAQ 這種任務只需要最低一級；程式碼生成需要中間一級；長鏈推理才需要最高一級。這個級距是路由的<strong>硬前提</strong>——能力不足的池即使更便宜、更快，也不能拿來承接，只能在「沒有任何能力足夠的池可用」時當作降級選項（見第 4 節）。</p>
 
   <div class="lgw-pipeline">
     <div class="lgw-pipe-row">
@@ -285,7 +278,7 @@
 
   <div class="callout accent">
     <div class="c-title"><span class="ic">關鍵</span>預估 token 與實際 token</div>
-    <p>准入時往往只能用 tokenizer 近似或歷史均值做<strong>預留</strong>；完成後再按實際 usage 結算。預留過緊會誤殺；過鬆會超賣。實務是 soft reserve + 完成後校正，並對異常長輸出設硬上限。</p>
+    <p>准入時往往只能用 tokenizer 近似或歷史均值做<strong>預留</strong>；完成後再按實際 usage 結算。預留過緊會誤殺；過鬆會超賣。實務是 soft reserve + 完成後校正，並對異常長輸出設硬上限。<strong>擋下請求的是預留金額、不是最後的帳單</strong>——這兩個數字不一樣，而被拿去和剩餘預算比較的永遠是前者。</p>
   </div>
 
   <div class="oneliner">
@@ -301,6 +294,8 @@
   <p class="sec-sub">逾時、配額用盡、區域故障時，Gateway 應能依政策切到備援供應商或較小模型。</p>
 
   <p>Fallback 鏈常見順序：同供應商次級模型 → 另一供應商同級模型 → 降級回答（較短、較便宜）→ 快取／模板兜底。關鍵不是「永遠成功」，而是<strong>失敗可預期、行為可宣告</strong>（例如回應標頭標明實際模型與是否降級）。</p>
+
+  <p>這條鏈上有兩個常被混用的詞，面試時要分清楚：<strong>Fallback</strong> 指首選後端因<em>健康問題</em>（逾時、5xx、熔斷）出局，改由<strong>另一個能力同樣足夠</strong>的後端承接，答案品質不打折，代價通常是成本或延遲上升；<strong>Degrade（降級）</strong>指<em>沒有任何能力足夠的後端可用</em>（被延遲預算、context 上限或預算擋掉），只好用<strong>低一級</strong>的模型作答，品質確實會打折，因此必須在回應標頭標註。前者換家、後者換級。</p>
 
   <div class="lgw-pipeline">
     <div class="lgw-pipe-row">
@@ -400,7 +395,7 @@
 
   <div class="callout accent">
     <div class="c-title"><span class="ic">關鍵</span>命中率不是唯一 KPI</div>
-    <p>還要盯「錯命中率」（語意近但答案不該共用）與節省的 $／延遲。一個高命中但常回過期答案的快取，比低命中更危險。</p>
+    <p>還要盯「錯命中率」（語意近但答案不該共用）與節省的 $／延遲。一個高命中但常回過期答案的快取，比低命中更危險。實務會把「可接受的錯命中率」做成<strong>租戶等級的政策</strong>：內部與高價層容忍度低、免費層容忍度高——同一個相似度分數，在不同租戶下可以得到不同的放行結論。</p>
   </div>
 
   <div class="oneliner">
@@ -411,71 +406,107 @@
 <section id="s6">
   <div class="sec-head">
     <span class="sec-num">06</span>
-    <h2>互動 Demo：路由決策與語意快取命中</h2>
+    <h2>互動 · 准入與路由決策</h2>
   </div>
-  <p class="sec-sub">同一批請求，切換 Gateway 策略，觀察路由目標、快取命中、fallback 與累計成本。</p>
+  <p class="sec-sub">前面四節是規則，這一節把規則跑起來：同一筆請求，改一個旋鈕就換一個結論。</p>
 
-  <div class="demo" id="demo-lgw-gateway">
+  <p>下面的決策器把第 2 到第 5 節的規則寫成一次判定。左邊調請求本身，右邊調 Gateway 當下的狀態；四個後端池與 Semantic Cache 會被畫成平面上的五個候選點，兩條約束線切出可行域，最後導出一個判定碼與它的數字理由。</p>
+
+  <div class="demo" id="demo-lgw-admit">
     <div class="demo-bar">
-      <span class="label">互動 · LLM Gateway</span>
-      <span class="label" style="text-transform:none;font-family:var(--sans);font-size:12px;color:var(--text-2)">切換策略後按「處理下一筆」，看路由與語意快取</span>
+      <span class="label">互動 · 准入與路由決策</span>
+      <span class="label" style="text-transform:none;font-family:var(--sans);font-size:12px;color:var(--text-2)">拖任一個旋鈕，判定與理由即時重算</span>
     </div>
     <div class="demo-body">
-      <p style="margin:0 0 8px;font-size:13px;color:var(--text-2);line-height:1.55;">場景：5 筆請求（短 FAQ ×2 語意相近、程式碼生成、長推理、尖峰超額）。供應商池：Cheap／Balanced／Premium；Premium 在部分步驟會「故障」以展示 fallback。數字為教學示意。</p>
-
-      <div class="seg" role="group" aria-label="Gateway 策略">
-        <button data-sc="direct" aria-pressed="true">直打貴模型</button>
-        <button data-sc="routed" aria-pressed="false">智慧路由</button>
-        <button data-sc="cached" aria-pressed="false">路由 + 語意快取</button>
+      <div class="seg" role="group" aria-label="任務型態">
+        <button data-task="faq" aria-pressed="true">短 FAQ（需 L1）</button>
+        <button data-task="codegen" aria-pressed="false">程式碼生成（需 L2）</button>
+        <button data-task="longreason" aria-pressed="false">長推理（需 L3）</button>
       </div>
 
-      <div class="lgw-demo-controls">
-        <button class="btn primary" id="lgw-btn-step">處理下一筆</button>
-        <button class="btn" id="lgw-btn-reset">重置</button>
-      </div>
-
-      <div class="lgw-metric">
-        <span>步驟 <strong id="lgw-m-step">0</strong></span>
-        <span>累計成本 <strong id="lgw-m-cost">$0.00</strong></span>
-        <span>快取命中 <strong id="lgw-m-hits">0</strong></span>
-        <span>Fallback <strong id="lgw-m-falls">0</strong></span>
-        <span>省下 token（示意） <strong id="lgw-m-saved">0</strong></span>
-      </div>
-
-      <div class="lgw-panels">
-        <div class="lgw-panel">
-          <div class="pt">REQUEST QUEUE</div>
-          <div class="lgw-req-list" id="lgw-reqs"></div>
-          <div class="legend" style="margin-top:10px">
-            <span><i class="dot ns-wait"></i>處理中</span>
-            <span><i class="dot ns-ok"></i>快取命中</span>
-            <span><i class="dot ns-lock"></i>Fallback</span>
-            <span><i class="dot ns-bad"></i>拒單／超額</span>
+      <div class="lgw-dp-knobs">
+        <div class="lgw-dp-group">
+          <div class="gt">請求屬性</div>
+          <div class="lgw-dp-knob">
+            <span class="kl">輸入 token</span><span class="kv" id="lgw-dp-v-prompt">600</span>
+            <input type="range" id="lgw-dp-prompt" min="200" max="8000" step="100" value="600" aria-label="輸入 token">
+          </div>
+          <div class="lgw-dp-knob">
+            <span class="kl">輸出 token</span><span class="kv" id="lgw-dp-v-out">250</span>
+            <input type="range" id="lgw-dp-out" min="50" max="2000" step="50" value="250" aria-label="輸出 token">
+          </div>
+          <div class="lgw-dp-knob">
+            <span class="kl">延遲預算</span><span class="kv" id="lgw-dp-v-lat">3,500 ms</span>
+            <input type="range" id="lgw-dp-lat" min="500" max="45000" step="500" value="3500" aria-label="延遲預算">
           </div>
         </div>
-        <div class="lgw-panel">
-          <div class="pt">PROVIDER POOLS</div>
-          <div class="lgw-provider-row" id="lgw-providers"></div>
-          <div class="pt" style="margin-top:12px">CACHE HIT RATIO（本回合）</div>
-          <div class="lgw-cache-bar" id="lgw-cache-bar" aria-hidden="true">
-            <span class="hit" style="width:0%"></span>
-            <span class="miss" style="width:0%"></span>
+        <div class="lgw-dp-group">
+          <div class="gt">Gateway 狀態</div>
+          <div class="lgw-dp-knob">
+            <span class="kl">租戶層級</span><span class="kv" id="lgw-dp-v-tier">Pro</span>
+            <select id="lgw-dp-tier" aria-label="租戶層級">
+              <option value="free">Free（日預算 $0.50、錯命中容忍 8%）</option>
+              <option value="pro" selected>Pro（日預算 $20、容忍 4%）</option>
+              <option value="internal">Internal（日預算 $200、容忍 2%）</option>
+            </select>
           </div>
-          <div class="legend">
-            <span><i class="dot ns-ok"></i>Hit</span>
-            <span><i class="dot ns-wait"></i>Miss（打模型）</span>
+          <div class="lgw-dp-knob">
+            <span class="kl">今日已用預算</span><span class="kv" id="lgw-dp-v-spent">40%</span>
+            <input type="range" id="lgw-dp-spent" min="0" max="100" step="1" value="40" aria-label="今日已用預算">
+          </div>
+          <div class="lgw-dp-knob">
+            <span class="kl">最近鄰快取相似度</span><span class="kv" id="lgw-dp-v-sim">0.93</span>
+            <input type="range" id="lgw-dp-sim" min="50" max="99" step="1" value="93" aria-label="最近鄰快取相似度">
+          </div>
+          <div class="lgw-dp-knob">
+            <span class="kl">相似度閾值 τ</span><span class="kv" id="lgw-dp-v-tau">0.90</span>
+            <input type="range" id="lgw-dp-tau" min="70" max="98" step="1" value="90" aria-label="相似度閾值">
+          </div>
+          <div class="lgw-dp-knob">
+            <span class="kl">供應商健康</span><span class="kv" id="lgw-dp-v-outage">全部正常</span>
+            <select id="lgw-dp-outage" aria-label="供應商健康">
+              <option value="none" selected>全部正常</option>
+              <option value="premium">Premium 池逾時／5xx</option>
+              <option value="balanced">Balanced 池逾時／5xx</option>
+            </select>
           </div>
         </div>
       </div>
 
-      <div class="status-line" id="lgw-status">選擇策略後按「處理下一筆」。對照三種策略的成本與命中差異。</div>
-      <div class="lgw-verdict" id="lgw-verdict">判定尚未產生——處理完佇列後會摘要成本／命中／fallback。</div>
-      <div class="lgw-timeline" id="lgw-timeline" aria-live="polite"></div>
+      <div class="lgw-dp-plane" id="lgw-dp-plane"></div>
+      <p class="cap">橫軸是<strong>准入預留</strong>（被拿去和剩餘預算比較的那個數，不是最後帳單），縱軸是預估延遲，兩軸都是對數刻度。左下角填色矩形＝兩條量化約束切出的可行域；<strong>能力級距、context 上限與供應商健康不是座標軸</strong>，違反它們的候選會留在原位但畫成空心並標出是哪一條規則擋的。看的時候先找雙環的勝出點，再看被擋在哪條線外。</p>
+
+      <div class="legend">
+        <span><i class="dot ns-ok"></i>可行</span>
+        <span><i class="dot ns-wait"></i>勝出</span>
+        <span><i class="dot ns-lock"></i>能力不足（可當降級候選）</span>
+        <span><i class="dot ns-bad"></i>出局</span>
+      </div>
+
+      <div class="lgw-dp-call" id="lgw-dp-call"></div>
+
+      <div class="tbl-wrap">
+        <table class="lgw-dp-tbl">
+          <thead>
+            <tr><th>候選後端</th><th>能力</th><th>准入預留</th><th>實際成本</th><th>預估延遲</th><th>判定</th></tr>
+          </thead>
+          <tbody id="lgw-dp-rows"></tbody>
+        </table>
+      </div>
+      <p class="cap">預留與實際成本的差距就是第 3 節說的 soft reserve：預留用 <code>輸出 token × 1.3</code> 抓保險係數，完成後再按實際 usage 結算並退回差額。</p>
+
+      <div class="lgw-dp-meter" id="lgw-dp-meter"></div>
+
+      <div class="status-line" id="lgw-dp-status"></div>
+
+      <div style="margin-top:10px">
+        <button class="btn" id="lgw-dp-reset">重置為預設請求</button>
+      </div>
     </div>
   </div>
 
   <div class="oneliner">
-    <b>一句話答法</b>Demo 要看的是機制：直打貴模型最穩也最貴；路由降本；語意快取在重複 FAQ 上把延遲與 token 一起砍掉。
+    <b>一句話答法</b>Gateway 的准入是一次多約束判定：能力級距、context、延遲預算、剩餘預算與快取相似度一起決定這筆請求走快取、正常路由、換家、降級，還是直接 429。
   </div>
 </section>
 
@@ -506,6 +537,10 @@
         <tr>
           <td>Semantic cache 何時不該用？</td>
           <td>高時效、個人化、含 PII、或答案依賴即時工具結果的請求。</td>
+        </tr>
+        <tr>
+          <td>Fallback 與 Degrade 差在哪？</td>
+          <td>Fallback 換家、能力不降；Degrade 換級、品質打折且必須在回應標頭標註。</td>
         </tr>
         <tr>
           <td>Fallback 如何避免雪崩？</td>
