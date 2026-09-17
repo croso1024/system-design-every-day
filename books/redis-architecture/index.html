@@ -1379,7 +1379,7 @@
         <a href="#s5"><span class="n">05</span>主從複寫與 Sentinel</a>
         <a href="#s6"><span class="n">06</span>Cluster：16384 slot 與線上 resharding</a>
         <a href="#s7"><span class="n">07</span>maxmemory、淘汰策略與大／熱 key</a>
-        <a href="#s8"><span class="n">08</span>互動 Demo：slot 遷移與淘汰政策</a>
+        <a href="#s8"><span class="n">08</span>互動 · maxmemory 撞牆：誰被踢、命中率掉多少</a>
         <a href="#s9"><span class="n">09</span>面試折衷與邊界</a>
       </div>
     </nav>
@@ -1395,7 +1395,10 @@
     <!-- ===================== MAIN CONTENT ===================== -->
     <main>
       <div class="inner">
-        <!-- demo-archetype: A｜時序推進 — 讀者選「Slot 遷移」或「maxmemory 淘汰」，按「下一步」逐步重放：前者看客戶端先收 ASK（不改對照表）再收 MOVED（改表），後者在同一份工作集下比較 noeviction／allkeys-lru／allkeys-lfu／volatile-ttl 各自踢掉誰。選 A 是因為 ASK 與 MOVED 的差別本質上就是「發生在第幾步」，把順序抽掉之後兩者看起來一模一樣。 -->
+        <!-- demo-archetype: D｜空間視覺化（主，第 6 節）＋B｜參數掃描（次，第 8 節） — 讀者在 canvas 上的 16384 格 slot
+     空間調節點數、增減節點、設定遷移區段與進度並輸入 key（真跑 CRC16 mod 16384 與 hash tag 規則），即時看到每格歸屬、
+     每節點 slot 數與傾斜、reshard 搬遷量，以及每把 key 被判成 HIT／ASK／MOVED 的理由；次 demo 掃 maxmemory 參數算出
+     淘汰誰與命中率變化。選 D 是因為 Cluster 的命題是「一個固定大小的位址空間怎麼被切、怎麼搬」，那是面積問題。 -->
 <style>
   /* 本篇專屬：ra-* 命名空間，不覆蓋全站 base 類別 */
   #ra-root {
@@ -1434,124 +1437,71 @@
   .ra-pane .ss { font-family: var(--mono); font-size: 11px; color: var(--text-3); margin-bottom: 8px; letter-spacing: .04em; }
   .ra-pane ul { margin: 0; padding-left: 1.15em; font-size: 13px; color: var(--text-2); line-height: 1.65; }
 
-  .ra-ctrl { display: flex; flex-wrap: wrap; gap: 10px; margin: 10px 0 8px; align-items: center; }
-  .ra-metric { display: flex; flex-wrap: wrap; gap: 14px; margin: 8px 0 4px; font-size: 13px; color: var(--text-2); }
-  .ra-metric strong { color: var(--text); font-family: var(--mono); font-size: 12.5px; }
+  /* ---------- 主 demo：16384 slot 空間（rk-） ---------- */
+  .rk-wrap { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 300px); gap: 16px; align-items: start; margin: 12px 0 4px; }
+  @media (max-width: 760px) { .rk-wrap { grid-template-columns: 1fr; } }
+  .rk-cvbox { border: 1px solid var(--border-strong); border-radius: var(--radius-sm); background: #fff; padding: 8px; }
+  #rk-cv { display: block; width: 100%; max-width: 512px; height: auto; margin: 0 auto; image-rendering: pixelated; cursor: crosshair; }
+  .rk-axis { display: flex; justify-content: space-between; font-family: var(--mono); font-size: 10.5px; color: var(--text-3); margin-top: 5px; }
+  .rk-pick { font-family: var(--mono); font-size: 11.5px; color: var(--text-2); margin: 6px 0 0; line-height: 1.5; }
 
-  .ra-actors { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin: 12px 0 6px; }
-  @media (max-width: 760px) { .ra-actors { grid-template-columns: 1fr 1fr; } }
-  @media (max-width: 480px) { .ra-actors { grid-template-columns: 1fr; } }
-  .ra-actor {
-    border: 1.5px solid var(--border-strong); border-radius: var(--radius-sm);
-    padding: 12px 12px 10px; background: #fff; text-align: center;
-    transition: background .18s, border-color .18s, box-shadow .18s;
-  }
-  .ra-actor .an { font-weight: 700; font-size: 13px; letter-spacing: .03em; }
-  .ra-actor .al { font-family: var(--mono); font-size: 10.5px; color: var(--text-3); margin-top: 2px; }
-  .ra-actor .av { font-family: var(--mono); font-size: 14px; font-weight: 700; margin-top: 8px; color: var(--text); word-break: break-all; }
-  .ra-actor .ah { font-size: 11.5px; color: var(--text-2); margin-top: 4px; min-height: 1.4em; }
-  .ra-actor.on { background: var(--accent-soft); border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
-  .ra-actor.on .an { color: var(--accent); }
-  .ra-actor.ok { background: var(--ok-soft); border-color: var(--ok); }
-  .ra-actor.ok .an { color: var(--ok); }
-  .ra-actor.dirty { background: var(--warn-soft); border-color: var(--warn); }
-  .ra-actor.dirty .an { color: var(--warn); }
-  .ra-actor.bad { background: var(--bad-soft); border-color: var(--bad); }
-  .ra-actor.bad .an { color: var(--bad); }
+  .rk-knobs { display: grid; gap: 9px; }
+  .rk-knob { display: grid; grid-template-columns: 76px minmax(0, 1fr) auto; gap: 8px; align-items: center; font-size: 12.5px; color: var(--text-2); }
+  .rk-knob > label { font-size: 12px; }
+  .rk-knob input[type="range"] { width: 100%; }
+  .rk-knob .kv2 { font-family: var(--mono); font-size: 11.5px; color: var(--text); min-width: 56px; text-align: right; }
+  .rk-knob select { font-family: var(--mono); font-size: 12px; padding: 4px 6px; border: 1px solid var(--border-strong); border-radius: 5px; background: #fff; color: var(--text); width: 100%; }
+  .rk-keyin { width: 100%; font-family: var(--mono); font-size: 12px; padding: 6px 8px; border: 1px solid var(--border-strong); border-radius: 6px; background: #fff; color: var(--text); box-sizing: border-box; }
+  .rk-btns { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 2px; }
+  .rk-hint { font-size: 11.5px; color: var(--text-3); line-height: 1.5; margin: 2px 0 0; }
 
-  .ra-slots {
-    display: grid; grid-template-columns: repeat(16, 1fr); gap: 4px;
-    margin: 8px 0 4px;
-  }
-  @media (max-width: 720px) { .ra-slots { grid-template-columns: repeat(8, 1fr); } }
-  .ra-slot {
-    font-family: var(--mono); font-size: 10px; padding: 8px 2px;
-    border: 1.5px solid var(--border-strong); border-radius: 5px;
-    background: #fff; color: var(--text-2); text-align: center;
-    transition: background .18s, border-color .18s, color .18s;
-  }
-  .ra-slot .sn { display: block; font-weight: 700; font-size: 11px; color: var(--text); }
-  .ra-slot.n1 { background: var(--ra-c-soft); border-color: var(--ra-c); color: var(--ra-c); }
-  .ra-slot.n1 .sn { color: var(--ra-c); }
-  .ra-slot.n2 { background: var(--ra-alt-soft); border-color: var(--ra-alt); color: var(--ra-alt); }
-  .ra-slot.n2 .sn { color: var(--ra-alt); }
-  .ra-slot.n3 { background: var(--ra-s-soft); border-color: var(--ra-s); color: var(--ra-s); }
-  .ra-slot.n3 .sn { color: var(--ra-s); }
-  .ra-slot.mig { background: var(--ra-w-soft); border-color: var(--ra-w); color: var(--ra-w); box-shadow: 0 0 0 2px var(--ra-w-soft); }
-  .ra-slot.mig .sn { color: var(--ra-w); }
-  .ra-slot.hit { box-shadow: 0 0 0 2px var(--accent-soft); }
-  .ra-slot.empty { color: var(--text-3); border-style: dashed; background: var(--bg-soft); }
+  .rk-leg { display: flex; flex-wrap: wrap; gap: 12px; margin: 8px 0 2px; font-size: 11.5px; color: var(--text-2); align-items: center; }
+  .rk-sw { width: 10px; height: 10px; border-radius: 2px; display: inline-block; border: 1px solid rgba(0,0,0,.12); }
+  .rk-leg span { display: inline-flex; align-items: center; gap: 5px; }
 
-  .ra-keys {
-    display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0 4px; min-height: 36px;
-  }
-  .ra-key {
-    font-family: var(--mono); font-size: 11px; padding: 6px 8px;
-    border: 1.5px solid var(--border-strong); border-radius: 6px; background: #fff; color: var(--text-2);
-  }
-  .ra-key b { color: var(--text); font-weight: 700; margin-right: 4px; }
-  .ra-key.hot { background: var(--ra-c-soft); border-color: var(--ra-c); color: var(--ra-c); }
-  .ra-key.hot b { color: var(--ra-c); }
-  .ra-key.cold { background: var(--bg-soft); }
-  .ra-key.gone { background: var(--ra-bad-soft); border-color: var(--ra-bad); color: var(--ra-bad); text-decoration: line-through; }
-  .ra-key.gone b { color: var(--ra-bad); }
-  .ra-key.now { box-shadow: 0 0 0 3px var(--accent-soft); border-color: var(--accent); }
-  .ra-key.oom { background: var(--ra-bad-soft); border-color: var(--ra-bad); color: var(--ra-bad); border-style: dashed; }
+  .rk-bars { display: grid; gap: 4px; margin: 10px 0 4px; }
+  .rk-bar { display: grid; grid-template-columns: 110px minmax(0, 1fr) 54px; gap: 8px; align-items: center; }
+  .rk-bar .bn { font-family: var(--mono); font-size: 11.5px; color: var(--text-2); display: flex; align-items: center; gap: 5px; white-space: nowrap; }
+  .rk-bar .bt { display: block; height: 10px; background: var(--bg-soft); border-radius: 3px; overflow: hidden; }
+  .rk-bar .bt i { display: block; height: 100%; }
+  .rk-bar .bv { font-family: var(--mono); font-size: 11.5px; color: var(--text); text-align: right; }
 
-  .ra-panels { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 12px; }
-  @media (max-width: 640px) { .ra-panels { grid-template-columns: 1fr; } }
-  .ra-panel { border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 12px; background: #fff; }
-  .ra-panel .pt {
-    font-size: 11px; color: var(--text-3); letter-spacing: .06em; text-transform: uppercase;
-    font-family: var(--mono); margin-bottom: 8px;
-  }
-  .ra-panel .prow {
-    display: flex; justify-content: space-between; gap: 8px;
-    font-family: var(--mono); font-size: 12px; padding: 4px 0;
-    border-bottom: 1px dashed var(--border);
-  }
-  .ra-panel .prow:last-child { border-bottom: none; }
-  .ra-panel .pk { color: var(--text-3); white-space: nowrap; }
-  .ra-panel .pv { color: var(--text); font-weight: 600; text-align: right; word-break: break-all; }
-  .ra-panel .pv.good { color: var(--ok); }
-  .ra-panel .pv.bad { color: var(--bad); }
-  .ra-panel .pv.warn { color: var(--warn); }
+  .rk-tbl { width: 100%; border-collapse: collapse; margin: 10px 0 4px; font-size: 12.5px; }
+  .rk-tbl th, .rk-tbl td { border: 1px solid var(--border); padding: 6px 9px; text-align: left; vertical-align: top; }
+  .rk-tbl th { background: var(--bg-soft); color: var(--text-2); font-weight: 600; width: 38%; white-space: nowrap; }
+  .rk-tbl td { font-family: var(--mono); font-size: 12px; color: var(--text); }
+  .rk-tbl td.big { font-size: 15px; font-weight: 700; }
 
-  .ra-wire {
-    border: 1px solid var(--border); border-radius: var(--radius-sm);
-    background: #fff; padding: 8px 10px; margin-top: 10px; max-height: 280px; overflow-y: auto;
-  }
-  .ra-row {
-    display: flex; align-items: baseline; gap: 8px;
-    font-family: var(--mono); font-size: 11.5px; padding: 4px 0;
-    border-bottom: 1px dashed var(--border);
-  }
-  .ra-row:last-child { border-bottom: none; }
-  .ra-row .ar { width: 42px; flex: none; text-align: center; color: var(--text-3); font-weight: 700; }
-  .ra-row .tg {
-    flex: none; border-radius: 4px; padding: 2px 6px; font-size: 10.5px; font-weight: 700;
-    border: 1px solid var(--border-strong); background: var(--bg-soft); color: var(--text-3);
-  }
-  .ra-row .tx { color: var(--text-2); line-height: 1.5; }
-  .ra-row.read .tg { background: var(--ra-c-soft); border-color: var(--ra-c); color: var(--ra-c); }
-  .ra-row.ok .tg { background: var(--ra-s-soft); border-color: var(--ra-s); color: var(--ra-s); }
-  .ra-row.warn .tg { background: var(--ra-w-soft); border-color: var(--ra-w); color: var(--ra-w); }
-  .ra-row.bad .tg { background: var(--ra-bad-soft); border-color: var(--ra-bad); color: var(--ra-bad); }
+  .rk-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 10px; margin: 10px 0 4px; }
+  .rk-card { border: 1px solid var(--border); border-left-width: 4px; border-radius: var(--radius-sm); background: #fff; padding: 10px 12px; }
+  .rk-card.hit { border-left-color: var(--ok); }
+  .rk-card.ask { border-left-color: var(--warn); }
+  .rk-card.moved { border-left-color: var(--accent); }
+  .rk-card .kk { font-family: var(--mono); font-size: 12px; font-weight: 700; color: var(--text); word-break: break-all; }
+  .rk-card .kr { display: flex; justify-content: space-between; gap: 6px; font-size: 11px; color: var(--text-3); margin-top: 3px; }
+  .rk-card .kr b { font-family: var(--mono); font-size: 11px; color: var(--text); font-weight: 600; text-align: right; word-break: break-all; }
+  .rk-card .kv { margin-top: 7px; font-family: var(--mono); font-size: 13px; font-weight: 700; }
+  .rk-card.hit .kv { color: var(--ok); }
+  .rk-card.ask .kv { color: var(--warn); }
+  .rk-card.moved .kv { color: var(--accent); }
+  .rk-card .kw { font-size: 11.5px; color: var(--text-2); line-height: 1.5; margin-top: 4px; }
+  .rk-empty { font-size: 12.5px; color: var(--text-3); margin: 0; }
 
-  .ra-verdict {
-    margin-top: 10px; padding: 10px 12px; border-radius: var(--radius-sm);
-    border: 1px solid var(--border); background: var(--bg-soft);
-    font-size: 13px; color: var(--text-2); line-height: 1.55;
-  }
-  .ra-verdict.tone-ok { border-left: 3px solid var(--ok); background: var(--ok-soft); color: var(--text); }
-  .ra-verdict.tone-lock { border-left: 3px solid var(--warn); background: var(--warn-soft); color: var(--text); }
-  .ra-verdict.tone-bad { border-left: 3px solid var(--bad); background: var(--bad-soft); color: var(--text); }
+  /* ---------- 次 demo：maxmemory 撞牆（rm-） ---------- */
+  .rm-knobs { display: grid; grid-template-columns: 1fr 1fr; gap: 9px 18px; margin: 10px 0 6px; }
+  @media (max-width: 640px) { .rm-knobs { grid-template-columns: 1fr; } }
+  .rm-knob { display: grid; grid-template-columns: 96px minmax(0, 1fr) auto; gap: 8px; align-items: center; font-size: 12px; color: var(--text-2); }
+  .rm-knob input[type="range"] { width: 100%; }
+  .rm-knob .kv2 { font-family: var(--mono); font-size: 11.5px; color: var(--text); min-width: 56px; text-align: right; }
 
-  .ra-mode-hint { font-size: 12.5px; color: var(--text-2); margin: 8px 0 4px; line-height: 1.55; }
-
-  /* display 覆寫 UA hidden；切換面板必須成對寫 display:none */
-  .ra-view { display: block; }
-  .ra-view[hidden] { display: none; }
+  .rm-scale { margin: 14px 0 4px; }
+  .rm-track { display: flex; height: 22px; border: 1px solid var(--border-strong); border-radius: 5px; background: var(--bg-soft); overflow: hidden; }
+  .rm-track i { display: block; height: 100%; }
+  .rm-track .pin { background: #6b6f9a; }
+  .rm-track .vol { background: #a3743e; }
+  .rm-need { height: 7px; margin-top: 4px; background: var(--bg-soft); border-radius: 3px; overflow: hidden; }
+  .rm-need i { display: block; height: 100%; background: var(--ra-bad); }
+  .rm-lbl { display: flex; justify-content: space-between; gap: 10px; font-family: var(--mono); font-size: 10.5px; color: var(--text-3); margin-top: 4px; }
 </style>
 
 <div id="ra-root">
@@ -1750,6 +1700,7 @@ flowchart LR
       </ul>
     </div>
   </div>
+  <p class="cap">左欄是選型時該按的順序（先問操作、再選型別、最後才看編碼閾值），右欄是同一個決定在記憶體上的代價。對照著看會發現：真正讓 RSS 跳一截的不是 payload，而是超過閾值後從 listpack／intset 換成 hashtable／skiplist 所帶來的指標開銷。</p>
 
   <div class="callout accent">
     <div class="c-title"><span class="ic">關鍵</span>Big key 往往是選型錯誤，不是流量錯誤</div>
@@ -1793,6 +1744,7 @@ flowchart LR
       </ul>
     </div>
   </div>
+  <p class="cap">兩欄的分野是「崩潰之後還剩什麼」：RDB 給的是一個完整但過去的時間點，AOF 給的是一條可重放的命令流。看 AOF 那欄的 <code>appendfsync</code> 三行——資料安全的刻度就在那裡，其餘都是還原速度與檔案大小的取捨。</p>
 
   <div class="tbl-wrap">
     <table>
@@ -1897,6 +1849,7 @@ flowchart TD
       </ul>
     </div>
   </div>
+  <p class="cap">左欄是讓「多數派存在且唯一」的設定，右欄是這組設定沒做對時的長相。重點在右欄第一行：腦裂的成因不是 Sentinel 數量不夠，而是舊主在分區另一側<strong>仍然接受寫入</strong>——所以要靠 <code>min-replicas-to-write</code> 這類寫入保護把它自己關掉。</p>
 
   <div class="callout accent">
     <div class="c-title"><span class="ic">關鍵</span>Sentinel 管角色，不管 slot</div>
@@ -1981,6 +1934,82 @@ sequenceDiagram
   </pre>
   <p class="cap">兩趟都先打到 A，差別在回程之後：<code>ASK</code> 不改對照表，下一次仍先問 A；<code>MOVED</code> 才讓客戶端把 slot 7 記到 C。所以 ASK 是「這一次借道」，MOVED 是「歸屬換人」。</p>
 
+  <p class="ra-sub">3 · 互動：在 16384 格上看歸屬、傾斜與重定向</p>
+  <div class="demo" id="demo-rk">
+    <div class="demo-bar">
+      <span class="label">互動 · 16384 slot 空間</span>
+      <span class="label" style="text-transform:none;font-family:var(--sans);font-size:12px;color:var(--text-2)">調節點數與遷移，輸入 key 看它落在哪一格</span>
+    </div>
+    <div class="demo-body">
+      <p style="margin:0 0 10px;font-size:13px;color:var(--text-2);line-height:1.55;">下面這張格帶就是完整的 keyspace：128 欄 × 128 列 = 16384 格，<strong>一格一個 slot</strong>（左上是 slot 0，右下是 slot 16383），顏色是歸屬節點。key 的 slot 由 CRC16 當場算出，不是查表。</p>
+
+      <div class="rk-wrap">
+        <div>
+          <div class="rk-cvbox">
+            <canvas id="rk-cv" width="512" height="512" aria-label="16384 個 slot 的歸屬格帶"></canvas>
+            <div class="rk-axis"><span>slot 0</span><span>每列 128 格</span><span>slot 16383</span></div>
+          </div>
+          <div class="rk-leg">
+            <span><i class="rk-sw" style="background:#3f6188"></i>N1</span>
+            <span><i class="rk-sw" style="background:#4d7d68"></i>N2</span>
+            <span><i class="rk-sw" style="background:#a3743e"></i>N3</span>
+            <span><i class="rk-sw" style="background:#6b6f9a"></i>N4+</span>
+            <span><i class="rk-sw" style="background:#c2cfdd"></i>排隊待遷（仍屬來源）</span>
+            <span><i class="rk-sw" style="background:#c98a2e"></i>正在搬（MIGRATING／IMPORTING）</span>
+          </div>
+          <p class="rk-pick" id="rk-pick">在格帶上點一下，可查該格的 slot 號與歸屬。</p>
+        </div>
+
+        <div class="rk-knobs">
+          <div class="rk-knob">
+            <label for="rk-nodes">主節點數</label>
+            <input type="range" id="rk-nodes" min="3" max="9" step="1" value="3">
+            <span class="kv2" id="rk-nodes-v">3 台</span>
+          </div>
+          <div class="rk-btns">
+            <button class="btn" id="rk-add">＋ 加入一台</button>
+            <button class="btn" id="rk-drop">− 移除一台</button>
+          </div>
+          <div class="rk-knob">
+            <label for="rk-src">遷移來源</label>
+            <select id="rk-src"></select>
+            <span class="kv2">MIGRATING</span>
+          </div>
+          <div class="rk-knob">
+            <label for="rk-dst">遷移目標</label>
+            <select id="rk-dst"></select>
+            <span class="kv2">IMPORTING</span>
+          </div>
+          <div class="rk-knob">
+            <label for="rk-span">遷移槽數</label>
+            <input type="range" id="rk-span" min="0" max="4096" step="32" value="512">
+            <span class="kv2" id="rk-span-v">512 格</span>
+          </div>
+          <div class="rk-knob">
+            <label for="rk-prog">遷移進度</label>
+            <input type="range" id="rk-prog" min="0" max="100" step="1" value="40">
+            <span class="kv2" id="rk-prog-v">40%</span>
+          </div>
+          <div>
+            <label for="rk-keys" style="font-size:12px;color:var(--text-2)">key（逗號分隔，最多 6 把）</label>
+            <input type="text" class="rk-keyin" id="rk-keys" spellcheck="false" autocomplete="off">
+          </div>
+          <div class="rk-btns">
+            <button class="btn primary" id="rk-sample">填一把落在遷移段的 key</button>
+            <button class="btn" id="rk-reset">重置</button>
+          </div>
+          <p class="rk-hint">「填一把落在遷移段的 key」是真的從 <code>job:1</code> 開始逐一算 CRC16，優先找落在<strong>正在搬的那一格</strong>、而且會拿到 <code>ASK</code> 的那一把（搜尋上限 20 萬把，按下去大約要等 0.3 秒）。</p>
+        </div>
+      </div>
+
+      <div class="rk-bars" id="rk-bars"></div>
+      <table class="rk-tbl"><tbody id="rk-facts"></tbody></table>
+      <div class="rk-cards" id="rk-cards"></div>
+      <div class="status-line" id="rk-status"></div>
+    </div>
+  </div>
+  <p class="cap">三個可驗的點：<strong>(1)</strong> 加一台的搬遷量正好是 <code>16384 ÷ 新節點數</code>——Redis 只從既有各節點的尾端切走要給新節點的那一份，其餘 slot 不動，所以新節點在格帶上是<strong>好幾段同色</strong>而不是一整條；這與一致性雜湊的鄰近重映射殊途同歸，但靠的是固定對照表。<strong>(2)</strong> 同一把 key 在遷移進度 0%／中途／100% 會依序得到 <code>HIT</code>、<code>ASK</code>、<code>MOVED</code>，三者由「它的 slot 排在遷移清單的第幾格」算出。<strong>(3)</strong> 「正在搬的那一格裡，這把 key 到底搬走了沒」現實中取決於 <code>MIGRATE</code> 跑到哪；本 demo 為了可重現，改用該 key 的 CRC16 落在 slot 索引之外的高位當代理規則（低 14 位就是 slot 本身，對同一格的所有 key 都相同，拿來當代理會讓整格答案一致）——所以同一格裡不同的 key 會拿到不同答案，這正是遷移窗口裡 <code>MGET</code> 會一半 ASK、一半本地的原因。</p>
+
   <div class="callout warn">
     <div class="c-title"><span class="ic">陷阱</span>遷移窗口的多 key 操作與「以為 hash ring 會自動平衡」</div>
     <p>MIGRATING 時，同一槽裡有的 key 在 A、有的在 C。客戶端若對兩把 key 做一次 <code>MGET</code>，可能一半 ASK、一半本地——這就是為什麼遷移期要避免跨 key 批次，或接受重試。另外：新增節點<strong>不會</strong>自動把熱 slot 拆開。熱 key 若都落在同一槽（沒設計 hash tag），那一槽再怎麼遷，流量仍綁在一台。熱槽要靠拆 key，不是靠多加節點。</p>
@@ -2061,6 +2090,7 @@ sequenceDiagram
       </ul>
     </div>
   </div>
+  <p class="cap">左右兩欄是兩種不同的病：左邊是<strong>單鍵太大</strong>（一次命令就卡住整條迴圈，複寫與 RDB 也被它拖住），右邊是<strong>單鍵太熱</strong>（key 不大，但流量全壓在同一個 slot 的同一台主節點）。看處置那一列就知道差別：大 key 要拆結構，熱 key 要複製或打散，兩者都不是加節點能解的。</p>
 
   <div class="callout accent">
     <div class="c-title"><span class="ic">關鍵</span>熱 key 的應用層互斥重建不是本篇的題</div>
@@ -2075,113 +2105,79 @@ sequenceDiagram
 <section id="s8">
   <div class="sec-head">
     <span class="sec-num">08</span>
-    <h2>互動 Demo：slot 遷移與淘汰政策</h2>
+    <h2>互動 · maxmemory 撞牆：誰被踢、命中率掉多少</h2>
   </div>
-  <p class="sec-sub">同一個叢集畫布。先看 slot 7 從 N1 遷到 N3 時客戶端收到 ASK 再收到 MOVED；再看同一份工作集在四種 maxmemory 政策下誰被踢、誰 OOM。</p>
+  <p class="sec-sub">同一份工作集、同一條存取軌跡，只換政策就換一整組犧牲者。這裡把「候選集合是誰」造成的差別算出來。</p>
 
-  <div class="demo" id="demo-ra">
+  <div class="demo" id="demo-rm">
     <div class="demo-bar">
-      <span class="label">互動 · Redis 叢集與記憶體</span>
-      <span class="label" style="text-transform:none;font-family:var(--sans);font-size:12px;color:var(--text-2)">切模式後按「下一步」逐步重放</span>
+      <span class="label">互動 · maxmemory 與淘汰政策</span>
+      <span class="label" style="text-transform:none;font-family:var(--sans);font-size:12px;color:var(--text-2)">拖動參數，命中率與犧牲者即時重算</span>
     </div>
     <div class="demo-body">
-      <p class="ra-mode-hint" id="ra-mode-hint">Slot 遷移：16 格代表 16384 slot。客戶端先打快取中的節點，觀察 ASK（暫借）與 MOVED（改表）。</p>
+      <p style="margin:0 0 10px;font-size:13px;color:var(--text-2);line-height:1.55;">模擬條件：一條 4000 次存取的軌跡，主要依 Zipf 熱度分佈抽 key，另外每 500 次插入一段 150 次的<strong>冷 key 掃描</strong>（模擬跑在旁邊的批次作業）。下面所有數字都是這條軌跡跑完後的計數。</p>
 
-      <div class="seg" role="group" aria-label="實驗模式" id="ra-seg-mode">
-        <button data-mode="slot" aria-pressed="true">Slot 遷移 · MOVED／ASK</button>
-        <button data-mode="evict" aria-pressed="false">maxmemory 淘汰</button>
+      <div class="seg" role="group" aria-label="淘汰政策" id="rm-seg">
+        <button data-policy="noeviction" aria-pressed="false">noeviction</button>
+        <button data-policy="allkeys-lru" aria-pressed="false">allkeys-lru</button>
+        <button data-policy="allkeys-lfu" aria-pressed="false">allkeys-lfu</button>
+        <button data-policy="volatile-lru" aria-pressed="true">volatile-lru</button>
+        <button data-policy="volatile-ttl" aria-pressed="false">volatile-ttl</button>
       </div>
 
-      <div id="ra-slot-view" class="ra-view">
-        <p class="ra-mode-hint" style="margin-top:8px">三台主節點，slot 7（<code>cart:42</code>）將從 N1 遷到 N3。客戶端對照表一開始是對的；遷移期它會過時。</p>
-      </div>
-
-      <div id="ra-evict-view" class="ra-view" hidden>
-        <div class="seg" role="group" aria-label="淘汰政策" id="ra-seg-policy" style="margin-top:8px">
-          <button data-policy="noeviction" aria-pressed="true">noeviction</button>
-          <button data-policy="allkeys-lru" aria-pressed="false">allkeys-lru</button>
-          <button data-policy="allkeys-lfu" aria-pressed="false">allkeys-lfu</button>
-          <button data-policy="volatile-ttl" aria-pressed="false">volatile-ttl</button>
+      <div class="rm-knobs">
+        <div class="rm-knob">
+          <label for="rm-keys">工作集 key 數</label>
+          <input type="range" id="rm-keys" min="500" max="20000" step="100" value="4000">
+          <span class="kv2" id="rm-keys-v">4000 把</span>
         </div>
-        <p class="ra-mode-hint" style="margin-top:8px"><code>maxmemory = 6</code>。H1／H2 先被連續 GET 加溫（高頻），H3 只寫一次。C 鍵帶 TTL。第 11 步 <code>SET C4</code> 才撞牆：比較 LRU 踢誰、LFU 踢誰、volatile-ttl 只動哪一把。</p>
+        <div class="rm-knob">
+          <label for="rm-bytes">每鍵 bytes</label>
+          <input type="range" id="rm-bytes" min="64" max="4096" step="64" value="512">
+          <span class="kv2" id="rm-bytes-v">512 B</span>
+        </div>
+        <div class="rm-knob">
+          <label for="rm-mem">maxmemory</label>
+          <input type="range" id="rm-mem" min="64" max="8192" step="32" value="256">
+          <span class="kv2" id="rm-mem-v">256 KB</span>
+        </div>
+        <div class="rm-knob">
+          <label for="rm-ttl">設了 TTL 的比例</label>
+          <input type="range" id="rm-ttl" min="0" max="100" step="5" value="40">
+          <span class="kv2" id="rm-ttl-v">40%</span>
+        </div>
+        <div class="rm-knob">
+          <label for="rm-zipf">熱度傾斜 s</label>
+          <input type="range" id="rm-zipf" min="4" max="20" step="1" value="11">
+          <span class="kv2" id="rm-zipf-v">1.1</span>
+        </div>
+        <div class="rm-knob" style="grid-template-columns:auto">
+          <button class="btn" id="rm-reset">重置</button>
+        </div>
       </div>
 
-      <div class="ra-ctrl">
-        <button class="btn primary" id="ra-btn-next">下一步</button>
-        <button class="btn" id="ra-btn-reset">重置</button>
+      <div class="rm-scale">
+        <div class="rm-track" id="rm-gauge"></div>
+        <div class="rm-need"><i id="rm-need"></i></div>
+        <div class="rm-lbl">
+          <span id="rm-needtx">工作集需求</span>
+          <span id="rm-maxtx">maxmemory</span>
+        </div>
       </div>
-
-      <div class="ra-metric">
-        <span>步 <strong id="ra-m-step">0</strong> / <span id="ra-m-total">8</span></span>
-        <span>HIT／成功 <strong id="ra-m-ok">0</strong></span>
-        <span>ASK <strong id="ra-m-ask">0</strong></span>
-        <span>MOVED <strong id="ra-m-moved">0</strong></span>
-        <span>OOM／驅逐 <strong id="ra-m-evict">0</strong></span>
-      </div>
-
       <div class="legend">
-        <span><i class="dot ns-idle"></i>待命</span>
-        <span><i class="dot ns-wait"></i>本步作用中</span>
-        <span><i class="dot ns-lock"></i>MIGRATING／有 TTL</span>
-        <span><i class="dot ns-ok"></i>服務成功／命中</span>
-        <span><i class="dot ns-bad"></i>MOVED／OOM／被踢</span>
+        <span><i class="dot ns-wait"></i>常駐的無 TTL key（volatile-* 永遠踢不掉）</span>
+        <span><i class="dot ns-lock"></i>常駐的有 TTL key（唯一的候選集合）</span>
+        <span><i class="dot ns-bad"></i>下方細條：工作集本來需要多少</span>
       </div>
 
-      <div class="ra-actors" id="ra-actors" aria-live="polite">
-        <div class="ra-actor" data-role="cli">
-          <div class="an">Client</div>
-          <div class="al" id="ra-cli-al">對照表</div>
-          <div class="av" id="ra-cli-val">—</div>
-          <div class="ah" id="ra-cli-hint">待命</div>
-        </div>
-        <div class="ra-actor" data-role="n1">
-          <div class="an">N1</div>
-          <div class="al" id="ra-n1-al">slot 0–7</div>
-          <div class="av" id="ra-n1-val">—</div>
-          <div class="ah" id="ra-n1-hint">待命</div>
-        </div>
-        <div class="ra-actor" data-role="n2">
-          <div class="an">N2</div>
-          <div class="al" id="ra-n2-al">slot 8–11</div>
-          <div class="av" id="ra-n2-val">—</div>
-          <div class="ah" id="ra-n2-hint">待命</div>
-        </div>
-        <div class="ra-actor" data-role="n3">
-          <div class="an">N3</div>
-          <div class="al" id="ra-n3-al">slot 12–15</div>
-          <div class="av" id="ra-n3-val">—</div>
-          <div class="ah" id="ra-n3-hint">待命</div>
-        </div>
-      </div>
-
-      <div id="ra-slots" class="ra-slots" aria-label="slot 歸屬"></div>
-      <div id="ra-keys" class="ra-keys" aria-label="key 狀態"></div>
-
-      <div class="ra-panels">
-        <div class="ra-panel">
-          <div class="pt">本步語義</div>
-          <div class="prow"><span class="pk">操作</span><span class="pv" id="ra-p-op">—</span></div>
-          <div class="prow"><span class="pk">回應</span><span class="pv" id="ra-p-resp">—</span></div>
-          <div class="prow"><span class="pk">對照表／政策</span><span class="pv" id="ra-p-map">—</span></div>
-          <div class="prow"><span class="pk">犧牲者</span><span class="pv" id="ra-p-victim">—</span></div>
-        </div>
-        <div class="ra-panel">
-          <div class="pt">累計</div>
-          <div class="prow"><span class="pk">成功次數</span><span class="pv" id="ra-p-ok">0</span></div>
-          <div class="prow"><span class="pk">重定向</span><span class="pv" id="ra-p-redir">ASK 0 · MOVED 0</span></div>
-          <div class="prow"><span class="pk">OOM / 驅逐</span><span class="pv" id="ra-p-ev">0</span></div>
-          <div class="prow"><span class="pk">備註</span><span class="pv" id="ra-p-note">—</span></div>
-        </div>
-      </div>
-
-      <div class="status-line" id="ra-status">選擇模式後按「下一步」。Slot 實驗 8 步；淘汰實驗 12 步（第 11 步才撞 maxmemory）。</div>
-      <div class="ra-verdict" id="ra-verdict">判定尚未產生——走完一輪後會摘要 ASK／MOVED 或各政策踢了誰。</div>
-      <div class="ra-wire" id="ra-wire" aria-label="事件日誌"></div>
+      <table class="rk-tbl"><tbody id="rm-out"></tbody></table>
+      <div class="status-line" id="rm-status"></div>
     </div>
   </div>
+  <p class="cap">預設就停在最經典的誤配上：政策是 <code>volatile-lru</code>，但只有 40% 的 key 設了 expire——無 TTL 的那 60% 會慢慢佔滿記憶體且永遠不被選中，於是驅逐與 OOM 同時出現。把 TTL 比例拉到 0，數字會與 <code>noeviction</code> 一模一樣；切到 <code>volatile-ttl</code>，「被踢的是熱鍵嗎」那一列會跳上去，因為它挑的是 TTL 最短的，不是最冷的。另外兩點要誠實說明：真實 Redis 的 LRU／LFU 是 <code>maxmemory-samples</code> 取樣近似，本模擬用的是精確排序，所以實機的誤殺通常比這裡更多；「業務讀取命中率」刻意把掃描批次的存取排除，因為掃描本來就必然 miss，混在一起會蓋掉政策之間的差別。</p>
 
   <div class="oneliner">
-    <b>一句話答法</b>遷移中來源沒有那把 key 就回 ASK，客戶端不改表；歸屬切完才 MOVED。同樣 6 格上限，noeviction 拒寫，allkeys-lru 連持久熱鍵都可能踢，volatile-ttl 只動有過期的。
+    <b>一句話答法</b>淘汰政策的差別不在演算法名字，在<strong>候選集合</strong>：<code>allkeys-*</code> 全部可踢，<code>volatile-*</code> 只踢有 expire 的，沒有候選就回 OOM；<code>volatile-ttl</code> 挑的是活得最短的，不是最冷的，所以它會誤殺熱鍵。
   </div>
 </section>
 
@@ -2320,751 +2316,700 @@ sequenceDiagram
 (function () {
   "use strict";
 
-  var demo = document.getElementById("demo-ra");
-  if (!demo) return;
+  /* ============================================================
+     (1) 常數與參數表
+     ============================================================ */
+  var SLOT_TOTAL = 16384;          /* Redis Cluster 固定槽數 */
+  var SEED_NODES = 3;              /* 叢集建立時的起始節點數 */
+  var GRID_COLS = 128;             /* 128 × 128 = 16384，一格一槽，非取樣 */
+  var CELL = 4;                    /* 每格 4px */
+  var CRC16_POLY = 0x1021;         /* CRC16/XMODEM 多項式 */
+  var NODE_NAME = ["N1", "N2", "N3", "N4", "N5", "N6", "N7", "N8", "N9", "N10"];
+  var NODE_FILL = ["#3f6188", "#4d7d68", "#a3743e", "#6b6f9a", "#8a6d8f",
+                   "#5f8296", "#96705a", "#6f8a5a", "#8a5f63", "#5d6b7a"];
+  var NODE_TINT = ["#c2cfdd", "#c6dad0", "#e4d0b0", "#cccedf", "#d8c9da",
+                   "#c4d5dd", "#dcc9be", "#cfdac0", "#dcc4c7", "#c9d0d7"];
+  var INFLIGHT_FILL = "#c98a2e";
+  var TRACE_LEN = 4000;            /* 淘汰模擬的存取軌跡長度 */
+  var SCAN_EVERY = 500;            /* 每 500 次存取插入一段掃描 */
+  var SCAN_BURST = 150;            /* 每段掃描連續掃 150 把冷 key */
+  var LCG_SEED = 20250917;
+  var LCG_MUL = 48271;
+  var LCG_MOD = 2147483647;
+  var HOT_FRACTION = 0.05;         /* 前 5% 熱門視為「熱鍵」 */
+  var SAMPLE_PREFIX = "job:";
+  var SAMPLE_SCAN = 200000;        /* 樣本 key 的搜尋上限 */
+  var crcTable = null;             /* 由多項式當場推出來的加速表，不是寫死的常數 */
+  var ownerCache = {};             /* 同一個節點數的歸屬只建一次 */
 
-  var SLOT_COUNT = 16;
-  var MAXMEM = 6;
+  /* ============================================================
+     (2) compute* 純函式（不碰 DOM）
+     ============================================================ */
 
-  var KEY_META = {
-    "user:alice": { slot: 3, start: "n1" },
-    "cart:42": { slot: 7, start: "n1" },
-    "sess:9": { slot: 9, start: "n2" },
-    "order:14": { slot: 14, start: "n3" }
-  };
-
-  var EVICT_STEPS = [
-    { op: "SET", key: "H1", ttl: null },
-    { op: "GET", key: "H1" },
-    { op: "GET", key: "H1" },
-    { op: "SET", key: "H2", ttl: null },
-    { op: "GET", key: "H2" },
-    { op: "GET", key: "H2" },
-    { op: "SET", key: "H3", ttl: null },
-    { op: "SET", key: "C1", ttl: 2 },
-    { op: "SET", key: "C2", ttl: 9 },
-    { op: "SET", key: "C3", ttl: 4 },
-    { op: "SET", key: "C4", ttl: 1 },
-    { op: "GET", key: "H3" }
-  ];
-
-  var HINTS = {
-    slot: "Slot 遷移：16 格代表 16384 slot。客戶端先打快取中的節點，觀察 ASK（暫借）與 MOVED（改表）。",
-    evict: "maxmemory = 6。H1／H2 先被連續 GET 加溫，H3 只寫一次。C 鍵帶 TTL。第 11 步 SET C4 才撞牆。"
-  };
-
-  var mode = "slot";
-  var policy = "noeviction";
-  var step = 0;
-  var okCount = 0;
-  var askCount = 0;
-  var movedCount = 0;
-  var evictCount = 0;
-  var oomCount = 0;
-
-  /* cluster state */
-  var slotOwner = [];
-  var migrating = null; /* { slot, from, to } */
-  var keyHome = {};
-  var clientMap = {};
-  var lastHitSlot = null;
-  var lastTarget = null;
-
-  /* eviction store: { key: { ttl, last, freq, born } } */
-  var store = {};
-  var clock = 0;
-  var lastVictim = "—";
-  var lastOpOk = true;
-
-  var statusEl = document.getElementById("ra-status");
-  var verdictEl = document.getElementById("ra-verdict");
-  var wireEl = document.getElementById("ra-wire");
-  var btnNext = document.getElementById("ra-btn-next");
-  var btnReset = document.getElementById("ra-btn-reset");
-  var hintEl = document.getElementById("ra-mode-hint");
-  var slotView = document.getElementById("ra-slot-view");
-  var evictView = document.getElementById("ra-evict-view");
-  var slotsEl = document.getElementById("ra-slots");
-  var keysEl = document.getElementById("ra-keys");
-
-  var mStep = document.getElementById("ra-m-step");
-  var mTotal = document.getElementById("ra-m-total");
-  var mOk = document.getElementById("ra-m-ok");
-  var mAsk = document.getElementById("ra-m-ask");
-  var mMoved = document.getElementById("ra-m-moved");
-  var mEvict = document.getElementById("ra-m-evict");
-
-  var actors = {
-    cli: demo.querySelector('.ra-actor[data-role="cli"]'),
-    n1: demo.querySelector('.ra-actor[data-role="n1"]'),
-    n2: demo.querySelector('.ra-actor[data-role="n2"]'),
-    n3: demo.querySelector('.ra-actor[data-role="n3"]')
-  };
-  var actorVal = {
-    cli: document.getElementById("ra-cli-val"),
-    n1: document.getElementById("ra-n1-val"),
-    n2: document.getElementById("ra-n2-val"),
-    n3: document.getElementById("ra-n3-val")
-  };
-  var actorHint = {
-    cli: document.getElementById("ra-cli-hint"),
-    n1: document.getElementById("ra-n1-hint"),
-    n2: document.getElementById("ra-n2-hint"),
-    n3: document.getElementById("ra-n3-hint")
-  };
-  var actorAl = {
-    cli: document.getElementById("ra-cli-al"),
-    n1: document.getElementById("ra-n1-al"),
-    n2: document.getElementById("ra-n2-al"),
-    n3: document.getElementById("ra-n3-al")
-  };
-
-  var pOp = document.getElementById("ra-p-op");
-  var pResp = document.getElementById("ra-p-resp");
-  var pMap = document.getElementById("ra-p-map");
-  var pVictim = document.getElementById("ra-p-victim");
-  var pOk = document.getElementById("ra-p-ok");
-  var pRedir = document.getElementById("ra-p-redir");
-  var pEv = document.getElementById("ra-p-ev");
-  var pNote = document.getElementById("ra-p-note");
-
-  function ownerOfSlot(s) {
-    if (s <= 7) return "n1";
-    if (s <= 11) return "n2";
-    return "n3";
-  }
-
-  function nodeLabel(id) {
-    if (id === "n1") return "N1";
-    if (id === "n2") return "N2";
-    if (id === "n3") return "N3";
-    return id;
-  }
-
-  function mapSummary() {
-    var s7 = clientMap[7] || "?";
-    return "slot7→" + nodeLabel(s7);
-  }
-
-  function resetCluster() {
-    slotOwner = [];
-    var i;
-    for (i = 0; i < SLOT_COUNT; i += 1) slotOwner[i] = ownerOfSlot(i);
-    migrating = null;
-    keyHome = {
-      "user:alice": "n1",
-      "cart:42": "n1",
-      "sess:9": "n2",
-      "order:14": "n3"
-    };
-    clientMap = {};
-    for (i = 0; i < SLOT_COUNT; i += 1) clientMap[i] = slotOwner[i];
-    lastHitSlot = null;
-    lastTarget = null;
-  }
-
-  function resetEvict() {
-    store = {};
-    clock = 0;
-    lastVictim = "—";
-    lastOpOk = true;
-  }
-
-  function resetCounts() {
-    step = 0;
-    okCount = 0;
-    askCount = 0;
-    movedCount = 0;
-    evictCount = 0;
-    oomCount = 0;
-  }
-
-  function totalSteps() {
-    return mode === "slot" ? 8 : EVICT_STEPS.length;
-  }
-
-  function logRow(kind, tag, text) {
-    var row = document.createElement("div");
-    row.className = "ra-row " + kind;
-    var ar = document.createElement("span");
-    ar.className = "ar";
-    ar.textContent = String(step);
-    var tg = document.createElement("span");
-    tg.className = "tg";
-    tg.textContent = tag;
-    var tx = document.createElement("span");
-    tx.className = "tx";
-    tx.textContent = text;
-    row.appendChild(ar);
-    row.appendChild(tg);
-    row.appendChild(tx);
-    wireEl.insertBefore(row, wireEl.firstChild);
-  }
-
-  function clearLog() {
-    wireEl.innerHTML = "";
-  }
-
-  function setActor(id, cls, val, hint) {
-    var el = actors[id];
-    if (!el) return;
-    el.classList.remove("on", "ok", "dirty", "bad");
-    if (cls) el.classList.add(cls);
-    if (val !== undefined) actorVal[id].textContent = val;
-    if (hint !== undefined) actorHint[id].textContent = hint;
-  }
-
-  function clearActors() {
-    ["cli", "n1", "n2", "n3"].forEach(function (id) {
-      setActor(id, "", "—", "待命");
-    });
-  }
-
-  function renderSlots() {
-    slotsEl.innerHTML = "";
-    var i;
-    for (i = 0; i < SLOT_COUNT; i += 1) {
-      var cell = document.createElement("div");
-      var owner = slotOwner[i];
-      var cls = "ra-slot " + owner;
-      if (migrating && migrating.slot === i) cls += " mig";
-      if (lastHitSlot === i) cls += " hit";
-      cell.className = cls;
-      var sn = document.createElement("span");
-      sn.className = "sn";
-      sn.textContent = String(i);
-      cell.appendChild(sn);
-      cell.appendChild(document.createTextNode(nodeLabel(owner)));
-      slotsEl.appendChild(cell);
-    }
-  }
-
-  function renderSlotKeys(activeKey) {
-    keysEl.innerHTML = "";
-    Object.keys(KEY_META).forEach(function (k) {
-      var el = document.createElement("span");
-      el.className = "ra-key" + (k === activeKey ? " now" : "");
-      el.innerHTML = "<b>" + k + "</b>slot " + KEY_META[k].slot + " @ " + nodeLabel(keyHome[k]);
-      keysEl.appendChild(el);
-    });
-  }
-
-  function renderEvictKeys(activeKey, victimKey, oomKey) {
-    keysEl.innerHTML = "";
-    var names = ["H1", "H2", "H3", "C1", "C2", "C3", "C4"];
-    names.forEach(function (k) {
-      var obj = store[k];
-      if (!obj && k !== activeKey && k !== oomKey && k !== victimKey) return;
-      var el = document.createElement("span");
-      var cls = "ra-key";
-      if (!obj) {
-        cls += k === oomKey ? " oom" : " gone";
-        el.className = cls + (k === activeKey ? " now" : "");
-        el.innerHTML = "<b>" + k + "</b>" + (k === oomKey ? "OOM 未寫入" : "已驅逐");
-        keysEl.appendChild(el);
-        return;
+  function utf8Bytes(str) {
+    var out = [];
+    for (var i = 0; i < str.length; i++) {
+      var c = str.charCodeAt(i);
+      if (c >= 0xd800 && c <= 0xdbff && i + 1 < str.length) {
+        var c2 = str.charCodeAt(i + 1);
+        if (c2 >= 0xdc00 && c2 <= 0xdfff) { c = 0x10000 + ((c - 0xd800) << 10) + (c2 - 0xdc00); i++; }
       }
-      if (k.charAt(0) === "H") cls += " hot";
-      else cls += " cold";
-      if (k === victimKey) cls += " gone";
-      if (k === activeKey) cls += " now";
-      el.className = cls;
-      var ttlTxt = obj.ttl === null ? "persist" : "ttl=" + obj.ttl;
-      el.innerHTML = "<b>" + k + "</b>" + ttlTxt + " f=" + obj.freq + " t=" + obj.last;
-      keysEl.appendChild(el);
-    });
-  }
-
-  function setTone(el, tone) {
-    el.classList.remove("tone-ok", "tone-lock", "tone-bad");
-    if (tone) el.classList.add("tone-" + tone);
-  }
-
-  function updateMetrics() {
-    mStep.textContent = String(step);
-    mTotal.textContent = String(totalSteps());
-    mOk.textContent = String(okCount);
-    mAsk.textContent = String(askCount);
-    mMoved.textContent = String(movedCount);
-    mEvict.textContent = String(evictCount + oomCount);
-    pOk.textContent = String(okCount);
-    pRedir.textContent = "ASK " + askCount + " · MOVED " + movedCount;
-    pEv.textContent = String(evictCount + oomCount);
-  }
-
-  function clusterGet(key) {
-    var meta = KEY_META[key];
-    var slot = meta.slot;
-    lastHitSlot = slot;
-    var cached = clientMap[slot];
-    var actualOwner = slotOwner[slot];
-    var home = keyHome[key];
-
-    setActor("cli", "on", key, "表 " + mapSummary());
-    actorAl.cli.textContent = "GET " + key;
-
-    /* Client sends to cached node first. */
-    if (cached !== actualOwner && !(migrating && migrating.slot === slot)) {
-      /* Stale map after ownership changed → MOVED */
-      movedCount += 1;
-      clientMap[slot] = actualOwner;
-      setActor(cached, "bad", "MOVED " + nodeLabel(actualOwner), "slot " + slot + " 已不在這");
-      setActor(actualOwner, "ok", key + " = OK", "對照表已更新");
-      okCount += 1;
-      lastTarget = actualOwner;
-      return {
-        resp: "MOVED " + nodeLabel(actualOwner) + " → OK",
-        note: "歸屬已切。客戶端改表後重打 " + nodeLabel(actualOwner) + "。",
-        tone: "bad",
-        tag: "MOVED"
-      };
+      if (c < 0x80) out.push(c);
+      else if (c < 0x800) { out.push(0xc0 | (c >> 6), 0x80 | (c & 63)); }
+      else if (c < 0x10000) { out.push(0xe0 | (c >> 12), 0x80 | ((c >> 6) & 63), 0x80 | (c & 63)); }
+      else { out.push(0xf0 | (c >> 18), 0x80 | ((c >> 12) & 63), 0x80 | ((c >> 6) & 63), 0x80 | (c & 63)); }
     }
+    return out;
+  }
 
-    if (migrating && migrating.slot === slot) {
-      if (home === migrating.from) {
-        /* source still has the key */
-        setActor(migrating.from, "dirty", key + " 仍在來源", "MIGRATING 且 key 未搬");
-        setActor(migrating.to, "on", "IMPORTING", "尚未接到這把 key");
-        okCount += 1;
-        lastTarget = migrating.from;
-        return {
-          resp: "OK（來源仍服務）",
-          note: "MIGRATING 期間，key 還在來源就由來源回答。對照表不改。",
-          tone: "lock",
-          tag: "HIT"
-        };
+  /* CRC16/XMODEM：逐 bit 位移，不用查表 */
+  function crc16Xmodem(bytes) {
+    var crc = 0;
+    for (var i = 0; i < bytes.length; i++) {
+      crc = (crc ^ (bytes[i] << 8)) & 0xffff;
+      for (var b = 0; b < 8; b++) {
+        if (crc & 0x8000) crc = ((crc << 1) ^ CRC16_POLY) & 0xffff;
+        else crc = (crc << 1) & 0xffff;
       }
-      /* key already on target → ASK */
-      askCount += 1;
-      okCount += 1;
-      setActor(migrating.from, "dirty", "ASK " + nodeLabel(migrating.to), "來源已無此 key");
-      setActor(migrating.to, "ok", "ASKING + GET OK", "暫借；表仍指向 " + nodeLabel(cached));
-      lastTarget = migrating.to;
-      return {
-        resp: "ASK " + nodeLabel(migrating.to) + " → OK",
-        note: "只重試這一次，對照表仍是 slot7→" + nodeLabel(clientMap[slot]) + "。",
-        tone: "lock",
-        tag: "ASK"
-      };
     }
-
-    /* Steady state, map is correct */
-    setActor(actualOwner, "ok", key + " = OK", "直打 " + nodeLabel(actualOwner));
-    okCount += 1;
-    lastTarget = actualOwner;
-    return {
-      resp: "OK",
-      note: "對照表命中，無重定向。",
-      tone: "ok",
-      tag: "OK"
-    };
+    return crc;
   }
 
-  function runSlotStep() {
-    var result;
-    var activeKey = "";
-    lastHitSlot = null;
-
-    if (step === 1) {
-      activeKey = "user:alice";
-      result = clusterGet(activeKey);
-      pOp.textContent = "GET user:alice  (slot 3)";
-    } else if (step === 2) {
-      migrating = { slot: 7, from: "n1", to: "n3" };
-      setActor("cli", "", mapSummary(), "對照表尚未過時");
-      setActor("n1", "dirty", "MIGRATING 7", "開始把 slot 7 交給 N3");
-      setActor("n3", "on", "IMPORTING 7", "接收中");
-      pOp.textContent = "CLUSTER SETSLOT 7 MIGRATING / IMPORTING";
-      result = {
-        resp: "遷移開始",
-        note: "槽 7 雙邊標記。key 尚未搬，客戶端表仍是 slot7→N1。",
-        tone: "lock",
-        tag: "MIG"
-      };
-    } else if (step === 3) {
-      activeKey = "cart:42";
-      result = clusterGet(activeKey);
-      pOp.textContent = "GET cart:42  (slot 7，key 仍在 N1)";
-    } else if (step === 4) {
-      keyHome["cart:42"] = "n3";
-      setActor("n1", "dirty", "MIGRATE cart:42", "DUMP → RESTORE → DEL");
-      setActor("n3", "ok", "cart:42 已在", "IMPORTING 收到這把 key");
-      setActor("cli", "", mapSummary(), "表仍 slot7→N1");
-      lastHitSlot = 7;
-      pOp.textContent = "MIGRATE cart:42  N1 → N3";
-      result = {
-        resp: "key 已到 N3，槽尚未切歸屬",
-        note: "同一槽裡這把 key 在目標，其他 key 可能還在來源。",
-        tone: "lock",
-        tag: "MOVE"
-      };
-    } else if (step === 5) {
-      activeKey = "cart:42";
-      result = clusterGet(activeKey);
-      pOp.textContent = "GET cart:42  (來源已無 key)";
-    } else if (step === 6) {
-      slotOwner[7] = "n3";
-      migrating = null;
-      setActor("n1", "bad", "不再擁有 7", "SETSLOT 7 NODE N3");
-      setActor("n3", "ok", "擁有 slot 7", "歸屬已切");
-      setActor("cli", "on", mapSummary(), "表還沒改，下一打會 MOVED");
-      lastHitSlot = 7;
-      pOp.textContent = "CLUSTER SETSLOT 7 NODE N3";
-      result = {
-        resp: "歸屬切到 N3",
-        note: "客戶端對照表仍過時。下一筆 GET 會拿到 MOVED。",
-        tone: "lock",
-        tag: "OWNER"
-      };
-    } else if (step === 7) {
-      activeKey = "cart:42";
-      result = clusterGet(activeKey);
-      pOp.textContent = "GET cart:42  (歸屬已切，表過時)";
-    } else if (step === 8) {
-      activeKey = "cart:42";
-      result = clusterGet(activeKey);
-      pOp.textContent = "GET cart:42  (表已更新)";
-    }
-
-    renderSlots();
-    renderSlotKeys(activeKey);
-    pResp.textContent = result.resp;
-    pMap.textContent = mapSummary();
-    pVictim.textContent = "—";
-    pNote.textContent = result.note;
-    actorAl.n1.textContent = slotOwner[7] === "n1" || (migrating && migrating.from === "n1") ? "slot 0–7" : "slot 0–6";
-    actorAl.n3.textContent = slotOwner[7] === "n3" ? "slot 7, 12–15" : "slot 12–15";
-    statusEl.innerHTML = "<b>" + result.tag + "</b>　" + result.note;
-    logRow(result.tone === "ok" ? "ok" : result.tone === "bad" ? "bad" : "warn", result.tag, pOp.textContent + " → " + result.resp);
-
-    if (step >= 8) {
-      var txt = "ASK " + askCount + " 次（不改表）、MOVED " + movedCount + " 次（改表）。之後同一槽直打 N3。";
-      verdictEl.textContent = txt;
-      setTone(verdictEl, movedCount ? "ok" : "lock");
-    }
-  }
-
-  function candidatesFor(pol) {
-    var keys = Object.keys(store);
-    if (pol.indexOf("volatile") === 0) {
-      return keys.filter(function (k) { return store[k].ttl !== null; });
-    }
-    return keys;
-  }
-
-  function pickVictim(pol) {
-    var cand = candidatesFor(pol);
-    if (!cand.length) return null;
-    var i;
-    var best = cand[0];
-    if (pol === "allkeys-lru" || pol === "volatile-lru") {
-      for (i = 1; i < cand.length; i += 1) {
-        if (store[cand[i]].last < store[best].last) best = cand[i];
-        else if (store[cand[i]].last === store[best].last && store[cand[i]].born < store[best].born) best = cand[i];
+  /* 樣本搜尋要試上萬把 key，這裡用同一條多項式當場推一張 256 項加速表，
+     再以「前綴 CRC + 逐位數續算」的方式增量計算。結果與 crc16Xmodem 完全相同。 */
+  function crcTableOf() {
+    if (crcTable) return crcTable;
+    crcTable = new Array(256);
+    for (var i = 0; i < 256; i++) {
+      var c = (i << 8) & 0xffff;
+      for (var b = 0; b < 8; b++) {
+        if (c & 0x8000) c = ((c << 1) ^ CRC16_POLY) & 0xffff;
+        else c = (c << 1) & 0xffff;
       }
-      return best;
+      crcTable[i] = c;
     }
-    if (pol === "allkeys-lfu" || pol === "volatile-lfu") {
-      for (i = 1; i < cand.length; i += 1) {
-        if (store[cand[i]].freq < store[best].freq) best = cand[i];
-        else if (store[cand[i]].freq === store[best].freq && store[cand[i]].last < store[best].last) best = cand[i];
+    return crcTable;
+  }
+  function crcStep(crc, byte) {
+    var t = crcTableOf();
+    return (((crc << 8) & 0xffff) ^ t[((crc >> 8) ^ byte) & 0xff]) & 0xffff;
+  }
+  function crc16Ascii(str, seed) {
+    var crc = seed === undefined ? 0 : seed;
+    for (var i = 0; i < str.length; i++) crc = crcStep(crc, str.charCodeAt(i) & 0xff);
+    return crc;
+  }
+
+  /* hash tag：第一個 { 到其後第一個 }，中間非空才只雜湊該段 */
+  function hashTagPart(key) {
+    var s = key.indexOf("{");
+    if (s === -1) return key;
+    var e = key.indexOf("}", s + 1);
+    if (e === -1 || e === s + 1) return key;
+    return key.substring(s + 1, e);
+  }
+
+  function slotOfKey(key) {
+    return crc16Xmodem(utf8Bytes(hashTagPart(key))) % SLOT_TOTAL;
+  }
+
+  /* 增量式歸屬：3 台連續均分起家，之後每加一台就從既有各節點的
+     區段尾端各切走 round(count_i / m) 格給新節點，其餘 slot 不動。
+     這是 redis-cli --cluster add-node/rebalance 的搬法，
+     所以新節點的 slot 不是連續區段。 */
+  function ownersFor(n) {
+    if (ownerCache[n]) return ownerCache[n];
+    var owner = new Array(SLOT_TOTAL);
+    var counts = [];
+    var base = Math.floor(SLOT_TOTAL / SEED_NODES);
+    var rem = SLOT_TOTAL % SEED_NODES;
+    var idx = 0, i, k, s;
+    for (i = 0; i < SEED_NODES; i++) {
+      var c = base + (i < rem ? 1 : 0);
+      counts.push(c);
+      for (k = 0; k < c; k++) owner[idx++] = i;
+    }
+    for (var m = SEED_NODES + 1; m <= n; m++) {
+      var lists = [];
+      for (i = 0; i < m - 1; i++) lists.push([]);
+      for (s = 0; s < SLOT_TOTAL; s++) lists[owner[s]].push(s);
+      var take = [], sum = 0;
+      for (i = 0; i < m - 1; i++) { var t = Math.round(counts[i] / m); take.push(t); sum += t; }
+      var target = Math.floor(SLOT_TOTAL / m);
+      var d = sum - target, j = 0;
+      while (d > 0) { if (take[j] > 0) { take[j]--; d--; } j = (j + 1) % (m - 1); }
+      while (d < 0) { take[j]++; d++; j = (j + 1) % (m - 1); }
+      var newId = m - 1;
+      for (i = 0; i < m - 1; i++) {
+        var lst = lists[i];
+        for (k = 0; k < take[i]; k++) owner[lst[lst.length - 1 - k]] = newId;
+        counts[i] -= take[i];
       }
-      return best;
+      counts.push(target);
     }
-    if (pol === "volatile-ttl") {
-      for (i = 1; i < cand.length; i += 1) {
-        var a = store[cand[i]].ttl;
-        var b = store[best].ttl;
-        if (a !== null && (b === null || a < b)) best = cand[i];
-      }
-      return best;
-    }
-    return null;
+    ownerCache[n] = { owner: owner, counts: counts };
+    return ownerCache[n];
   }
 
-  function evictOne() {
-    if (policy === "noeviction") return null;
-    var v = pickVictim(policy);
-    if (!v) return null;
-    delete store[v];
-    evictCount += 1;
-    lastVictim = v;
-    return v;
+  function diffCost(a, b) {
+    var n = 0;
+    for (var i = 0; i < SLOT_TOTAL; i++) if (a[i] !== b[i]) n++;
+    return n;
   }
 
-  function ensureSpace() {
-    if (Object.keys(store).length < MAXMEM) return { ok: true, victim: null, oom: false };
-    if (policy === "noeviction") return { ok: false, victim: null, oom: true };
-    var v = evictOne();
-    if (!v) return { ok: false, victim: null, oom: true };
-    return { ok: true, victim: v, oom: false };
-  }
+  // @probe fn       computeSlotSpace
+  // @probe baseline {"nodes":3,"keys":"{user:100}:profile,{user:100}:cart,cart:42","srcNode":0,"dstNode":2,"spanSlots":512,"progressPct":40}
+  // @probe sweep    {"nodes":[3,9],"keys":["foo","{u1}:a,{u1}:b,bar"],"srcNode":[0,1],"dstNode":[1,2],"spanSlots":[1,4096],"progressPct":[0,100]}
+  function computeSlotSpace(p) {
+    var nodes = Math.max(3, Math.min(9, Math.round(p.nodes)));
+    var src = Math.max(0, Math.min(nodes - 1, Math.round(p.srcNode)));
+    var dst = Math.max(0, Math.min(nodes - 1, Math.round(p.dstNode)));
+    if (dst === src) dst = (src + 1) % nodes;
 
-  function runEvictStep() {
-    var spec = EVICT_STEPS[step - 1];
-    clock += 1;
-    var victim = null;
-    var oomKey = null;
-    lastOpOk = true;
-    lastVictim = "—";
-    lastHitSlot = null;
-    pResp.className = "pv";
+    var built = ownersFor(nodes);
+    var owner = built.owner;
+    var i, s;
 
-    ["n1", "n2", "n3"].forEach(function (id) {
-      setActor(id, "", "max=" + MAXMEM, Object.keys(store).length + " keys");
-    });
+    var srcSlots = [];
+    for (s = 0; s < SLOT_TOTAL; s++) if (owner[s] === src) srcSlots.push(s);
 
-    if (spec.op === "GET") {
-      var g = store[spec.key];
-      actorAl.cli.textContent = "GET " + spec.key;
-      if (!g) {
-        lastOpOk = false;
-        setActor("cli", "bad", spec.key + " MISS", "已被驅逐或不存在");
-        setActor("n1", "bad", "nil", policy);
-        pOp.textContent = "GET " + spec.key;
-        pResp.textContent = "(nil)";
-        pNote.textContent = spec.key + " 不在 maxmemory 集合裡。";
-        statusEl.innerHTML = "<b>MISS</b>　" + spec.key + " 已被踢或不曾寫入。";
-        logRow("bad", "MISS", "GET " + spec.key + " → (nil)");
-        pMap.textContent = policy;
-        pVictim.textContent = lastVictim;
-        renderSlotsEmpty();
-        renderEvictKeys(spec.key, null, null);
-        maybeEvictVerdict();
-        return;
-      }
-      g.last = clock;
-      g.freq += 1;
-      okCount += 1;
-      setActor("cli", "on", "GET " + spec.key, "freq=" + g.freq);
-      setActor("n1", "ok", spec.key + " HIT", "last=" + g.last);
-      pOp.textContent = "GET " + spec.key;
-      pResp.textContent = "OK  freq=" + g.freq;
-      pNote.textContent = "命中會更新 LRU 時間戳與 LFU 計數。";
-      statusEl.innerHTML = "<b>HIT</b>　" + spec.key + " last=" + g.last + " freq=" + g.freq + "。";
-      logRow("ok", "HIT", "GET " + spec.key + " → OK f=" + g.freq);
-      pMap.textContent = policy;
-      pVictim.textContent = "—";
-      renderSlotsEmpty();
-      renderEvictKeys(spec.key, null, null);
-      maybeEvictVerdict();
-      return;
+    var span = Math.max(0, Math.min(srcSlots.length, Math.round(p.spanSlots)));
+    var progress = Math.max(0, Math.min(100, Math.round(p.progressPct)));
+    var migrating = srcSlots.slice(srcSlots.length - span);
+    var doneCount = Math.floor(span * progress / 100);
+    var doneSet = {}, migSet = {};
+    for (i = 0; i < span; i++) migSet[migrating[i]] = 1;
+    for (i = 0; i < doneCount; i++) doneSet[migrating[i]] = 1;
+    var inflight = (doneCount < span) ? migrating[doneCount] : -1;
+
+    var eff = owner.slice();
+    for (i = 0; i < doneCount; i++) eff[migrating[i]] = dst;
+
+    var counts = [];
+    for (i = 0; i < nodes; i++) counts.push(0);
+    for (s = 0; s < SLOT_TOTAL; s++) counts[eff[s]]++;
+    var max = counts[0], min = counts[0];
+    for (i = 1; i < nodes; i++) {
+      if (counts[i] > max) max = counts[i];
+      if (counts[i] < min) min = counts[i];
+    }
+    var baseCounts = built.counts.slice();
+    var bMax = baseCounts[0], bMin = baseCounts[0];
+    for (i = 1; i < nodes; i++) {
+      if (baseCounts[i] > bMax) bMax = baseCounts[i];
+      if (baseCounts[i] < bMin) bMin = baseCounts[i];
     }
 
-    /* SET */
-    actorAl.cli.textContent = "SET " + spec.key;
-    var existing = store[spec.key];
-    if (existing) {
-      existing.last = clock;
-      existing.freq += 1;
-      existing.ttl = spec.ttl;
-      okCount += 1;
-      setActor("cli", "ok", "覆寫 " + spec.key, "仍佔 1 格");
-      setActor("n1", "ok", Object.keys(store).length + "/" + MAXMEM, policy);
-      pOp.textContent = "SET " + spec.key + (spec.ttl === null ? " persist" : " EX " + spec.ttl);
-      pResp.textContent = "OK（覆寫）";
-      pNote.textContent = "已存在的 key 不增加記憶體。";
-      logRow("ok", "SET", "SET " + spec.key + " 覆寫");
-      pMap.textContent = policy;
-      pVictim.textContent = "—";
-      renderSlotsEmpty();
-      renderEvictKeys(spec.key, null, null);
-      maybeEvictVerdict();
-      return;
-    }
+    var addCost = diffCost(owner, ownersFor(nodes + 1).owner);
+    var removeCost = nodes > SEED_NODES ? diffCost(owner, ownersFor(nodes - 1).owner) : 0;
 
-    var space = ensureSpace();
-    if (!space.ok) {
-      oomCount += 1;
-      lastOpOk = false;
-      oomKey = spec.key;
-      setActor("cli", "bad", "OOM", spec.key + " 未寫入");
-      setActor("n1", "bad", Object.keys(store).length + "/" + MAXMEM, "noeviction 或無可踢者");
-      pOp.textContent = "SET " + spec.key + (spec.ttl === null ? " persist" : " EX " + spec.ttl);
-      pResp.textContent = "OOM command not allowed";
-      pNote.textContent = policy === "noeviction"
-        ? "noeviction：滿了就拒寫，既有 key 原封不動。"
-        : "候選集合是空的（volatile 政策下沒有帶 TTL 的 key）。";
-      statusEl.innerHTML = "<b>OOM</b>　" + spec.key + " 寫入被拒。讀仍可。";
-      logRow("bad", "OOM", "SET " + spec.key + " 被拒");
-      pMap.textContent = policy;
-      pVictim.textContent = "—";
-      renderSlotsEmpty();
-      renderEvictKeys(spec.key, null, oomKey);
-      maybeEvictVerdict();
-      return;
-    }
-
-    victim = space.victim;
-    store[spec.key] = {
-      ttl: spec.ttl,
-      last: clock,
-      freq: 1,
-      born: clock
-    };
-    okCount += 1;
-    setActor("cli", victim ? "dirty" : "on", "SET " + spec.key, victim ? "騰出 " + victim : "尚未滿");
-    setActor("n1", victim ? "dirty" : "ok", Object.keys(store).length + "/" + MAXMEM, victim ? "evict " + victim : policy);
-    pOp.textContent = "SET " + spec.key + (spec.ttl === null ? " persist" : " EX " + spec.ttl);
-    pResp.textContent = victim ? "evict " + victim + " → OK" : "OK";
-    pNote.textContent = victim
-      ? (policy.indexOf("lru") !== -1
-        ? "LRU 踢最久未碰的。"
-        : policy.indexOf("lfu") !== -1
-          ? "LFU 踢最低頻（同分再比 LRU）。"
-          : "volatile-ttl 在有過期的集合裡踢 TTL 最短的。")
-      : "容量未滿，直接寫入。";
-    statusEl.innerHTML = victim
-      ? "<b>EVICT</b>　踢掉 " + victim + "，寫入 " + spec.key + "。"
-      : "<b>SET</b>　" + spec.key + " 寫入，現在 " + Object.keys(store).length + "/" + MAXMEM + "。";
-    logRow(victim ? "warn" : "ok", victim ? "EVICT" : "SET",
-      "SET " + spec.key + (victim ? " 踢 " + victim : " OK"));
-    pMap.textContent = policy;
-    pVictim.textContent = victim || "—";
-    pResp.className = "pv" + (victim ? " warn" : " good");
-    renderSlotsEmpty();
-    renderEvictKeys(spec.key, victim, null);
-    maybeEvictVerdict();
-  }
-
-  function renderSlotsEmpty() {
-    slotsEl.innerHTML = "";
-    var i;
-    var names = Object.keys(store);
-    for (i = 0; i < MAXMEM; i += 1) {
-      var cell = document.createElement("div");
-      if (i < names.length) {
-        var k = names[i];
-        var obj = store[k];
-        cell.className = "ra-slot " + (obj.ttl === null ? "n1" : "mig");
-        var sn = document.createElement("span");
-        sn.className = "sn";
-        sn.textContent = k;
-        cell.appendChild(sn);
-        cell.appendChild(document.createTextNode(obj.ttl === null ? "persist" : "ttl " + obj.ttl));
+    var rawKeys = String(p.keys == null ? "" : p.keys).split(",");
+    var keys = [], slotSet = {}, distinct = 0, askN = 0, movedN = 0, hitN = 0;
+    for (i = 0; i < rawKeys.length && keys.length < 6; i++) {
+      var key = rawKeys[i].replace(/^\s+|\s+$/g, "");
+      if (!key) continue;
+      var part = hashTagPart(key);
+      var crc = crc16Xmodem(utf8Bytes(part));
+      var slot = crc % SLOT_TOTAL;
+      var resp, target, why;
+      if (doneSet[slot]) {
+        resp = "MOVED"; target = dst;
+        why = "槽已完成 SETSLOT，歸屬永久換人 → 客戶端更新對照表";
+      } else if (slot === inflight) {
+        /* 同一格裡「這把 key 搬走了沒」現實中看 MIGRATE 跑到哪；
+           這裡取 CRC16 落在 slot 索引之外的高位當代理規則（低 14 位就是 slot 本身，
+           對同一格的所有 key 都相同，拿來當代理會讓整格答案一致）。 */
+        if ((crc >> 14) & 1) {
+          resp = "ASK"; target = dst;
+          why = "槽遷移中且這把 key 已被搬走 → 只有這一次帶 ASKING 去目標，對照表不動";
+        } else {
+          resp = "HIT"; target = src;
+          why = "槽遷移中但這把 key 還在來源 → 來源直接服務";
+        }
       } else {
-        cell.className = "ra-slot empty";
-        var sn2 = document.createElement("span");
-        sn2.className = "sn";
-        sn2.textContent = "·";
-        cell.appendChild(sn2);
-        cell.appendChild(document.createTextNode("空"));
+        resp = "HIT"; target = owner[slot];
+        why = migSet[slot] ? "槽排在遷移清單裡但還沒輪到 → 來源照常服務" : "槽不在遷移範圍，直接命中歸屬節點";
       }
-      slotsEl.appendChild(cell);
+      if (resp === "ASK") askN++; else if (resp === "MOVED") movedN++; else hitN++;
+      if (!slotSet[slot]) { slotSet[slot] = 1; distinct++; }
+      keys.push({
+        key: key, tag: part, tagged: part !== key, crc: crc, slot: slot,
+        row: Math.floor(slot / GRID_COLS), col: slot % GRID_COLS,
+        owner: owner[slot], resp: resp, target: target, why: why
+      });
     }
+
+    var segs = [], curNode = -1, curState = "", start = 0;
+    for (s = 0; s < SLOT_TOTAL; s++) {
+      var st = doneSet[s] ? "done" : (s === inflight ? "inflight" : (migSet[s] ? "pending" : "own"));
+      var nd = eff[s];
+      if (nd !== curNode || st !== curState) {
+        if (s > 0) segs.push({ from: start, to: s - 1, node: curNode, state: curState });
+        curNode = nd; curState = st; start = s;
+      }
+    }
+    segs.push({ from: start, to: SLOT_TOTAL - 1, node: curNode, state: curState });
+
+    return {
+      nodes: nodes, src: src, dst: dst,
+      perNodeSlots: counts, skew: max - min,
+      baseNodeSlots: baseCounts, baseSkew: bMax - bMin,
+      maxOverAvg: Math.round(max / (SLOT_TOTAL / nodes) * 1000) / 1000,
+      span: span, doneSlots: doneCount, inflightSlot: inflight,
+      pendingSlots: span - doneCount - (inflight >= 0 ? 1 : 0),
+      migratedPct: span ? Math.round(doneCount / span * 1000) / 10 : 0,
+      rangeFrom: span ? migrating[0] : -1,
+      rangeTo: span ? migrating[span - 1] : -1,
+      addCost: addCost, addPct: Math.round(addCost / SLOT_TOTAL * 1000) / 10,
+      removeCost: removeCost, removePct: Math.round(removeCost / SLOT_TOTAL * 1000) / 10,
+      keys: keys, distinctSlots: distinct,
+      hitCount: hitN, askCount: askN, movedCount: movedN,
+      multiOk: keys.length > 1 && distinct === 1,
+      segments: segs, segmentCount: segs.length
+    };
   }
 
-  function maybeEvictVerdict() {
-    if (step < EVICT_STEPS.length) return;
-    var living = Object.keys(store).sort().join(", ") || "（空）";
-    var txt = policy + " 結束：仍在的 key = " + living +
-      "。驅逐 " + evictCount + "、OOM " + oomCount + "。";
-    if (policy === "noeviction") {
-      txt += " 既有六把都還在，C4 沒寫進去。";
-      setTone(verdictEl, "bad");
-    } else if (policy === "volatile-ttl") {
-      txt += " H1–H3 因無 TTL 未被踢；TTL 最短的 C1 先走，最後 GET H3 仍命中。";
-      setTone(verdictEl, "lock");
-    } else if (policy === "allkeys-lru") {
-      txt += " LRU 踢最久沒碰的 H1（頻率高但 recency 舊）。最後 GET H3 仍命中。";
-      setTone(verdictEl, "ok");
-    } else {
-      txt += " LFU 踢最低頻的 H3。最後 GET H3 會 miss——這就是與 LRU 的差別。";
-      setTone(verdictEl, "ok");
-    }
-    verdictEl.textContent = txt;
-  }
+  // @probe fn       computeEviction
+  // @probe baseline {"keyCount":4000,"bytesPerKey":512,"maxMemoryKB":256,"ttlPct":40,"zipfS":1.1,"policy":"volatile-lru"}
+  // @probe sweep    {"keyCount":[500,20000],"bytesPerKey":[64,4096],"maxMemoryKB":[64,8192],"ttlPct":[0,100],"zipfS":[0.4,1.4],"policy":["noeviction","volatile-ttl"]}
+  function computeEviction(p) {
+    var keyCount = Math.max(100, Math.min(20000, Math.round(p.keyCount)));
+    var bytesPerKey = Math.max(16, Math.min(4096, Math.round(p.bytesPerKey)));
+    var maxMemoryKB = Math.max(16, Math.min(8192, Math.round(p.maxMemoryKB)));
+    var ttlPct = Math.max(0, Math.min(100, Math.round(p.ttlPct)));
+    var zipfS = Math.max(0.1, Math.min(2, p.zipfS));
+    var policy = String(p.policy || "allkeys-lru");
 
-  function syncSeg(root, attr, value) {
-    if (!root) return;
-    var buttons = root.querySelectorAll("button");
+    var maxBytes = maxMemoryKB * 1024;
+    var capacity = Math.max(1, Math.floor(maxBytes / bytesPerKey));
     var i;
-    for (i = 0; i < buttons.length; i += 1) {
-      var on = buttons[i].getAttribute(attr) === value;
-      buttons[i].setAttribute("aria-pressed", on ? "true" : "false");
+
+    var cum = new Array(keyCount), acc = 0;
+    for (i = 0; i < keyCount; i++) { acc += 1 / Math.pow(i + 1, zipfS); cum[i] = acc; }
+    var totalW = acc;
+
+    /* ttlPct = 0 不指派、100 全部指派，兩端都不做除法 */
+    function hasTtl(idx) { return ((idx * ttlPct) % 100) < ttlPct; }
+    function ttlOf(idx) { return ((idx * 37) % 600) + 60; }
+    function zipfPick(u) {
+      var target = u * totalW, lo = 0, hi = keyCount - 1;
+      while (lo < hi) { var mid = (lo + hi) >> 1; if (cum[mid] < target) lo = mid + 1; else hi = mid; }
+      return lo;
+    }
+
+    var resident = [], pos = {};
+    var hits = 0, misses = 0, appHits = 0, appMisses = 0;
+    var evictions = 0, oomWrites = 0, evictedHot = 0;
+    var hotLimit = Math.max(1, Math.floor(keyCount * HOT_FRACTION));
+    var rnd = LCG_SEED % LCG_MOD;
+    var scanCursor = Math.floor(keyCount / 2);
+    var isVolatile = policy.indexOf("volatile") === 0;
+
+    for (var t = 1; t <= TRACE_LEN; t++) {
+      rnd = (rnd * LCG_MUL) % LCG_MOD;
+      var isScan = (t % SCAN_EVERY) < SCAN_BURST;
+      var idx = isScan ? ((scanCursor++) % keyCount) : zipfPick(rnd / LCG_MOD);
+      var at = pos[idx];
+      if (at !== undefined) {
+        hits++; if (!isScan) appHits++;
+        var e = resident[at]; e.freq++; e.last = t;
+        continue;
+      }
+      misses++; if (!isScan) appMisses++;
+      if (resident.length >= capacity) {
+        if (policy === "noeviction") { oomWrites++; continue; }
+        var vi = -1, vKey = 0;
+        for (var r = 0; r < resident.length; r++) {
+          var c = resident[r];
+          if (isVolatile && !c.ttl) continue;
+          var k;
+          if (policy === "volatile-ttl") k = c.ttl * 100000 + c.last;
+          else if (policy === "allkeys-lfu" || policy === "volatile-lfu") k = c.freq * 100000 + c.last;
+          else k = c.last;
+          if (vi === -1 || k < vKey) { vi = r; vKey = k; }
+        }
+        if (vi === -1) { oomWrites++; continue; }
+        var victim = resident[vi];
+        if (victim.idx < hotLimit) evictedHot++;
+        evictions++;
+        delete pos[victim.idx];
+        var tailEntry = resident.pop();
+        if (vi < resident.length) { resident[vi] = tailEntry; pos[tailEntry.idx] = vi; }
+      }
+      pos[idx] = resident.length;
+      resident.push({ idx: idx, freq: 1, last: t, ttl: hasTtl(idx) ? ttlOf(idx) : 0 });
+    }
+
+    var ttlResident = 0, hotResident = 0;
+    for (i = 0; i < resident.length; i++) {
+      if (resident[i].ttl) ttlResident++;
+      if (resident[i].idx < hotLimit) hotResident++;
+    }
+    var hitRate = Math.round(hits / (hits + misses) * 1000) / 10;
+    var appRate = Math.round(appHits / (appHits + appMisses) * 1000) / 10;
+    var kind;
+    if (oomWrites === 0) kind = appRate < 40 ? "可服務，但命中率偏低" : "可服務";
+    else if (policy === "noeviction") kind = "寫入被拒（noeviction 的預期行為）";
+    else if (evictions === 0) kind = "寫入全被拒——候選集合從頭到尾都是空的，等價於 noeviction";
+    else kind = "部分寫入被拒——候選集合用完了";
+
+    return {
+      maxBytes: maxBytes, bytesPerKey: bytesPerKey,
+      capacityKeys: capacity,
+      workingSetKB: Math.round(keyCount * bytesPerKey / 1024),
+      residentAtEnd: resident.length,
+      residentTtlKeys: ttlResident,
+      residentHotKeys: hotResident,
+      usedBytes: resident.length * bytesPerKey,
+      headroomBytes: maxBytes - resident.length * bytesPerKey,
+      hits: hits, misses: misses, hitRate: hitRate,
+      appHits: appHits, appMisses: appMisses, appHitRate: appRate,
+      evictions: evictions, oomWrites: oomWrites,
+      evictedHotShare: evictions ? Math.round(evictedHot / evictions * 1000) / 10 : 0,
+      verdictKind: kind
+    };
+  }
+
+  /* 給「填一把樣本 key」按鈕用：從 job:1 起逐一真算 CRC16，
+     優先找落在「正在搬的那一格」而且會拿到 ASK 的那一把，其次退而求其次找遷移段內的任何一把。 */
+  function findSampleKey(from, to, prefer) {
+    var best = "", onSlot = "";
+    var seed = crc16Ascii(SAMPLE_PREFIX, 0);
+    for (var n = 1; n <= SAMPLE_SCAN; n++) {
+      var crc = crc16Ascii(String(n), seed);
+      var slot = crc % SLOT_TOTAL;
+      if (prefer >= 0 && slot === prefer) {
+        if ((crc >> 14) & 1) return SAMPLE_PREFIX + n;
+        if (!onSlot) onSlot = SAMPLE_PREFIX + n;
+      }
+      if (!best && slot >= from && slot <= to) best = SAMPLE_PREFIX + n;
+    }
+    return onSlot || best;
+  }
+
+  function escapeHtml(s) {
+    return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  }
+
+  function fmtBytes(b) {
+    if (b >= 1048576) return (Math.round(b / 104857.6) / 10) + " MB";
+    if (b >= 1024) return (Math.round(b / 102.4) / 10) + " KB";
+    return b + " B";
+  }
+
+  /* ============================================================
+     (3) DOM 參照
+     ============================================================ */
+  var kDemo = document.getElementById("demo-rk");
+  var mDemo = document.getElementById("demo-rm");
+
+  var kCanvas = kDemo && document.getElementById("rk-cv");
+  var kCtx = kCanvas && kCanvas.getContext ? kCanvas.getContext("2d") : null;
+  var kNodes = kDemo && document.getElementById("rk-nodes");
+  var kNodesOut = kDemo && document.getElementById("rk-nodes-v");
+  var kAdd = kDemo && document.getElementById("rk-add");
+  var kDrop = kDemo && document.getElementById("rk-drop");
+  var kSrc = kDemo && document.getElementById("rk-src");
+  var kDst = kDemo && document.getElementById("rk-dst");
+  var kSpan = kDemo && document.getElementById("rk-span");
+  var kSpanOut = kDemo && document.getElementById("rk-span-v");
+  var kProg = kDemo && document.getElementById("rk-prog");
+  var kProgOut = kDemo && document.getElementById("rk-prog-v");
+  var kKeys = kDemo && document.getElementById("rk-keys");
+  var kSample = kDemo && document.getElementById("rk-sample");
+  var kReset = kDemo && document.getElementById("rk-reset");
+  var kBars = kDemo && document.getElementById("rk-bars");
+  var kCards = kDemo && document.getElementById("rk-cards");
+  var kFacts = kDemo && document.getElementById("rk-facts");
+  var kStatus = kDemo && document.getElementById("rk-status");
+  var kPick = kDemo && document.getElementById("rk-pick");
+
+  var mPolicySeg = mDemo && document.getElementById("rm-seg");
+  var mKeyCount = mDemo && document.getElementById("rm-keys");
+  var mKeyCountOut = mDemo && document.getElementById("rm-keys-v");
+  var mBytes = mDemo && document.getElementById("rm-bytes");
+  var mBytesOut = mDemo && document.getElementById("rm-bytes-v");
+  var mMem = mDemo && document.getElementById("rm-mem");
+  var mMemOut = mDemo && document.getElementById("rm-mem-v");
+  var mTtl = mDemo && document.getElementById("rm-ttl");
+  var mTtlOut = mDemo && document.getElementById("rm-ttl-v");
+  var mZipf = mDemo && document.getElementById("rm-zipf");
+  var mZipfOut = mDemo && document.getElementById("rm-zipf-v");
+  var mReset = mDemo && document.getElementById("rm-reset");
+  var mGauge = mDemo && document.getElementById("rm-gauge");
+  var mNeed = mDemo && document.getElementById("rm-need");
+  var mNeedTx = mDemo && document.getElementById("rm-needtx");
+  var mMaxTx = mDemo && document.getElementById("rm-maxtx");
+  var mOut = mDemo && document.getElementById("rm-out");
+  var mStatus = mDemo && document.getElementById("rm-status");
+
+  var K_DEFAULT = { nodes: 3, src: 0, dst: 2, span: 512, prog: 40,
+                    keys: "{user:100}:profile,{user:100}:cart,cart:42" };
+  var M_DEFAULT = { keyCount: 4000, bytesPerKey: 512, maxMemoryKB: 256,
+                    ttlPct: 40, zipfS: 1.1, policy: "volatile-lru" };
+  var mPolicy = M_DEFAULT.policy;
+  var kPicked = -1;
+
+  /* ============================================================
+     (4) render —— 只把算好的 state 畫出來
+     ============================================================ */
+
+  function renderSlotSpace(st) {
+    if (kCtx) {
+      kCtx.fillStyle = "#ffffff";
+      kCtx.fillRect(0, 0, GRID_COLS * CELL, GRID_COLS * CELL);
+      for (var g = 0; g < st.segments.length; g++) {
+        var seg = st.segments[g];
+        var fill = seg.state === "inflight" ? INFLIGHT_FILL
+          : (seg.state === "pending" ? NODE_TINT[seg.node] : NODE_FILL[seg.node]);
+        kCtx.fillStyle = fill;
+        var r0 = Math.floor(seg.from / GRID_COLS), r1 = Math.floor(seg.to / GRID_COLS);
+        for (var r = r0; r <= r1; r++) {
+          var c0 = (r === r0) ? seg.from % GRID_COLS : 0;
+          var c1 = (r === r1) ? seg.to % GRID_COLS : GRID_COLS - 1;
+          kCtx.fillRect(c0 * CELL, r * CELL, (c1 - c0 + 1) * CELL, CELL);
+        }
+      }
+      for (var i = 0; i < st.keys.length; i++) {
+        var kk = st.keys[i];
+        var x = kk.col * CELL, y = kk.row * CELL;
+        kCtx.strokeStyle = "#262a2f";
+        kCtx.lineWidth = 1.5;
+        kCtx.strokeRect(x - 2.5, y - 2.5, CELL + 5, CELL + 5);
+        kCtx.strokeStyle = "#ffffff";
+        kCtx.lineWidth = 1;
+        kCtx.strokeRect(x - 1.5, y - 1.5, CELL + 3, CELL + 3);
+      }
+    }
+
+    var html = "", n;
+    for (n = 0; n < st.nodes; n++) {
+      var pct = st.perNodeSlots[n] / SLOT_TOTAL * 100;
+      html += '<div class="rk-bar">'
+        + '<span class="bn"><i class="rk-sw" style="background:' + NODE_FILL[n] + '"></i>' + NODE_NAME[n]
+        + (n === st.src ? " · 來源" : (n === st.dst ? " · 目標" : "")) + '</span>'
+        + '<span class="bt"><i style="width:' + pct.toFixed(2) + '%;background:' + NODE_FILL[n] + '"></i></span>'
+        + '<span class="bv">' + st.perNodeSlots[n] + '</span></div>';
+    }
+    if (kBars) kBars.innerHTML = html;
+
+    var f = "";
+    f += '<tr><th>每節點槽數（含已完成遷移）</th><td>最多 ' + Math.max.apply(null, st.perNodeSlots)
+       + ' · 最少 ' + Math.min.apply(null, st.perNodeSlots) + ' · 傾斜 ' + st.skew + ' 格</td></tr>';
+    f += '<tr><th>純歸屬傾斜（不含遷移）</th><td>' + st.baseSkew + ' 格（' + st.nodes
+       + ' 台均分 16384 的殘餘）</td></tr>';
+    f += '<tr><th>遷移區段</th><td>' + (st.span ? ('slot ' + st.rangeFrom + '–' + st.rangeTo + '，共 ' + st.span + ' 格') : '未設定') + '</td></tr>';
+    f += '<tr><th>遷移進度</th><td>已 SETSLOT ' + st.doneSlots + ' 格（' + st.migratedPct + '%）·搬運中 '
+       + (st.inflightSlot >= 0 ? ('slot ' + st.inflightSlot) : '無') + ' · 未動 ' + st.pendingSlots + ' 格</td></tr>';
+    f += '<tr><th>再加一台的搬遷量</th><td>' + st.addCost + ' 格（' + st.addPct + '%）→ ' + st.nodes + ' 台變 ' + (st.nodes + 1) + ' 台</td></tr>';
+    f += '<tr><th>移除一台的搬遷量</th><td>' + (st.nodes > SEED_NODES ? (st.removeCost + ' 格（' + st.removePct + '%）') : '已是起始 3 台') + '</td></tr>';
+    if (kFacts) kFacts.innerHTML = f;
+
+    var c = "";
+    for (var j = 0; j < st.keys.length; j++) {
+      var k = st.keys[j];
+      var cls = k.resp === "MOVED" ? "moved" : (k.resp === "ASK" ? "ask" : "hit");
+      c += '<div class="rk-card ' + cls + '">'
+        + '<div class="kk">' + escapeHtml(k.key) + '</div>'
+        + '<div class="kr"><span>雜湊字串</span><b>' + escapeHtml(k.tag) + (k.tagged ? "（hash tag）" : "（整把 key）") + '</b></div>'
+        + '<div class="kr"><span>CRC16</span><b>0x' + k.crc.toString(16).toUpperCase() + '</b></div>'
+        + '<div class="kr"><span>slot</span><b>' + k.slot + '</b></div>'
+        + '<div class="kr"><span>歸屬</span><b>' + NODE_NAME[k.owner] + '</b></div>'
+        + '<div class="kv">' + k.resp + (k.resp === "HIT" ? "" : " → " + NODE_NAME[k.target]) + '</div>'
+        + '<div class="kw">' + k.why + '</div>'
+        + '</div>';
+    }
+    if (kCards) kCards.innerHTML = c || '<p class="rk-empty">輸入至少一把 key，才會算 slot 與重定向。</p>';
+
+    if (kStatus) {
+      var multi = st.keys.length > 1
+        ? (st.multiOk
+            ? ("這 " + st.keys.length + " 把 key 都落在 slot " + st.keys[0].slot + " → 單槽事務（MULTI／WATCH）成立。")
+            : ("這 " + st.keys.length + " 把 key 散在 " + st.distinctSlots + " 個 slot → Cluster 直接拒絕跨槽事務。"))
+        : "再輸入一把 key，可看跨槽事務判定。";
+      kStatus.textContent = "本次回應：HIT " + st.hitCount + " · ASK " + st.askCount + " · MOVED " + st.movedCount
+        + "。" + multi;
+    }
+
+    if (kPick) {
+      if (kPicked < 0) {
+        kPick.textContent = "在格帶上點一下，可查該格的 slot 號與歸屬。";
+      } else {
+        var ownerId = -1, state = "own";
+        for (var q = 0; q < st.segments.length; q++) {
+          if (kPicked >= st.segments[q].from && kPicked <= st.segments[q].to) {
+            ownerId = st.segments[q].node; state = st.segments[q].state; break;
+          }
+        }
+        var label = state === "done" ? "已完成 SETSLOT，歸屬已換人"
+          : (state === "inflight" ? "正在 MIGRATING／IMPORTING"
+          : (state === "pending" ? "排在遷移清單但尚未輪到" : "未涉及遷移"));
+        kPick.textContent = "slot " + kPicked + "（第 " + Math.floor(kPicked / GRID_COLS)
+          + " 列第 " + (kPicked % GRID_COLS) + " 格）→ " + NODE_NAME[ownerId] + "，" + label + "。";
+      }
     }
   }
 
-  function applyModeChrome() {
-    hintEl.textContent = HINTS[mode];
-    slotView.hidden = mode !== "slot";
-    evictView.hidden = mode !== "evict";
-    syncSeg(document.getElementById("ra-seg-mode"), "data-mode", mode);
-    syncSeg(document.getElementById("ra-seg-policy"), "data-policy", policy);
-    if (mode === "slot") {
-      actorAl.cli.textContent = "對照表";
-      actorAl.n1.textContent = "slot 0–7";
-      actorAl.n2.textContent = "slot 8–11";
-      actorAl.n3.textContent = "slot 12–15";
-      actorVal.n2.textContent = "—";
-      actors.n2.style.opacity = "1";
-      actors.n3.style.opacity = "1";
-    } else {
-      actorAl.cli.textContent = "命令";
-      actorAl.n1.textContent = "maxmemory=6";
-      actorAl.n2.textContent = "政策";
-      actorAl.n3.textContent = "候選";
-      setActor("n2", "", policy, "allkeys 對全集；volatile 只看 TTL");
-      setActor("n3", "", "H persist / C ttl", "H 無過期、C 有過期");
+  function renderEviction(st) {
+    var maxBytes = st.maxBytes;
+    var usedPct = Math.min(100, st.usedBytes / maxBytes * 100);
+    var ttlBytes = st.residentTtlKeys * st.bytesPerKey;
+    var ttlPctOfMax = Math.min(100, ttlBytes / maxBytes * 100);
+    var pinPct = Math.max(0, usedPct - ttlPctOfMax);
+
+    if (mGauge) {
+      mGauge.innerHTML =
+        '<i class="pin" style="width:' + pinPct.toFixed(2) + '%"></i>'
+        + '<i class="vol" style="width:' + ttlPctOfMax.toFixed(2) + '%"></i>';
     }
+    var needPct = st.workingSetKB * 1024 / maxBytes * 100;
+    if (mNeed) mNeed.style.width = Math.min(100, needPct).toFixed(2) + "%";
+    if (mNeedTx) mNeedTx.textContent = "工作集需要 " + st.workingSetKB + " KB"
+      + (needPct > 100 ? "，是 maxmemory 的 " + (Math.round(needPct) / 100).toFixed(2) + " 倍" : "，塞得下");
+    if (mMaxTx) mMaxTx.textContent = "maxmemory " + Math.round(maxBytes / 1024) + " KB";
+
+    var o = "";
+    o += '<tr><th>容量</th><td>' + st.capacityKeys + ' 把（maxmemory ÷ 每鍵 bytes）·常駐 ' + st.residentAtEnd + ' 把·餘裕 ' + fmtBytes(Math.max(0, st.headroomBytes)) + '</td></tr>';
+    o += '<tr><th>業務讀取命中率</th><td class="big">' + st.appHitRate + '%</td></tr>';
+    o += '<tr><th>全部存取命中率</th><td>' + st.hitRate + '%（含掃描批次；掃描一定是 miss，會把整體拉低）</td></tr>';
+    o += '<tr><th>驅逐次數</th><td>' + st.evictions + ' 次</td></tr>';
+    o += '<tr><th>被踢的是熱鍵嗎</th><td>' + st.evictedHotShare + '% 的犧牲者屬前 5% 熱門</td></tr>';
+    o += '<tr><th>寫入被拒（OOM）</th><td>' + st.oomWrites + ' 次</td></tr>';
+    o += '<tr><th>常駐組成</th><td>有 TTL ' + st.residentTtlKeys + ' 把 · 無 TTL ' + (st.residentAtEnd - st.residentTtlKeys) + ' 把（後者在 volatile-* 下永遠踢不掉）</td></tr>';
+    if (mOut) mOut.innerHTML = o;
+
+    if (mStatus) mStatus.textContent = "判定：" + st.verdictKind
+      + "。政策 " + mPolicy + "，候選集合為 "
+      + (mPolicy.indexOf("volatile") === 0 ? "「只有設了 expire 的 key」" : (mPolicy === "noeviction" ? "「無」" : "「全部 key」"))
+      + "。";
   }
 
-  function hardReset(keepMode) {
-    resetCounts();
-    resetCluster();
-    resetEvict();
-    clearLog();
-    clearActors();
-    pOp.textContent = "—";
-    pResp.textContent = "—";
-    pResp.className = "pv";
-    pMap.textContent = mode === "slot" ? mapSummary() : policy;
-    pVictim.textContent = "—";
-    pNote.textContent = "—";
-    verdictEl.textContent = "判定尚未產生——走完一輪後會摘要 ASK／MOVED 或各政策踢了誰。";
-    setTone(verdictEl, "");
-    applyModeChrome();
-    if (mode === "slot") {
-      renderSlots();
-      renderSlotKeys("");
-      statusEl.textContent = "按「下一步」開始：先打 user:alice 確認對照表，再遷移 slot 7。";
-    } else {
-      renderSlotsEmpty();
-      renderEvictKeys("", null, null);
-      statusEl.textContent = "按「下一步」寫入 H1。滿 6 格之後的 SET 才會觸發淘汰或 OOM。";
+  /* ============================================================
+     (5) 事件綁定
+     ============================================================ */
+
+  function kParams() {
+    return {
+      nodes: Number(kNodes.value),
+      keys: kKeys.value,
+      srcNode: Number(kSrc.value),
+      dstNode: Number(kDst.value),
+      spanSlots: Number(kSpan.value),
+      progressPct: Number(kProg.value)
+    };
+  }
+
+  function fillNodeSelect(sel, n, keep) {
+    var html = "";
+    for (var i = 0; i < n; i++) html += '<option value="' + i + '">' + NODE_NAME[i] + '</option>';
+    sel.innerHTML = html;
+    sel.value = String(Math.min(keep, n - 1));
+  }
+
+  function kSync() {
+    var n = Number(kNodes.value);
+    if (Number(kSrc.value) >= n || kSrc.options.length !== n) fillNodeSelect(kSrc, n, Number(kSrc.value));
+    if (Number(kDst.value) >= n || kDst.options.length !== n) fillNodeSelect(kDst, n, Number(kDst.value));
+    kNodesOut.textContent = n + " 台";
+    kSpanOut.textContent = kSpan.value + " 格";
+    kProgOut.textContent = kProg.value + "%";
+    if (kDrop) kDrop.disabled = n <= SEED_NODES;
+    if (kAdd) kAdd.disabled = n >= 9;
+    renderSlotSpace(computeSlotSpace(kParams()));
+  }
+
+  function kResetAll() {
+    kNodes.value = String(K_DEFAULT.nodes);
+    fillNodeSelect(kSrc, K_DEFAULT.nodes, K_DEFAULT.src);
+    fillNodeSelect(kDst, K_DEFAULT.nodes, K_DEFAULT.dst);
+    kSpan.value = String(K_DEFAULT.span);
+    kProg.value = String(K_DEFAULT.prog);
+    kKeys.value = K_DEFAULT.keys;
+    kPicked = -1;
+    kSync();
+  }
+
+  if (kDemo && kNodes) {
+    [kNodes, kSpan, kProg].forEach(function (el) {
+      el.addEventListener("input", kSync);
+    });
+    [kSrc, kDst].forEach(function (el) { el.addEventListener("change", kSync); });
+    kKeys.addEventListener("input", kSync);
+    if (kAdd) kAdd.addEventListener("click", function () {
+      kNodes.value = String(Math.min(9, Number(kNodes.value) + 1));
+      kSync();
+    });
+    if (kDrop) kDrop.addEventListener("click", function () {
+      kNodes.value = String(Math.max(SEED_NODES, Number(kNodes.value) - 1));
+      kSync();
+    });
+    if (kSample) kSample.addEventListener("click", function () {
+      var st = computeSlotSpace(kParams());
+      if (st.span <= 0) return;
+      var found = findSampleKey(st.rangeFrom, st.rangeTo, st.inflightSlot);
+      if (found) { kKeys.value = found; kSync(); }
+    });
+    if (kCanvas) kCanvas.addEventListener("click", function (ev) {
+      var r = kCanvas.getBoundingClientRect();
+      var col = Math.floor((ev.clientX - r.left) / r.width * GRID_COLS);
+      var row = Math.floor((ev.clientY - r.top) / r.height * GRID_COLS);
+      if (col < 0 || row < 0 || col >= GRID_COLS || row >= GRID_COLS) return;
+      kPicked = row * GRID_COLS + col;
+      kSync();
+    });
+    if (kReset) kReset.addEventListener("click", kResetAll);
+    kResetAll();
+  }
+
+  function mParams() {
+    return {
+      keyCount: Number(mKeyCount.value),
+      bytesPerKey: Number(mBytes.value),
+      maxMemoryKB: Number(mMem.value),
+      ttlPct: Number(mTtl.value),
+      zipfS: Number(mZipf.value) / 10,
+      policy: mPolicy
+    };
+  }
+
+  function mSync() {
+    mKeyCountOut.textContent = mKeyCount.value + " 把";
+    mBytesOut.textContent = mBytes.value + " B";
+    mMemOut.textContent = mMem.value + " KB";
+    mTtlOut.textContent = mTtl.value + "%";
+    mZipfOut.textContent = (Number(mZipf.value) / 10).toFixed(1);
+    var btns = mPolicySeg.querySelectorAll("button");
+    for (var i = 0; i < btns.length; i++) {
+      btns[i].setAttribute("aria-pressed", btns[i].getAttribute("data-policy") === mPolicy ? "true" : "false");
     }
-    updateMetrics();
-    btnNext.disabled = false;
-    void keepMode;
+    renderEviction(computeEviction(mParams()));
   }
 
-  function onNext() {
-    if (step >= totalSteps()) return;
-    step += 1;
-    if (mode === "slot") runSlotStep();
-    else runEvictStep();
-    updateMetrics();
-    if (step >= totalSteps()) btnNext.disabled = true;
+  function mResetAll() {
+    mKeyCount.value = String(M_DEFAULT.keyCount);
+    mBytes.value = String(M_DEFAULT.bytesPerKey);
+    mMem.value = String(M_DEFAULT.maxMemoryKB);
+    mTtl.value = String(M_DEFAULT.ttlPct);
+    mZipf.value = String(Math.round(M_DEFAULT.zipfS * 10));
+    mPolicy = M_DEFAULT.policy;
+    mSync();
   }
 
-  btnNext.addEventListener("click", onNext);
-  btnReset.addEventListener("click", function () { hardReset(true); });
-
-  document.getElementById("ra-seg-mode").addEventListener("click", function (ev) {
-    var btn = ev.target.closest("button[data-mode]");
-    if (!btn) return;
-    mode = btn.getAttribute("data-mode");
-    hardReset(true);
-  });
-
-  document.getElementById("ra-seg-policy").addEventListener("click", function (ev) {
-    var btn = ev.target.closest("button[data-policy]");
-    if (!btn) return;
-    policy = btn.getAttribute("data-policy");
-    hardReset(true);
-  });
-
-  hardReset(true);
+  if (mDemo && mKeyCount) {
+    [mKeyCount, mBytes, mMem, mTtl, mZipf].forEach(function (el) {
+      el.addEventListener("input", mSync);
+    });
+    mPolicySeg.addEventListener("click", function (ev) {
+      var t = ev.target;
+      if (!t || !t.getAttribute) return;
+      var pol = t.getAttribute("data-policy");
+      if (!pol) return;
+      mPolicy = pol;
+      mSync();
+    });
+    if (mReset) mReset.addEventListener("click", mResetAll);
+    mResetAll();
+  }
 })();
 </script>
 
