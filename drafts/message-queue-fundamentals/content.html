@@ -1,4 +1,4 @@
-<!-- demo-archetype: A｜時序推進 — 讀者先選情境（Queue vs Log ／ Visibility · DLQ），再選模型或租約長度，然後按「下一步」走過固定劇本，觀察 ACK 後能否重放、慢請求何時被重投、Poison 何時進 DLQ。選 A 是因為本篇核心是「租約到期與 ACK 的先後順序決定會不會重複投遞」，順序本身就是教學內容。 -->
+<!-- demo-archetype: C｜並排對照（主，第 9 節）＋B｜參數掃描（次，第 5 節） — 主 demo 把同一組生產／消費／保留參數同時推給 Queue 與 Log 兩側，讀者調訊息則數、生產速率、競爭消費者數、保留窗口、晚到者上線位置與重放距離，即時算出 Queue 的峰值積壓與晚到者只拿得到的待辦量、Log 的蒸發則數、可重放區間與缺口，以及兩側的總交付次數；次 demo 讓讀者把 visibility timeout 的門檻線推過工時分佈，算出重投則次、重複副作用佔比、工人有效產能與崩潰救援等待。選 C 是因為本篇最硬的分界是「ACK 的作用域」——Queue 的 ACK 對全世界生效、Log 的 ACK 只動自己的游標，這個差別只有同一組輸入並排推到兩側才看得見。 -->
 <style>
   #mq-root {
     --mq-c: #3f6188; --mq-c-soft: #eef2f7;
@@ -36,124 +36,42 @@
   .mq-pane .ss { font-family: var(--mono); font-size: 11px; color: var(--text-3); margin-bottom: 8px; letter-spacing: .04em; }
   .mq-pane ul { margin: 0; padding-left: 1.15em; font-size: 13px; color: var(--text-2); line-height: 1.65; }
 
-  .mq-ctrl { display: flex; flex-wrap: wrap; gap: 10px; margin: 10px 0 8px; align-items: center; }
-  .mq-metric { display: flex; flex-wrap: wrap; gap: 14px; margin: 8px 0 4px; font-size: 13px; color: var(--text-2); }
-  .mq-metric strong { color: var(--text); font-family: var(--mono); font-size: 12.5px; }
+  /* Demo · 兩種模型並排（mqr-）與租約長度掃描（mql-） */
+  .mqr-ctl, .mql-ctl { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px 16px; margin: 10px 0 6px; }
+  @media (max-width: 700px) { .mqr-ctl, .mql-ctl { grid-template-columns: 1fr; } }
+  .mqr-f, .mql-f { display: flex; flex-direction: column; gap: 4px; }
+  .mqr-f label, .mql-f label { font-family: var(--mono); font-size: 11px; color: var(--text-3); display: flex; justify-content: space-between; gap: 8px; }
+  .mqr-f label b, .mql-f label b { color: var(--text); font-weight: 700; }
+  .mqr-f input[type="range"], .mql-f input[type="range"] { width: 100%; accent-color: var(--accent); }
+  .mqr-segs, .mql-segs { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin: 6px 0 8px; }
+  .mqr-canvas, .mql-canvas { border: 1px solid var(--border); border-radius: var(--radius-sm); background: #fff; padding: 6px 8px 4px; margin: 8px 0 4px; overflow-x: auto; }
+  .mqr-canvas svg, .mql-canvas svg { display: block; min-width: 520px; }
 
-  .mq-mode-hint { font-size: 12.5px; color: var(--text-2); margin: 8px 0 4px; line-height: 1.55; }
+  .mqr-cmp {
+    display: grid; grid-template-columns: 1.1fr 1fr 1fr; gap: 1px;
+    background: var(--border); border: 1px solid var(--border);
+    border-radius: var(--radius-sm); overflow: hidden; margin: 12px 0 4px;
+  }
+  .mqr-cmp > div { background: #fff; padding: 8px 10px; font-size: 12px; line-height: 1.5; }
+  .mqr-cmp .rh { background: var(--bg-soft); font-family: var(--mono); font-size: 11px; font-weight: 700; color: var(--text-2); }
+  .mqr-cmp .rk { background: var(--bg-soft); font-size: 11.5px; color: var(--text-2); }
+  .mqr-cmp .rq, .mqr-cmp .rl { font-family: var(--mono); font-size: 11.5px; color: var(--text); }
+  .mqr-cmp .rq.hit { background: var(--accent-soft); }
+  .mqr-cmp .rl.hit { background: var(--ok-soft); }
 
-  .mq-view { display: block; }
-  .mq-view[hidden] { display: none; }
-  .mq-lane { display: flex; flex-wrap: wrap; gap: 8px; align-items: stretch; margin: 8px 0 4px; }
-  .mq-lane[hidden] { display: none; }
-  .mq-actors { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin: 12px 0 6px; }
-  @media (max-width: 720px) { .mq-actors { grid-template-columns: 1fr; } }
-  .mq-actors[hidden] { display: none; }
-
-  .mq-col-label {
-    font-family: var(--mono); font-size: 10.5px; letter-spacing: .06em; text-transform: uppercase;
-    color: var(--text-3); margin: 10px 0 2px;
-  }
-
-  .mq-msg {
-    flex: 1 1 88px; min-width: 88px;
-    border: 1.5px solid var(--border-strong); border-radius: var(--radius-sm);
-    padding: 8px 8px 7px; background: #fff; text-align: center;
-    transition: background .18s, border-color .18s, box-shadow .18s, opacity .18s;
-  }
-  .mq-msg .mn { font-weight: 700; font-size: 13px; }
-  .mq-msg .ml { font-family: var(--mono); font-size: 10.5px; color: var(--text-3); margin-top: 2px; }
-  .mq-msg .mh { font-size: 11.5px; color: var(--text-2); margin-top: 5px; min-height: 1.35em; }
-  .mq-msg.ready { background: var(--mq-c-soft); border-color: var(--mq-c); }
-  .mq-msg.ready .mn { color: var(--mq-c); }
-  .mq-msg.hold { background: var(--warn-soft); border-color: var(--warn); box-shadow: 0 0 0 3px var(--warn-soft); }
-  .mq-msg.hold .mn { color: var(--warn); }
-  .mq-msg.ok { background: var(--ok-soft); border-color: var(--ok); }
-  .mq-msg.ok .mn { color: var(--ok); }
-  .mq-msg.gone { background: var(--bg-soft); border-color: var(--border); opacity: .55; }
-  .mq-msg.dup { background: var(--warn-soft); border-color: var(--warn); }
-  .mq-msg.dup .mn { color: var(--warn); }
-  .mq-msg.bad { background: var(--bad-soft); border-color: var(--bad); }
-  .mq-msg.bad .mn { color: var(--bad); }
-  .mq-msg.wait { background: var(--accent-soft); border-color: var(--accent); }
-  .mq-msg.idle { background: #fff; }
-
-  .mq-node {
-    border: 1.5px solid var(--border-strong); border-radius: var(--radius-sm);
-    padding: 10px 10px 8px; background: #fff;
-    transition: background .18s, border-color .18s, box-shadow .18s;
-  }
-  .mq-node .an { font-weight: 700; font-size: 13px; }
-  .mq-node .al { font-family: var(--mono); font-size: 10.5px; color: var(--text-3); margin-top: 2px; }
-  .mq-node .av { font-family: var(--mono); font-size: 12.5px; font-weight: 700; margin-top: 8px; color: var(--text); word-break: break-all; }
-  .mq-node .ah { font-size: 11.5px; color: var(--text-2); margin-top: 4px; min-height: 1.4em; }
-  .mq-node.idle { background: #fff; }
-  .mq-node.hold { background: var(--ok-soft); border-color: var(--ok); }
-  .mq-node.hold .an { color: var(--ok); }
-  .mq-node.frozen { background: var(--warn-soft); border-color: var(--warn); }
-  .mq-node.frozen .an { color: var(--warn); }
-  .mq-node.wait { background: var(--accent-soft); border-color: var(--accent); }
-  .mq-node.wait .an { color: var(--accent); }
-  .mq-node.bad { background: var(--bad-soft); border-color: var(--bad); }
-  .mq-node.bad .an { color: var(--bad); }
-  .mq-node.coord { border-style: dashed; }
-
-  .mq-dlq {
-    margin-top: 10px; padding: 12px 14px; border: 1.5px dashed var(--border-strong);
-    border-radius: var(--radius-sm); background: #fff;
-  }
-  .mq-dlq .rt { font-weight: 700; font-size: 13px; margin-bottom: 4px; }
-  .mq-dlq .rs { font-family: var(--mono); font-size: 11px; color: var(--text-3); margin-bottom: 8px; }
-  .mq-dlq.has { border-color: var(--bad); background: var(--bad-soft); border-style: solid; }
-
-  .mq-panels { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 12px; }
-  @media (max-width: 640px) { .mq-panels { grid-template-columns: 1fr; } }
-  .mq-panel { border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 12px; background: #fff; }
-  .mq-panel .pt {
-    font-size: 11px; color: var(--text-3); letter-spacing: .06em; text-transform: uppercase;
-    font-family: var(--mono); margin-bottom: 8px;
-  }
-  .mq-panel .prow {
-    display: flex; justify-content: space-between; gap: 8px;
-    font-family: var(--mono); font-size: 12px; padding: 4px 0;
-    border-bottom: 1px dashed var(--border);
-  }
-  .mq-panel .prow:last-child { border-bottom: none; }
-  .mq-panel .pk { color: var(--text-3); white-space: nowrap; }
-  .mq-panel .pv { color: var(--text); font-weight: 600; text-align: right; word-break: break-all; }
-  .mq-panel .pv.good { color: var(--ok); }
-  .mq-panel .pv.bad { color: var(--bad); }
-  .mq-panel .pv.warn { color: var(--warn); }
-
-  .mq-wire {
-    border: 1px solid var(--border); border-radius: var(--radius-sm);
-    background: #fff; padding: 8px 10px; margin-top: 10px; max-height: 280px; overflow-y: auto;
-  }
-  .mq-row {
-    display: flex; align-items: baseline; gap: 8px;
-    font-family: var(--mono); font-size: 11.5px; padding: 4px 0;
-    border-bottom: 1px dashed var(--border);
-  }
-  .mq-row:last-child { border-bottom: none; }
-  .mq-row .ar { width: 42px; flex: none; text-align: center; color: var(--text-3); font-weight: 700; }
-  .mq-row .tg {
-    flex: none; border-radius: 4px; padding: 2px 6px; font-size: 10.5px; font-weight: 700;
-    border: 1px solid var(--border-strong); background: var(--bg-soft); color: var(--text-3);
-  }
-  .mq-row .tx { color: var(--text-2); line-height: 1.5; }
-  .mq-row.read .tg { background: var(--mq-c-soft); border-color: var(--mq-c); color: var(--mq-c); }
-  .mq-row.ok .tg { background: var(--mq-s-soft); border-color: var(--mq-s); color: var(--mq-s); }
-  .mq-row.warn .tg { background: var(--mq-w-soft); border-color: var(--mq-w); color: var(--mq-w); }
-  .mq-row.bad .tg { background: var(--mq-bad-soft); border-color: var(--mq-bad); color: var(--mq-bad); }
-
-  .mq-verdict {
-    margin-top: 10px; padding: 10px 12px; border-radius: var(--radius-sm);
-    border: 1px solid var(--border); background: var(--bg-soft);
-    font-size: 13px; color: var(--text-2); line-height: 1.55;
-  }
-  .mq-verdict.tone-ok { border-left: 3px solid var(--ok); background: var(--ok-soft); color: var(--text); }
-  .mq-verdict.tone-lock { border-left: 3px solid var(--warn); background: var(--warn-soft); color: var(--text); }
-  .mq-verdict.tone-bad { border-left: 3px solid var(--bad); background: var(--bad-soft); color: var(--text); }
+  .mql-out { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin: 10px 0 4px; }
+  @media (max-width: 760px) { .mql-out { grid-template-columns: 1fr 1fr; } .mqr-cmp { grid-template-columns: 1fr; } }
+  .mql-stat { border: 1px solid var(--border); border-radius: var(--radius-sm); background: #fff; padding: 8px 10px; }
+  .mql-stat .sk { font-family: var(--mono); font-size: 10.5px; color: var(--text-3); letter-spacing: .03em; }
+  .mql-stat .sv { font-family: var(--mono); font-size: 15px; font-weight: 700; color: var(--text); margin-top: 3px; }
+  .mql-stat .sn { font-size: 11px; color: var(--text-2); margin-top: 2px; line-height: 1.4; }
+  .mql-stat.ok { border-color: var(--ok); background: var(--ok-soft); }
+  .mql-stat.ok .sv { color: var(--ok); }
+  .mql-stat.warn { border-color: var(--warn); background: var(--warn-soft); }
+  .mql-stat.warn .sv { color: var(--warn); }
+  .mql-stat.bad { border-color: var(--bad); background: var(--bad-soft); }
+  .mql-stat.bad .sv { color: var(--bad); }
+  .mqr-note, .mql-note { font-family: var(--mono); font-size: 11px; color: var(--text-3); line-height: 1.55; margin: 6px 0 0; }
 </style>
 
 <div id="mq-root">
@@ -362,6 +280,50 @@ sequenceDiagram
     <li><strong>可變工時</strong>：長尾請求必須能延長租約（heartbeat / change-visibility）。固定 timeout 假設「每則工作一樣久」，長尾一到就重投。</li>
   </ul>
 
+  <div class="demo" id="mql-demo">
+    <div class="demo-bar">
+      <span class="label">互動 · 租約長度掃描</span>
+      <span class="label" style="text-transform:none;font-family:var(--sans);font-size:12px;color:var(--text-2)">把 VT 門檻線推過工時分佈，看重投與救援等待怎麼反向拉扯</span>
+    </div>
+    <div class="demo-body">
+      <div class="mql-ctl">
+        <div class="mql-f">
+          <label for="mql-vt">Visibility timeout <b id="mql-vt-v">10 s</b></label>
+          <input id="mql-vt" type="range" min="1" max="60" step="1" value="10">
+        </div>
+        <div class="mql-f">
+          <label for="mql-p50">一般工作耗時 p50 <b id="mql-p50-v">3 s</b></label>
+          <input id="mql-p50" type="range" min="1" max="20" step="1" value="3">
+        </div>
+        <div class="mql-f">
+          <label for="mql-p99">長尾工作耗時 p99 <b id="mql-p99-v">25 s</b></label>
+          <input id="mql-p99" type="range" min="1" max="120" step="1" value="25">
+        </div>
+        <div class="mql-f">
+          <label for="mql-tail">長尾佔比 <b id="mql-tail-v">8 %</b></label>
+          <input id="mql-tail" type="range" min="0" max="30" step="1" value="8">
+        </div>
+      </div>
+
+      <div class="mql-segs">
+        <div class="seg" role="group" aria-label="是否續租">
+          <button data-hb="0" aria-pressed="true">不續租</button>
+          <button data-hb="1" aria-pressed="false">每半個租約續租一次</button>
+        </div>
+        <button class="btn" id="mql-reset">重置</button>
+      </div>
+
+      <div class="status-line" id="mql-status">拖動旋鈕，看租約長度怎麼決定重投與救援等待。</div>
+
+      <div class="mql-canvas" id="mql-canvas"></div>
+      <p class="cap">橫軸是處理耗時，兩根柱子是這批 200 則工作的<strong>兩點分佈</strong>（刻意簡化：一般工作全部落在 p50、長尾工作全部落在 p99）。紅色虛線是租約門檻——<strong>線右邊的柱子會被重投，每滿一個租約就被搶走一次</strong>。最下面那條橘色標尺是同一個租約的反面：工人崩潰後訊息最壞要等多久才被救回。<strong>要看的是這兩者往相反方向被拉</strong>。</p>
+
+      <div class="mql-out" id="mql-out"></div>
+      <p class="mql-note">這批的規模是固定的：200 則訊息、8 個工人平行處理，只當分母用。</p>
+    </div>
+  </div>
+  <p class="cap">預設值下（租約 10s、長尾 25s、長尾佔 8%），長尾那 16 則每則被重投 2 次、共多出 <strong>32 次投遞、16% 的訊息會被重複做</strong>，工人有 25.2% 的時間在白燒。把租約拉到 30s 重投歸零，但崩潰救援從 10s 變成 30s；改開續租則兩邊都低——這就是「可變工時必須能延長租約」的量化理由。再把一般工作的耗時拉到 20s（超過租約），<strong>兩根柱子會同時越線</strong>，重複副作用佔比直接頂到 100%。</p>
+
   <div class="callout accent">
     <div class="c-title"><span class="ic">關鍵</span>重投不是 bug，是租約的定義</div>
     <p>Visibility timeout 到期後的第二次投遞，是系統在說「我不確定上一任做完沒有」。這跟協調服務的 Session 過期是同一類契約：集群側的時鐘說了算，工人本地「我還在做」不算數。GC pause、長 IO、被 SIGSTOP，都會讓本地計時器說謊。所以消費者必須把每一則訊息當成可能是重投，處理路徑從第一天就按冪等來寫。</p>
@@ -541,131 +503,68 @@ sequenceDiagram
 <section id="s9">
   <div class="sec-head">
     <span class="sec-num">09</span>
-    <h2>互動 · Queue / Log 與租約重投</h2>
+    <h2>互動 · 同一批訊息，兩種模型</h2>
   </div>
-  <p class="sec-sub">同一批訊息在兩種模型下被消費與重放；再把處理耗時對上 Visibility timeout，看重複投遞與 DLQ。</p>
+  <p class="sec-sub">同一組生產與消費參數推到兩側：Queue 走完後 broker 上剩下什麼、Log 的保留窗口留下什麼，以及三組讀者各自讀得到哪一段。</p>
 
-  <div class="demo" id="demo-mq">
+  <div class="demo" id="mqr-demo">
     <div class="demo-bar">
-      <span class="label">互動 · 訊息模型</span>
-      <span class="label" style="text-transform:none;font-family:var(--sans);font-size:12px;color:var(--text-2)">下一步推進時序；重置回到起點</span>
+      <span class="label">互動 · Queue vs Log</span>
+      <span class="label" style="text-transform:none;font-family:var(--sans);font-size:12px;color:var(--text-2)">同一組輸入同時餵給兩側，差異自己跑出來</span>
     </div>
     <div class="demo-body">
-      <div class="seg" role="group" aria-label="情境切換" id="mq-seg-mode">
-        <button data-mode="model" aria-pressed="true">Queue vs Log</button>
-        <button data-mode="lease" aria-pressed="false">Visibility · DLQ</button>
-      </div>
-
-      <div id="mq-model-view" class="mq-view">
-        <div class="seg" role="group" aria-label="模型切換" id="mq-seg-kind" style="margin-top:8px">
-          <button data-kind="queue" aria-pressed="true">Queue · 消費即消失</button>
-          <button data-kind="log" aria-pressed="false">Log · 可重放</button>
+      <div class="mqr-ctl">
+        <div class="mqr-f">
+          <label for="mqr-msg">這批訊息 <b id="mqr-msg-v">16 則</b></label>
+          <input id="mqr-msg" type="range" min="8" max="40" step="1" value="16">
         </div>
-        <p class="mq-mode-hint">同一批 M1–M4。Queue 下工人互搶，ACK 後空佇列無法回溯；Log 下兩組獨立游標，組 A 可把游標撥回去重放。</p>
-      </div>
-
-      <div id="mq-lease-view" class="mq-view" hidden>
-        <div class="seg" role="group" aria-label="租約長度" id="mq-seg-vt" style="margin-top:8px">
-          <button data-vt="short" aria-pressed="true">VT = 2（短於慢請求）</button>
-          <button data-vt="long" aria-pressed="false">VT = 6（長於慢請求）</button>
+        <div class="mqr-f">
+          <label for="mqr-prod">生產速率 <b id="mqr-prod-v">4 則/tick</b></label>
+          <input id="mqr-prod" type="range" min="1" max="8" step="1" value="4">
         </div>
-        <p class="mq-mode-hint">OK 處理 1 tick、SLOW 處理 4 ticks、POISON 每次都失敗。短租約會在 SLOW 做完前重投；兩種設定下 Poison 達 3 次都進 DLQ。</p>
+        <div class="mqr-f">
+          <label for="mqr-workers">競爭消費者 <b id="mqr-workers-v">1 人</b></label>
+          <input id="mqr-workers" type="range" min="1" max="8" step="1" value="1">
+        </div>
+        <div class="mqr-f">
+          <label for="mqr-ret">Log 保留窗口 <b id="mqr-ret-v">10 則</b></label>
+          <input id="mqr-ret" type="range" min="4" max="40" step="1" value="10">
+        </div>
+        <div class="mqr-f">
+          <label for="mqr-late">組 B 上線於 <b id="mqr-late-v">第 8 則</b></label>
+          <input id="mqr-late" type="range" min="0" max="40" step="1" value="8">
+        </div>
+        <div class="mqr-f">
+          <label for="mqr-back">組 C 想往回撥 <b id="mqr-back-v">6 則</b></label>
+          <input id="mqr-back" type="range" min="0" max="40" step="1" value="6">
+        </div>
       </div>
 
-      <div class="mq-ctrl">
-        <button class="btn primary" id="mq-btn-next">下一步</button>
-        <button class="btn" id="mq-btn-reset">重置</button>
+      <div class="mqr-segs">
+        <button class="btn" id="mqr-reset">重置</button>
       </div>
 
-      <div class="mq-metric">
-        <span>步 <strong id="mq-m-step">0</strong> / <span id="mq-m-total">5</span></span>
-        <span>投遞 <strong id="mq-m-del">0</strong></span>
-        <span>ACK <strong id="mq-m-ack">0</strong></span>
-        <span>重投 <strong id="mq-m-redel">0</strong></span>
-        <span>副作用 <strong id="mq-m-fx">0</strong></span>
-        <span>DLQ <strong id="mq-m-dlq">0</strong></span>
-      </div>
+      <div class="status-line" id="mqr-status">拖動上面六個旋鈕，兩側會同時重算。</div>
+
+      <div class="mqr-canvas" id="mqr-canvas"></div>
+      <p class="cap">兩帶共用同一條 y 軸：<strong>M1 在最上、序號往下遞增</strong>，所以同一列就是同一則訊息在兩種模型下的下場。左帶全是虛線空框——Queue 的 ACK 等於刪除，走完之後 broker 上什麼都不剩；右帶灰色剪影是<strong>已經超出保留窗口而被回收</strong>的那幾則。右邊三條軌是三組讀者各自的游標與讀取區間，<strong>要看的是三條軌的起點差多少</strong>。</p>
 
       <div class="legend">
-        <span><i class="dot ns-idle"></i>待命 / 已刪</span>
-        <span><i class="dot ns-wait"></i>在 broker 可見</span>
-        <span><i class="dot ns-lock"></i>租約中 / 處理中</span>
-        <span><i class="dot ns-ok"></i>ACK / 已提交游標</span>
-        <span><i class="dot ns-bad"></i>重投 / Poison / DLQ</span>
+        <span><i class="dot ns-idle"></i>已刪除 / 已回收</span>
+        <span><i class="dot ns-ok"></i>仍在保留窗口內</span>
+        <span><i class="dot ns-wait"></i>組 B 上線那一刻還在佇列裡</span>
+        <span><i class="dot ns-bad"></i>重放缺口</span>
       </div>
 
-      <div class="mq-col-label" id="mq-lane-label">Broker</div>
-      <div class="mq-lane" id="mq-lane" aria-live="polite"></div>
-
-      <div class="mq-actors" id="mq-actors">
-        <div class="mq-node idle" data-role="prod">
-          <div class="an">Producer</div>
-          <div class="al" data-sub>寫入端</div>
-          <div class="av" data-val>—</div>
-          <div class="ah" data-hint>待命</div>
-        </div>
-        <div class="mq-node coord idle" data-role="broker">
-          <div class="an" id="mq-broker-name">Queue</div>
-          <div class="al" data-sub>Broker</div>
-          <div class="av" data-val>depth 0</div>
-          <div class="ah" data-hint>空</div>
-        </div>
-        <div class="mq-node idle" data-role="wa">
-          <div class="an" id="mq-wa-name">Worker A</div>
-          <div class="al" data-sub>消費者</div>
-          <div class="av" data-val>—</div>
-          <div class="ah" data-hint>待命</div>
-        </div>
-        <div class="mq-node idle" data-role="wb">
-          <div class="an" id="mq-wb-name">Worker B</div>
-          <div class="al" data-sub>消費者</div>
-          <div class="av" data-val>—</div>
-          <div class="ah" data-hint>待命</div>
-        </div>
-        <div class="mq-node idle" data-role="extra">
-          <div class="an" id="mq-ex-name">Worker C</div>
-          <div class="al" data-sub>晚到者</div>
-          <div class="av" data-val>—</div>
-          <div class="ah" data-hint>尚未加入</div>
-        </div>
-      </div>
-
-      <div id="mq-dlq" class="mq-dlq mq-view" hidden>
-        <div class="rt">Dead Letter Queue</div>
-        <div class="rs">主路徑隔離 · 等人工介入</div>
-        <div class="mq-metric" style="margin:0">
-          <span>內容 <strong id="mq-dlq-val">（空）</strong></span>
-          <span>失敗次數 <strong id="mq-dlq-n">0</strong></span>
-          <span>處置 <strong id="mq-dlq-act">尚未分流</strong></span>
-        </div>
-      </div>
-
-      <div class="mq-panels">
-        <div class="mq-panel">
-          <div class="pt">本步語義</div>
-          <div class="prow"><span class="pk">事件</span><span class="pv" id="mq-p-op">—</span></div>
-          <div class="prow"><span class="pk">規則</span><span class="pv" id="mq-p-rule">—</span></div>
-          <div class="prow"><span class="pk">持有 / 游標</span><span class="pv" id="mq-p-hold">—</span></div>
-          <div class="prow"><span class="pk">消費者</span><span class="pv" id="mq-p-cli">—</span></div>
-        </div>
-        <div class="mq-panel">
-          <div class="pt">觀測</div>
-          <div class="prow"><span class="pk">模型 / VT</span><span class="pv" id="mq-p-model">Queue</span></div>
-          <div class="prow"><span class="pk">可見深度</span><span class="pv" id="mq-p-depth">0</span></div>
-          <div class="prow"><span class="pk">重放可能</span><span class="pv" id="mq-p-replay">否</span></div>
-          <div class="prow"><span class="pk">效果次數</span><span class="pv" id="mq-p-fx">0</span></div>
-        </div>
-      </div>
-
-      <div class="status-line" id="mq-status">選擇情境後按「下一步」。Queue/Log 各 5 步；租約劇本 7 步。</div>
-      <div class="mq-verdict" id="mq-verdict">判定尚未產生——走完一輪後會摘要能否重放，或短租約是否造成重複副作用。</div>
-      <div class="mq-wire" id="mq-wire" aria-label="事件日誌"></div>
+      <div class="mqr-cmp" id="mqr-cmp"></div>
+      <p class="mqr-note">三組讀者是固定編制（組 A 從頭跟、組 B 晚到、組 C 重放）；tick 的語意是「一輪生產＋一輪消費」。</p>
     </div>
   </div>
-  <p class="cap">Queue 走完後晚到者兩手空空，是模型定義，不是 bug。短 VT 下 SLOW 的第二次副作用請看成 At-least-once 的帳單；POISON 進 DLQ 是隔離成功（主路徑被救回來）。</p>
+
+  <p class="cap">四組操作值得自己推一次：<strong>(1)</strong> 預設值下 Queue 側峰值積壓 12 則，組 B 在第 8 則上線時看得到 <strong>6 則——但那是還沒被做掉的待辦，不是歷史</strong>；同一刻 Log 給得出 8 則歷史。<strong>(2)</strong> 把競爭消費者從 1 拉到 8（追上生產速率），Queue 側積壓歸零、<strong>組 B 拿到的變成 0 則</strong>，而 Log 側三條軌一動也不動——「晚到者兩手空空」是 <code>workers ≥ prodRate</code> 的推論，不是模型的口號。<strong>(3)</strong> 把保留窗口降到 6、往回撥拉到 14，Log 帶上方 10 則變成灰色剪影，組 C 的游標被卡在窗口起點，<strong>出現 8 則缺口</strong>、只讀得到 6 則——這就是「在保留窗口內可重放」那句工程句。<strong>(4)</strong> 看最後一列：同一批 16 則訊息，Queue 總共交付 16 次，Log 是 38 次；<strong>多出來的不是浪費，是「同一批事實餵給獨立下游」這件事的價格</strong>。</p>
 
   <div class="oneliner">
-    <b>一句話答法</b>同一批訊息：Queue ACK 後無法回溯，Log 靠獨立游標重放。處理慢於 Visibility timeout 就會重投；Poison 達上限必須離開主路徑。
+    <b>一句話答法</b>同一批訊息：Queue 的 ACK 對全世界生效（刪除），所以晚到者只拿得到「還沒被做掉的待辦」，而且積壓一清空就連那個都沒有；Log 的 ACK 只推進自己那一組的游標，日誌本體不動，晚到與重放都只受保留窗口限制。
   </div>
 </section>
 
