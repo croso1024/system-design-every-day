@@ -1376,7 +1376,7 @@
         <a href="#s2"><span class="n">02</span>為什麼要分層</a>
         <a href="#s3"><span class="n">03</span>TCP/IP 四層模型</a>
         <a href="#s4"><span class="n">04</span>封裝與解封裝</a>
-        <a href="#s5"><span class="n">05</span>一個封包的完整旅程</a>
+        <a href="#s5"><span class="n">05</span>封包的旅程，與它卡在哪一層</a>
         <a href="#s6"><span class="n">06</span>系列地圖：接下來往哪走</a>
         <a href="#s7"><span class="n">07</span>面試與常見誤區速查</a>
       </div>
@@ -1393,10 +1393,19 @@
     <!-- ===================== MAIN CONTENT ===================== -->
     <main>
       <div class="inner">
-            <!-- 本篇專屬樣式：僅命名空間 nl-*，不覆蓋全站 base.html 既有類別 -->
+        <!-- demo-archetype: E｜決策器（主，第 5 節「封包的旅程，與它卡在哪一層」）＋F｜拆解器（次，第 4 節「封裝與解封裝」）
+     E：讀者把手上量到的八項觀察（DNS、閘道、目的 IP、port 連線是 refused 還是 timeout、伺服器端有沒有在聽、TLS、大封包、是否同網段）
+     自由組合填入，診斷器把每條被觸發的規則加減成五個候選層的嫌疑分數並正規化成百分比，算出最可能的層與信心邊際、已被排除的層、
+     目前的不確定度（bit），再把每個尚未量的檢查項的每一種結果都代入重算一次分佈，用資訊增益挑出「下一個最該量什麼」與預估剩餘步數，
+     並偵測互相矛盾的觀察組合。選 E 是因為排錯的命題是「這個症狀落在哪一層、還能排除哪幾層」——那是一個判定與排除問題，不是一段流程。
+     F：讀者調 payload 大小、路徑 MTU、IP 版本、TCP options 與 VLAN 標籤，算出各層 header bytes、MSS 或 IP 分片單位、要切成幾片、
+     最後一片多大、乙太網最小訊框的 padding、線路上的總 byte 數與 overhead 百分比——每個數字都是算術推導。
+     選 F 是因為「封裝的代價」只有攤成逐段 byte 才看得見，而 TCP 分段與 UDP 分片是兩條不同的公式。 -->
+    <!-- 本篇專屬樣式：僅命名空間 nl-*，不覆蓋全站 base.html 既有類別 -->
     <style>
       /* 四層的分類色（皆為低飽和 Notion 色調，作為分層辨識，非狀態語意） */
-      #nl-root {
+      /* 四層色 token 定義在 :root，才能同時服務靜態分層圖與兩個 demo（僅新增，不覆寫既有變數） */
+      :root {
         --l-app: #3f6188;   --l-app-soft: #eef2f7;
         --l-tp:  #4d7d68;   --l-tp-soft:  #eef4f1;
         --l-net: #a3743e;   --l-net-soft: #f6f0e7;
@@ -1408,7 +1417,6 @@
       .nl-layer {
         border:1px solid var(--border); border-left-width:4px; border-radius:var(--radius-sm);
         padding:11px 14px; background:#fff; display:flex; gap:14px; align-items:baseline;
-        transition:background .2s, border-color .2s, box-shadow .2s;
       }
       .nl-layer .ln { font-family:var(--mono); font-size:11px; color:var(--text-3); flex:0 0 26px; }
       .nl-layer .lname { font-weight:700; font-size:14.5px; flex:0 0 140px; }
@@ -1419,67 +1427,134 @@
       .nl-layer.l-tp   { border-left-color:var(--l-tp);   }
       .nl-layer.l-net  { border-left-color:var(--l-net);  }
       .nl-layer.l-link { border-left-color:var(--l-link); }
-      .nl-layer.active { box-shadow:0 0 0 3px var(--accent-soft); }
-      .nl-layer.l-app.active  { background:var(--l-app-soft);  }
-      .nl-layer.l-tp.active   { background:var(--l-tp-soft);   }
-      .nl-layer.l-net.active  { background:var(--l-net-soft);  }
-      .nl-layer.l-link.active { background:var(--l-link-soft); }
-      .nl-layer.dim { opacity:.45; }
       @media (max-width:560px){
         .nl-layer { flex-direction:column; gap:4px; }
         .nl-layer .lname { flex:none; }
       }
 
-      /* 封裝演示：層堆疊（左）與封包位元串（下） */
-      .nl-encap-grid { display:grid; grid-template-columns:1fr; gap:16px; }
-      .nl-pdu-badge {
-        display:inline-block; font-family:var(--mono); font-size:11px; letter-spacing:.06em;
-        border:1px solid var(--border-strong); border-radius:999px; padding:2px 10px; color:var(--text-2);
-        background:var(--bg-soft); margin-left:8px;
+      /* ===== 04 封包切片拆解器：比例色塊條（nb-） ===== */
+      .nb-knobs { display:grid; grid-template-columns:repeat(3,1fr); gap:11px 14px; margin:4px 0 12px; }
+      @media (max-width:720px){ .nb-knobs{ grid-template-columns:1fr 1fr; } }
+      @media (max-width:460px){ .nb-knobs{ grid-template-columns:1fr; } }
+      .nb-knob { display:grid; grid-template-columns:1fr auto; gap:2px 8px; align-items:center; }
+      .nb-knob .kl { font-size:12.5px; color:var(--text-2); }
+      .nb-knob .kv { font-family:var(--mono); font-size:12px; font-weight:700; color:var(--text); justify-self:end; }
+      .nb-knob input[type="range"] { grid-column:1 / -1; width:100%; margin:2px 0 0; accent-color:var(--accent); }
+      .nb-knob select {
+        grid-column:1 / -1; width:100%; margin-top:2px; font-family:var(--mono); font-size:12px;
+        padding:4px 6px; border:1px solid var(--border-strong); border-radius:5px; background:#fff; color:var(--text);
       }
-      .nl-wire-label { font-family:var(--mono); font-size:11px; color:var(--text-3); margin:2px 0 8px; letter-spacing:.06em; text-transform:uppercase; }
-      .nl-wire {
-        display:flex; align-items:stretch; gap:4px; flex-wrap:wrap;
-        border:1px dashed var(--border-strong); border-radius:var(--radius-sm);
-        padding:12px; background:var(--bg-soft); min-height:88px;
+      .nb-chk { display:flex; align-items:center; gap:7px; font-size:12.5px; color:var(--text-2); cursor:pointer; align-self:end; padding-bottom:3px; }
+      .nb-chk input { accent-color:var(--accent); width:15px; height:15px; margin:0; }
+
+      .nb-bars { display:flex; flex-direction:column; gap:6px; margin:12px 0 4px; }
+      .nb-barrow { display:grid; grid-template-columns:66px 1fr; gap:8px; align-items:center; }
+      .nb-barrow .rl { font-family:var(--mono); font-size:11px; color:var(--text-3); text-align:right; }
+      .nb-bar { display:flex; height:30px; border:1px solid var(--border-strong); border-radius:5px; overflow:hidden; background:#fff; }
+      .nb-seg {
+        display:flex; align-items:center; justify-content:center; min-width:0; overflow:hidden;
+        font-family:var(--mono); font-size:10.5px; color:var(--text); white-space:nowrap;
+        border-right:1px solid var(--border-strong);
       }
-      .nl-box {
-        border:1.5px solid var(--border-strong); border-radius:6px; background:#fff;
-        padding:8px 10px; min-width:96px; display:flex; flex-direction:column; gap:3px;
-        animation:nlpop .28s ease;
-      }
-      @keyframes nlpop { from{ opacity:0; transform:translateY(6px) scale(.96); } to{ opacity:1; transform:none; } }
-      .nl-box.hidden { display:none; }
-      .nl-box .bh { font-weight:700; font-size:12px; }
-      .nl-box .bf { font-family:var(--mono); font-size:10px; color:var(--text-2); line-height:1.5; }
-      .nl-box.app     { border-color:var(--l-app);  background:var(--l-app-soft);  flex:1 1 150px; }
-      .nl-box.tp      { border-color:var(--l-tp);   background:var(--l-tp-soft);  }
-      .nl-box.net     { border-color:var(--l-net);  background:var(--l-net-soft); }
-      .nl-box.link    { border-color:var(--l-link); background:var(--l-link-soft);}
-      .nl-box .btag { font-family:var(--mono); font-size:9.5px; color:var(--text-3); text-transform:uppercase; letter-spacing:.05em; }
-      .nl-bits {
-        margin-top:10px; font-family:var(--mono); font-size:12px; color:var(--l-link);
-        letter-spacing:.18em; word-break:break-all; min-height:20px;
+      .nb-seg:last-child { border-right:0; }
+      .nb-seg.ov  { background:var(--bg-soft); color:var(--text-3); }
+      .nb-seg.eth { background:var(--l-link-soft); }
+      .nb-seg.vln { background:#e7e9f2; }
+      .nb-seg.ip  { background:var(--l-net-soft); }
+      .nb-seg.l4  { background:var(--l-tp-soft); }
+      .nb-seg.pay { background:var(--l-app-soft); }
+      .nb-seg.pad { background:var(--warn-soft); color:var(--warn); }
+      .nb-seg.fcs { background:var(--l-link-soft); }
+      .nb-ell { grid-column:1 / -1; text-align:center; font-family:var(--mono); font-size:12px; color:var(--text-3); }
+      .nb-key { display:flex; flex-wrap:wrap; gap:4px 12px; margin:8px 0 0; font-family:var(--mono); font-size:11px; color:var(--text-2); }
+      .nb-key span { display:flex; align-items:center; gap:5px; }
+      .nb-key i { width:10px; height:10px; border-radius:3px; border:1px solid var(--border-strong); flex:0 0 auto; }
+
+      .nb-tiles { display:grid; grid-template-columns:repeat(5,1fr); gap:8px; margin:12px 0 4px; }
+      @media (max-width:720px){ .nb-tiles{ grid-template-columns:repeat(3,1fr); } }
+      @media (max-width:420px){ .nb-tiles{ grid-template-columns:repeat(2,1fr); } }
+      .nb-tile { border:1px solid var(--border); border-radius:var(--radius-sm); background:#fff; padding:8px 9px; }
+      .nb-tile .tl { font-size:11px; color:var(--text-3); line-height:1.35; }
+      .nb-tile .tv { font-family:var(--mono); font-size:15px; font-weight:700; color:var(--text); margin-top:2px; }
+      .nb-tile.warn { border-color:var(--warn); background:var(--warn-soft); }
+      .nb-tile.warn .tv { color:var(--warn); }
+
+      /* ===== 05 分層診斷器：巢狀分層堆疊盒 + 嫌疑條（nd-） ===== */
+      .nd-obs { display:grid; grid-template-columns:repeat(3,1fr); gap:10px 14px; margin:4px 0 12px; }
+      @media (max-width:720px){ .nd-obs{ grid-template-columns:1fr 1fr; } }
+      @media (max-width:460px){ .nd-obs{ grid-template-columns:1fr; } }
+      .nd-ob { display:flex; flex-direction:column; gap:3px; min-width:0; }
+      .nd-ob .ol { font-size:12.5px; color:var(--text-2); line-height:1.35; }
+      .nd-ob select {
+        font-family:var(--mono); font-size:12px; padding:4px 6px; width:100%;
+        border:1px solid var(--border-strong); border-radius:5px; background:#fff; color:var(--text);
       }
 
-      /* 端到端旅程：三個節點，各含 4 層迷你堆疊 */
+      .nd-stack { display:flex; flex-direction:column; gap:6px; margin:12px 0 4px; }
+      .nd-band {
+        border:1px solid var(--border); border-left-width:4px; border-radius:var(--radius-sm);
+        background:#fff; padding:8px 11px;
+        display:grid; grid-template-columns:168px 1fr 58px; gap:10px; align-items:center;
+      }
+      @media (max-width:600px){
+        .nd-band { grid-template-columns:1fr 54px; }
+        .nd-band .bm { grid-column:1 / -1; }
+      }
+      .nd-band.sub { margin-left:18px; }
+      .nd-band .bn { font-weight:700; font-size:13px; }
+      .nd-band .bd { font-size:11px; color:var(--text-3); margin-top:1px; line-height:1.45; }
+      .nd-band .bx {
+        font-family:var(--mono); font-size:10px; color:var(--text-3);
+        border:1px solid var(--border-strong); border-radius:4px; padding:0 5px; margin-left:6px; white-space:nowrap;
+      }
+      .nd-band .bm { height:12px; background:var(--bg-soft); border-radius:999px; overflow:hidden; }
+      .nd-band .bm i { display:block; height:100%; background:var(--accent-line); }
+      .nd-band .bp { font-family:var(--mono); font-size:13px; font-weight:700; text-align:right; color:var(--text); }
+      .nd-band.top { border-color:var(--accent); box-shadow:0 0 0 2px var(--accent-soft); }
+      .nd-band.top .bm i { background:var(--accent); }
+      .nd-band.out { opacity:.55; background:var(--bg-soft); }
+      .nd-band.out .bp { color:var(--text-3); }
+      .nd-band.l-app  { border-left-color:var(--l-app); }
+      .nd-band.l-tp   { border-left-color:var(--l-tp); }
+      .nd-band.l-net  { border-left-color:var(--l-net); }
+      .nd-band.l-link { border-left-color:var(--l-link); }
+
+      .nd-next { border:1px solid var(--accent-line); background:var(--accent-soft); border-radius:var(--radius-sm); padding:10px 12px; margin:12px 0 0; }
+      .nd-next.done { border-color:var(--ok); background:var(--ok-soft); }
+      .nd-next .nt { font-family:var(--mono); font-size:11px; color:var(--text-2); letter-spacing:.04em; }
+      .nd-next .nq { font-weight:700; font-size:13.5px; margin:3px 0 3px; }
+      .nd-next .nc {
+        font-family:var(--mono); font-size:12px; color:var(--text); background:#fff;
+        border:1px solid var(--border-strong); border-radius:5px; padding:3px 7px; display:inline-block;
+      }
+      .nd-next .nm { font-size:12px; color:var(--text-2); margin-top:5px; line-height:1.55; }
+      .nd-conflict { border:1px solid var(--bad); background:var(--bad-soft); border-radius:var(--radius-sm); padding:9px 12px; margin:10px 0 0; font-size:12.5px; color:var(--bad); line-height:1.6; }
+      .nd-ev { display:flex; flex-direction:column; gap:4px; margin:12px 0 0; }
+      .nd-ev .eh { font-family:var(--mono); font-size:11px; color:var(--text-3); letter-spacing:.04em; }
+      .nd-ev .er { display:grid; grid-template-columns:76px 1fr; gap:8px; font-size:12px; color:var(--text-2); line-height:1.5; }
+      .nd-ev .er .ew { font-family:var(--mono); font-size:11.5px; text-align:right; white-space:nowrap; }
+      .nd-ev .er .ew.up { color:var(--bad); }
+      .nd-ev .er .ew.dn { color:var(--ok); }
+
+      /* 端到端旅程（靜態圖）：三個節點，各含 4 層迷你堆疊 */
       .nl-journey { display:flex; align-items:stretch; gap:8px; margin:8px 0 4px; }
-      .nl-node { flex:1 1 0; border:1px solid var(--border); border-radius:var(--radius-sm); padding:10px; background:#fff; min-width:0; transition:border-color .2s, box-shadow .2s; }
-      .nl-node.done { border-color:var(--accent-line); }
-      .nl-node.hot  { box-shadow:0 0 0 3px var(--accent-soft); border-color:var(--accent); }
+      .nl-node { flex:1 1 0; border:1px solid var(--border); border-radius:var(--radius-sm); padding:10px; background:#fff; min-width:0; }
       .nl-node-title { font-weight:700; font-size:13px; text-align:center; margin-bottom:2px; }
-      .nl-node-sub { font-family:var(--mono); font-size:10px; color:var(--text-3); text-align:center; margin-bottom:8px; }
+      .nl-node-sub { font-family:var(--mono); font-size:11px; color:var(--text-3); text-align:center; margin-bottom:8px; }
       .nl-nstack { display:flex; flex-direction:column; gap:3px; }
       .nl-cell {
         border:1px solid var(--border); border-radius:5px; padding:5px 7px; font-size:11px;
-        color:var(--text-3); background:#fff; text-align:center; transition:background .2s, color .2s, border-color .2s;
+        color:var(--text-3); background:#fff; text-align:center;
       }
       .nl-cell.on-app  { background:var(--l-app-soft);  border-color:var(--l-app);  color:var(--text); }
       .nl-cell.on-tp   { background:var(--l-tp-soft);   border-color:var(--l-tp);   color:var(--text); }
       .nl-cell.on-net  { background:var(--l-net-soft);  border-color:var(--l-net);  color:var(--text); }
       .nl-cell.on-link { background:var(--l-link-soft); border-color:var(--l-link); color:var(--text); }
-      .nl-hop { align-self:center; font-family:var(--mono); font-size:16px; color:var(--text-3); flex:0 0 auto; padding:0 2px; }
-      .nl-hop.live { color:var(--accent); }
+      .nl-cell.off { opacity:.35; }
+      .nl-hop {
+        align-self:center; flex:0 0 auto; padding:0 2px; white-space:nowrap;
+        font-family:var(--mono); font-size:11.5px; color:var(--text-3);
+      }
       @media (max-width:560px){
         .nl-journey { flex-direction:column; }
         .nl-hop { transform:rotate(90deg); align-self:center; }
@@ -1601,55 +1676,62 @@
 
       <p>資料往下走一層，那一層就在前面（有時也在後面）貼上自己的 <strong>header</strong>，把上層交來的東西整個當成「不透明的酬載（payload）」包起來——這叫<strong>封裝</strong>。接收端反過來，每往上走一層就拆掉對應的 header，讀出裡面的酬載交給上層——這叫<strong>解封裝</strong>。兩邊完全對稱，像一組俄羅斯娃娃。</p>
 
-      <p>關鍵洞察：<strong>每一層只看得懂、也只在乎自己那層的 header。</strong>路由器讀 IP header 就夠了，它根本不拆你的 TCP／HTTP；交換器只看 MAC。這種「各層互不干涉」正是分層能成立的原因。下面這個演示，讓你親手把一塊 HTTP 資料一層層包成 Frame，再反向拆回來：</p>
+      <p>關鍵洞察：<strong>每一層只看得懂、也只在乎自己那層的 header。</strong>路由器讀 IP header 就夠了，它根本不拆你的 TCP／HTTP；交換器只看 MAC。這種「各層互不干涉」正是分層能成立的原因。而封裝是要付代價的——每一層貼上去的 header 都是實實在在的 byte。下面這個拆解器讓你調 payload 大小與各層選項，把代價算到個位數：</p>
 
-      <!-- INTERACTIVE: encapsulation builder -->
-      <div class="demo" id="demo-encap">
+      <!-- INTERACTIVE: 封包切片拆解器（F） -->
+      <div class="demo" id="demo-nb">
         <div class="demo-bar">
-          <span class="label">互動 · 封裝／解封裝</span>
-          <div class="seg" role="group" aria-label="方向切換">
-            <button data-mode="encap" aria-pressed="true">封裝（送端 ↓）</button>
-            <button data-mode="decap" aria-pressed="false">解封裝（收端 ↑）</button>
+          <span class="label">互動 · 一筆資料在線路上佔多少 byte</span>
+          <div class="seg" role="group" aria-label="傳輸層協定">
+            <button data-l4="tcp" aria-pressed="true">TCP（分段）</button>
+            <button data-l4="udp" aria-pressed="false">UDP（IP 分片）</button>
           </div>
         </div>
-        <div class="demo-body" id="nl-root">
-          <div class="nl-encap-grid">
-            <div>
-              <div class="nl-wire-label">目前所在層 · 資料單位<span class="nl-pdu-badge" id="enc-pdu">Message</span></div>
-              <div class="nl-stack" id="enc-stack">
-                <div class="nl-layer l-app"  data-layer="app"><span class="ln">▲</span><span class="lname">應用 Application</span><span class="lbody"><span class="lrole">HTTP 產生請求資料</span></span></div>
-                <div class="nl-layer l-tp"   data-layer="tp"><span class="ln">│</span><span class="lname">傳輸 Transport</span><span class="lbody"><span class="lrole">TCP：port 多工、可靠傳輸</span></span></div>
-                <div class="nl-layer l-net"  data-layer="net"><span class="ln">│</span><span class="lname">網路 Internet</span><span class="lbody"><span class="lrole">IP：跨網路定址與路由</span></span></div>
-                <div class="nl-layer l-link" data-layer="link"><span class="ln">▼</span><span class="lname">鏈路 Link</span><span class="lbody"><span class="lrole">Ethernet：相鄰設備間傳輸</span></span></div>
-              </div>
+        <div class="demo-body">
+
+          <div class="nb-knobs">
+            <div class="nb-knob">
+              <span class="kl">應用層 payload</span><span class="kv" id="nb-v-pay">1200 B</span>
+              <input type="range" id="nb-pay" min="1" max="20000" step="1" value="1200" aria-label="應用層 payload 大小">
             </div>
-            <div>
-              <div class="nl-wire-label">線路上的位元串（wire format）</div>
-              <div class="nl-wire" id="enc-wire">
-                <div class="nl-box link hidden" data-box="link-h"><span class="btag">Link</span><span class="bh">Ethernet Header</span><span class="bf">dst/src MAC<br>type 0x0800</span></div>
-                <div class="nl-box net hidden"  data-box="net-h"><span class="btag">Internet</span><span class="bh">IP Header</span><span class="bf">src/dst IP<br>TTL=64 · proto=TCP</span></div>
-                <div class="nl-box tp hidden"   data-box="tp-h"><span class="btag">Transport</span><span class="bh">TCP Header</span><span class="bf">src/dst port<br>seq/ack · flags</span></div>
-                <div class="nl-box app hidden"  data-box="payload"><span class="btag">Application</span><span class="bh">HTTP 資料（payload）</span><span class="bf">GET /index.html HTTP/1.1<br>Host: example.com</span></div>
-                <div class="nl-box link hidden" data-box="link-t"><span class="btag">Link</span><span class="bh">FCS 尾端</span><span class="bf">CRC 檢查碼</span></div>
-              </div>
-              <div class="nl-bits" id="enc-bits"></div>
+            <div class="nb-knob">
+              <span class="kl">路徑 MTU</span><span class="kv" id="nb-v-mtu">1500 B</span>
+              <select id="nb-mtu" aria-label="路徑 MTU">
+                <option value="576">576（保守下限）</option>
+                <option value="1400">1400（VPN 常見）</option>
+                <option value="1492">1492（PPPoE）</option>
+                <option value="1500" selected>1500（乙太網標準）</option>
+                <option value="9000">9000（Jumbo Frame）</option>
+              </select>
+            </div>
+            <div class="nb-knob">
+              <span class="kl">網路層版本</span><span class="kv" id="nb-v-ip">IPv4 · 20 B</span>
+              <select id="nb-ip" aria-label="IP 版本">
+                <option value="4" selected>IPv4（header 20 B）</option>
+                <option value="6">IPv6（header 40 B）</option>
+              </select>
+            </div>
+            <label class="nb-chk">
+              <input type="checkbox" id="nb-opt" checked>
+              <span>TCP options：timestamps + SACK（+12 B）</span>
+            </label>
+            <label class="nb-chk">
+              <input type="checkbox" id="nb-vlan">
+              <span>802.1Q VLAN 標籤（+4 B）</span>
+            </label>
+            <div class="nb-knob" style="align-self:end">
+              <button class="btn" id="nb-reset" style="grid-column:1 / -1">重置為預設參數</button>
             </div>
           </div>
-          <div class="status-line" id="enc-status"></div>
-          <div style="margin-top:14px;display:flex;gap:8px;flex-wrap:wrap;">
-            <button class="btn" id="enc-prev">上一步</button>
-            <button class="btn primary" id="enc-next">下一步</button>
-            <button class="btn" id="enc-reset">重置</button>
-          </div>
-          <div class="legend">
-            <span><i class="dot" style="background:var(--l-app-soft);border-color:var(--l-app)"></i>應用</span>
-            <span><i class="dot" style="background:var(--l-tp-soft);border-color:var(--l-tp)"></i>傳輸</span>
-            <span><i class="dot" style="background:var(--l-net-soft);border-color:var(--l-net)"></i>網路</span>
-            <span><i class="dot" style="background:var(--l-link-soft);border-color:var(--l-link)"></i>鏈路</span>
-          </div>
+
+          <div class="nb-bars" id="nb-bars"></div>
+          <div class="nb-key" id="nb-key"></div>
+          <div class="nb-tiles" id="nb-tiles"></div>
+          <div class="status-line" id="nb-status"></div>
+
         </div>
       </div>
-      <p class="cap">切到「解封裝」會看到收端從一整個 Frame 反向拆回 HTTP 資料——與送端的封裝一步步對稱。注意：Link 層在前後各加了東西（header + 尾端 FCS），其餘層只加前面的 header。</p>
+      <p class="cap">看 payload 那一段的寬度佔比：payload 拉到 1 byte 時，整條線幾乎全是 header——這就是「小封包的 overhead」。另外注意兩件常被搞混的事：<b>VLAN 標籤不佔 MTU</b>（MTU 量的是 IP 層以上的 payload，所以加 VLAN 只讓每個 frame 變長、不會讓 MSS 變小）；<b>UDP 被 IP 分片時只有第一片帶得到 UDP header</b>，後面幾片在 IP 眼裡只是無名的 byte 串。模型已計入乙太網最小訊框 64 B 的 padding 與每個 frame 的前導碼＋訊框間隔 20 B。</p>
 
       <div class="callout warn">
         <div class="c-title"><span class="ic">陷阱</span>封裝不是加密</div>
@@ -1665,7 +1747,7 @@
 
     <!-- ============ 05 一個封包的完整旅程 ============ -->
     <section id="s5">
-      <div class="sec-head"><span class="sec-num">05</span><h2>一個封包的完整旅程</h2></div>
+      <div class="sec-head"><span class="sec-num">05</span><h2>封包的旅程，與它卡在哪一層</h2></div>
       <p class="sec-sub">把封裝放進真實地形：資料不是點對點直達，而是一跳跳穿過設備——而不同設備只拆到不同的層。</p>
 
       <p>回到開頭那個 HTTP 請求。它從你的電腦出發，中間至少會經過家用／機房的<strong>路由器</strong>，最後抵達伺服器。這裡藏著一個最能鞏固分層心智模型的事實：<strong>不同設備只把封包往上拆到不同的層</strong>——</p>
@@ -1674,57 +1756,144 @@
         <li><strong>路由器 Router</strong>：拆到<strong>網路層（第 3 層）</strong>，讀 IP、查路由表決定下一跳，然後換上新 frame header 再送出。</li>
         <li><strong>端點主機（你的電腦／伺服器）</strong>：一路拆到<strong>應用層</strong>，因為資料就是要交給上面的程式。</li>
       </ul>
-      <p>跟著下面的演示走一遍，看同一個請求如何在三個節點間、以不同的「拆解深度」接力：</p>
+      <p>把這三種角色排成一列，就是一個請求的實際地形：</p>
 
-      <!-- INTERACTIVE: end-to-end journey -->
-      <div class="demo" id="demo-journey">
-        <div class="demo-bar">
-          <span class="label">互動 · 封包的端到端旅程</span>
-          <span class="label" style="text-transform:none;font-family:var(--sans);font-size:12px;color:var(--text-2)">看不同設備各拆到第幾層</span>
-        </div>
-        <div class="demo-body">
-          <div class="nl-journey" id="jn-journey">
-            <div class="nl-node" data-node="client">
-              <div class="nl-node-title">你的電腦</div>
-              <div class="nl-node-sub">end host</div>
-              <div class="nl-nstack">
-                <div class="nl-cell" data-l="app">應用</div>
-                <div class="nl-cell" data-l="tp">傳輸</div>
-                <div class="nl-cell" data-l="net">網路</div>
-                <div class="nl-cell" data-l="link">鏈路</div>
-              </div>
-            </div>
-            <span class="nl-hop" data-hop="c-r">→</span>
-            <div class="nl-node" data-node="router">
-              <div class="nl-node-title">路由器</div>
-              <div class="nl-node-sub">router · L3</div>
-              <div class="nl-nstack">
-                <div class="nl-cell" data-l="app" style="opacity:.35">應用</div>
-                <div class="nl-cell" data-l="tp" style="opacity:.35">傳輸</div>
-                <div class="nl-cell" data-l="net">網路</div>
-                <div class="nl-cell" data-l="link">鏈路</div>
-              </div>
-            </div>
-            <span class="nl-hop" data-hop="r-s">→</span>
-            <div class="nl-node" data-node="server">
-              <div class="nl-node-title">伺服器</div>
-              <div class="nl-node-sub">end host</div>
-              <div class="nl-nstack">
-                <div class="nl-cell" data-l="app">應用</div>
-                <div class="nl-cell" data-l="tp">傳輸</div>
-                <div class="nl-cell" data-l="net">網路</div>
-                <div class="nl-cell" data-l="link">鏈路</div>
-              </div>
-            </div>
+      <div class="nl-journey">
+        <div class="nl-node">
+          <div class="nl-node-title">你的電腦</div>
+          <div class="nl-node-sub">end host</div>
+          <div class="nl-nstack">
+            <div class="nl-cell on-app">應用</div>
+            <div class="nl-cell on-tp">傳輸</div>
+            <div class="nl-cell on-net">網路</div>
+            <div class="nl-cell on-link">鏈路</div>
           </div>
-          <div class="status-line" id="jn-status"></div>
-          <div style="margin-top:14px;display:flex;gap:8px;flex-wrap:wrap;">
-            <button class="btn primary" id="jn-next">下一步</button>
-            <button class="btn" id="jn-reset">重置</button>
+        </div>
+        <span class="nl-hop">─Frame─▸</span>
+        <div class="nl-node">
+          <div class="nl-node-title">路由器</div>
+          <div class="nl-node-sub">router · L3</div>
+          <div class="nl-nstack">
+            <div class="nl-cell off">應用</div>
+            <div class="nl-cell off">傳輸</div>
+            <div class="nl-cell on-net">網路</div>
+            <div class="nl-cell on-link">鏈路</div>
+          </div>
+        </div>
+        <span class="nl-hop">─換新 Frame─▸</span>
+        <div class="nl-node">
+          <div class="nl-node-title">伺服器</div>
+          <div class="nl-node-sub">end host</div>
+          <div class="nl-nstack">
+            <div class="nl-cell on-app">應用</div>
+            <div class="nl-cell on-tp">傳輸</div>
+            <div class="nl-cell on-net">網路</div>
+            <div class="nl-cell on-link">鏈路</div>
           </div>
         </div>
       </div>
-      <p class="cap">重點不在動畫，而在那個「路由器只點亮到網路層」的畫面：它證明了封裝的價值——中途設備不必也不能理解上層內容，各層真正做到了獨立。</p>
+      <p class="cap">看中間那一格：路由器的「應用」與「傳輸」是灰的——它拆到網路層讀完目的 IP 就轉發，上層內容對它是不透明的 payload。IP 位址一路不變，MAC 每一跳都換，所以箭頭上寫的是「換新 Frame」。</p>
+
+      <p>這張圖也是<strong>排錯時最有用的一張圖</strong>。當「連不上」發生時，資深工程師做的第一件事不是重開機，而是<strong>把症狀壓到某一層</strong>：能 ping 通卻連不上 port、DNS 解得出來卻沒反應、小請求正常但大檔案會卡住——每一種組合都指向不同的層。下面的診斷器讓你把手上量到的每一項填進去，它會算出嫌疑落在哪一層、哪幾層已經被排除，以及<strong>下一個最該量的是什麼</strong>：</p>
+
+      <!-- INTERACTIVE: 分層診斷器（E） -->
+      <div class="demo" id="demo-nd">
+        <div class="demo-bar">
+          <span class="label">互動 · 分層診斷器</span>
+          <span class="label" style="text-transform:none;font-family:var(--sans);font-size:12px;color:var(--text-2)">填入你量到的每一項，看問題被壓到哪一層</span>
+        </div>
+        <div class="demo-body">
+
+          <div class="nd-obs">
+            <div class="nd-ob">
+              <span class="ol">網域解不解得出 IP</span>
+              <select id="nd-dns" aria-label="網域解析結果">
+                <option value="unknown">尚未測</option>
+                <option value="ok" selected>解得出 IP</option>
+                <option value="fail">解不出來</option>
+              </select>
+            </div>
+            <div class="nd-ob">
+              <span class="ol">ping 預設閘道</span>
+              <select id="nd-gw" aria-label="預設閘道可達性">
+                <option value="unknown">尚未測</option>
+                <option value="ok" selected>通</option>
+                <option value="fail">不通</option>
+              </select>
+            </div>
+            <div class="nd-ob">
+              <span class="ol">ping 目的 IP</span>
+              <select id="nd-ping" aria-label="目的位址可達性">
+                <option value="unknown">尚未測</option>
+                <option value="ok" selected>通</option>
+                <option value="fail">不通</option>
+              </select>
+            </div>
+            <div class="nd-ob">
+              <span class="ol">連那個 port（nc / telnet）</span>
+              <select id="nd-tcp" aria-label="TCP 連線結果">
+                <option value="unknown">尚未測</option>
+                <option value="ok">連得上</option>
+                <option value="refused">connection refused</option>
+                <option value="timeout" selected>逾時、沒有任何回應</option>
+              </select>
+            </div>
+            <div class="nd-ob">
+              <span class="ol">伺服器端有沒有在聽那個 port</span>
+              <select id="nd-listen" aria-label="伺服器端監聽狀態">
+                <option value="unknown" selected>尚未測</option>
+                <option value="yes">有，ss 看得到</option>
+                <option value="no">沒有任何程式在聽</option>
+              </select>
+            </div>
+            <div class="nd-ob">
+              <span class="ol">TLS 握手</span>
+              <select id="nd-tls" aria-label="TLS 握手結果">
+                <option value="na" selected>尚未測／不適用</option>
+                <option value="ok">成功</option>
+                <option value="namemismatch">憑證名稱（SAN）不符</option>
+                <option value="handshakefail">握手失敗</option>
+              </select>
+            </div>
+            <div class="nd-ob">
+              <span class="ol">大封包 / 大 body</span>
+              <select id="nd-big" aria-label="大封包傳輸行為">
+                <option value="unknown" selected>尚未測</option>
+                <option value="ok">和小的一樣正常</option>
+                <option value="stalls">小的正常、大的會卡住</option>
+              </select>
+            </div>
+            <div class="nd-ob">
+              <span class="ol">目的地跟你同網段嗎</span>
+              <select id="nd-sub" aria-label="是否同網段">
+                <option value="unknown">不確定</option>
+                <option value="yes">同網段</option>
+                <option value="no" selected>跨網段</option>
+              </select>
+            </div>
+          </div>
+
+          <div class="nd-stack" id="nd-stack"></div>
+          <div id="nd-conflict"></div>
+          <div class="nd-next" id="nd-next"></div>
+          <div class="status-line" id="nd-status"></div>
+          <div class="nd-ev" id="nd-ev"></div>
+
+          <div class="legend">
+            <span><i class="dot" style="background:var(--l-app-soft);border-color:var(--l-app)"></i>應用層</span>
+            <span><i class="dot" style="background:var(--l-tp-soft);border-color:var(--l-tp)"></i>傳輸層</span>
+            <span><i class="dot" style="background:var(--l-net-soft);border-color:var(--l-net)"></i>網路層</span>
+            <span><i class="dot" style="background:var(--l-link-soft);border-color:var(--l-link)"></i>鏈路層</span>
+          </div>
+
+          <div style="margin-top:12px;display:flex;gap:8px;flex-wrap:wrap;">
+            <button class="btn primary" id="nd-clear">全部設為「尚未測」</button>
+            <button class="btn" id="nd-reset">重置為預設情境</button>
+          </div>
+
+        </div>
+      </div>
+      <p class="cap">嫌疑百分比是把每條被觸發的規則加減出來的分數正規化而成，不是查表：改任何一格都會讓五條長條同時重算。被壓到 0 分的層會標成「已排除」——排除比指認更有價值，因為它讓你不必再去量那一層。最下方的「下一個該量什麼」是<b>算</b>出來的：它把每個還沒量的檢查項的每一種可能結果都代進去重算一次分佈，挑能把不確定度（以 bit 計）壓最多的那一個。</p>
 
       <div class="callout accent">
         <div class="c-title"><span class="ic">串起來</span>從網址到畫面，各層各司其職</div>
@@ -1886,166 +2055,682 @@
 
   
 <script>
-"use strict";
-document.addEventListener("DOMContentLoaded", function(){
+(function () {
+  "use strict";
 
-  /* ===== 04 封裝 / 解封裝 builder ===== */
-  (function(){
-    var root = document.getElementById("demo-encap");
-    if(!root) return;
+  /* ================= (1) 常數與參數表 ================= */
 
-    var stack   = document.getElementById("enc-stack");
-    var wire    = document.getElementById("enc-wire");
-    var pduEl   = document.getElementById("enc-pdu");
-    var bitsEl  = document.getElementById("enc-bits");
-    var statusEl= document.getElementById("enc-status");
-    var prevBtn = document.getElementById("enc-prev");
-    var nextBtn = document.getElementById("enc-next");
-    var resetBtn= document.getElementById("enc-reset");
-    var segBtns = root.querySelectorAll(".seg button");
+  /* ---- demo 1（第 4 節）：封包切片拆解器 ---- */
+  var ETH_HDR = 14;          /* dst MAC 6 + src MAC 6 + EtherType 2 */
+  var ETH_FCS = 4;           /* 尾端 CRC */
+  var VLAN_TAG = 4;          /* 802.1Q */
+  var PREAMBLE_IFG = 20;     /* 前導碼 8 + 訊框間隔 12（線路上真的佔時間） */
+  var MIN_FRAME = 64;        /* 乙太網最小訊框：dst MAC 起算到 FCS 止 */
+  var IP4_HDR = 20, IP6_HDR = 40;
+  var TCP_BASE = 20, TCP_OPTS = 12, UDP_HDR = 8;
+  var FRAG_ALIGN = 8;        /* IP 分片偏移以 8 bytes 為單位 */
+  var PAY_MIN = 1, PAY_MAX = 20000;
+  var BARS_SHOWN = 3;        /* 片數超過這個值就只畫頭尾 */
+  var LABEL_MIN_SHARE = 0.055;
+  var NB_BASE = { payloadBytes: 1200, l4: "tcp", tcpOptions: true, ipVersion: 4, vlan: false, mtu: 1500 };
 
-    var layerEls = {};
-    stack.querySelectorAll(".nl-layer").forEach(function(el){ layerEls[el.dataset.layer] = el; });
-    var boxEls = {};
-    wire.querySelectorAll(".nl-box").forEach(function(el){ boxEls[el.dataset.box] = el; });
+  var SEG_NAME = {
+    ov: "前導+IFG", eth: "Ethernet", vln: "VLAN", ip: "IP",
+    l4: "L4", pay: "payload", pad: "padding", fcs: "FCS"
+  };
+  var SEG_COLOR = {
+    ov: "var(--bg-soft)", eth: "var(--l-link-soft)", vln: "#e7e9f2", ip: "var(--l-net-soft)",
+    l4: "var(--l-tp-soft)", pay: "var(--l-app-soft)", pad: "var(--warn-soft)", fcs: "var(--l-link-soft)"
+  };
 
-    var mode = "encap";
-    var idx = 0;
+  /* ---- demo 2（第 5 節）：分層診斷器 ---- */
+  var BASE_SCORE = 20;       /* 每一層的先驗分數；沒有任何觀察時五層等權 */
+  var DONE_BITS = 0.4;       /* 不確定度低於此即視為已定位 */
 
-    // 每個步驟：active 層、可見的 box 集合、PDU 名稱、位元串、說明
-    var ENCAP = [
-      { active:"app",  boxes:["payload"], pdu:"Message / 資料",
-        bits:"", note:"<b>應用層</b>：HTTP 產生要傳的請求資料（例如 <code>GET /index.html</code>）。此刻它還只是一段純資料。" },
-      { active:"tp",   boxes:["tp-h","payload"], pdu:"Segment",
-        bits:"", note:"<b>傳輸層（TCP）</b>：在前面貼上 TCP header（來源/目的 port、序號、旗標），資料單位成為 <b>Segment</b>。port 決定送到對方哪個程式，序號讓資料能可靠重組。" },
-      { active:"net",  boxes:["net-h","tp-h","payload"], pdu:"Packet",
-        bits:"", note:"<b>網路層（IP）</b>：再貼上 IP header（來源/目的 IP、TTL、上層協定=TCP），成為 <b>Packet</b>。IP 位址決定要送到「哪一台主機」、要跨哪些網路。" },
-      { active:"link", boxes:["link-h","net-h","tp-h","payload","link-t"], pdu:"Frame",
-        bits:"", note:"<b>鏈路層（Ethernet）</b>：前面加 frame header（來源/目的 MAC、EtherType），<b>尾端</b>再加 FCS 檢查碼，成為 <b>Frame</b>。MAC 只認得相鄰設備。" },
-      { active:null,   boxes:["link-h","net-h","tp-h","payload","link-t"], pdu:"Frame → bits",
-        bits:"01000101 00110010 10110001 …", note:"<b>送上實體線路</b>：Frame 化為一連串 bit（電壓／光／電波）送出。<b>注意</b>：每一層只認得自己貼的 header，完全不理會裡面包了什麼——這就是分層。" }
-    ];
+  var LAYERS = [
+    { id: "appdns", name: "應用層 · 名稱解析", face: "l-app", sub: true,
+      desc: "DNS、hosts、搜尋網域：把名字換成 IP 的那一段" },
+    { id: "apptls", name: "應用層 · 協定與 TLS", face: "l-app", sub: true,
+      desc: "憑證與 SNI、HTTP 語意、伺服器程式本身" },
+    { id: "tp", name: "傳輸層 Transport", face: "l-tp", sub: false,
+      desc: "port、監聽位址、防火牆的 port 規則" },
+    { id: "net", name: "網路層 Internet", face: "l-net", sub: false,
+      desc: "IP 路由、預設閘道、網段判定、路徑 MTU" },
+    { id: "link", name: "鏈路層 Link", face: "l-link", sub: false,
+      desc: "線材與 Wi-Fi、ARP、VLAN、網卡與驅動" }
+  ];
 
-    var DECAP = [
-      { active:"link", boxes:["link-h","net-h","tp-h","payload","link-t"], pdu:"Frame",
-        bits:"01000101 00110010 10110001 …", note:"<b>收端·鏈路層</b>：bit 從線路抵達，先用 <b>FCS</b> 檢查有沒有毀損、比對目的 MAC 是不是自己，重組出完整 <b>Frame</b>。" },
-      { active:"net",  boxes:["net-h","tp-h","payload"], pdu:"Packet",
-        bits:"", note:"<b>網路層</b>：拆掉 frame header 與 FCS，取出裡面的 <b>Packet</b>。檢查目的 IP 是自己、TTL 等，再把內容往上交給傳輸層。" },
-      { active:"tp",   boxes:["tp-h","payload"], pdu:"Segment",
-        bits:"", note:"<b>傳輸層</b>：拆掉 IP header 後得到 <b>Segment</b>。依<b>目的 port</b> 找到對應的應用程式（多工解多工），確認序號、重組資料。" },
-      { active:"app",  boxes:["payload"], pdu:"Message / 資料",
-        bits:"", note:"<b>應用層</b>：拆掉 TCP header，交出原始 HTTP 資料。" },
-      { active:"app",  boxes:["payload"], pdu:"Message / 資料",
-        bits:"", note:"<b>解封裝完成</b>：伺服器程式拿到完整 HTTP 請求。整個過程與送端的封裝<b>逐層對稱</b>——這一層拆掉的，正是對面那一層貼上的。" }
-    ];
+  /* 規則函式：若干 if 判定作用在觀察組合上，對某層加減權重。
+     權重是常數，但它下游的百分比、邊際、排除數、熵、資訊增益、步數全部是算出來的。 */
+  var RULES = [
+    { id: "dns-fail", hit: function (o) { return o.dns === "fail"; },
+      w: { appdns: 45 }, text: "網域解不出 IP ⇒ 卡在名稱解析，下層根本還沒被用到" },
+    { id: "dns-ok", hit: function (o) { return o.dns === "ok"; },
+      w: { appdns: -30 }, text: "網域解得出 IP ⇒ 名稱解析這一段已經成立" },
+    { id: "gw-fail", hit: function (o) { return o.gw === "fail"; },
+      w: { link: 35, net: 18 }, text: "連預設閘道都 ping 不到 ⇒ 本地鏈路（線材／Wi-Fi／ARP／VLAN）高度可疑" },
+    { id: "gw-ok", hit: function (o) { return o.gw === "ok"; },
+      w: { link: -26 }, text: "閘道 ping 得通 ⇒ 本地鏈路與 ARP 正常" },
+    { id: "ping-ok", hit: function (o) { return o.ping === "ok"; },
+      w: { link: -30, net: -30, tp: 14, apptls: 12 }, text: "目的 IP ping 得通 ⇒ 端到端 L3 路徑成立，嫌疑往上層集中" },
+    { id: "ping-fail-same", hit: function (o) { return o.ping === "fail" && o.sub === "yes"; },
+      w: { link: 26, net: 14 }, text: "同網段卻 ping 不到 ⇒ 不經路由，先查 ARP 與 L2" },
+    { id: "ping-fail-cross", hit: function (o) { return o.ping === "fail" && o.sub !== "yes"; },
+      w: { net: 32 }, text: "跨網段 ping 不到 ⇒ 路由表、閘道或回程路由可疑" },
+    { id: "tcp-ok", hit: function (o) { return o.tcp === "ok"; },
+      w: { tp: -30, net: -20, link: -14, apptls: 22 }, text: "TCP 連得上 ⇒ IP 可達且該 port 有人監聽，只剩應用層" },
+    { id: "tcp-refused", hit: function (o) { return o.tcp === "refused"; },
+      w: { tp: 42, net: -25, link: -18 }, text: "connection refused ⇒ 主機可達，但那個 port 沒有程式在聽" },
+    { id: "tcp-timeout", hit: function (o) { return o.tcp === "timeout"; },
+      w: { tp: 28, net: 16 }, text: "逾時、毫無回應 ⇒ 封包被靜默丟棄，典型是防火牆擋 port，也可能是回程路由" },
+    { id: "listen-no", hit: function (o) { return o.listen === "no"; },
+      w: { tp: 45 }, text: "伺服器端根本沒有程式在聽 ⇒ 是監聽位址／port 的問題，不是網路" },
+    { id: "listen-yes", hit: function (o) { return o.listen === "yes"; },
+      w: { tp: -22, net: 14, link: 6 }, text: "有程式在聽卻連不到 ⇒ 嫌疑往下層（防火牆、路由）移" },
+    { id: "listen-bound", hit: function (o) { return o.listen === "yes" && o.tcp === "refused"; },
+      w: { tp: 30 }, text: "有人在聽卻被拒 ⇒ 多半聽在 127.0.0.1 或別的介面，仍是傳輸層的綁定問題" },
+    { id: "tls-ok", hit: function (o) { return o.tls === "ok"; },
+      w: { apptls: -22, tp: -10 }, text: "TLS 握手成功 ⇒ 傳輸層與憑證鏈都沒問題" },
+    { id: "tls-name", hit: function (o) { return o.tls === "namemismatch"; },
+      w: { apptls: 48 }, text: "憑證名稱（SAN）不符 ⇒ 純應用層：SNI、虛擬主機或憑證本身發錯" },
+    { id: "tls-fail", hit: function (o) { return o.tls === "handshakefail"; },
+      w: { apptls: 32 }, text: "握手失敗 ⇒ 協定版本、cipher 或中間設備攔截，仍在應用層" },
+    { id: "big-stall", hit: function (o) { return o.big === "stalls"; },
+      w: { net: 44, link: 12, apptls: -8 }, text: "小的正常、大的卡住 ⇒ 路徑 MTU 與 PMTUD 黑洞的典型指紋，屬網路層" },
+    { id: "mtu-blackhole", hit: function (o) { return o.big === "stalls" && o.tcp === "ok"; },
+      w: { net: 40, apptls: -26 }, text: "連得上、小請求也正常，卻在大 body 卡死 ⇒ 幾乎就是 PMTUD 黑洞：中途把 ICMP『fragmentation needed』擋掉了" },
+    { id: "big-ok", hit: function (o) { return o.big === "ok"; },
+      w: { net: -8 }, text: "大封包也正常 ⇒ 路徑 MTU 沒問題" },
+    { id: "sub-yes", hit: function (o) { return o.sub === "yes"; },
+      w: { link: 10, net: -12 }, text: "同網段 ⇒ 不需要路由，ARP 與 L2 的權重提高" },
+    { id: "sub-no", hit: function (o) { return o.sub === "no"; },
+      w: { net: 12 }, text: "跨網段 ⇒ 必須經過閘道與路由表" }
+  ];
 
-    function steps(){ return mode==="encap" ? ENCAP : DECAP; }
+  /* 檢查項：unob 是「尚未觀測」的值；need 決定這個檢查現在做不做得成 */
+  var CHECKS = [
+    { key: "dns", unob: "unknown", values: ["ok", "fail"],
+      q: "目標網域解不解得出 IP？", cmd: "dig +short <網域>",
+      need: function () { return true; } },
+    { key: "gw", unob: "unknown", values: ["ok", "fail"],
+      q: "預設閘道 ping 不 ping 得通？", cmd: "ip route | grep default && ping -c3 <閘道>",
+      need: function () { return true; } },
+    { key: "ping", unob: "unknown", values: ["ok", "fail"],
+      q: "目的 IP ping 不 ping 得通？", cmd: "ping -c3 <目的 IP>",
+      need: function () { return true; } },
+    { key: "tcp", unob: "unknown", values: ["ok", "refused", "timeout"],
+      q: "那個 port 連不連得上？連不上又是哪一種連不上？", cmd: "nc -vz <host> <port>",
+      need: function () { return true; } },
+    { key: "listen", unob: "unknown", values: ["yes", "no"],
+      q: "伺服器端真的有程式在聽那個 port 嗎？", cmd: "ss -ltnp | grep :<port>",
+      need: function () { return true; } },
+    { key: "tls", unob: "na", values: ["ok", "namemismatch", "handshakefail"],
+      q: "TLS 握手過不過得去？", cmd: "openssl s_client -connect <host>:443 -servername <host>",
+      need: function (o) { return o.tcp === "ok" || o.tcp === "unknown"; } },
+    { key: "big", unob: "unknown", values: ["ok", "stalls"],
+      q: "大封包會不會卡住？", cmd: "ping -c3 -M do -s 1472 <目的 IP>",
+      need: function (o) { return o.ping !== "fail"; } },
+    { key: "sub", unob: "unknown", values: ["yes", "no"],
+      q: "目的地跟你同網段嗎？", cmd: "ip -o addr show && ipcalc <你的 IP>/<遮罩>",
+      need: function () { return true; } }
+  ];
 
-    function render(){
-      var s = steps()[idx];
-      // 層高亮
-      Object.keys(layerEls).forEach(function(k){
-        var el = layerEls[k];
-        el.classList.toggle("active", s.active === k);
-        el.classList.toggle("dim", s.active !== null && s.active !== k);
-      });
-      // box 顯示
-      Object.keys(boxEls).forEach(function(k){
-        boxEls[k].classList.toggle("hidden", s.boxes.indexOf(k) === -1);
-      });
-      pduEl.textContent = s.pdu;
-      bitsEl.textContent = s.bits || "";
-      statusEl.innerHTML = s.note;
-      prevBtn.disabled = idx <= 0;
-      nextBtn.disabled = idx >= steps().length - 1;
+  var CONFLICTS = [
+    { hit: function (o) { return o.tls !== "na" && o.tcp !== "ok" && o.tcp !== "unknown"; },
+      text: "TLS 握手必須先有一條建立好的 TCP 連線：你同時回報了 TLS 有結果、TCP 卻不是「連得上」。" },
+    { hit: function (o) { return o.ping === "ok" && o.gw === "fail" && o.sub === "no"; },
+      text: "跨網段的封包一定要經過預設閘道：閘道 ping 不到、目的 IP 卻 ping 得到，這兩件事不能同時成立。" },
+    { hit: function (o) { return o.big !== "unknown" && o.ping === "fail"; },
+      text: "目的 IP 完全 ping 不到，就沒辦法用 ping 做大封包測試——這組觀察互相衝突。" }
+  ];
+
+  var ND_BASE = {
+    dns: "ok", gw: "ok", ping: "ok", tcp: "timeout",
+    listen: "unknown", tls: "na", big: "unknown", sub: "no"
+  };
+  var ND_CLEAR = {
+    dns: "unknown", gw: "unknown", ping: "unknown", tcp: "unknown",
+    listen: "unknown", tls: "na", big: "unknown", sub: "unknown"
+  };
+
+  /* ================= (2) compute* 純函式（不得碰 DOM） ================= */
+
+  function clampInt(v, lo, hi, dflt) {
+    var n = Math.round(Number(v));
+    if (!isFinite(n)) n = dflt;
+    if (n < lo) n = lo;
+    if (n > hi) n = hi;
+    return n;
+  }
+  function oneOf(v, list, dflt) {
+    var s = String(v);
+    return list.indexOf(s) === -1 ? dflt : s;
+  }
+  function log2(x) { return Math.log(x) / Math.LN2; }
+
+  // @probe fn       computeFraming
+  // @probe baseline {"payloadBytes":1200,"l4":"tcp","tcpOptions":true,"ipVersion":4,"vlan":false,"mtu":1500}
+  // @probe sweep    {"payloadBytes":[1,20000],"l4":["tcp","udp"],"tcpOptions":[true,false],"ipVersion":[4,6],"vlan":[true,false],"mtu":[576,9000]}
+  function computeFraming(p) {
+    p = p || {};
+    var payload = clampInt(p.payloadBytes, PAY_MIN, PAY_MAX, NB_BASE.payloadBytes);
+    var l4 = oneOf(p.l4, ["tcp", "udp"], NB_BASE.l4);
+    var tcpOptions = p.tcpOptions == null ? NB_BASE.tcpOptions : !!p.tcpOptions;
+    var ipVersion = clampInt(p.ipVersion, 4, 6, NB_BASE.ipVersion) === 6 ? 6 : 4;
+    var vlan = p.vlan == null ? NB_BASE.vlan : !!p.vlan;
+    var mtu = clampInt(p.mtu, 576, 9000, NB_BASE.mtu);
+
+    var ipHdr = ipVersion === 6 ? IP6_HDR : IP4_HDR;
+    var l4Hdr = l4 === "tcp" ? (TCP_BASE + (tcpOptions ? TCP_OPTS : 0)) : UDP_HDR;
+    var ethHdr = ETH_HDR + (vlan ? VLAN_TAG : 0);
+    var minFrame = MIN_FRAME + (vlan ? VLAN_TAG : 0);
+
+    var i, chunk, frameBytes, padBytes, segs, pieces, mss, fragUnit, chunks = [];
+
+    if (l4 === "tcp") {
+      /* TCP：由傳輸層自己切段，每一段都帶完整的 TCP header */
+      mss = mtu - ipHdr - l4Hdr;
+      if (mss < 1) mss = 1;
+      fragUnit = 0;
+      pieces = Math.max(1, Math.ceil(payload / mss));
+      for (i = 0; i < pieces; i += 1) {
+        chunks.push(i === pieces - 1 ? payload - mss * (pieces - 1) : mss);
+      }
+    } else {
+      /* UDP：整個 datagram 交給 IP，由 IP 切片；偏移必須是 8 bytes 的倍數 */
+      mss = 0;
+      fragUnit = Math.floor((mtu - ipHdr) / FRAG_ALIGN) * FRAG_ALIGN;
+      if (fragUnit < FRAG_ALIGN) fragUnit = FRAG_ALIGN;
+      var pdu = payload + l4Hdr;
+      pieces = Math.max(1, Math.ceil(pdu / fragUnit));
+      for (i = 0; i < pieces; i += 1) {
+        chunks.push(i === pieces - 1 ? pdu - fragUnit * (pieces - 1) : fragUnit);
+      }
     }
 
-    function reset(){ idx = 0; render(); }
+    /* 逐片組出線路上的段落與 byte 數 */
+    var frames = [], wireBytes = 0, padTotal = 0, headerTotal = 0;
+    for (i = 0; i < pieces; i += 1) {
+      segs = [];
+      segs.push({ k: "ov", b: PREAMBLE_IFG });
+      segs.push({ k: "eth", b: ETH_HDR });
+      if (vlan) segs.push({ k: "vln", b: VLAN_TAG });
+      segs.push({ k: "ip", b: ipHdr });
+      if (l4 === "tcp") {
+        segs.push({ k: "l4", b: l4Hdr });
+        chunk = chunks[i];
+      } else if (i === 0) {
+        segs.push({ k: "l4", b: l4Hdr });
+        chunk = chunks[0] - l4Hdr;   /* 第一片的 IP payload 裡含 UDP header */
+      } else {
+        chunk = chunks[i];
+      }
+      segs.push({ k: "pay", b: chunk });
 
-    nextBtn.addEventListener("click", function(){ if(idx < steps().length-1){ idx++; render(); } });
-    prevBtn.addEventListener("click", function(){ if(idx > 0){ idx--; render(); } });
-    resetBtn.addEventListener("click", reset);
-    segBtns.forEach(function(b){
-      b.addEventListener("click", function(){
-        segBtns.forEach(function(x){ x.setAttribute("aria-pressed","false"); });
-        b.setAttribute("aria-pressed","true");
-        mode = b.dataset.mode;
-        reset();
-      });
+      frameBytes = ethHdr + ipHdr + (l4 === "tcp" || i === 0 ? l4Hdr : 0) + chunk + ETH_FCS;
+      padBytes = Math.max(0, minFrame - frameBytes);
+      if (padBytes > 0) segs.push({ k: "pad", b: padBytes });
+      segs.push({ k: "fcs", b: ETH_FCS });
+
+      var total = PREAMBLE_IFG + frameBytes + padBytes;
+      var j, sum = 0;
+      for (j = 0; j < segs.length; j += 1) { sum += segs[j].b; }
+      for (j = 0; j < segs.length; j += 1) { segs[j].share = segs[j].b / sum; }
+
+      frames.push({ idx: i + 1, segs: segs, payloadBytes: chunk, frameBytes: frameBytes, padBytes: padBytes, wireBytes: total });
+      wireBytes += total;
+      padTotal += padBytes;
+      headerTotal += total - chunk;
+    }
+
+    var overheadBytes = wireBytes - payload;
+    var overheadPct = Math.round((overheadBytes / wireBytes) * 10000) / 100;
+    var goodputPct = Math.round((100 - overheadPct) * 100) / 100;
+    var costRatio = Math.round((wireBytes / payload) * 100) / 100;
+
+    return {
+      params: { payloadBytes: payload, l4: l4, tcpOptions: tcpOptions, ipVersion: ipVersion, vlan: vlan, mtu: mtu },
+      ethHdr: ethHdr, ipHdr: ipHdr, l4Hdr: l4Hdr, fcs: ETH_FCS, minFrame: minFrame,
+      mss: mss, fragUnit: fragUnit, pieces: pieces,
+      firstPieceBytes: chunks.length ? (l4 === "udp" ? chunks[0] - l4Hdr : chunks[0]) : 0,
+      lastPieceBytes: frames[frames.length - 1].payloadBytes,
+      frames: frames,
+      wireBytes: wireBytes, headerBytes: headerTotal, padBytes: padTotal,
+      overheadBytes: overheadBytes, overheadPct: overheadPct,
+      goodputPct: goodputPct, costRatio: costRatio,
+      splitNeeded: pieces > 1
+    };
+  }
+
+  // @probe fn       computeDiagnosis
+  // @probe baseline {"dns":"ok","gw":"ok","ping":"ok","tcp":"timeout","listen":"unknown","tls":"na","big":"unknown","sub":"no"}
+  // @probe sweep    {"dns":["ok","fail"],"gw":["ok","fail"],"ping":["ok","fail"],"tcp":["ok","refused"],"listen":["yes","no"],"tls":["ok","namemismatch"],"big":["ok","stalls"],"sub":["yes","no"]}
+  function computeDiagnosis(p) {
+    p = p || {};
+    var obs = {
+      dns: oneOf(p.dns, ["unknown", "ok", "fail"], ND_BASE.dns),
+      gw: oneOf(p.gw, ["unknown", "ok", "fail"], ND_BASE.gw),
+      ping: oneOf(p.ping, ["unknown", "ok", "fail"], ND_BASE.ping),
+      tcp: oneOf(p.tcp, ["unknown", "ok", "refused", "timeout"], ND_BASE.tcp),
+      listen: oneOf(p.listen, ["unknown", "yes", "no"], ND_BASE.listen),
+      tls: oneOf(p.tls, ["na", "ok", "namemismatch", "handshakefail"], ND_BASE.tls),
+      big: oneOf(p.big, ["unknown", "ok", "stalls"], ND_BASE.big),
+      sub: oneOf(p.sub, ["unknown", "yes", "no"], ND_BASE.sub)
+    };
+
+    var i, j, k;
+
+    /* 分數：先驗 + 每條被觸發的規則的加減，夾在 0 以上再正規化 */
+    function scoreOf(o) {
+      var raw = {}, out = [], sum = 0, q, r, key;
+      for (q = 0; q < LAYERS.length; q += 1) { raw[LAYERS[q].id] = BASE_SCORE; }
+      for (q = 0; q < RULES.length; q += 1) {
+        r = RULES[q];
+        if (!r.hit(o)) continue;
+        for (key in r.w) {
+          if (Object.prototype.hasOwnProperty.call(r.w, key)) { raw[key] += r.w[key]; }
+        }
+      }
+      for (q = 0; q < LAYERS.length; q += 1) {
+        var v = raw[LAYERS[q].id];
+        if (v < 0) v = 0;
+        out.push(v);
+        sum += v;
+      }
+      return { raw: out, sum: sum };
+    }
+    function pctOf(sc) {
+      var out = [], q;
+      for (q = 0; q < sc.raw.length; q += 1) {
+        out.push(sc.sum > 0 ? (sc.raw[q] / sc.sum) * 100 : 100 / LAYERS.length);
+      }
+      return out;
+    }
+    function entropyOf(pcts) {
+      var h = 0, q, pr;
+      for (q = 0; q < pcts.length; q += 1) {
+        pr = pcts[q] / 100;
+        if (pr > 0) h -= pr * log2(pr);
+      }
+      return h;
+    }
+
+    var sc = scoreOf(obs);
+    var pct = pctOf(sc);
+    var entropy = entropyOf(pct);
+
+    /* 排名與信心邊際 */
+    var order = [];
+    for (i = 0; i < LAYERS.length; i += 1) { order.push(i); }
+    order.sort(function (a, b) {
+      var d = pct[b] - pct[a];
+      return d !== 0 ? d : a - b;
     });
+    var topIdx = order[0];
+    var margin = Math.round((pct[order[0]] - pct[order[1]]) * 10) / 10;
 
-    reset();
-  })();
-
-  /* ===== 05 端到端旅程 ===== */
-  (function(){
-    var root = document.getElementById("demo-journey");
-    if(!root) return;
-
-    var statusEl = document.getElementById("jn-status");
-    var nextBtn  = document.getElementById("jn-next");
-    var resetBtn = document.getElementById("jn-reset");
-
-    var nodeEls = {};
-    root.querySelectorAll(".nl-node").forEach(function(el){ nodeEls[el.dataset.node] = el; });
-    var hopEls = {};
-    root.querySelectorAll(".nl-hop").forEach(function(el){ hopEls[el.dataset.hop] = el; });
-
-    var CLS = { app:"on-app", tp:"on-tp", net:"on-net", link:"on-link" };
-    var ALL = ["app","tp","net","link"];
-
-    // 每步：hot 節點、done 節點集合、各節點點亮的層、活躍的 hop、說明
-    var STEPS = [
-      { hot:null, done:[], on:{}, hop:null,
-        text:"按「下一步」，跟著一個 HTTP 請求從你的電腦出發，看它一路上被哪些設備拆到第幾層。" },
-      { hot:"client", done:[], on:{ client:["app","tp","net","link"] }, hop:null,
-        text:"<b>送端·你的電腦</b>：資料從應用層一路往下<b>封裝</b>到鏈路層——貼 TCP → IP → Ethernet header，成為一個完整的 Frame。" },
-      { hot:"client", done:["client"], on:{ client:["link"] }, hop:"c-r",
-        text:"Frame 沿實體鏈路離開網卡，送往<b>預設閘道</b>（家用／機房路由器）。" },
-      { hot:"router", done:["client"], on:{ router:["link","net"] }, hop:null,
-        text:"<b>路由器</b>：只把 Frame 往上拆到<b>網路層（第 3 層）</b>，讀取<b>目的 IP</b>、查路由表決定下一跳。它<b>不拆也不在乎</b>你的 TCP／HTTP 內容。" },
-      { hot:"router", done:["client","router"], on:{ router:["link"] }, hop:"r-s",
-        text:"路由器換上<b>新的 frame header</b>（新的來源/目的 MAC），把同一個 IP Packet <b>重新封裝</b>成新 Frame，送往下一段鏈路。IP 不變，MAC 每一跳都換。" },
-      { hot:"server", done:["client","router"], on:{ server:["link","net","tp","app"] }, hop:null,
-        text:"<b>收端·伺服器</b>：Frame 一路往上<b>解封裝</b>到應用層，web server 程式終於拿到完整 HTTP 請求。與送端封裝<b>逐層對稱</b>——旅程完成。" }
-    ];
-
-    var idx = 0;
-
-    function clearCells(){
-      root.querySelectorAll(".nl-cell").forEach(function(c){
-        c.classList.remove("on-app","on-tp","on-net","on-link");
+    var bands = [], excluded = [];
+    for (i = 0; i < LAYERS.length; i += 1) {
+      var out = sc.raw[i] === 0;
+      if (out) excluded.push(LAYERS[i].name);
+      bands.push({
+        id: LAYERS[i].id, name: LAYERS[i].name, desc: LAYERS[i].desc,
+        face: LAYERS[i].face, sub: LAYERS[i].sub,
+        score: sc.raw[i], pct: Math.round(pct[i] * 10) / 10,
+        excluded: out, top: i === topIdx && !out
       });
     }
-    function render(){
-      var s = STEPS[idx];
-      clearCells();
-      Object.keys(nodeEls).forEach(function(k){
-        nodeEls[k].classList.toggle("hot", s.hot === k);
-        nodeEls[k].classList.toggle("done", s.done.indexOf(k) !== -1);
+
+    /* 已觸發的規則＝證據列 */
+    var evidence = [];
+    for (i = 0; i < RULES.length; i += 1) {
+      if (!RULES[i].hit(obs)) continue;
+      var parts = [], key2;
+      for (key2 in RULES[i].w) {
+        if (Object.prototype.hasOwnProperty.call(RULES[i].w, key2)) {
+          parts.push({ layer: key2, w: RULES[i].w[key2] });
+        }
+      }
+      evidence.push({ id: RULES[i].id, text: RULES[i].text, hits: parts });
+    }
+
+    /* 資訊增益：把每個「還沒量、而且現在量得成」的檢查項的每一種結果都代進去重算一次 */
+    var candidates = [], best = null, trials = 0;
+    for (i = 0; i < CHECKS.length; i += 1) {
+      var c = CHECKS[i];
+      if (obs[c.key] !== c.unob) continue;
+      if (!c.need(obs)) continue;
+      var sumH = 0;
+      for (j = 0; j < c.values.length; j += 1) {
+        var probe = {};
+        for (k in obs) { if (Object.prototype.hasOwnProperty.call(obs, k)) probe[k] = obs[k]; }
+        probe[c.key] = c.values[j];
+        sumH += entropyOf(pctOf(scoreOf(probe)));
+        trials += 1;
+      }
+      var avgH = sumH / c.values.length;
+      var cand = {
+        key: c.key, q: c.q, cmd: c.cmd, outcomes: c.values.length,
+        avgEntropy: Math.round(avgH * 1000) / 1000,
+        gainBits: Math.round((entropy - avgH) * 1000) / 1000
+      };
+      candidates.push(cand);
+      if (!best || cand.gainBits > best.gainBits) best = cand;
+    }
+
+    /* 只有「量了真的會壓低不確定度」的檢查才值得建議 */
+    var settled = entropy <= DONE_BITS;
+    var nextWorth = !!best && !settled && best.gainBits > 0;
+    var stepsLeft = nextWorth ? Math.max(1, Math.ceil(entropy / log2(best.outcomes))) : 0;
+
+    var blockedCount = 0;
+    for (i = 0; i < CHECKS.length; i += 1) {
+      if (obs[CHECKS[i].key] === CHECKS[i].unob && !CHECKS[i].need(obs)) blockedCount += 1;
+    }
+
+    var conflicts = [];
+    for (i = 0; i < CONFLICTS.length; i += 1) {
+      if (CONFLICTS[i].hit(obs)) conflicts.push(CONFLICTS[i].text);
+    }
+
+    var observedCount = 0;
+    for (i = 0; i < CHECKS.length; i += 1) {
+      if (obs[CHECKS[i].key] !== CHECKS[i].unob) observedCount += 1;
+    }
+
+    return {
+      obs: obs,
+      bands: bands,
+      topLayer: bands[topIdx].name,
+      topPct: bands[topIdx].pct,
+      margin: margin,
+      excluded: excluded,
+      excludedCount: excluded.length,
+      entropyBits: Math.round(entropy * 1000) / 1000,
+      candidates: candidates,
+      nextCheck: best,
+      nextWorth: nextWorth,
+      recomputes: trials,
+      stepsLeft: stepsLeft,
+      blockedCount: blockedCount,
+      observedCount: observedCount,
+      conflicts: conflicts,
+      conflicted: conflicts.length > 0,
+      evidence: evidence,
+      settled: settled
+    };
+  }
+
+  /* ================= (3) DOM 參照 ================= */
+
+  var nb = document.getElementById("demo-nb");
+  var nd = document.getElementById("demo-nd");
+
+  var nbEls = nb ? {
+    pay: document.getElementById("nb-pay"),
+    mtu: document.getElementById("nb-mtu"),
+    ip: document.getElementById("nb-ip"),
+    opt: document.getElementById("nb-opt"),
+    vlan: document.getElementById("nb-vlan"),
+    reset: document.getElementById("nb-reset"),
+    vPay: document.getElementById("nb-v-pay"),
+    vMtu: document.getElementById("nb-v-mtu"),
+    vIp: document.getElementById("nb-v-ip"),
+    bars: document.getElementById("nb-bars"),
+    key: document.getElementById("nb-key"),
+    tiles: document.getElementById("nb-tiles"),
+    status: document.getElementById("nb-status"),
+    seg: nb.querySelectorAll(".seg button")
+  } : null;
+
+  var ndEls = nd ? {
+    dns: document.getElementById("nd-dns"),
+    gw: document.getElementById("nd-gw"),
+    ping: document.getElementById("nd-ping"),
+    tcp: document.getElementById("nd-tcp"),
+    listen: document.getElementById("nd-listen"),
+    tls: document.getElementById("nd-tls"),
+    big: document.getElementById("nd-big"),
+    sub: document.getElementById("nd-sub"),
+    stack: document.getElementById("nd-stack"),
+    next: document.getElementById("nd-next"),
+    conflict: document.getElementById("nd-conflict"),
+    status: document.getElementById("nd-status"),
+    ev: document.getElementById("nd-ev"),
+    clear: document.getElementById("nd-clear"),
+    reset: document.getElementById("nd-reset")
+  } : null;
+
+  var nbState = {
+    payloadBytes: NB_BASE.payloadBytes, l4: NB_BASE.l4, tcpOptions: NB_BASE.tcpOptions,
+    ipVersion: NB_BASE.ipVersion, vlan: NB_BASE.vlan, mtu: NB_BASE.mtu
+  };
+  var ndKeys = ["dns", "gw", "ping", "tcp", "listen", "tls", "big", "sub"];
+
+  /* ================= (4) render(state)：只讀結果畫出來 ================= */
+
+  /* 指令字串裡有 <網域>、<目的 IP> 這類角括號佔位符，進 innerHTML 前必須跳脫 */
+  function esc(t) {
+    return String(t).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  }
+
+  function barHtml(frame) {
+    var s = [], i, g;
+    for (i = 0; i < frame.segs.length; i += 1) {
+      g = frame.segs[i];
+      s.push('<div class="nb-seg ' + g.k + '" style="flex:' + g.b + ' 0 0;" title="' +
+        SEG_NAME[g.k] + " " + g.b + ' B">' +
+        (g.share >= LABEL_MIN_SHARE ? (SEG_NAME[g.k] + " " + g.b) : "") + "</div>");
+    }
+    return '<div class="nb-barrow"><span class="rl">第 ' + frame.idx + " 片<br>" +
+      frame.wireBytes + " B</span><div class=\"nb-bar\">" + s.join("") + "</div></div>";
+  }
+
+  function keyHtml(res) {
+    var seen = {}, out = [], i, j, g, f;
+    for (i = 0; i < res.frames.length; i += 1) {
+      f = res.frames[i];
+      for (j = 0; j < f.segs.length; j += 1) {
+        g = f.segs[j];
+        if (seen[g.k]) continue;
+        seen[g.k] = true;
+        out.push('<span><i style="background:' + SEG_COLOR[g.k] + '"></i>' + SEG_NAME[g.k] +
+          " " + (g.k === "pay" ? "（每片不等長）" : g.b + " B") + "</span>");
+      }
+    }
+    return out.join("");
+  }
+
+  function tile(label, value, warn) {
+    return '<div class="nb-tile' + (warn ? " warn" : "") + '"><div class="tl">' + label +
+      '</div><div class="tv">' + value + "</div></div>";
+  }
+
+  function renderFraming(res) {
+    nbEls.vPay.textContent = res.params.payloadBytes + " B";
+    nbEls.vMtu.textContent = res.params.mtu + " B";
+    nbEls.vIp.textContent = "IPv" + res.params.ipVersion + " · " + res.ipHdr + " B";
+
+    var i;
+    for (i = 0; i < nbEls.seg.length; i += 1) {
+      nbEls.seg[i].setAttribute("aria-pressed",
+        nbEls.seg[i].getAttribute("data-l4") === res.params.l4 ? "true" : "false");
+    }
+
+    var rows = [];
+    if (res.frames.length <= BARS_SHOWN) {
+      for (i = 0; i < res.frames.length; i += 1) rows.push(barHtml(res.frames[i]));
+    } else {
+      rows.push(barHtml(res.frames[0]));
+      rows.push(barHtml(res.frames[1]));
+      rows.push('<div class="nb-ell">⋯ 中間還有 ' + (res.frames.length - 3) + ' 片，每片都長得跟第 2 片一樣 ⋯</div>');
+      rows.push(barHtml(res.frames[res.frames.length - 1]));
+    }
+    nbEls.bars.innerHTML = rows.join("");
+    nbEls.key.innerHTML = keyHtml(res);
+
+    var tiles = [];
+    if (res.params.l4 === "tcp") {
+      tiles.push(tile("MSS＝MTU−IP−TCP", res.mss + " B", false));
+    } else {
+      tiles.push(tile("分片單位（8 B 對齊）", res.fragUnit + " B", false));
+    }
+    tiles.push(tile(res.params.l4 === "tcp" ? "要切成幾段" : "要切成幾片",
+      res.pieces + (res.params.l4 === "tcp" ? " 段" : " 片"), res.splitNeeded));
+    tiles.push(tile("最後一片的 payload", res.lastPieceBytes + " B", false));
+    tiles.push(tile("線路上總共", res.wireBytes + " B", false));
+    tiles.push(tile("Overhead", res.overheadPct + " %", res.overheadPct >= 50));
+    nbEls.tiles.innerHTML = tiles.join("");
+
+    nbEls.status.textContent =
+      (res.params.l4 === "tcp"
+        ? "TCP 自己切段：MSS = " + res.params.mtu + " − " + res.ipHdr + " − " + res.l4Hdr + " = " + res.mss + " B"
+        : "IP 負責分片：分片單位 = floor((" + res.params.mtu + " − " + res.ipHdr + ") / 8) × 8 = " + res.fragUnit + " B") +
+      "　│　" + res.params.payloadBytes + " B 的 payload 佔線路 " + res.wireBytes + " B，" +
+      "其中 header 與框架佔 " + res.headerBytes + " B" +
+      (res.padBytes > 0 ? "（含最小訊框 padding " + res.padBytes + " B）" : "") +
+      "　│　每送出 1 byte 資料要付 " + res.costRatio + " byte 線路，有效載荷率 " + res.goodputPct + " %。";
+  }
+
+  function renderDiagnosis(res) {
+    var i, j, b, s = [];
+
+    for (i = 0; i < res.bands.length; i += 1) {
+      b = res.bands[i];
+      s.push('<div class="nd-band ' + b.face + (b.sub ? " sub" : "") +
+        (b.top ? " top" : "") + (b.excluded ? " out" : "") + '">' +
+        '<div><div class="bn">' + esc(b.name) +
+        (b.excluded ? '<span class="bx">已排除</span>' : (b.top ? '<span class="bx">最可能</span>' : "")) +
+        '</div><div class="bd">' + esc(b.desc) + "</div></div>" +
+        '<div class="bm"><i style="width:' + b.pct + '%"></i></div>' +
+        '<div class="bp">' + b.pct + "%</div></div>");
+    }
+    ndEls.stack.innerHTML = s.join("");
+
+    if (res.conflicted) {
+      var cs = [];
+      for (i = 0; i < res.conflicts.length; i += 1) {
+        cs.push('<div class="nd-conflict">觀察組合互相矛盾：' + esc(res.conflicts[i]) + "</div>");
+      }
+      ndEls.conflict.innerHTML = cs.join("");
+    } else {
+      ndEls.conflict.innerHTML = "";
+    }
+
+    if (res.nextWorth) {
+      ndEls.next.className = "nd-next";
+      ndEls.next.innerHTML =
+        '<div class="nt">下一個最該量什麼（由資訊增益算出，本次共試算 ' + res.recomputes + ' 種結果）</div>' +
+        '<div class="nq">' + esc(res.nextCheck.q) + "</div>" +
+        '<code class="nc">' + esc(res.nextCheck.cmd) + "</code>" +
+        '<div class="nm">目前不確定度 ' + res.entropyBits + " bit；把這一項的 " + res.nextCheck.outcomes +
+        " 種結果都代進去重算，平均剩下 " + res.nextCheck.avgEntropy + " bit，預期壓掉 " +
+        res.nextCheck.gainBits + " bit。這是目前 " + res.candidates.length + " 個可行候選中增益最大的" +
+        (res.blockedCount > 0 ? "（另有 " + res.blockedCount + " 項因為前置條件還不成立而量不了）" : "") + "。</div>";
+    } else {
+      ndEls.next.className = "nd-next done";
+      ndEls.next.innerHTML =
+        '<div class="nt">下一個最該量什麼</div>' +
+        '<div class="nq">' + (res.settled
+          ? "不必再量了，已經定位到單一層"
+          : (res.nextCheck
+              ? "剩下的檢查項量了也不會更清楚（最佳增益 " + res.nextCheck.gainBits + " bit ≤ 0）"
+              : "現在量得成的檢查項都量完了")) + "</div>" +
+        '<div class="nm">目前不確定度 ' + res.entropyBits + " bit" +
+        (res.blockedCount > 0 ? "；還有 " + res.blockedCount + " 項因為前置條件不成立而量不了" : "") + "。</div>";
+    }
+
+    var ev = ['<div class="eh">已觸發的判定依據（' + res.evidence.length + " 條)</div>"];
+    for (i = 0; i < res.evidence.length; i += 1) {
+      var parts = [];
+      for (j = 0; j < res.evidence[i].hits.length; j += 1) {
+        var h = res.evidence[i].hits[j];
+        parts.push('<span class="ew ' + (h.w > 0 ? "up" : "dn") + '">' +
+          (h.w > 0 ? "+" : "") + h.w + "</span>");
+      }
+      ev.push('<div class="er"><span class="ew">' + parts.join(" ") + '</span><span>' +
+        esc(res.evidence[i].text) + "</span></div>");
+    }
+    ndEls.ev.innerHTML = ev.join("");
+
+    ndEls.status.textContent =
+      "已填 " + res.observedCount + " / " + ndKeys.length + " 項　│　最可能：" +
+      res.topLayer + "（" + res.topPct + "%，領先第二名 " + res.margin + " 個百分點）　│　已排除 " +
+      res.excludedCount + " 層" + (res.excludedCount > 0 ? "：" + res.excluded.join("、") : "") +
+      "　│　不確定度 " + res.entropyBits + " bit，預估還要 " + res.stepsLeft + " 步" +
+      (res.conflicted ? "　│　⚠ 觀察組合有 " + res.conflicts.length + " 處矛盾，分數仍照算但結論不可信。" : "。");
+  }
+
+  /* ================= (5) 事件綁定 ================= */
+
+  if (nb) {
+    (function () {
+      function refresh() { renderFraming(computeFraming(nbState)); }
+      var i;
+
+      nbEls.pay.addEventListener("input", function () {
+        nbState.payloadBytes = Number(nbEls.pay.value); refresh();
       });
-      Object.keys(hopEls).forEach(function(k){
-        hopEls[k].classList.toggle("live", s.hop === k);
+      nbEls.mtu.addEventListener("change", function () {
+        nbState.mtu = Number(nbEls.mtu.value); refresh();
       });
-      Object.keys(s.on).forEach(function(node){
-        var nd = nodeEls[node]; if(!nd) return;
-        s.on[node].forEach(function(l){
-          var cell = nd.querySelector('.nl-cell[data-l="'+l+'"]');
-          if(cell) cell.classList.add(CLS[l]);
+      nbEls.ip.addEventListener("change", function () {
+        nbState.ipVersion = Number(nbEls.ip.value); refresh();
+      });
+      nbEls.opt.addEventListener("change", function () {
+        nbState.tcpOptions = !!nbEls.opt.checked; refresh();
+      });
+      nbEls.vlan.addEventListener("change", function () {
+        nbState.vlan = !!nbEls.vlan.checked; refresh();
+      });
+      for (i = 0; i < nbEls.seg.length; i += 1) {
+        nbEls.seg[i].addEventListener("click", function () {
+          nbState.l4 = this.getAttribute("data-l4"); refresh();
         });
+      }
+      nbEls.reset.addEventListener("click", function () {
+        nbState.payloadBytes = NB_BASE.payloadBytes;
+        nbState.l4 = NB_BASE.l4;
+        nbState.tcpOptions = NB_BASE.tcpOptions;
+        nbState.ipVersion = NB_BASE.ipVersion;
+        nbState.vlan = NB_BASE.vlan;
+        nbState.mtu = NB_BASE.mtu;
+        nbEls.pay.value = NB_BASE.payloadBytes;
+        nbEls.mtu.value = String(NB_BASE.mtu);
+        nbEls.ip.value = String(NB_BASE.ipVersion);
+        nbEls.opt.checked = NB_BASE.tcpOptions;
+        nbEls.vlan.checked = NB_BASE.vlan;
+        refresh();
       });
-      statusEl.innerHTML = s.text;
-      nextBtn.disabled = idx >= STEPS.length - 1;
-    }
-    function reset(){ idx = 0; render(); }
 
-    nextBtn.addEventListener("click", function(){ if(idx < STEPS.length-1){ idx++; render(); } });
-    resetBtn.addEventListener("click", reset);
+      refresh();
+    })();
+  }
 
-    reset();
-  })();
+  if (nd) {
+    (function () {
+      function readObs() {
+        var o = {}, i;
+        for (i = 0; i < ndKeys.length; i += 1) { o[ndKeys[i]] = ndEls[ndKeys[i]].value; }
+        return o;
+      }
+      function refresh() { renderDiagnosis(computeDiagnosis(readObs())); }
+      function applyPreset(preset) {
+        var i;
+        for (i = 0; i < ndKeys.length; i += 1) { ndEls[ndKeys[i]].value = preset[ndKeys[i]]; }
+        refresh();
+      }
+      var i;
+      for (i = 0; i < ndKeys.length; i += 1) {
+        ndEls[ndKeys[i]].addEventListener("change", refresh);
+      }
+      ndEls.clear.addEventListener("click", function () { applyPreset(ND_CLEAR); });
+      ndEls.reset.addEventListener("click", function () { applyPreset(ND_BASE); });
 
-});
+      refresh();
+    })();
+  }
+})();
 </script>
 
 
