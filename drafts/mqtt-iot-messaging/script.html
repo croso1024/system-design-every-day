@@ -2,283 +2,598 @@
 (function () {
   "use strict";
 
-  var scenario = "topic", pubQos = 1, lossy = false, stepIdx = 0, curTopic = null;
+  /* ================= (1) 常數與參數表 ================= */
 
-  function $(id) { return document.getElementById(id); }
-  var statusEl = $("mqtt-status"), wireEl = $("mqtt-wire"), pubsEl = $("mqtt-pubs"),
-      subsEl = $("mqtt-subs"), metaEl = $("mqtt-meta"), storeEl = $("mqtt-store"),
-      bnoteEl = $("mqtt-broker-note"), btnNext = $("mqtt-btn-next"), btnReset = $("mqtt-btn-reset");
+  /* --- Demo A：控制封包逐 byte 拆解 --- */
+  var PKT_TYPE = { PUBLISH: 3, CONNECT: 1, SUBSCRIBE: 8 };
+  var ACK_BYTES = { PUBACK: 4, PUBREC: 4, PUBREL: 4, PUBCOMP: 4, CONNACK: 4, SUBACK: 5 };
+  var PING_BYTES = 4;              /* PINGREQ 2 bytes ＋ PINGRESP 2 bytes */
+  var VBI_MAX = [127, 16383, 2097151, 268435455];
+  var PROTO_NAME = "MQTT";         /* 3.1.1 的協定名 */
+  var PROTO_LEVEL = 4;             /* 3.1.1 */
+  var WILL_PAYLOAD = "offline";
+  var WILL_SUFFIX = "/status";
+  var ALIAS_BYTES = 3;             /* 5.0 Topic Alias 屬性：識別碼 1 + 2 bytes 整數 */
+  var SHOW_PAYLOAD_HEAD = 8, SHOW_PAYLOAD_TAIL = 2;
+  var DAY_SEC = 86400;
+  /* payload slider 的刻度：刻意踩過 127 / 16383 / 2097151 這三個變長編碼進位點 */
+  var PAYLOAD_STEPS = [0, 1, 4, 16, 64, 71, 72, 120, 128, 200, 512, 2048, 16000, 16325, 16326, 16384, 65536, 300000, 2097100, 2097200];
+  var PKT_DEFAULTS = {
+    packetType: "PUBLISH",
+    str: "factory/taipei/line-3/robot-07/telemetry/temperature",
+    payloadBytes: 4, qos: 1, grantedQos: 1, dup: false, retain: false,
+    packetId: 42, keepAliveSec: 60, intervalSec: 60
+  };
 
-  var T_TEMP = "factory/taipei/line-3/robot-07/telemetry/temperature";
-  var T_STAT = "factory/taipei/line-3/robot-07/status";
-
-  var SUBS = [
-    { n: "溫控後台", f: "factory/taipei/+/+/telemetry/temperature" },
-    { n: "三線看板", f: "factory/taipei/line-3/#" },
-    { n: "單機除錯", f: T_TEMP },
-    { n: "Presence 看板", f: "factory/+/+/+/status" },
-    { n: "稽核全訂", f: "#" }
+  /* --- Demo B：訂閱樹逐層比對 --- */
+  var CORPUS = [
+    "factory/taipei/line-3/robot-07/telemetry/temperature",
+    "factory/taipei/line-3/robot-07/status",
+    "factory/taipei/line-5/robot-02/telemetry/temperature",
+    "factory/tainan/line-1/robot-01/status",
+    "sport",
+    "$SYS/broker/uptime"
   ];
-  var TOPICS = [
-    { t: T_TEMP, h: "Presence 看板沒亮：第 5 層就對不上了（status vs telemetry），何況層數也不合——<b>+ 恰好吃一層，層數不合就整條不匹配</b>。" },
-    { t: T_STAT, h: "溫控後台與單機除錯都沒亮：它們的尾巴是 telemetry/temperature。同一台機台、不同語義子樹自然分流——這就是 topic 層級順序的價值。" },
-    { t: "factory/taipei/line-5/robot-02/telemetry/temperature", h: "三線看板沒亮（這是 line-5），但溫控後台亮了——<b>+ 讓一條 filter 一次覆蓋全廠所有機台</b>。" },
-    { t: "factory/tainan/line-1/robot-01/status", h: "只剩 Presence 看板與稽核全訂。# 什麼都收，唯一收不到的是 $SYS/ 開頭的 Broker 內部指標。" }
-  ];
+  var FILTER_DEFAULTS = {
+    filter: "factory/taipei/+/+/telemetry/temperature",
+    probe: "factory/taipei/line-3/robot-07/status"
+  };
 
-  /* MQTT topic filter 比對：+ 恰好一層、# 吃掉剩下全部且只能在最後 */
-  function match(filter, topic) {
-    if (topic.charAt(0) === "$" && (filter.charAt(0) === "+" || filter.charAt(0) === "#")) return false;
-    var f = filter.split("/"), t = topic.split("/"), i;
-    for (i = 0; i < f.length; i++) {
-      if (f[i] === "#") return true;
-      if (i >= t.length) return false;
-      if (f[i] !== "+" && f[i] !== t[i]) return false;
+  /* ================= (2) compute* 純函式 ================= */
+
+  /* UTF-8 逐 code point 編碼：長度前綴算的是 bytes，不是字元數 */
+  function utf8Bytes(s) {
+    var out = [], i, c, cp;
+    for (i = 0; i < s.length; i++) {
+      c = s.charCodeAt(i);
+      if (c >= 0xD800 && c <= 0xDBFF && i + 1 < s.length) {
+        cp = ((c - 0xD800) << 10) + (s.charCodeAt(i + 1) - 0xDC00) + 0x10000;
+        i++;
+      } else {
+        cp = c;
+      }
+      if (cp < 0x80) { out.push(cp); }
+      else if (cp < 0x800) { out.push(0xC0 | (cp >> 6), 0x80 | (cp & 63)); }
+      else if (cp < 0x10000) { out.push(0xE0 | (cp >> 12), 0x80 | ((cp >> 6) & 63), 0x80 | (cp & 63)); }
+      else { out.push(0xF0 | (cp >> 18), 0x80 | ((cp >> 12) & 63), 0x80 | ((cp >> 6) & 63), 0x80 | (cp & 63)); }
     }
-    return f.length === t.length;
+    return out;
   }
 
-  function R(c, a, t, x) { return { c: c, a: a, t: t, x: x }; }
-  function nodeHTML(n) {
-    return '<div class="mqtt-node ' + (n.c || "") + '"><div class="nn">' + n.n + "</div>" +
-      (n.f ? '<div class="nf">' + n.f + "</div>" : "") + (n.b ? '<div class="nb">' + n.b + "</div>" : "") + "</div>";
-  }
-  function kvHTML(rows) {
-    if (!rows.length) return '<div class="empty">本情境不涉及 Broker 保存狀態。</div>';
-    return rows.map(function (r) {
-      return '<div class="prow"><span class="pk">' + r[0] + '</span><span class="pv ' + (r[2] || "") + '">' + r[1] + "</span></div>";
-    }).join("");
-  }
-  function paint(v) {
-    statusEl.innerHTML = v.s;
-    pubsEl.innerHTML = v.pubs.map(nodeHTML).join("");
-    subsEl.innerHTML = v.subs.map(nodeHTML).join("");
-    bnoteEl.textContent = v.bn;
-    metaEl.innerHTML = kvHTML(v.meta);
-    storeEl.innerHTML = kvHTML(v.store);
-    wireEl.innerHTML = v.rows.length
-      ? v.rows.map(function (r) {
-          return '<div class="mqtt-row ' + (r.c || "") + '"><span class="ar">' + (r.a || "") +
-            '</span><span class="tg">' + r.t + '</span><span class="tx">' + r.x + "</span></div>";
-        }).join("")
-      : '<div class="mqtt-row note"><span class="ar"></span><span class="tg">IDLE</span><span class="tx">尚無封包。</span></div>';
-    wireEl.scrollTop = wireEl.scrollHeight;
+  /* 剩餘長度的變長編碼：每 byte 7 bit 數值 ＋ 最高位當接續位元 */
+  function encodeVBI(n) {
+    var out = [], x = n, b;
+    do {
+      b = x % 128;
+      x = Math.floor(x / 128);
+      if (x > 0) { b = b | 128; }
+      out.push(b);
+    } while (x > 0 && out.length < 4);
+    return out;
   }
 
-  /* ---------- 情境一：topic 與 wildcard 匹配 ---------- */
-  function viewTopic() {
-    var rows = [], subs = [], hits = 0, i, ok, cur = curTopic;
-    for (i = 0; i < SUBS.length; i++) {
-      ok = cur ? match(SUBS[i].f, cur.t) : null;
-      if (ok) hits++;
-      subs.push({ n: SUBS[i].n, f: SUBS[i].f, b: cur ? (ok ? "MATCH · 收到 1 份" : "不匹配") : "等待發佈", c: cur ? (ok ? "hit" : "miss") : "" });
-      if (cur) rows.push(R(ok ? "b2s" : "bad", ok ? "→" : "✕", ok ? "PUBLISH" : "SKIP", SUBS[i].f + "　→　" + SUBS[i].n + (ok ? "" : "（不匹配，不複製）")));
+  function hex(v) {
+    var h = v.toString(16).toUpperCase();
+    return "0x" + (h.length < 2 ? "0" + h : h);
+  }
+  function printable(v) {
+    return (v >= 32 && v < 127) ? String.fromCharCode(v) : "·";
+  }
+  function bitsOf(v) {
+    var out = [], i;
+    for (i = 7; i >= 0; i--) { out.push((v >> i) & 1); }
+    return out;
+  }
+
+  function cell(list, v, field, note) {
+    list.push({ v: v, hex: hex(v), chr: printable(v), field: field, note: note });
+  }
+  function pushString(list, bytes, lenNote, strNote) {
+    var i;
+    cell(list, (bytes.length >> 8) & 255, "len", lenNote);
+    cell(list, bytes.length & 255, "len", lenNote);
+    for (i = 0; i < bytes.length; i++) { cell(list, bytes[i], "str", strNote); }
+  }
+
+  // @probe fn       computePacket
+  // @probe baseline {"packetType":"PUBLISH","str":"factory/taipei/line-3/robot-07/telemetry/temperature","payloadBytes":4,"qos":1,"grantedQos":1,"dup":false,"retain":false,"packetId":42,"keepAliveSec":60,"intervalSec":60}
+  // @probe sweep    {"packetType":["PUBLISH","CONNECT"],"str":["a","感測器/溫度/機台-07/上報"],"payloadBytes":[0,2097200],"qos":[0,2],"grantedQos":[0,2],"dup":[false,true],"retain":[false,true],"packetId":[1,65535],"keepAliveSec":[10,600],"intervalSec":[5,3600]}
+  function computePacket(p) {
+    var strBytes = utf8Bytes(p.str);
+    var head = [], tail = [], varLen = 0, payLen = 0, flags = 0, i;
+    var willBytes = null, willPayBytes = null, clientNote, elided = 0;
+
+    if (p.packetType === "PUBLISH") {
+      flags = (p.dup ? 8 : 0) | (p.qos << 1) | (p.retain ? 1 : 0);
+      pushString(tail, strBytes, "topic 長度前綴 2 bytes", "topic 字串（每則都要重送）");
+      varLen = 2 + strBytes.length;
+      if (p.qos >= 1) {
+        cell(tail, (p.packetId >> 8) & 255, "pid", "Packet Id 高位 = id >> 8");
+        cell(tail, p.packetId & 255, "pid", "Packet Id 低位 = id & 255");
+        varLen += 2;
+      }
+      payLen = p.payloadBytes;
+    } else if (p.packetType === "CONNECT") {
+      flags = 0;
+      pushString(tail, utf8Bytes(PROTO_NAME), "協定名長度前綴", "協定名 MQTT");
+      cell(tail, PROTO_LEVEL, "misc", "協定版本 4 = MQTT 3.1.1");
+      /* 連線旗標：bit1 clean session、bit2 will、bit3-4 will QoS、bit5 will retain */
+      var cflags = 0x02 | (p.retain ? (0x04 | (p.qos << 3)) : 0);
+      cell(tail, cflags, "misc", "連線旗標（clean session＋遺囑設定）");
+      cell(tail, (p.keepAliveSec >> 8) & 255, "misc", "Keep Alive 高位");
+      cell(tail, p.keepAliveSec & 255, "misc", "Keep Alive 低位");
+      varLen = 10;
+      pushString(tail, strBytes, "client id 長度前綴", "client id");
+      payLen = 2 + strBytes.length;
+      if (p.retain) {
+        willBytes = utf8Bytes(p.str + WILL_SUFFIX);
+        willPayBytes = utf8Bytes(WILL_PAYLOAD);
+        pushString(tail, willBytes, "遺囑 topic 長度前綴", "遺囑 topic");
+        pushString(tail, willPayBytes, "遺囑 payload 長度前綴", "遺囑 payload");
+        payLen += 2 + willBytes.length + 2 + willPayBytes.length;
+      }
+    } else { /* SUBSCRIBE */
+      flags = 0x02; /* 保留位，規格固定 0b0010 */
+      cell(tail, (p.packetId >> 8) & 255, "pid", "Packet Id 高位");
+      cell(tail, p.packetId & 255, "pid", "Packet Id 低位");
+      varLen = 2;
+      pushString(tail, strBytes, "filter 長度前綴", "topic filter");
+      cell(tail, p.qos, "misc", "訂閱選項：要求的 QoS");
+      payLen = 2 + strBytes.length + 1;
     }
-    if (cur) rows.unshift(R("p2b", "→", "PUBLISH", "topic=" + cur.t + "　qos=0"));
+
+    var remaining = varLen + payLen;
+    var rl = encodeVBI(remaining);
+    var byte1 = (PKT_TYPE[p.packetType] << 4) | flags;
+    var totalBytes = 1 + rl.length + remaining;
+
+    /* 位元組格：固定表頭 → 剩餘長度 → 可變表頭與 payload */
+    cell(head, byte1, "fixed", "4 bit 型別 ＋ 4 bit 旗標");
+    for (i = 0; i < rl.length; i++) {
+      cell(head, rl[i], "rl", "剩餘長度第 " + (i + 1) + " byte");
+    }
+    var bytes = head.concat(tail);
+
+    /* PUBLISH 的應用 payload：協定不看內容，只佔位（過長則摺疊） */
+    if (p.packetType === "PUBLISH" && payLen > 0) {
+      if (payLen <= SHOW_PAYLOAD_HEAD + SHOW_PAYLOAD_TAIL + 1) {
+        for (i = 0; i < payLen; i++) { bytes.push({ v: -1, hex: "··", chr: "", field: "pay", note: "payload 第 " + (i + 1) + " byte" }); }
+      } else {
+        for (i = 0; i < SHOW_PAYLOAD_HEAD; i++) { bytes.push({ v: -1, hex: "··", chr: "", field: "pay", note: "payload" }); }
+        elided = payLen - SHOW_PAYLOAD_HEAD - SHOW_PAYLOAD_TAIL;
+        bytes.push({ v: -2, hex: "…", chr: "", field: "pay", note: "另外 " + elided + " bytes", ellipsis: true });
+        for (i = 0; i < SHOW_PAYLOAD_TAIL; i++) { bytes.push({ v: -1, hex: "··", chr: "", field: "pay", note: "payload" }); }
+      }
+    }
+
+    /* 位元展開：列數隨剩餘長度的 byte 數增減 */
+    var bitRows = [], b, bits, j;
+    bits = bitsOf(byte1);
+    bitRows.push({
+      label: "固定表頭 byte 1",
+      bits: bits.map(function (x, k) { return { b: x, cls: k < 4 ? (x ? "on" : "") : (x ? "cont" : "") }; }),
+      note: "前 4 bit 型別 = " + PKT_TYPE[p.packetType] + "（" + p.packetType + "）、後 4 bit 旗標 = " +
+        (p.packetType === "PUBLISH"
+          ? "DUP " + (p.dup ? 1 : 0) + " / QoS " + p.qos + " / RETAIN " + (p.retain ? 1 : 0)
+          : p.packetType === "SUBSCRIBE" ? "規格固定 0010" : "全 0")
+    });
+    for (i = 0; i < rl.length; i++) {
+      b = rl[i];
+      bits = bitsOf(b);
+      bitRows.push({
+        label: "剩餘長度 byte " + (i + 1),
+        bits: bits.map(function (x, k) { return { b: x, cls: k === 0 ? (x ? "cont" : "") : (x ? "on" : "") }; }),
+        note: "接續位元 = " + ((b & 128) ? "1（後面還有）" : "0（這是最後一個）") + "、本 byte 帶 " + (b & 127) + " × 128^" + i
+      });
+    }
+
+    /* 開銷與進位空間 */
+    var overheadBytes = totalBytes - (p.packetType === "PUBLISH" ? payLen : 0);
+    var overheadPct = totalBytes > 0 ? overheadBytes / totalBytes * 100 : 0;
+    var headroom = VBI_MAX[rl.length - 1] - remaining;
+
+    /* 第一段 hop：本封包 ＋ 它的 ack */
+    var hop1Packets = 1, hop1Bytes = totalBytes, hop1Seq = p.packetType;
+    if (p.packetType === "PUBLISH") {
+      if (p.qos === 1) { hop1Packets = 2; hop1Bytes += ACK_BYTES.PUBACK; hop1Seq = "PUBLISH → PUBACK"; }
+      else if (p.qos === 2) {
+        hop1Packets = 4;
+        hop1Bytes += ACK_BYTES.PUBREC + ACK_BYTES.PUBREL + ACK_BYTES.PUBCOMP;
+        hop1Seq = "PUBLISH → PUBREC → PUBREL → PUBCOMP";
+      }
+    } else if (p.packetType === "CONNECT") {
+      hop1Packets = 2; hop1Bytes += ACK_BYTES.CONNACK; hop1Seq = "CONNECT → CONNACK";
+    } else {
+      hop1Packets = 2; hop1Bytes += ACK_BYTES.SUBACK; hop1Seq = "SUBSCRIBE → SUBACK";
+    }
+
+    /* 第二段 hop：Broker → Subscriber，用 min(發佈 QoS, 授予 QoS) 重新組一次 PUBLISH */
+    var effectiveQos = Math.min(p.qos, p.grantedQos);
+    var hop2Var = 2 + strBytes.length + (effectiveQos >= 1 ? 2 : 0);
+    var hop2Remaining = hop2Var + (p.packetType === "PUBLISH" ? payLen : 0);
+    var hop2Total = 1 + encodeVBI(hop2Remaining).length + hop2Remaining;
+    var hop2Packets = 1, hop2Bytes = hop2Total, hop2Seq = "PUBLISH";
+    if (effectiveQos === 1) { hop2Packets = 2; hop2Bytes += ACK_BYTES.PUBACK; hop2Seq = "PUBLISH → PUBACK"; }
+    else if (effectiveQos === 2) {
+      hop2Packets = 4;
+      hop2Bytes += ACK_BYTES.PUBREC + ACK_BYTES.PUBREL + ACK_BYTES.PUBCOMP;
+      hop2Seq = "PUBLISH → PUBREC → PUBREL → PUBCOMP";
+    }
+
+    /* 每日帳單：只有這一筆交換在跑時，PINGREQ 才真的會被送出去 */
+    var perDay = Math.floor(DAY_SEC / p.intervalSec);
+    var pingsPerInterval = Math.max(0, Math.ceil(p.intervalSec / p.keepAliveSec) - 1);
+    var pingsPerDay = perDay * pingsPerInterval;
+    var dailyBytes = perDay * hop1Bytes + pingsPerDay * PING_BYTES;
+
+    /* Topic Alias：第一則照送，之後 topic 長度前綴歸零、改帶 3 bytes 的別名 */
+    var topicCost = p.packetType === "PUBLISH" ? 2 + strBytes.length : 0;
+    var aliasSavedPerDay = Math.max(0, (perDay - 1) * (topicCost - ALIAS_BYTES));
+    var aliasSavedPct = dailyBytes > 0 ? aliasSavedPerDay / dailyBytes * 100 : 0;
+
     return {
-      s: cur ? "PUBLISH <b>" + cur.t + "</b>：Broker 拿這個 topic name 去比對整棵訂閱樹，" + hits + " / " + SUBS.length + " 條 filter 匹配。" + cur.h
-             : "點上面任一個 topic 發佈一則訊息，看 Broker 的訂閱樹比對結果。注意這裡沒有「下一步」——匹配是一瞬間的事。",
-      pubs: [{ n: "robot-07", f: "publisher", b: cur ? "PUBLISH" : "待命", c: cur ? "act" : "" }],
-      subs: subs, bn: cur ? (hits ? "比對訂閱樹 → 複製 " + hits + " 份" : "無匹配 → 直接丟棄") : "待命",
-      meta: [["發佈的 topic", cur ? cur.t : "—"], ["匹配 / 總訂閱", (cur ? hits : 0) + " / " + SUBS.length],
-             ["Broker 動作", cur ? (hits ? "複製 " + hits + " 份轉發" : "丟棄（topic 不是佇列）") : "—", cur && !hits ? "bad" : ""]],
-      store: [], rows: rows
+      bytes: bytes, bitRows: bitRows, elided: elided,
+      byte1: byte1, rlCount: rl.length, remaining: remaining, headroom: headroom,
+      strByteLen: strBytes.length, strCharLen: p.str.length,
+      varLen: varLen, payLen: payLen, totalBytes: totalBytes,
+      overheadBytes: overheadBytes, overheadPct: overheadPct,
+      hop1: { packets: hop1Packets, bytes: hop1Bytes, seq: hop1Seq },
+      hop2: { packets: hop2Packets, bytes: hop2Bytes, seq: hop2Seq, qos: effectiveQos },
+      daily: { publishes: perDay, pings: pingsPerDay, pingsPerInterval: pingsPerInterval, bytes: dailyBytes },
+      alias: { saved: aliasSavedPerDay, pct: aliasSavedPct },
+      keepAliveLimit: p.keepAliveSec * 1.5
     };
   }
 
-  /* ---------- 情境二：QoS 0/1/2 投遞流 ---------- */
-  function qosSteps() {
-    var q = pubQos, eA = Math.min(q, 2), S = [], a = 0, b = 0, d = 0, rows = [];
-    function P(s, add, o) {
-      o = o || {}; rows = rows.concat(add);
-      S.push({ s: s, rows: rows.slice(), a: a, b: b, d: d, pm: o.pm || "", am: o.am || "", bm: o.bm || "",
-               bn: o.bn || "待命", infl: o.infl || "—", dedup: o.dedup || "（空）" });
-    }
-    if (q === 0) {
-      P("QoS 0 = fire and forget：沒有 Packet Identifier、沒有 ack、沒有重傳。「注入丟包」在這條路徑上完全不會被任何人察覺。",
-        [R("p2b", "→", "PUBLISH", "qos=0　topic=" + T_TEMP + "　payload=26.4")], { pm: "act", infl: "不進 inflight" });
-      a = 1; b = 1; d = 1;
-      P("Broker 收下就立刻轉發給兩個匹配的訂閱者。看板 A 訂閱時要的是 QoS 2，實得卻是 0——<b>第二段有效 QoS = min(發佈 0, 授予 2) = 0</b>。",
-        [R("b2s", "→", "PUBLISH", "→ 看板 A　qos=0"), R("b2s", "→", "PUBLISH", "→ 稽核 B　qos=0")],
-        { am: "hit", bm: "hit", bn: "已轉發 · 不保存任何狀態" });
-      P("結論：<b>at most once</b>。整條流程 3 個封包、零往返、雙方零狀態——高頻遙測該用的等級，因為下一筆讀數馬上就來。",
-        [R("note", "", "結論", "訊息若在任何一段遺失，沒有任何一方會知道。")], { am: "hit", bm: "hit", bn: "閒置" });
-    } else if (q === 1) {
-      P("發佈端送出 QoS 1 的 PUBLISH，把它放進 inflight 等 PUBACK。Packet Identifier = 42。",
-        [R("p2b", "→", "PUBLISH", "qos=1　id=42　DUP=0　payload=26.4")], { pm: "act", infl: "id=42（等 PUBACK）" });
-      a = 1; b = 1; d = 1;
-      P("QoS 1 的接收端<b>一收到就交付</b>，所以 Broker 立刻轉發。兩段的 QoS 不同：給 A 是 min(1,2)=1，給 B 是 min(1,0)=0。",
-        [R("b2s", "→", "PUBLISH", "→ 看板 A　qos=1　id=7"), R("b2s", "→", "PUBLISH", "→ 稽核 B　qos=0")],
-        { am: "hit", bm: "hit", infl: "id=42（等 PUBACK）", bn: "已交付 · 待回 PUBACK" });
-      if (lossy) {
-        P("PUBACK 在回程遺失。Broker 早就處理並轉發了，但發佈端只知道「我沒收到 ack」——它無法分辨是訊息沒到、還是 ack 沒回。",
-          [R("bad", "✕", "PUBACK", "id=42　在回程遺失")], { am: "hit", bm: "hit", infl: "id=42（逾時計時中）", bn: "以為已完成" });
-        P("發佈端逾時，用 DUP=1 重送同一個 id=42。DUP 只是「這是一次重送」的提示，<b>規格明文說它不能拿來當去重依據</b>。",
-          [R("p2b", "→", "PUBLISH", "qos=1　id=42　DUP=1　← 重送")], { pm: "act", am: "hit", bm: "hit", infl: "id=42（重送中）" });
-        a = 2; b = 2; d = 2;
-        P("關鍵一步：<b>QoS 1 的接收端沒有去重義務</b>。Broker 看到 id=42 再來一次就再交付一次——看板 A 收到了第二份相同訊息。",
-          [R("b2s", "→", "PUBLISH", "→ 看板 A　qos=1　id=8　← 重複投遞"), R("b2s", "→", "PUBLISH", "→ 稽核 B　qos=0　← 重複投遞")],
-          { am: "keep", bm: "keep", infl: "id=42（仍在等）", bn: "再次交付（不去重）" });
+  /* Topic Filter 的合法性：# 只能在末端且獨佔整層、+ 必須獨佔整層 */
+  function validateFilter(f) {
+    var lv, i;
+    if (f.length === 0) { return { ok: false, why: "Topic Filter 不得是空字串" }; }
+    lv = f.split("/");
+    for (i = 0; i < lv.length; i++) {
+      if (lv[i].indexOf("#") >= 0) {
+        if (lv[i] !== "#") {
+          return { ok: false, why: "第 " + (i + 1) + " 層「" + lv[i] + "」把 # 和其他字元混在同一層——# 必須自己佔滿整層" };
+        }
+        if (i !== lv.length - 1) {
+          return { ok: false, why: "# 出現在第 " + (i + 1) + " 層／共 " + lv.length + " 層——# 只能是最後一個字元" };
+        }
       }
-      P("PUBACK 抵達，發佈端釋放 inflight 並回收 Packet Identifier 42。",
-        [R("ctl", "←", "PUBACK", "id=42")], { am: a > 1 ? "keep" : "hit", bm: b > 1 ? "keep" : "hit", bn: "完成" });
-      P("結論：<b>at least once</b>。" + (lossy ? "本次看板 A 收到 <b>2 份</b>相同訊息。" : "本次沒有丟包，剛好一份——但協定並不保證這件事。") +
-        " 所以實務上的標準解是「QoS 1 + 應用層用 msg_id 去重」。",
-        [R("note", "", "結論", "重複的成本遠低於 QoS 2 的兩個額外來回，尤其在弱網與電池裝置上。")],
-        { am: a > 1 ? "keep" : "hit", bm: b > 1 ? "keep" : "hit", bn: "閒置" });
-    } else {
-      P("發佈端送出 QoS 2 的 PUBLISH。注意：Broker 此時「收下」了，但<b>還不會交付給任何人</b>。",
-        [R("p2b", "→", "PUBLISH", "qos=2　id=42　DUP=0")], { pm: "act", infl: "id=42（等 PUBREC）" });
-      P("第一對交換的後半：Broker 把 id=42 記進去重表，回 PUBREC 表示「我收到了、而且我記住了」。",
-        [R("ctl", "←", "PUBREC", "id=42")], { infl: "id=42（等 PUBCOMP）", dedup: "{ 42 }", bn: "已記錄 id=42 · 尚未交付" });
-      if (lossy) {
-        P("PUBREC 在回程遺失。發佈端一樣不知道對面發生了什麼。",
-          [R("bad", "✕", "PUBREC", "id=42　在回程遺失")], { infl: "id=42（逾時計時中）", dedup: "{ 42 }", bn: "已記錄 · 尚未交付" });
-        P("發佈端逾時，DUP=1 重送 PUBLISH id=42——<b>這裡就是 QoS 2 與 QoS 1 分岔的地方</b>。",
-          [R("p2b", "→", "PUBLISH", "qos=2　id=42　DUP=1　← 重送")], { pm: "act", infl: "id=42（重送中）", dedup: "{ 42 }" });
-        P("Broker 查去重表：42 已經在裡面 → <b>不交付、不轉發，只補回一個 PUBREC</b>。第二份訊息被擋在這裡，訂閱者永遠不會知道它存在過。",
-          [R("ctl", "←", "PUBREC", "id=42　← 命中去重表，未重複交付")], { dedup: "{ 42 }", bn: "命中去重表 · 丟棄重複" });
+      if (lv[i].indexOf("+") >= 0 && lv[i] !== "+") {
+        return { ok: false, why: "第 " + (i + 1) + " 層「" + lv[i] + "」把 + 和其他字元混在同一層——+ 必須自己佔滿整層" };
       }
-      a = 1; b = 1; d = 1;
-      P("第二對交換：PUBREL 才是「可以交付了」的信號，Broker 到這一步<b>才真正把訊息轉發出去</b>。給 B 的仍然是 min(2,0)=0。",
-        [R("p2b", "→", "PUBREL", "id=42"), R("b2s", "→", "PUBLISH", "→ 看板 A　qos=2　id=9"), R("b2s", "→", "PUBLISH", "→ 稽核 B　qos=0")],
-        { pm: "act", am: "hit", bm: "hit", infl: "id=42（等 PUBCOMP）", dedup: "{ 42 }", bn: "收到 PUBREL · 交付一次" });
-      P("PUBCOMP：Broker 把 id=42 從去重表移除，發佈端回收這個 Packet Identifier。<b>第二對交換的真正作用就是確認「什麼時候可以安全地忘記」</b>。",
-        [R("ctl", "←", "PUBCOMP", "id=42")], { am: "hit", bm: "hit", bn: "完成 · 已釋放 id=42" });
-      P("結論：<b>每一段 hop 上是 exactly once</b>，但 end-to-end 不是——給稽核 B 的第二段是 QoS 0，而且只要中間有 Broker 重啟或 bridge 轉送，重複仍可能發生。",
-        [R("note", "", "結論", "要真正的一次語義，答案永遠是應用層冪等，不是把 QoS 調到 2。")], { am: "hit", bm: "hit", bn: "閒置" });
     }
-    return S.map(function (st) {
-      var sem = q === 0 ? "at most once" : (q === 1 ? "at least once" : "exactly once（每段）");
-      return {
-        s: st.s, rows: st.rows, bn: st.bn,
-        pubs: [{ n: "robot-07", f: "publisher · " + T_TEMP.split("/").pop(), b: "發佈 QoS " + q, c: st.pm }],
-        subs: [{ n: "看板 A", f: "factory/taipei/+/+/telemetry/temperature", b: "授予 QoS 2 · 收到 " + st.a + " 份", c: st.am },
-               { n: "稽核 B", f: "#", b: "授予 QoS 0 · 收到 " + st.b + " 份", c: st.bm }],
-        meta: [["發佈端 QoS", "QoS " + q], ["第二段 · 看板 A", "QoS " + eA], ["第二段 · 稽核 B", "QoS 0"],
-               ["Broker 交付次數", String(st.d), st.d > 1 ? "bad" : ""],
-               ["看板 A 收到", st.a + " 份", st.a > 1 ? "bad" : (st.a ? "good" : "")], ["語義", sem]],
-        store: [["發佈端 inflight", st.infl], ["Broker QoS 2 去重表", st.dedup]]
-      };
-    });
+    return { ok: true, why: "合法 Topic Filter：共 " + lv.length + " 層" };
   }
 
-  /* ---------- 情境三：retained 與 Last Will ---------- */
-  function lwtSteps() {
-    var S = [], rows = [];
-    function P(s, add, o) {
-      rows = rows.concat(add);
-      S.push({
-        s: s, rows: rows.slice(), bn: o.bn,
-        pubs: [{ n: "robot-07", f: "keep-alive 60s · clean-start 0", b: o.pb, c: o.pm || "" }],
-        subs: o.sv ? [{ n: "看板 dash-01", f: "factory/+/+/+/status", b: o.sb, c: o.sm || "" }]
-                   : [{ n: "（尚無訂閱者）", f: "—", b: "", c: "miss" }],
-        meta: [["Keep Alive", "60 s"], ["Broker 逾時門檻", "90 s（× 1.5）"], ["Session Expiry", "3600 s"],
-               ["遺囑狀態", o.will, o.will.indexOf("已發") === 0 ? "bad" : ""], ["dash-01 收到", (o.got || 0) + " 則"]],
-        store: [["retained: …/robot-07/status", o.ret || "（空）", o.ret === "offline" ? "bad" : (o.ret ? "good" : "")],
-                ["session: robot-07", o.sess], ["will: robot-07", o.will]]
+  /* 逐層比對，記錄每一層的判定與「比到第幾層就停」 */
+  function traceMatch(filter, topic) {
+    var f = filter.split("/"), t = topic.split("/"), trace = [], i;
+    var compares = 0, matched = null, swallowed = 0;
+
+    if (t[0].charAt(0) === "$" && (f[0] === "+" || f[0] === "#")) {
+      compares = 1;
+      trace.push({ k: "no", text: "$ 前綴" });
+      return { matched: false, trace: trace, compares: compares, swallowed: 0, levels: t.length,
+        note: "以 $ 開頭的 topic 不被第一層的 + / # 匹配" };
+    }
+    for (i = 0; i < f.length; i++) {
+      compares++;
+      if (f[i] === "#") {
+        swallowed = Math.max(0, t.length - i);
+        trace.push({ k: "rest", text: "# 吞 " + swallowed + " 層" });
+        matched = true;
+        break;
+      }
+      if (i >= t.length) {
+        trace.push({ k: "no", text: "topic 只有 " + t.length + " 層" });
+        matched = false;
+        break;
+      }
+      if (f[i] === "+") { trace.push({ k: "one", text: "+ ← " + t[i] }); continue; }
+      if (f[i] !== t[i]) { trace.push({ k: "no", text: f[i] + " ≠ " + t[i] }); matched = false; break; }
+      trace.push({ k: "eq", text: t[i] });
+    }
+    if (matched === null) {
+      matched = f.length === t.length;
+      if (!matched) {
+        trace.push({ k: "no", text: "topic 還多 " + (t.length - f.length) + " 層" });
+      }
+    }
+    return {
+      matched: matched, trace: trace, compares: compares, swallowed: swallowed, levels: t.length,
+      note: matched
+        ? (swallowed > 0 ? "# 吞掉 " + swallowed + " 層" : (swallowed === 0 && f[f.length - 1] === "#" ? "# 吞掉 0 層（仍然命中）" : "逐層全中"))
+        : "第 " + trace.length + " 層起不符，後面不再比"
+    };
+  }
+
+  // @probe fn       computeFilterMatch
+  // @probe baseline {"filter":"factory/taipei/+/+/telemetry/temperature","probe":"factory/taipei/line-3/robot-07/status"}
+  // @probe sweep    {"filter":["#","factory/taipei/#/cmd"],"probe":["sport","$SYS/broker/uptime"]}
+  function computeFilterMatch(p) {
+    var valid = validateFilter(p.filter);
+    var topics = [{ t: p.probe, own: true }], i, r;
+    for (i = 0; i < CORPUS.length; i++) {
+      if (CORPUS[i] !== p.probe) { topics.push({ t: CORPUS[i], own: false }); }
+    }
+
+    var rows = [], hits = 0, compareCount = 0, maxLevels = p.filter.split("/").length;
+    for (i = 0; i < topics.length; i++) {
+      maxLevels = Math.max(maxLevels, topics[i].t.split("/").length);
+      if (!valid.ok) {
+        rows.push({ topic: topics[i].t, own: topics[i].own, matched: false, trace: [], compares: 0, swallowed: 0, note: "filter 不合法，不進入比對" });
+        continue;
+      }
+      r = traceMatch(p.filter, topics[i].t);
+      compareCount += r.compares;
+      if (r.matched) { hits++; }
+      rows.push({
+        topic: topics[i].t, own: topics[i].own, matched: r.matched, trace: r.trace,
+        compares: r.compares, swallowed: r.swallowed, note: r.note
       });
     }
-    P("robot-07 建立連線。<b>遺囑是在 CONNECT 封包裡就先講好的</b>——趁還活著的時候，把「我死掉時要通知誰、說什麼」交給 Broker 保管。",
-      [R("p2b", "→", "CONNECT", "client-id=robot-07　clean-start=0　session-expiry=3600　keep-alive=60"),
-       R("p2b", "→", "WILL", "will-topic=…/robot-07/status　will-payload=offline　will-qos=1　will-retain=1"),
-       R("ctl", "←", "CONNACK", "reason=0　session-present=0　（沒有舊 session，訂閱要重建）")],
-      { pm: "act", pb: "已連線", bn: "已保管遺囑", will: "已登記（未觸發）", sess: "存在 · expiry 3600s" });
-    P("上線公告：發佈 online 到 status topic，<b>帶 RETAIN=1</b>。此刻沒有任何訂閱者匹配，但 Broker 仍然會把它存進 retained store。",
-      [R("p2b", "→", "PUBLISH", "topic=…/robot-07/status　payload=online　qos=1　retain=1"),
-       R("note", "", "RETAIN", "寫入 retained store（每個 topic 只留最新一則，覆蓋舊的）")],
-      { pm: "act", pb: "已上線公告", bn: "retained store 寫入", will: "已登記（未觸發）", sess: "存在 · expiry 3600s", ret: "online" });
-    P("遙測上報，這則<b>沒有 retain</b>。沒有任何訂閱者匹配 → Broker 直接丟棄。<b>topic 是路由鍵不是佇列</b>，這則訊息不會被存在任何地方。",
-      [R("p2b", "→", "PUBLISH", "topic=…/telemetry/temperature　payload=26.4　qos=0　retain=0"),
-       R("bad", "✕", "DROP", "無匹配訂閱者且非 retained → 丟棄，不進任何佇列")],
-      { pm: "act", pb: "上報中", bn: "無匹配 → 丟棄", will: "已登記（未觸發）", sess: "存在 · expiry 3600s", ret: "online" });
-    P("看板 dash-01 上線並訂閱 <code>factory/+/+/+/status</code>，Broker 在 SUBACK 裡回覆<b>實際授予</b>的 QoS 1。",
-      [R("b2s", "←", "SUBSCRIBE", "filter=factory/+/+/+/status　requested-qos=1"),
-       R("b2s", "→", "SUBACK", "granted-qos=1")],
-      { pb: "運行中", sv: 1, sm: "act", sb: "已訂閱", bn: "新增訂閱", will: "已登記（未觸發）", sess: "存在 · expiry 3600s", ret: "online" });
-    P("Broker 立刻投遞 retained：<b>dash-01 一訂上就拿到 robot-07 的當前狀態</b>，不必等下一次上報。這則帶 RETAIN=1，客戶端據此知道它是快照而不是剛發生的事。",
-      [R("b2s", "→", "PUBLISH", "→ dash-01　payload=online　retain=1　← 來自 retained store")],
-      { pb: "運行中", sv: 1, sm: "hit", sb: "收到 online（retained）", got: 1, bn: "投遞 retained", will: "已登記（未觸發）", sess: "存在 · expiry 3600s", ret: "online" });
-    P("robot-07 突然斷電：<b>沒有 DISCONNECT、沒有 FIN</b>。這就是 WebSocket 篇談保活時講過的 half-open——Broker 這一刻什麼都不知道，那條連線在它眼中還活著。",
-      [R("bad", "✕", "POWER", "robot-07 斷電，來不及送出 DISCONNECT")],
-      { pm: "dead", pb: "斷電（Broker 未察覺）", sv: 1, sb: "仍顯示 online", got: 1, bn: "尚未察覺 · 計時中", will: "已登記（未觸發）", sess: "存在 · expiry 3600s", ret: "online" });
-    P("Keep Alive 60 s × 1.5 = <b>90 s 內沒有收到任何封包</b> → Broker 判定連線死亡。<b>這 90 秒就是 presence 的精度上限</b>：拉長 Keep Alive 省電，代價就是這個數字一起變大。",
-      [R("ctl", "⏱", "KEEPALIVE", "90 s 無任何封包 → 判定連線異常中斷")],
-      { pm: "dead", pb: "已被判定離線", sv: 1, sb: "仍顯示 online", got: 1, bn: "逾時 · 準備代發遺囑", will: "觸發條件成立", sess: "存在 · expiry 3600s", ret: "online" });
-    P("Broker <b>代替裝置</b>發出遺囑：offline 送到同一個 topic 並帶 retain=1，<b>覆蓋掉 retained store 裡的 online</b>。dash-01 立刻收到。",
-      [R("ctl", "→", "LWT", "PUBLISH topic=…/robot-07/status　payload=offline　qos=1　retain=1"),
-       R("b2s", "→", "PUBLISH", "→ dash-01　payload=offline")],
-      { pm: "dead", pb: "離線", sv: 1, sm: "hit", sb: "收到 offline（LWT）", got: 2, bn: "已代發遺囑", will: "已發出", sess: "存在 · expiry 3600s", ret: "offline" });
-    P("收尾：<b>session 還在</b>（Session Expiry 3600 s），離線期間發給 robot-07 的 QoS 1 指令會排進它的佇列；上電重連（Clean Start=0）時 CONNACK 的 Session Present=1，訂閱與待送訊息一起回來。反過來，若剛才是<b>乾淨的 DISCONNECT</b>，Broker 會直接丟棄遺囑、一個字都不發。",
-      [R("note", "", "SESSION", "QoS 0 訊息不排隊；只有 QoS 1／2 會被保留在離線佇列裡"),
-       R("note", "", "對照", "正常 DISCONNECT → 不發 LWT；Keep Alive 逾時／連線異常 → 發 LWT")],
-      { pm: "dead", pb: "離線 · session 保留中", sv: 1, sb: "已知離線", got: 2, bn: "保留 session 待重連", will: "已發出（重連後可重新登記）", sess: "保留中 · 倒數 3600s", ret: "offline" });
-    return S;
+    return {
+      valid: valid.ok, why: valid.why, rows: rows, hits: hits, total: topics.length,
+      compareCount: compareCount, maxLevels: maxLevels,
+      filterLevels: p.filter.split("/"),
+      avgCompares: topics.length ? Math.round(compareCount / topics.length * 10) / 10 : 0
+    };
   }
 
-  /* ---------- 控制 ---------- */
-  var steps = [];
-  function build() {
-    steps = scenario === "qos" ? qosSteps() : (scenario === "lwt" ? lwtSteps() : []);
+  /* ================= (3) DOM 參照 ================= */
+
+  var rootB = document.getElementById("mqtt-demo-bytes");
+  var rootF = document.getElementById("mqtt-demo-filter");
+
+  function $(id) { return document.getElementById(id); }
+
+  /* ================= (4) render ================= */
+
+  var FIELD_NAME = {
+    fixed: "固定表頭", rl: "剩餘長度", len: "長度前綴",
+    str: "字串", pid: "Packet Id", misc: "可變表頭", pay: "Payload"
+  };
+
+  function n3(v) { return String(v).replace(/\B(?=(\d{3})+(?!\d))/g, ","); }
+
+  function statHTML(label, value, sub, warn) {
+    return '<div class="mqb-s' + (warn ? " warn-v" : "") + '">' +
+      '<div class="sl">' + label + '</div><div class="sv">' + value + '</div>' +
+      '<div class="ss">' + sub + '</div></div>';
   }
-  function render() {
-    $("mqtt-row-topic").style.display = scenario === "topic" ? "" : "none";
-    $("mqtt-row-qos").style.display = scenario === "qos" ? "" : "none";
-    if (scenario === "topic") { paint(viewTopic()); btnNext.disabled = true; return; }
-    paint(steps[stepIdx]);
-    btnNext.disabled = stepIdx >= steps.length - 1;
-  }
-  function reset() { stepIdx = 0; curTopic = null; syncPicker(); build(); render(); }
-
-  function pressGroup(el, btn) {
-    el.querySelectorAll("button").forEach(function (b) { b.setAttribute("aria-pressed", "false"); });
-    btn.setAttribute("aria-pressed", "true");
+  function hopHTML(title, seq, sub) {
+    return '<div class="mqb-hop"><div class="ht">' + title + '</div>' +
+      '<div class="hv">' + seq + '</div><div class="hs">' + sub + '</div></div>';
   }
 
-  var picker = $("mqtt-picker");
-  picker.innerHTML = TOPICS.map(function (o, i) {
-    return '<button class="mqtt-tchip" type="button" data-i="' + i + '" aria-pressed="false">' + o.t + "</button>";
-  }).join("");
-  function syncPicker() {
-    picker.querySelectorAll("button").forEach(function (b) {
-      b.setAttribute("aria-pressed", curTopic && TOPICS[+b.getAttribute("data-i")] === curTopic ? "true" : "false");
-    });
+  function renderBytes(state) {
+    var res = computePacket(state), html = "", i, b, row, j, bit;
+
+    html = "";
+    for (i = 0; i < res.bytes.length; i++) {
+      b = res.bytes[i];
+      html += '<div class="mqb-b f-' + b.field + (b.ellipsis ? " ell" : "") + '" title="' + b.note + '">' +
+        '<div class="bh">' + b.hex + '</div>' +
+        '<div class="bc">' + (b.ellipsis ? b.note : (b.field === "str" ? b.chr : FIELD_NAME[b.field])) + '</div></div>';
+    }
+    $("mqb-grid").innerHTML = html;
+
+    html = "";
+    for (i = 0; i < res.bitRows.length; i++) {
+      row = res.bitRows[i];
+      html += '<div class="mqb-brow"><span class="bn">' + row.label + '</span>';
+      for (j = 0; j < row.bits.length; j++) {
+        bit = row.bits[j];
+        html += '<span class="bit ' + bit.cls + '">' + bit.b + "</span>";
+      }
+      html += '<span class="bz">' + row.note + "</span></div>";
+    }
+    $("mqb-bits").innerHTML = html;
+
+    $("mqb-stats").innerHTML =
+      statHTML("封包總長度", res.totalBytes + " B",
+        "1（固定表頭）＋ " + res.rlCount + "（剩餘長度）＋ " + res.remaining + "（剩餘長度所宣告的部分）") +
+      statHTML("協定開銷", Math.round(res.overheadPct * 10) / 10 + "%",
+        (state.packetType === "PUBLISH"
+          ? res.overheadBytes + " B 開銷 / " + res.totalBytes + " B 總長"
+          : "此封包型別沒有應用 payload，整包都是協定成本") + "；字串佔 " + res.strByteLen +
+        " B（" + res.strCharLen + " 個字元）", res.overheadPct >= 80) +
+      statHTML("剩餘長度欄位", res.rlCount + " byte",
+        "目前值 " + n3(res.remaining) + "；離下次進位還可再加 " + n3(res.headroom) + " B") +
+      statHTML("每日流量", n3(res.daily.bytes) + " B",
+        "每日 " + n3(res.daily.publishes) + " 次交換 ＋ " + n3(res.daily.pings) +
+        " 次 PINGREQ／PINGRESP（每段間隔 " + res.daily.pingsPerInterval + " 次）");
+
+    var hop2Card = state.packetType === "PUBLISH"
+      ? hopHTML("第二段 hop · Broker → Subscriber（有效 QoS = min(" + state.qos + ", " + state.grantedQos + ") = " + res.hop2.qos + "）",
+          res.hop2.seq,
+          res.hop2.packets + " 個封包、共 " + n3(res.hop2.bytes) + " bytes" +
+          (res.hop2.qos === 0 ? "；有效 QoS 0 → 這一段的 PUBLISH 沒有 Packet Id" : ""))
+      : hopHTML("第二段 hop", "不適用",
+          state.packetType === "CONNECT"
+            ? "CONNECT 只有這一段；CONNACK 會帶回 Session Present，告訴你 Broker 手上還有沒有你的 session。"
+            : "SUBSCRIBE 只有這一段；SUBACK 回覆的是「實際授予」的 QoS——它就是 min 規則的另一半來源。");
+
+    $("mqb-hops").innerHTML =
+      hopHTML("第一段 hop · " + (state.packetType === "PUBLISH" ? "Publisher → Broker" : "Client → Broker"), res.hop1.seq,
+        res.hop1.packets + " 個封包、共 " + n3(res.hop1.bytes) + " bytes") + hop2Card;
+    $("mqb-status").textContent =
+      state.packetType + "：固定表頭 " + hex(res.byte1) + "、剩餘長度 " + res.rlCount +
+      " byte、總長 " + res.totalBytes + " bytes、開銷 " + (Math.round(res.overheadPct * 10) / 10) +
+      "%｜Keep Alive " + state.keepAliveSec + " 秒 → Broker 在 " + res.keepAliveLimit +
+      " 秒無封包時斷線" + (state.packetType === "PUBLISH"
+        ? "｜改用 5.0 Topic Alias 每日可省 " + n3(res.alias.saved) + " B（" +
+          Math.round(res.alias.pct * 10) / 10 + "%）。"
+        : "。");
+
+    $("mqb-o-pay").textContent = n3(state.payloadBytes);
+    $("mqb-o-ka").textContent = state.keepAliveSec;
+    $("mqb-o-ka15").textContent = res.keepAliveLimit;
+    $("mqb-o-int").textContent = state.intervalSec;
   }
-  picker.addEventListener("click", function (e) {
-    var b = e.target.closest ? e.target.closest("button") : null;
-    if (!b) return;
-    curTopic = TOPICS[+b.getAttribute("data-i")];
-    pressGroup(picker, b);
-    render();
-  });
 
-  $("mqtt-seg-sc").addEventListener("click", function (e) {
-    var b = e.target.closest ? e.target.closest("button") : null;
-    if (!b) return;
-    pressGroup($("mqtt-seg-sc"), b);
-    scenario = b.getAttribute("data-sc");
-    reset();
-  });
-  $("mqtt-seg-qos").addEventListener("click", function (e) {
-    var b = e.target.closest ? e.target.closest("button") : null;
-    if (!b) return;
-    pressGroup($("mqtt-seg-qos"), b);
-    pubQos = parseInt(b.getAttribute("data-q"), 10);
-    stepIdx = 0; build(); render();
-  });
-  $("mqtt-seg-loss").addEventListener("click", function (e) {
-    var b = e.target.closest ? e.target.closest("button") : null;
-    if (!b) return;
-    pressGroup($("mqtt-seg-loss"), b);
-    lossy = b.getAttribute("data-loss") === "1";
-    stepIdx = 0; build(); render();
-  });
+  function renderFilter(state) {
+    var res = computeFilterMatch(state), html = "", i, j, row, cellData;
 
-  btnNext.addEventListener("click", function () {
-    if (stepIdx < steps.length - 1) { stepIdx += 1; render(); }
-  });
-  btnReset.addEventListener("click", reset);
+    $("mqf-valid").className = "mqf-valid " + (res.valid ? "ok" : "bad");
+    $("mqf-valid").textContent = (res.valid ? "✓ " : "✕ ") + res.why;
 
-  reset();
+    var board = $("mqf-board");
+    board.style.gridTemplateColumns = "150px repeat(" + res.maxLevels + ", minmax(0, 1fr))";
+
+    html = '<span class="hh">FILTER</span>';
+    for (j = 0; j < res.maxLevels; j++) {
+      html += '<span class="hh">' + (j < res.filterLevels.length ? res.filterLevels[j] : "—") + "</span>";
+    }
+    for (i = 0; i < res.rows.length; i++) {
+      row = res.rows[i];
+      html += '<span class="tt' + (row.own ? " own" : "") + '">' + (row.own ? "▸ " : "") + row.topic + "</span>";
+      for (j = 0; j < res.maxLevels; j++) {
+        if (j < row.trace.length) {
+          cellData = row.trace[j];
+          html += '<span class="mqf-c ' + cellData.k + '">' + cellData.text + "</span>";
+        } else if (row.trace.length === 0) {
+          html += '<span class="mqf-c gone">—</span>';
+        } else {
+          html += '<span class="mqf-c gone">' + (row.matched ? "" : "未比") + "</span>";
+        }
+      }
+    }
+    board.innerHTML = html;
+
+    $("mqf-status").textContent =
+      "命中 " + res.hits + " / " + res.total + " 條｜訂閱樹比對成本：總共比了 " +
+      res.compareCount + " 層（平均每條 " + res.avgCompares + " 層，不符就短路）｜filter 共 " +
+      res.filterLevels.length + " 層。";
+  }
+
+  /* ================= (5) 事件綁定 ================= */
+
+  if (rootB) {
+    (function () {
+      var state = {}, k;
+      for (k in PKT_DEFAULTS) {
+        if (Object.prototype.hasOwnProperty.call(PKT_DEFAULTS, k)) { state[k] = PKT_DEFAULTS[k]; }
+      }
+
+      var STR_LABEL = {
+        PUBLISH: "Topic Name（發佈用，不得含 wildcard）",
+        CONNECT: "Client Id（遺囑 topic 會是它加上 /status）",
+        SUBSCRIBE: "Topic Filter（訂閱用）"
+      };
+      var QOS_LABEL = { PUBLISH: "發佈端 QoS", CONNECT: "遺囑 QoS", SUBSCRIBE: "要求的 QoS" };
+      var DUP_LABEL = { PUBLISH: "DUP（這是一次重送）", CONNECT: "（此封包型別無此旗標）", SUBSCRIBE: "（此封包型別無此旗標）" };
+      var RETAIN_LABEL = { PUBLISH: "RETAIN（Broker 留最後一則）", CONNECT: "附帶 Last Will（遺囑）", SUBSCRIBE: "（此封包型別無此旗標）" };
+
+      function applyMode() {
+        var t = state.packetType;
+        $("mqb-str-label").textContent = STR_LABEL[t];
+        $("mqb-qos-label").textContent = QOS_LABEL[t];
+        $("mqb-dup-label").textContent = DUP_LABEL[t];
+        $("mqb-retain-label").textContent = RETAIN_LABEL[t];
+        $("mqb-f-pay").className = "mqb-f" + (t === "PUBLISH" ? "" : " off");
+        $("mqb-f-granted").className = "mqb-f" + (t === "PUBLISH" ? "" : " off");
+        $("mqb-f-pid").className = "mqb-f" + (t === "CONNECT" ? " off" : "");
+        $("mqb-f-ka").className = "mqb-f" + (t === "CONNECT" ? "" : " off");
+      }
+
+      function paint() { applyMode(); renderBytes(state); }
+
+      $("mqb-seg-type").addEventListener("click", function (ev) {
+        var btn = ev.target, btns, i;
+        while (btn && btn !== this && btn.tagName !== "BUTTON") { btn = btn.parentNode; }
+        if (!btn || btn.tagName !== "BUTTON") { return; }
+        btns = this.querySelectorAll("button");
+        for (i = 0; i < btns.length; i++) { btns[i].setAttribute("aria-pressed", "false"); }
+        btn.setAttribute("aria-pressed", "true");
+        state.packetType = btn.getAttribute("data-v");
+        paint();
+      });
+      $("mqb-seg-qos").addEventListener("click", function (ev) {
+        var btn = ev.target, btns, i;
+        while (btn && btn !== this && btn.tagName !== "BUTTON") { btn = btn.parentNode; }
+        if (!btn || btn.tagName !== "BUTTON") { return; }
+        btns = this.querySelectorAll("button");
+        for (i = 0; i < btns.length; i++) { btns[i].setAttribute("aria-pressed", "false"); }
+        btn.setAttribute("aria-pressed", "true");
+        state.qos = parseInt(btn.getAttribute("data-v"), 10);
+        paint();
+      });
+      $("mqb-str").addEventListener("input", function () { state.str = this.value; paint(); });
+      $("mqb-pay").addEventListener("input", function () {
+        state.payloadBytes = PAYLOAD_STEPS[parseInt(this.value, 10)];
+        paint();
+      });
+      $("mqb-granted").addEventListener("change", function () { state.grantedQos = parseInt(this.value, 10); paint(); });
+      $("mqb-pid").addEventListener("input", function () {
+        var v = parseInt(this.value, 10);
+        if (isNaN(v) || v < 1) { v = 1; }
+        if (v > 65535) { v = 65535; }
+        state.packetId = v;
+        paint();
+      });
+      $("mqb-dup").addEventListener("change", function () { state.dup = this.checked; paint(); });
+      $("mqb-retain").addEventListener("change", function () { state.retain = this.checked; paint(); });
+      $("mqb-ka").addEventListener("input", function () { state.keepAliveSec = parseInt(this.value, 10); paint(); });
+      $("mqb-int").addEventListener("input", function () { state.intervalSec = parseInt(this.value, 10); paint(); });
+
+      function resetB() {
+        var key, i, btns;
+        for (key in PKT_DEFAULTS) {
+          if (Object.prototype.hasOwnProperty.call(PKT_DEFAULTS, key)) { state[key] = PKT_DEFAULTS[key]; }
+        }
+        $("mqb-str").value = state.str;
+        $("mqb-pay").value = PAYLOAD_STEPS.indexOf(state.payloadBytes);
+        $("mqb-granted").value = String(state.grantedQos);
+        $("mqb-pid").value = state.packetId;
+        $("mqb-dup").checked = state.dup;
+        $("mqb-retain").checked = state.retain;
+        $("mqb-ka").value = state.keepAliveSec;
+        $("mqb-int").value = state.intervalSec;
+        btns = $("mqb-seg-type").querySelectorAll("button");
+        for (i = 0; i < btns.length; i++) {
+          btns[i].setAttribute("aria-pressed", btns[i].getAttribute("data-v") === state.packetType ? "true" : "false");
+        }
+        btns = $("mqb-seg-qos").querySelectorAll("button");
+        for (i = 0; i < btns.length; i++) {
+          btns[i].setAttribute("aria-pressed", parseInt(btns[i].getAttribute("data-v"), 10) === state.qos ? "true" : "false");
+        }
+        paint();
+      }
+      $("mqb-reset").addEventListener("click", resetB);
+      resetB();
+    })();
+  }
+
+  if (rootF) {
+    (function () {
+      var state = { filter: FILTER_DEFAULTS.filter, probe: FILTER_DEFAULTS.probe };
+
+      function paint() { renderFilter(state); }
+
+      $("mqf-filter").addEventListener("input", function () { state.filter = this.value; paint(); });
+      $("mqf-probe").addEventListener("input", function () { state.probe = this.value; paint(); });
+
+      var exs = rootF.querySelectorAll(".mqf-ex .btn"), i;
+      for (i = 0; i < exs.length; i++) {
+        exs[i].addEventListener("click", function () {
+          state.filter = this.getAttribute("data-f");
+          $("mqf-filter").value = state.filter;
+          paint();
+        });
+      }
+
+      function resetF() {
+        state.filter = FILTER_DEFAULTS.filter;
+        state.probe = FILTER_DEFAULTS.probe;
+        $("mqf-filter").value = state.filter;
+        $("mqf-probe").value = state.probe;
+        paint();
+      }
+      $("mqf-reset").addEventListener("click", resetF);
+      resetF();
+    })();
+  }
 })();
 </script>

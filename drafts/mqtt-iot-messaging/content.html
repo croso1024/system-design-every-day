@@ -1,4 +1,5 @@
-<!-- demo-archetype: B｜參數掃描 — 讀者可切換發佈的 topic、發佈端 QoS（0/1/2）與鏈路是否注入丟包，即時觀察 Broker 的 wildcard 匹配結果、每一段 hop 的有效 QoS（min 規則）與訂閱者實際收到幾份。選 B 是因為本篇的核心是「同一則訊息，換一個旋鈕就換一種投遞保證」——QoS 與 topic filter 都是可調參數，而不是固定劇本。 -->
+<!-- demo-archetype: F｜拆解器（主，第 7 節）＋B｜參數掃描（次，第 2 節） — 主 demo 讓讀者輸入 topic / client id 字串、調 payload 大小、QoS、DUP/RETAIN、Packet Id 與 Keep Alive，系統真的組出 PUBLISH／CONNECT／SUBSCRIBE 的位元組（含剩餘長度的變長編碼），算出總長度、開銷佔比、兩段 hop 的往返封包與每日流量；次 demo 讓讀者自由輸入 topic filter 與候選 topic，即時重算訂閱樹的逐層比對結果與比對成本。
+     選 F 是因為本篇最貴的一張帳單是「2 bytes 標頭只是故事的一半」——那是一個編碼結構問題，只有把位元組攤開才看得見。 -->
 <style>
   /* 本篇專屬：mqtt-* 命名空間，不覆蓋全站 base 類別 */
   #mqtt-root {
@@ -42,43 +43,110 @@
   .mqtt-lv .lf.hi { background: var(--mqtt-brk-soft); border-color: var(--mqtt-brk); color: var(--mqtt-brk); }
   .mqtt-lv .sep { align-self: center; color: var(--text-3); font-family: var(--mono); font-size: 13px; }
 
-  /* Demo */
-  .mqtt-ctrl { display: flex; flex-wrap: wrap; gap: 10px; margin: 10px 0 8px; align-items: center; }
-  .mqtt-lb { font-family: var(--mono); font-size: 11px; letter-spacing: .05em; text-transform: uppercase; color: var(--text-3); }
-  .mqtt-picker { display: flex; flex-wrap: wrap; gap: 6px; }
-  .mqtt-tchip { font-family: var(--mono); font-size: 11.5px; padding: 6px 9px; border-radius: 6px; border: 1px solid var(--border-strong); background: #fff; color: var(--text-2); cursor: pointer; }
-  .mqtt-tchip:hover { border-color: var(--accent); color: var(--accent); }
-  .mqtt-tchip[aria-pressed="true"] { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); font-weight: 700; }
-  .mqtt-topo { display: grid; grid-template-columns: 1fr 1fr 1.15fr; gap: 10px; margin: 10px 0 2px; align-items: start; }
-  @media (max-width: 840px) { .mqtt-topo { grid-template-columns: 1fr; } }
-  .mqtt-col { display: flex; flex-direction: column; gap: 8px; } .mqtt-col .colt { font-family: var(--mono); font-size: 10.5px; letter-spacing: .06em; text-transform: uppercase; color: var(--text-3); }
-  .mqtt-node { border: 1.5px solid var(--border-strong); border-radius: var(--radius-sm); padding: 9px 11px; background: #fff; transition: background .18s, border-color .18s, box-shadow .18s, opacity .18s; }
-  .mqtt-node .nn { font-weight: 700; font-size: 12.5px; } .mqtt-node .nb { font-family: var(--mono); font-size: 10.5px; color: var(--text-2); margin-top: 4px; }
-  .mqtt-node .nf { font-family: var(--mono); font-size: 10.5px; color: var(--text-3); margin-top: 2px; word-break: break-all; }
-  .mqtt-node.act { background: var(--accent-soft); border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
-  .mqtt-node.hit { background: var(--ok-soft); border-color: var(--ok); } .mqtt-node.hit .nn { color: var(--ok); }
-  .mqtt-node.keep { background: var(--warn-soft); border-color: var(--warn); }
-  .mqtt-node.dead { background: var(--bad-soft); border-color: var(--bad); } .mqtt-node.dead .nn { color: var(--bad); }
-  .mqtt-node.miss { opacity: .4; } .mqtt-node.brk { border-top: 3px solid var(--mqtt-brk); }
-  .mqtt-wire { border: 1px solid var(--border); border-radius: var(--radius-sm); background: #fff; padding: 8px 10px; margin-top: 10px; max-height: 240px; overflow-y: auto; }
-  .mqtt-row { display: flex; align-items: baseline; gap: 8px; font-family: var(--mono); font-size: 11.5px; padding: 4px 0; border-bottom: 1px dashed var(--border); }
-  .mqtt-row:last-child { border-bottom: none; } .mqtt-row .tx { color: var(--text-2); line-height: 1.5; }
-  .mqtt-row .ar { width: 34px; flex: none; text-align: center; color: var(--text-3); font-weight: 700; }
-  .mqtt-row .tg { flex: none; border-radius: 4px; padding: 2px 6px; font-size: 10.5px; font-weight: 700; border: 1px solid var(--border-strong); background: var(--bg-soft); color: var(--text-3); }
-  .mqtt-row.p2b .ar { color: var(--mqtt-dev); } .mqtt-row.p2b .tg { background: var(--mqtt-dev-soft); border-color: var(--mqtt-dev); color: var(--mqtt-dev); }
-  .mqtt-row.b2s .ar { color: var(--mqtt-sub); } .mqtt-row.b2s .tg { background: var(--mqtt-sub-soft); border-color: var(--mqtt-sub); color: var(--mqtt-sub); }
-  .mqtt-row.ctl .tg { background: var(--mqtt-ctl-soft); border-color: var(--mqtt-ctl); color: var(--mqtt-ctl); }
-  .mqtt-row.bad .tg { background: var(--mqtt-bad-soft); border-color: var(--mqtt-bad); color: var(--mqtt-bad); } .mqtt-row.bad .tx { color: var(--bad); }
-  .mqtt-row.note { background: var(--bg-soft); border-radius: 4px; } .mqtt-row.note .tx { color: var(--text-3); }
-  .mqtt-panels { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 12px; }
-  @media (max-width: 640px) { .mqtt-panels { grid-template-columns: 1fr; } }
-  .mqtt-panel { border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 12px; background: #fff; }
-  .mqtt-panel .pt { font-size: 11px; color: var(--text-3); letter-spacing: .06em; text-transform: uppercase; font-family: var(--mono); margin-bottom: 8px; }
-  .mqtt-panel .prow { display: flex; justify-content: space-between; gap: 8px; font-family: var(--mono); font-size: 11.5px; padding: 4px 0; border-bottom: 1px dashed var(--border); }
-  .mqtt-panel .prow:last-child { border-bottom: none; } .mqtt-panel .pk { color: var(--text-3); white-space: nowrap; }
-  .mqtt-panel .pv { color: var(--text); font-weight: 600; text-align: right; word-break: break-all; }
-  .mqtt-panel .pv.good { color: var(--ok); } .mqtt-panel .pv.bad { color: var(--bad); } .mqtt-panel .pv.warn { color: var(--warn); }
-  .mqtt-panel .empty { font-family: var(--mono); font-size: 11.5px; color: var(--text-3); }
+  /* ===== Demo A（s7）：控制封包逐 byte 拆解 · mqb-* ===== */
+  .mqb-ctl { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px 14px; margin: 4px 0 4px; }
+  @media (max-width: 700px) { .mqb-ctl { grid-template-columns: 1fr; } }
+  .mqb-f.span2 { grid-column: 1 / -1; }
+  .mqb-f.off { opacity: .38; }
+  .mqb-f .fl { display: block; font-size: 11.5px; color: var(--text-2); margin-bottom: 4px; }
+  .mqb-f .fl b { font-family: var(--mono); color: var(--accent); font-weight: 700; }
+  .mqb-f input[type="text"], .mqb-f input[type="number"], .mqb-f select {
+    width: 100%; font-family: var(--mono); font-size: 12px; padding: 5px 7px;
+    border: 1px solid var(--border-strong); border-radius: 6px; background: #fff; color: var(--text);
+  }
+  .mqb-f input[type="range"] { width: 100%; accent-color: var(--accent); }
+  .mqb-f .seg { margin: 0; }
+  .mqb-chk { display: inline-flex; align-items: center; gap: 6px; font-size: 11.5px; color: var(--text-2); cursor: pointer; margin-right: 14px; }
+  .mqb-chk input { accent-color: var(--accent); }
+
+  /* 逐 byte 色塊：格數本身是輸出 */
+  .mqb-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(42px, 1fr)); gap: 3px; margin: 10px 0 0; }
+  .mqb-b { border: 1px solid transparent; border-radius: 4px; padding: 5px 2px; text-align: center; font-family: var(--mono); }
+  .mqb-b .bh { font-size: 11px; font-weight: 700; line-height: 1.2; }
+  .mqb-b .bc { font-size: 9px; opacity: .75; margin-top: 2px; line-height: 1.2; word-break: break-all; }
+  .mqb-b.f-fixed { background: var(--mqtt-ctl-soft); border-color: var(--mqtt-ctl); color: var(--mqtt-ctl); }
+  .mqb-b.f-rl    { background: var(--mqtt-bad-soft); border-color: var(--mqtt-bad); color: var(--mqtt-bad); }
+  .mqb-b.f-len   { background: var(--mqtt-dev-soft); border-color: var(--mqtt-dev); color: var(--mqtt-dev); }
+  .mqb-b.f-str   { background: var(--mqtt-brk-soft); border-color: var(--mqtt-brk); color: var(--mqtt-brk); }
+  .mqb-b.f-pid   { background: var(--warn-soft); border-color: var(--warn); color: var(--warn); }
+  .mqb-b.f-misc  { background: var(--bg-soft); border-color: var(--border-strong); color: var(--text-2); }
+  .mqb-b.f-pay   { background: var(--mqtt-sub-soft); border-color: var(--mqtt-sub); color: var(--mqtt-sub); }
+  .mqb-b.ell { grid-column: span 2; display: flex; flex-direction: column; justify-content: center; }
+
+  .mqb-keys { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 8px; font-size: 11px; color: var(--text-2); }
+  .mqb-keys span { display: inline-flex; align-items: center; gap: 5px; }
+  .mqb-keys i { width: 9px; height: 9px; border-radius: 2px; border: 1px solid; display: inline-block; }
+  .mqb-keys i.f-fixed { background: var(--mqtt-ctl-soft); border-color: var(--mqtt-ctl); }
+  .mqb-keys i.f-rl    { background: var(--mqtt-bad-soft); border-color: var(--mqtt-bad); }
+  .mqb-keys i.f-len   { background: var(--mqtt-dev-soft); border-color: var(--mqtt-dev); }
+  .mqb-keys i.f-str   { background: var(--mqtt-brk-soft); border-color: var(--mqtt-brk); }
+  .mqb-keys i.f-pid   { background: var(--warn-soft); border-color: var(--warn); }
+  .mqb-keys i.f-misc  { background: var(--bg-soft); border-color: var(--border-strong); }
+  .mqb-keys i.f-pay   { background: var(--mqtt-sub-soft); border-color: var(--mqtt-sub); }
+
+  /* 位元展開：列數隨剩餘長度的變長編碼增減 */
+  .mqb-bits { margin-top: 12px; }
+  .mqb-brow { display: grid; grid-template-columns: 150px repeat(8, minmax(0, 26px)) 1fr; gap: 3px; align-items: center; margin-bottom: 4px; }
+  @media (max-width: 640px) { .mqb-brow { grid-template-columns: 1fr; } .mqb-brow .bn, .mqb-brow .bz { grid-column: 1 / -1; } }
+  .mqb-brow .bn { font-family: var(--mono); font-size: 10.5px; color: var(--text-3); }
+  .mqb-brow .bit {
+    height: 22px; display: flex; align-items: center; justify-content: center;
+    font-family: var(--mono); font-size: 11px; border-radius: 3px;
+    background: var(--bg-soft); border: 1px solid var(--border); color: var(--text-3);
+  }
+  .mqb-brow .bit.on { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); font-weight: 700; }
+  .mqb-brow .bit.cont { background: var(--mqtt-bad-soft); border-color: var(--mqtt-bad); color: var(--mqtt-bad); font-weight: 700; }
+  .mqb-brow .bz { font-size: 10.5px; color: var(--text-2); padding-left: 6px; line-height: 1.35; }
+
+  /* 帳單數字 */
+  .mqb-stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin-top: 12px; }
+  @media (max-width: 700px) { .mqb-stats { grid-template-columns: repeat(2, 1fr); } }
+  .mqb-s { border: 1px solid var(--border); border-radius: var(--radius-sm); background: #fff; padding: 9px 10px; }
+  .mqb-s .sl { font-size: 10.5px; color: var(--text-3); }
+  .mqb-s .sv { font-family: var(--mono); font-size: 15px; font-weight: 700; color: var(--text); margin: 2px 0 1px; }
+  .mqb-s .ss { font-size: 10.5px; color: var(--text-2); line-height: 1.4; }
+  .mqb-s.warn-v .sv { color: var(--warn); }
+
+  .mqb-hops { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 8px; }
+  @media (max-width: 640px) { .mqb-hops { grid-template-columns: 1fr; } }
+  .mqb-hop { border: 1px solid var(--border); border-radius: var(--radius-sm); background: #fff; padding: 9px 11px; }
+  .mqb-hop .ht { font-family: var(--mono); font-size: 10.5px; color: var(--text-3); letter-spacing: .05em; margin-bottom: 4px; }
+  .mqb-hop .hv { font-family: var(--mono); font-size: 12.5px; font-weight: 700; color: var(--text); }
+  .mqb-hop .hs { font-size: 11px; color: var(--text-2); line-height: 1.45; margin-top: 3px; }
+
+  /* ===== Demo B（s2）：訂閱樹逐層比對 · mqf-* ===== */
+  .mqf-ctl { display: grid; grid-template-columns: 1fr 1fr; gap: 10px 14px; margin: 4px 0 8px; }
+  @media (max-width: 640px) { .mqf-ctl { grid-template-columns: 1fr; } }
+  .mqf-ctl .fl { display: block; font-size: 11.5px; color: var(--text-2); margin-bottom: 4px; }
+  .mqf-ctl input[type="text"] {
+    width: 100%; font-family: var(--mono); font-size: 12px; padding: 5px 7px;
+    border: 1px solid var(--border-strong); border-radius: 6px; background: #fff; color: var(--text);
+  }
+  .mqf-ex { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
+  .mqf-ex .btn { font-family: var(--mono); font-size: 11px; }
+  .mqf-board { display: grid; gap: 3px; margin-top: 8px; }
+  .mqf-board .hh { font-family: var(--mono); font-size: 9.5px; color: var(--text-3); padding-bottom: 2px; }
+  .mqf-board .tt {
+    font-family: var(--mono); font-size: 10.5px; color: var(--text-2);
+    display: flex; align-items: center; word-break: break-all; line-height: 1.3;
+  }
+  .mqf-board .tt.own { color: var(--accent); font-weight: 700; }
+  .mqf-c {
+    font-family: var(--mono); font-size: 10.5px; padding: 5px 3px; border-radius: 3px;
+    text-align: center; border: 1px solid var(--border); background: #fff;
+    color: var(--text-2); word-break: break-all; line-height: 1.25;
+  }
+  .mqf-c.eq   { background: var(--ok-soft);     border-color: var(--ok);     color: var(--ok); }
+  .mqf-c.one  { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); }
+  .mqf-c.rest { background: var(--warn-soft);   border-color: var(--warn);   color: var(--warn); }
+  .mqf-c.no   { background: var(--bad-soft);    border-color: var(--bad);    color: var(--bad); }
+  .mqf-c.gone { border-style: dashed; color: var(--text-3); opacity: .45; }
+  .mqf-valid {
+    font-family: var(--mono); font-size: 11.5px; padding: 8px 10px; border-radius: var(--radius-sm);
+    border: 1px solid var(--border); background: #fff; color: var(--text-2); margin-bottom: 8px; line-height: 1.5;
+  }
+  .mqf-valid.bad { border-color: var(--bad); background: var(--bad-soft); color: var(--bad); }
+  .mqf-valid.ok  { border-color: var(--ok); background: var(--ok-soft); color: var(--ok); }
 </style>
 
 <div id="mqtt-root">
@@ -236,6 +304,52 @@
     </table>
   </div>
   <p class="cap">兩個容易被追問的細節：<strong>(1)</strong> <code>sport/#</code> 也會匹配 <code>sport</code> 本身（<code>#</code> 可以吃零層）。<strong>(2)</strong> 以 <code>$</code> 開頭的 topic（如 Broker 自身指標的 <code>$SYS/...</code>、5.0 共享訂閱的 <code>$share/...</code>）<strong>不會被第一層的 <code>+</code> 或 <code>#</code> 匹配到</strong>——所以訂 <code>#</code> 不會把 Broker 的內部指標一起吸進來。</p>
+
+  <div class="demo" id="mqtt-demo-filter">
+    <div class="demo-bar">
+      <span class="label">互動 · 訂閱樹逐層比對</span>
+      <span class="label" style="text-transform:none;font-family:var(--sans);font-size:12px;color:var(--text-2)">改 filter 或候選 topic，即時重算命中與比對成本</span>
+    </div>
+    <div class="demo-body">
+      <p style="font-size:13px;color:var(--text-2);margin:2px 0 10px">
+        Broker 收到一則 PUBLISH 時做的唯一一件事，就是拿 topic name 去比對訂閱樹。下面兩個欄位都可以自由輸入：<strong>上面是訂閱用的 Topic Filter</strong>、<strong>下面是你自己想試的 topic name</strong>（它會排在固定語料的第一列）。每一格都是<strong>逐層比對的實際結果</strong>，不是事先寫好的答案。
+      </p>
+
+      <div class="mqf-ex">
+        <button class="btn" type="button" data-f="factory/taipei/+/+/telemetry/temperature">全廠溫度</button>
+        <button class="btn" type="button" data-f="factory/taipei/line-3/#">三線的一切</button>
+        <button class="btn" type="button" data-f="factory/+/+/+/status">全域 presence</button>
+        <button class="btn" type="button" data-f="#">稽核全訂</button>
+        <button class="btn" type="button" data-f="factory/taipei/#/cmd">非法：# 不在末端</button>
+        <button class="btn" type="button" data-f="sport/#">sport/#</button>
+      </div>
+
+      <div class="mqf-ctl">
+        <div>
+          <span class="fl">Topic Filter（訂閱用，可含 <code>+</code> / <code>#</code>）</span>
+          <input type="text" id="mqf-filter" spellcheck="false">
+        </div>
+        <div>
+          <span class="fl">自訂候選 Topic Name（發佈用，不得含 wildcard）</span>
+          <input type="text" id="mqf-probe" spellcheck="false">
+        </div>
+      </div>
+
+      <div class="mqf-valid" id="mqf-valid"></div>
+      <div class="mqf-board" id="mqf-board"></div>
+
+      <div class="legend">
+        <span><i class="dot ns-ok"></i>該層字面相同</span>
+        <span><i class="dot ns-wait"></i><code>+</code> 吃掉一層</span>
+        <span><i class="dot ns-lock"></i><code>#</code> 吞掉剩下所有層</span>
+        <span><i class="dot ns-bad"></i>比到這一層就不符（後面不再比）</span>
+      </div>
+
+      <div class="status-line" id="mqf-status"></div>
+      <button class="btn" type="button" id="mqf-reset">重置</button>
+    </div>
+  </div>
+  <p class="cap">三個值得停下來看的地方：<strong>(1)</strong> 不符的那一格右邊全部變虛線——比對是<strong>逐層短路</strong>的，這也是「比對成本」那個數字算出來的方式。<strong>(2)</strong> 輸入 <code>sport/#</code> 配 <code>sport</code> 會命中，且標示「<code>#</code> 吞掉 0 層」。<strong>(3)</strong> 輸入 <code>#</code> 時 <code>$SYS/broker/uptime</code> 仍然落空——<code>$</code> 開頭的 topic 不被第一層的 wildcard 匹配。</p>
 
   <div class="callout warn">
     <div class="c-title"><span class="ic">陷阱</span>Topic 是<strong>路由鍵</strong>，不是<strong>佇列</strong>——本篇最重要的一句話</div>
@@ -643,97 +757,109 @@ $ mosquitto_pub -h broker.example.com -p 8883 --cafile ca.crt \
 </section>
 
 <section id="s7">
-  <div class="sec-head"><span class="sec-num">07</span><h2>互動 · MQTT Topic / QoS 模擬器</h2></div>
-  <p class="sec-sub">一個 Broker 居中，左邊發佈、右邊訂閱。三個情境分別演 topic 匹配、QoS 投遞流，以及 retained 與 Last Will。</p>
+  <div class="sec-head"><span class="sec-num">07</span><h2>控制封包的位元組帳單</h2></div>
+  <p class="sec-sub">第 1 節說「2 bytes 標頭只是行銷話術的一半」。這一節把另一半攤開：一則 PUBLISH 到底是哪些位元組組成的。</p>
 
-  <div class="demo" id="mqtt-demo">
+  <p>MQTT 的每一個控制封包都是同一個三段式結構：<strong>固定表頭</strong>（1 byte 的「4 bit 封包型別 ＋ 4 bit 旗標」，加上 1–4 bytes 的剩餘長度）、<strong>可變表頭</strong>（依封包型別而異：PUBLISH 是「2 bytes 長度前綴 ＋ topic 字串」再加上只有 QoS ≥ 1 才出現的 2 bytes Packet Identifier；CONNECT 是協定名、版本、連線旗標與 Keep Alive；SUBSCRIBE 是 Packet Identifier），以及<strong>payload</strong>（協定完全不看內容）。所謂「最小 2 bytes」指的只有固定表頭那一段，而且是在剩餘長度只佔 1 byte 時；真正要付錢的是中間那一段——尤其是<strong>每則訊息都要重送一次的 topic 字串</strong>。</p>
+
+  <p>剩餘長度這個欄位值得單獨講，因為它是 MQTT 省位元組的手法裡最漂亮的一個：它用<strong>變長編碼</strong>，每個 byte 只拿 7 bit 存數值、最高位當<strong>接續位元</strong>（1 表示「後面還有一個 byte」）。所以 127 bytes 以內只花 1 byte、16,383 以內 2 bytes、2,097,151 以內 3 bytes、上限 268,435,455 花 4 bytes——<strong>小封包不必為大封包的可能性預付欄位寬度</strong>。要注意它算的是「這個封包在固定表頭之後還有幾個 bytes」，<strong>不包含它自己與第 1 個 byte</strong>。下面這台拆解器就把這些規則真的跑一遍：你調 topic、payload、QoS、旗標與 Keep Alive，它把位元組一格一格組出來。</p>
+
+  <div class="demo" id="mqtt-demo-bytes">
     <div class="demo-bar">
-      <span class="label">互動 · MQTT Topic / QoS</span>
-      <span class="label" style="text-transform:none;font-family:var(--sans);font-size:12px;color:var(--text-2)">情境一點 topic 發佈；情境二、三按「下一步」</span>
+      <span class="label">互動 · 控制封包逐 byte 拆解</span>
+      <span class="label" style="text-transform:none;font-family:var(--sans);font-size:12px;color:var(--text-2)">改任一個欄位，位元組會重新組一次</span>
     </div>
     <div class="demo-body">
-      <div class="seg" role="group" aria-label="情境切換" id="mqtt-seg-sc">
-        <button data-sc="topic" aria-pressed="true">Topic 與 Wildcard 匹配</button>
-        <button data-sc="qos" aria-pressed="false">QoS 0/1/2 投遞流</button>
-        <button data-sc="lwt" aria-pressed="false">Retained 與 Last Will</button>
-      </div>
-
-      <div class="mqtt-ctrl">
-        <button class="btn primary" id="mqtt-btn-next">下一步</button>
-        <button class="btn" id="mqtt-btn-reset">重置</button>
-        <div class="legend">
-          <span><i class="dot ns-wait"></i>本步作用中</span>
-          <span><i class="dot ns-ok"></i>匹配 / 收到訊息</span>
-          <span><i class="dot ns-lock"></i>保存的狀態 / 重複投遞</span>
-          <span><i class="dot ns-bad"></i>不匹配 / 丟棄 / 斷線</span>
-        </div>
-      </div>
-
-      <div class="mqtt-ctrl" id="mqtt-row-topic">
-        <span class="mqtt-lb">發佈到 topic</span>
-        <div class="mqtt-picker" id="mqtt-picker"></div>
-      </div>
-
-      <div class="mqtt-ctrl" id="mqtt-row-qos">
-        <span class="mqtt-lb">發佈端 QoS</span>
-        <div class="seg" role="group" aria-label="QoS 等級" id="mqtt-seg-qos">
-          <button data-q="0" aria-pressed="false">QoS 0</button>
-          <button data-q="1" aria-pressed="true">QoS 1</button>
-          <button data-q="2" aria-pressed="false">QoS 2</button>
-        </div>
-        <span class="mqtt-lb">鏈路</span>
-        <div class="seg" role="group" aria-label="鏈路品質" id="mqtt-seg-loss">
-          <button data-loss="0" aria-pressed="true">正常</button>
-          <button data-loss="1" aria-pressed="false">注入丟包</button>
-        </div>
-      </div>
-
-      <div class="status-line" id="mqtt-status">選一個情境開始。</div>
-
-      <div class="mqtt-topo">
-        <div class="mqtt-col">
-          <div class="colt">Publisher</div>
-          <div class="mqtt-col" id="mqtt-pubs"></div>
-        </div>
-        <div class="mqtt-col">
-          <div class="colt">Broker</div>
-          <div class="mqtt-node brk" id="mqtt-broker">
-            <div class="nn">broker.example.com</div>
-            <div class="nf">:8883 · MQTT 5.0</div>
-            <div class="nb" id="mqtt-broker-note">待命</div>
+      <div class="mqb-ctl">
+        <div class="mqb-f span2">
+          <span class="fl">封包型別</span>
+          <div class="seg" role="group" aria-label="封包型別" id="mqb-seg-type">
+            <button type="button" data-v="PUBLISH" aria-pressed="true">PUBLISH</button>
+            <button type="button" data-v="CONNECT" aria-pressed="false">CONNECT</button>
+            <button type="button" data-v="SUBSCRIBE" aria-pressed="false">SUBSCRIBE</button>
           </div>
         </div>
-        <div class="mqtt-col">
-          <div class="colt">Subscriber</div>
-          <div class="mqtt-col" id="mqtt-subs"></div>
+
+        <div class="mqb-f span2" id="mqb-f-str">
+          <span class="fl" id="mqb-str-label">Topic Name（發佈用）</span>
+          <input type="text" id="mqb-str" spellcheck="false">
+        </div>
+
+        <div class="mqb-f" id="mqb-f-pay">
+          <span class="fl">Payload 大小：<b id="mqb-o-pay">4</b> bytes</span>
+          <input type="range" id="mqb-pay" min="0" max="19" step="1" value="2">
+        </div>
+
+        <div class="mqb-f" id="mqb-f-qos">
+          <span class="fl" id="mqb-qos-label">發佈端 QoS</span>
+          <div class="seg" role="group" aria-label="QoS 等級" id="mqb-seg-qos">
+            <button type="button" data-v="0" aria-pressed="false">QoS 0</button>
+            <button type="button" data-v="1" aria-pressed="true">QoS 1</button>
+            <button type="button" data-v="2" aria-pressed="false">QoS 2</button>
+          </div>
+        </div>
+
+        <div class="mqb-f" id="mqb-f-granted">
+          <span class="fl">訂閱端被授予的 QoS（SUBACK）</span>
+          <select id="mqb-granted">
+            <option value="0">0</option>
+            <option value="1">1</option>
+            <option value="2">2</option>
+          </select>
+        </div>
+
+        <div class="mqb-f" id="mqb-f-pid">
+          <span class="fl">Packet Identifier（1–65535）</span>
+          <input type="number" id="mqb-pid" min="1" max="65535" step="1" value="42">
+        </div>
+
+        <div class="mqb-f span2" id="mqb-f-flags">
+          <label class="mqb-chk"><input type="checkbox" id="mqb-dup"> <span id="mqb-dup-label">DUP（這是一次重送）</span></label>
+          <label class="mqb-chk"><input type="checkbox" id="mqb-retain"> <span id="mqb-retain-label">RETAIN（Broker 留最後一則）</span></label>
+        </div>
+
+        <div class="mqb-f" id="mqb-f-ka">
+          <span class="fl">Keep Alive：<b id="mqb-o-ka">60</b> 秒（斷線門檻 <b id="mqb-o-ka15">90</b> 秒）</span>
+          <input type="range" id="mqb-ka" min="10" max="600" step="10" value="60">
+        </div>
+
+        <div class="mqb-f" id="mqb-f-int">
+          <span class="fl">發佈間隔：<b id="mqb-o-int">60</b> 秒</span>
+          <input type="range" id="mqb-int" min="5" max="3600" step="5" value="60">
+        </div>
+
+        <div class="mqb-f span2">
+          <button class="btn" type="button" id="mqb-reset">重置</button>
         </div>
       </div>
 
-      <div class="mqtt-wire" id="mqtt-wire"></div>
-
-      <div class="mqtt-panels">
-        <div class="mqtt-panel">
-          <div class="pt">本次投遞</div>
-          <div id="mqtt-meta"></div>
-        </div>
-        <div class="mqtt-panel">
-          <div class="pt">Broker 保存的狀態</div>
-          <div id="mqtt-store"></div>
-        </div>
+      <div class="mqb-grid" id="mqb-grid"></div>
+      <div class="mqb-keys">
+        <span><i class="f-fixed"></i>固定表頭</span>
+        <span><i class="f-rl"></i>剩餘長度（變長）</span>
+        <span><i class="f-len"></i>長度前綴</span>
+        <span><i class="f-str"></i>字串</span>
+        <span><i class="f-pid"></i>Packet Id</span>
+        <span><i class="f-misc"></i>其他可變表頭</span>
+        <span><i class="f-pay"></i>Payload</span>
       </div>
+
+      <div class="mqb-bits" id="mqb-bits"></div>
+      <div class="mqb-stats" id="mqb-stats"></div>
+      <div class="mqb-hops" id="mqb-hops"></div>
+
+      <div class="status-line" id="mqb-status"></div>
     </div>
   </div>
-
-  <p class="cap">三個值得停下來比對的地方：<strong>(1)</strong> 情境一發佈 <code>.../line-3/robot-07/status</code> 時，<code>factory/+/+/+/status</code> 會亮但 <code>factory/taipei/+/+/telemetry/temperature</code> 不會——<strong><code>+</code> 恰好吃一層，層數不合就整條不匹配</strong>。<strong>(2)</strong> 情境二選 QoS 1 加「注入丟包」，會看到 Broker <strong>轉發了兩次</strong>（PUBACK 遺失導致重送，而 QoS 1 沒有去重義務）；同樣的操作換成 QoS 2，第二次 PUBLISH 只換來一個 PUBREC，<strong>訊息並沒有被再交付一次</strong>。<strong>(3)</strong> 情境三裡，裝置斷電後 Broker 有好幾步是「什麼都不知道」的——直到 Keep Alive 的 1.5 倍門檻到期，遺囑才發出去。這段延遲就是 presence 的精度上限。</p>
+  <p class="cap">這台拆解器和子網篇那條「固定 32 格位元條」的差別，就在<strong>格數本身是輸出</strong>：把 payload 從 71 調到 72，剩餘長度會從 1 格變 2 格、位元展開多長出一整列，總長度一次跳 2 bytes；把 topic 換成中文，長度前綴算的是 <strong>UTF-8 的 bytes 而不是字元數</strong>。另外兩個算出來的數字值得看：<strong>(1)</strong> 「離下次進位還剩幾 bytes」告訴你這個封包還能長多大而不多付一個欄位。<strong>(2)</strong> 每日 PINGREQ 次數是 <code>ceil(發佈間隔 ÷ Keep Alive) − 1</code> 乘上每日發佈次數——<strong>只要發佈間隔小於 Keep Alive，這個數字就是 0</strong>，因為任何封包都算保活，心跳等於免費。</p>
 
   <div class="callout warn">
-    <div class="c-title"><span class="ic">說明</span>這個模型簡化了什麼，以及它跟前五個 demo 的分工</div>
-    <p>模型只保留「Broker 中介的投遞語義」這一條線：不畫 TCP／TLS 交握（TCP/UDP 篇與 TLS 篇的主場）、不畫 WebSocket 狀態機（WebSocket 篇）、時間軸被壓縮（Keep Alive 的 90 秒在這裡是一步）。丟包只注入在 ack 的回程，因為那正是 QoS 1 與 QoS 2 行為分岔的地方。<br>
-    分工也刻意錯開：<strong>QUIC 篇</strong>是雙泳道矩陣，比的是<em>丟包時誰被卡住</em>；<strong>WebSocket 篇</strong>是狀態機四格，主角是<em>一條連線的生命週期</em>；<strong>本篇</strong>是拓撲圖，主角是<em>一則訊息在 Broker 兩側各自發生了什麼</em>——所以這裡沒有狀態機，取而代之的是 Broker 手上那兩張表（retained store 與 session store）。</p>
+    <div class="c-title"><span class="ic">說明</span>這台拆解器簡化了什麼</div>
+    <p>它組的是 <strong>MQTT 3.1.1</strong> 的布局（CONNECT 可變表頭固定 10 bytes：<code>0x00 0x04 'M' 'Q' 'T' 'T'</code> ＋ 版本 ＋ 連線旗標 ＋ 2 bytes Keep Alive），<strong>不編碼 5.0 的 properties 區</strong>——5.0 會在可變表頭與 payload 之間多一段屬性，本質上是同一套「長度前綴 ＋ 內容」的疊加。CONNECT 的遺囑固定用 <code>&lt;client-id&gt;/status</code> 與 7 bytes 的 <code>offline</code>；PUBLISH 的 payload 因為協定完全不看內容，所以只調大小、不編內容（超過 12 bytes 的部分會摺疊成一格）。每日流量假設「除了這筆交換之外沒有其他封包」，那是電池裝置的典型情況，也是 PINGREQ 會真的被送出去的前提。</p>
   </div>
 
   <div class="oneliner">
-    <b>一句話答法</b>Wildcard 是逐層比對、<code>+</code> 不跨層而 <code>#</code> 吃掉剩下全部；QoS 1 在 ack 遺失時會造成<strong>重複投遞</strong>，QoS 2 靠 Broker 記住 Packet Id 擋掉第二份；retained 讓新訂閱者立刻看到現況，Last Will 則要等 Keep Alive 的 1.5 倍門檻到期才由 Broker 代發。
+    <b>一句話答法</b>MQTT 封包＝固定表頭（4 bit 型別＋4 bit 旗標，加上 1–4 bytes 的變長剩餘長度）＋可變表頭（PUBLISH 是 2 bytes 長度前綴＋topic，Packet Id 只在 QoS ≥ 1 出現）＋payload；「最小 2 bytes」只算固定表頭，真正的帳單在每則都要重送的 topic 字串上——50 bytes 的 topic 配 4 bytes 的溫度值，開銷佔九成以上，這正是 5.0 要用 Topic Alias 把它壓成 2 bytes 的理由。
   </div>
 </section>
 
