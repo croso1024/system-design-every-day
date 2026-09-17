@@ -1,7 +1,16 @@
+<!-- demo-archetype: E｜決策器（主，第 5 節「封包的旅程，與它卡在哪一層」）＋F｜拆解器（次，第 4 節「封裝與解封裝」）
+     E：讀者把手上量到的八項觀察（DNS、閘道、目的 IP、port 連線是 refused 還是 timeout、伺服器端有沒有在聽、TLS、大封包、是否同網段）
+     自由組合填入，診斷器把每條被觸發的規則加減成五個候選層的嫌疑分數並正規化成百分比，算出最可能的層與信心邊際、已被排除的層、
+     目前的不確定度（bit），再把每個尚未量的檢查項的每一種結果都代入重算一次分佈，用資訊增益挑出「下一個最該量什麼」與預估剩餘步數，
+     並偵測互相矛盾的觀察組合。選 E 是因為排錯的命題是「這個症狀落在哪一層、還能排除哪幾層」——那是一個判定與排除問題，不是一段流程。
+     F：讀者調 payload 大小、路徑 MTU、IP 版本、TCP options 與 VLAN 標籤，算出各層 header bytes、MSS 或 IP 分片單位、要切成幾片、
+     最後一片多大、乙太網最小訊框的 padding、線路上的總 byte 數與 overhead 百分比——每個數字都是算術推導。
+     選 F 是因為「封裝的代價」只有攤成逐段 byte 才看得見，而 TCP 分段與 UDP 分片是兩條不同的公式。 -->
     <!-- 本篇專屬樣式：僅命名空間 nl-*，不覆蓋全站 base.html 既有類別 -->
     <style>
       /* 四層的分類色（皆為低飽和 Notion 色調，作為分層辨識，非狀態語意） */
-      #nl-root {
+      /* 四層色 token 定義在 :root，才能同時服務靜態分層圖與兩個 demo（僅新增，不覆寫既有變數） */
+      :root {
         --l-app: #3f6188;   --l-app-soft: #eef2f7;
         --l-tp:  #4d7d68;   --l-tp-soft:  #eef4f1;
         --l-net: #a3743e;   --l-net-soft: #f6f0e7;
@@ -13,7 +22,6 @@
       .nl-layer {
         border:1px solid var(--border); border-left-width:4px; border-radius:var(--radius-sm);
         padding:11px 14px; background:#fff; display:flex; gap:14px; align-items:baseline;
-        transition:background .2s, border-color .2s, box-shadow .2s;
       }
       .nl-layer .ln { font-family:var(--mono); font-size:11px; color:var(--text-3); flex:0 0 26px; }
       .nl-layer .lname { font-weight:700; font-size:14.5px; flex:0 0 140px; }
@@ -24,67 +32,134 @@
       .nl-layer.l-tp   { border-left-color:var(--l-tp);   }
       .nl-layer.l-net  { border-left-color:var(--l-net);  }
       .nl-layer.l-link { border-left-color:var(--l-link); }
-      .nl-layer.active { box-shadow:0 0 0 3px var(--accent-soft); }
-      .nl-layer.l-app.active  { background:var(--l-app-soft);  }
-      .nl-layer.l-tp.active   { background:var(--l-tp-soft);   }
-      .nl-layer.l-net.active  { background:var(--l-net-soft);  }
-      .nl-layer.l-link.active { background:var(--l-link-soft); }
-      .nl-layer.dim { opacity:.45; }
       @media (max-width:560px){
         .nl-layer { flex-direction:column; gap:4px; }
         .nl-layer .lname { flex:none; }
       }
 
-      /* 封裝演示：層堆疊（左）與封包位元串（下） */
-      .nl-encap-grid { display:grid; grid-template-columns:1fr; gap:16px; }
-      .nl-pdu-badge {
-        display:inline-block; font-family:var(--mono); font-size:11px; letter-spacing:.06em;
-        border:1px solid var(--border-strong); border-radius:999px; padding:2px 10px; color:var(--text-2);
-        background:var(--bg-soft); margin-left:8px;
+      /* ===== 04 封包切片拆解器：比例色塊條（nb-） ===== */
+      .nb-knobs { display:grid; grid-template-columns:repeat(3,1fr); gap:11px 14px; margin:4px 0 12px; }
+      @media (max-width:720px){ .nb-knobs{ grid-template-columns:1fr 1fr; } }
+      @media (max-width:460px){ .nb-knobs{ grid-template-columns:1fr; } }
+      .nb-knob { display:grid; grid-template-columns:1fr auto; gap:2px 8px; align-items:center; }
+      .nb-knob .kl { font-size:12.5px; color:var(--text-2); }
+      .nb-knob .kv { font-family:var(--mono); font-size:12px; font-weight:700; color:var(--text); justify-self:end; }
+      .nb-knob input[type="range"] { grid-column:1 / -1; width:100%; margin:2px 0 0; accent-color:var(--accent); }
+      .nb-knob select {
+        grid-column:1 / -1; width:100%; margin-top:2px; font-family:var(--mono); font-size:12px;
+        padding:4px 6px; border:1px solid var(--border-strong); border-radius:5px; background:#fff; color:var(--text);
       }
-      .nl-wire-label { font-family:var(--mono); font-size:11px; color:var(--text-3); margin:2px 0 8px; letter-spacing:.06em; text-transform:uppercase; }
-      .nl-wire {
-        display:flex; align-items:stretch; gap:4px; flex-wrap:wrap;
-        border:1px dashed var(--border-strong); border-radius:var(--radius-sm);
-        padding:12px; background:var(--bg-soft); min-height:88px;
+      .nb-chk { display:flex; align-items:center; gap:7px; font-size:12.5px; color:var(--text-2); cursor:pointer; align-self:end; padding-bottom:3px; }
+      .nb-chk input { accent-color:var(--accent); width:15px; height:15px; margin:0; }
+
+      .nb-bars { display:flex; flex-direction:column; gap:6px; margin:12px 0 4px; }
+      .nb-barrow { display:grid; grid-template-columns:66px 1fr; gap:8px; align-items:center; }
+      .nb-barrow .rl { font-family:var(--mono); font-size:11px; color:var(--text-3); text-align:right; }
+      .nb-bar { display:flex; height:30px; border:1px solid var(--border-strong); border-radius:5px; overflow:hidden; background:#fff; }
+      .nb-seg {
+        display:flex; align-items:center; justify-content:center; min-width:0; overflow:hidden;
+        font-family:var(--mono); font-size:10.5px; color:var(--text); white-space:nowrap;
+        border-right:1px solid var(--border-strong);
       }
-      .nl-box {
-        border:1.5px solid var(--border-strong); border-radius:6px; background:#fff;
-        padding:8px 10px; min-width:96px; display:flex; flex-direction:column; gap:3px;
-        animation:nlpop .28s ease;
-      }
-      @keyframes nlpop { from{ opacity:0; transform:translateY(6px) scale(.96); } to{ opacity:1; transform:none; } }
-      .nl-box.hidden { display:none; }
-      .nl-box .bh { font-weight:700; font-size:12px; }
-      .nl-box .bf { font-family:var(--mono); font-size:10px; color:var(--text-2); line-height:1.5; }
-      .nl-box.app     { border-color:var(--l-app);  background:var(--l-app-soft);  flex:1 1 150px; }
-      .nl-box.tp      { border-color:var(--l-tp);   background:var(--l-tp-soft);  }
-      .nl-box.net     { border-color:var(--l-net);  background:var(--l-net-soft); }
-      .nl-box.link    { border-color:var(--l-link); background:var(--l-link-soft);}
-      .nl-box .btag { font-family:var(--mono); font-size:9.5px; color:var(--text-3); text-transform:uppercase; letter-spacing:.05em; }
-      .nl-bits {
-        margin-top:10px; font-family:var(--mono); font-size:12px; color:var(--l-link);
-        letter-spacing:.18em; word-break:break-all; min-height:20px;
+      .nb-seg:last-child { border-right:0; }
+      .nb-seg.ov  { background:var(--bg-soft); color:var(--text-3); }
+      .nb-seg.eth { background:var(--l-link-soft); }
+      .nb-seg.vln { background:#e7e9f2; }
+      .nb-seg.ip  { background:var(--l-net-soft); }
+      .nb-seg.l4  { background:var(--l-tp-soft); }
+      .nb-seg.pay { background:var(--l-app-soft); }
+      .nb-seg.pad { background:var(--warn-soft); color:var(--warn); }
+      .nb-seg.fcs { background:var(--l-link-soft); }
+      .nb-ell { grid-column:1 / -1; text-align:center; font-family:var(--mono); font-size:12px; color:var(--text-3); }
+      .nb-key { display:flex; flex-wrap:wrap; gap:4px 12px; margin:8px 0 0; font-family:var(--mono); font-size:11px; color:var(--text-2); }
+      .nb-key span { display:flex; align-items:center; gap:5px; }
+      .nb-key i { width:10px; height:10px; border-radius:3px; border:1px solid var(--border-strong); flex:0 0 auto; }
+
+      .nb-tiles { display:grid; grid-template-columns:repeat(5,1fr); gap:8px; margin:12px 0 4px; }
+      @media (max-width:720px){ .nb-tiles{ grid-template-columns:repeat(3,1fr); } }
+      @media (max-width:420px){ .nb-tiles{ grid-template-columns:repeat(2,1fr); } }
+      .nb-tile { border:1px solid var(--border); border-radius:var(--radius-sm); background:#fff; padding:8px 9px; }
+      .nb-tile .tl { font-size:11px; color:var(--text-3); line-height:1.35; }
+      .nb-tile .tv { font-family:var(--mono); font-size:15px; font-weight:700; color:var(--text); margin-top:2px; }
+      .nb-tile.warn { border-color:var(--warn); background:var(--warn-soft); }
+      .nb-tile.warn .tv { color:var(--warn); }
+
+      /* ===== 05 分層診斷器：巢狀分層堆疊盒 + 嫌疑條（nd-） ===== */
+      .nd-obs { display:grid; grid-template-columns:repeat(3,1fr); gap:10px 14px; margin:4px 0 12px; }
+      @media (max-width:720px){ .nd-obs{ grid-template-columns:1fr 1fr; } }
+      @media (max-width:460px){ .nd-obs{ grid-template-columns:1fr; } }
+      .nd-ob { display:flex; flex-direction:column; gap:3px; min-width:0; }
+      .nd-ob .ol { font-size:12.5px; color:var(--text-2); line-height:1.35; }
+      .nd-ob select {
+        font-family:var(--mono); font-size:12px; padding:4px 6px; width:100%;
+        border:1px solid var(--border-strong); border-radius:5px; background:#fff; color:var(--text);
       }
 
-      /* 端到端旅程：三個節點，各含 4 層迷你堆疊 */
+      .nd-stack { display:flex; flex-direction:column; gap:6px; margin:12px 0 4px; }
+      .nd-band {
+        border:1px solid var(--border); border-left-width:4px; border-radius:var(--radius-sm);
+        background:#fff; padding:8px 11px;
+        display:grid; grid-template-columns:168px 1fr 58px; gap:10px; align-items:center;
+      }
+      @media (max-width:600px){
+        .nd-band { grid-template-columns:1fr 54px; }
+        .nd-band .bm { grid-column:1 / -1; }
+      }
+      .nd-band.sub { margin-left:18px; }
+      .nd-band .bn { font-weight:700; font-size:13px; }
+      .nd-band .bd { font-size:11px; color:var(--text-3); margin-top:1px; line-height:1.45; }
+      .nd-band .bx {
+        font-family:var(--mono); font-size:10px; color:var(--text-3);
+        border:1px solid var(--border-strong); border-radius:4px; padding:0 5px; margin-left:6px; white-space:nowrap;
+      }
+      .nd-band .bm { height:12px; background:var(--bg-soft); border-radius:999px; overflow:hidden; }
+      .nd-band .bm i { display:block; height:100%; background:var(--accent-line); }
+      .nd-band .bp { font-family:var(--mono); font-size:13px; font-weight:700; text-align:right; color:var(--text); }
+      .nd-band.top { border-color:var(--accent); box-shadow:0 0 0 2px var(--accent-soft); }
+      .nd-band.top .bm i { background:var(--accent); }
+      .nd-band.out { opacity:.55; background:var(--bg-soft); }
+      .nd-band.out .bp { color:var(--text-3); }
+      .nd-band.l-app  { border-left-color:var(--l-app); }
+      .nd-band.l-tp   { border-left-color:var(--l-tp); }
+      .nd-band.l-net  { border-left-color:var(--l-net); }
+      .nd-band.l-link { border-left-color:var(--l-link); }
+
+      .nd-next { border:1px solid var(--accent-line); background:var(--accent-soft); border-radius:var(--radius-sm); padding:10px 12px; margin:12px 0 0; }
+      .nd-next.done { border-color:var(--ok); background:var(--ok-soft); }
+      .nd-next .nt { font-family:var(--mono); font-size:11px; color:var(--text-2); letter-spacing:.04em; }
+      .nd-next .nq { font-weight:700; font-size:13.5px; margin:3px 0 3px; }
+      .nd-next .nc {
+        font-family:var(--mono); font-size:12px; color:var(--text); background:#fff;
+        border:1px solid var(--border-strong); border-radius:5px; padding:3px 7px; display:inline-block;
+      }
+      .nd-next .nm { font-size:12px; color:var(--text-2); margin-top:5px; line-height:1.55; }
+      .nd-conflict { border:1px solid var(--bad); background:var(--bad-soft); border-radius:var(--radius-sm); padding:9px 12px; margin:10px 0 0; font-size:12.5px; color:var(--bad); line-height:1.6; }
+      .nd-ev { display:flex; flex-direction:column; gap:4px; margin:12px 0 0; }
+      .nd-ev .eh { font-family:var(--mono); font-size:11px; color:var(--text-3); letter-spacing:.04em; }
+      .nd-ev .er { display:grid; grid-template-columns:76px 1fr; gap:8px; font-size:12px; color:var(--text-2); line-height:1.5; }
+      .nd-ev .er .ew { font-family:var(--mono); font-size:11.5px; text-align:right; white-space:nowrap; }
+      .nd-ev .er .ew.up { color:var(--bad); }
+      .nd-ev .er .ew.dn { color:var(--ok); }
+
+      /* 端到端旅程（靜態圖）：三個節點，各含 4 層迷你堆疊 */
       .nl-journey { display:flex; align-items:stretch; gap:8px; margin:8px 0 4px; }
-      .nl-node { flex:1 1 0; border:1px solid var(--border); border-radius:var(--radius-sm); padding:10px; background:#fff; min-width:0; transition:border-color .2s, box-shadow .2s; }
-      .nl-node.done { border-color:var(--accent-line); }
-      .nl-node.hot  { box-shadow:0 0 0 3px var(--accent-soft); border-color:var(--accent); }
+      .nl-node { flex:1 1 0; border:1px solid var(--border); border-radius:var(--radius-sm); padding:10px; background:#fff; min-width:0; }
       .nl-node-title { font-weight:700; font-size:13px; text-align:center; margin-bottom:2px; }
-      .nl-node-sub { font-family:var(--mono); font-size:10px; color:var(--text-3); text-align:center; margin-bottom:8px; }
+      .nl-node-sub { font-family:var(--mono); font-size:11px; color:var(--text-3); text-align:center; margin-bottom:8px; }
       .nl-nstack { display:flex; flex-direction:column; gap:3px; }
       .nl-cell {
         border:1px solid var(--border); border-radius:5px; padding:5px 7px; font-size:11px;
-        color:var(--text-3); background:#fff; text-align:center; transition:background .2s, color .2s, border-color .2s;
+        color:var(--text-3); background:#fff; text-align:center;
       }
       .nl-cell.on-app  { background:var(--l-app-soft);  border-color:var(--l-app);  color:var(--text); }
       .nl-cell.on-tp   { background:var(--l-tp-soft);   border-color:var(--l-tp);   color:var(--text); }
       .nl-cell.on-net  { background:var(--l-net-soft);  border-color:var(--l-net);  color:var(--text); }
       .nl-cell.on-link { background:var(--l-link-soft); border-color:var(--l-link); color:var(--text); }
-      .nl-hop { align-self:center; font-family:var(--mono); font-size:16px; color:var(--text-3); flex:0 0 auto; padding:0 2px; }
-      .nl-hop.live { color:var(--accent); }
+      .nl-cell.off { opacity:.35; }
+      .nl-hop {
+        align-self:center; flex:0 0 auto; padding:0 2px; white-space:nowrap;
+        font-family:var(--mono); font-size:11.5px; color:var(--text-3);
+      }
       @media (max-width:560px){
         .nl-journey { flex-direction:column; }
         .nl-hop { transform:rotate(90deg); align-self:center; }
@@ -206,55 +281,62 @@
 
       <p>資料往下走一層，那一層就在前面（有時也在後面）貼上自己的 <strong>header</strong>，把上層交來的東西整個當成「不透明的酬載（payload）」包起來——這叫<strong>封裝</strong>。接收端反過來，每往上走一層就拆掉對應的 header，讀出裡面的酬載交給上層——這叫<strong>解封裝</strong>。兩邊完全對稱，像一組俄羅斯娃娃。</p>
 
-      <p>關鍵洞察：<strong>每一層只看得懂、也只在乎自己那層的 header。</strong>路由器讀 IP header 就夠了，它根本不拆你的 TCP／HTTP；交換器只看 MAC。這種「各層互不干涉」正是分層能成立的原因。下面這個演示，讓你親手把一塊 HTTP 資料一層層包成 Frame，再反向拆回來：</p>
+      <p>關鍵洞察：<strong>每一層只看得懂、也只在乎自己那層的 header。</strong>路由器讀 IP header 就夠了，它根本不拆你的 TCP／HTTP；交換器只看 MAC。這種「各層互不干涉」正是分層能成立的原因。而封裝是要付代價的——每一層貼上去的 header 都是實實在在的 byte。下面這個拆解器讓你調 payload 大小與各層選項，把代價算到個位數：</p>
 
-      <!-- INTERACTIVE: encapsulation builder -->
-      <div class="demo" id="demo-encap">
+      <!-- INTERACTIVE: 封包切片拆解器（F） -->
+      <div class="demo" id="demo-nb">
         <div class="demo-bar">
-          <span class="label">互動 · 封裝／解封裝</span>
-          <div class="seg" role="group" aria-label="方向切換">
-            <button data-mode="encap" aria-pressed="true">封裝（送端 ↓）</button>
-            <button data-mode="decap" aria-pressed="false">解封裝（收端 ↑）</button>
+          <span class="label">互動 · 一筆資料在線路上佔多少 byte</span>
+          <div class="seg" role="group" aria-label="傳輸層協定">
+            <button data-l4="tcp" aria-pressed="true">TCP（分段）</button>
+            <button data-l4="udp" aria-pressed="false">UDP（IP 分片）</button>
           </div>
         </div>
-        <div class="demo-body" id="nl-root">
-          <div class="nl-encap-grid">
-            <div>
-              <div class="nl-wire-label">目前所在層 · 資料單位<span class="nl-pdu-badge" id="enc-pdu">Message</span></div>
-              <div class="nl-stack" id="enc-stack">
-                <div class="nl-layer l-app"  data-layer="app"><span class="ln">▲</span><span class="lname">應用 Application</span><span class="lbody"><span class="lrole">HTTP 產生請求資料</span></span></div>
-                <div class="nl-layer l-tp"   data-layer="tp"><span class="ln">│</span><span class="lname">傳輸 Transport</span><span class="lbody"><span class="lrole">TCP：port 多工、可靠傳輸</span></span></div>
-                <div class="nl-layer l-net"  data-layer="net"><span class="ln">│</span><span class="lname">網路 Internet</span><span class="lbody"><span class="lrole">IP：跨網路定址與路由</span></span></div>
-                <div class="nl-layer l-link" data-layer="link"><span class="ln">▼</span><span class="lname">鏈路 Link</span><span class="lbody"><span class="lrole">Ethernet：相鄰設備間傳輸</span></span></div>
-              </div>
+        <div class="demo-body">
+
+          <div class="nb-knobs">
+            <div class="nb-knob">
+              <span class="kl">應用層 payload</span><span class="kv" id="nb-v-pay">1200 B</span>
+              <input type="range" id="nb-pay" min="1" max="20000" step="1" value="1200" aria-label="應用層 payload 大小">
             </div>
-            <div>
-              <div class="nl-wire-label">線路上的位元串（wire format）</div>
-              <div class="nl-wire" id="enc-wire">
-                <div class="nl-box link hidden" data-box="link-h"><span class="btag">Link</span><span class="bh">Ethernet Header</span><span class="bf">dst/src MAC<br>type 0x0800</span></div>
-                <div class="nl-box net hidden"  data-box="net-h"><span class="btag">Internet</span><span class="bh">IP Header</span><span class="bf">src/dst IP<br>TTL=64 · proto=TCP</span></div>
-                <div class="nl-box tp hidden"   data-box="tp-h"><span class="btag">Transport</span><span class="bh">TCP Header</span><span class="bf">src/dst port<br>seq/ack · flags</span></div>
-                <div class="nl-box app hidden"  data-box="payload"><span class="btag">Application</span><span class="bh">HTTP 資料（payload）</span><span class="bf">GET /index.html HTTP/1.1<br>Host: example.com</span></div>
-                <div class="nl-box link hidden" data-box="link-t"><span class="btag">Link</span><span class="bh">FCS 尾端</span><span class="bf">CRC 檢查碼</span></div>
-              </div>
-              <div class="nl-bits" id="enc-bits"></div>
+            <div class="nb-knob">
+              <span class="kl">路徑 MTU</span><span class="kv" id="nb-v-mtu">1500 B</span>
+              <select id="nb-mtu" aria-label="路徑 MTU">
+                <option value="576">576（保守下限）</option>
+                <option value="1400">1400（VPN 常見）</option>
+                <option value="1492">1492（PPPoE）</option>
+                <option value="1500" selected>1500（乙太網標準）</option>
+                <option value="9000">9000（Jumbo Frame）</option>
+              </select>
+            </div>
+            <div class="nb-knob">
+              <span class="kl">網路層版本</span><span class="kv" id="nb-v-ip">IPv4 · 20 B</span>
+              <select id="nb-ip" aria-label="IP 版本">
+                <option value="4" selected>IPv4（header 20 B）</option>
+                <option value="6">IPv6（header 40 B）</option>
+              </select>
+            </div>
+            <label class="nb-chk">
+              <input type="checkbox" id="nb-opt" checked>
+              <span>TCP options：timestamps + SACK（+12 B）</span>
+            </label>
+            <label class="nb-chk">
+              <input type="checkbox" id="nb-vlan">
+              <span>802.1Q VLAN 標籤（+4 B）</span>
+            </label>
+            <div class="nb-knob" style="align-self:end">
+              <button class="btn" id="nb-reset" style="grid-column:1 / -1">重置為預設參數</button>
             </div>
           </div>
-          <div class="status-line" id="enc-status"></div>
-          <div style="margin-top:14px;display:flex;gap:8px;flex-wrap:wrap;">
-            <button class="btn" id="enc-prev">上一步</button>
-            <button class="btn primary" id="enc-next">下一步</button>
-            <button class="btn" id="enc-reset">重置</button>
-          </div>
-          <div class="legend">
-            <span><i class="dot" style="background:var(--l-app-soft);border-color:var(--l-app)"></i>應用</span>
-            <span><i class="dot" style="background:var(--l-tp-soft);border-color:var(--l-tp)"></i>傳輸</span>
-            <span><i class="dot" style="background:var(--l-net-soft);border-color:var(--l-net)"></i>網路</span>
-            <span><i class="dot" style="background:var(--l-link-soft);border-color:var(--l-link)"></i>鏈路</span>
-          </div>
+
+          <div class="nb-bars" id="nb-bars"></div>
+          <div class="nb-key" id="nb-key"></div>
+          <div class="nb-tiles" id="nb-tiles"></div>
+          <div class="status-line" id="nb-status"></div>
+
         </div>
       </div>
-      <p class="cap">切到「解封裝」會看到收端從一整個 Frame 反向拆回 HTTP 資料——與送端的封裝一步步對稱。注意：Link 層在前後各加了東西（header + 尾端 FCS），其餘層只加前面的 header。</p>
+      <p class="cap">看 payload 那一段的寬度佔比：payload 拉到 1 byte 時，整條線幾乎全是 header——這就是「小封包的 overhead」。另外注意兩件常被搞混的事：<b>VLAN 標籤不佔 MTU</b>（MTU 量的是 IP 層以上的 payload，所以加 VLAN 只讓每個 frame 變長、不會讓 MSS 變小）；<b>UDP 被 IP 分片時只有第一片帶得到 UDP header</b>，後面幾片在 IP 眼裡只是無名的 byte 串。模型已計入乙太網最小訊框 64 B 的 padding 與每個 frame 的前導碼＋訊框間隔 20 B。</p>
 
       <div class="callout warn">
         <div class="c-title"><span class="ic">陷阱</span>封裝不是加密</div>
@@ -270,7 +352,7 @@
 
     <!-- ============ 05 一個封包的完整旅程 ============ -->
     <section id="s5">
-      <div class="sec-head"><span class="sec-num">05</span><h2>一個封包的完整旅程</h2></div>
+      <div class="sec-head"><span class="sec-num">05</span><h2>封包的旅程，與它卡在哪一層</h2></div>
       <p class="sec-sub">把封裝放進真實地形：資料不是點對點直達，而是一跳跳穿過設備——而不同設備只拆到不同的層。</p>
 
       <p>回到開頭那個 HTTP 請求。它從你的電腦出發，中間至少會經過家用／機房的<strong>路由器</strong>，最後抵達伺服器。這裡藏著一個最能鞏固分層心智模型的事實：<strong>不同設備只把封包往上拆到不同的層</strong>——</p>
@@ -279,57 +361,144 @@
         <li><strong>路由器 Router</strong>：拆到<strong>網路層（第 3 層）</strong>，讀 IP、查路由表決定下一跳，然後換上新 frame header 再送出。</li>
         <li><strong>端點主機（你的電腦／伺服器）</strong>：一路拆到<strong>應用層</strong>，因為資料就是要交給上面的程式。</li>
       </ul>
-      <p>跟著下面的演示走一遍，看同一個請求如何在三個節點間、以不同的「拆解深度」接力：</p>
+      <p>把這三種角色排成一列，就是一個請求的實際地形：</p>
 
-      <!-- INTERACTIVE: end-to-end journey -->
-      <div class="demo" id="demo-journey">
-        <div class="demo-bar">
-          <span class="label">互動 · 封包的端到端旅程</span>
-          <span class="label" style="text-transform:none;font-family:var(--sans);font-size:12px;color:var(--text-2)">看不同設備各拆到第幾層</span>
-        </div>
-        <div class="demo-body">
-          <div class="nl-journey" id="jn-journey">
-            <div class="nl-node" data-node="client">
-              <div class="nl-node-title">你的電腦</div>
-              <div class="nl-node-sub">end host</div>
-              <div class="nl-nstack">
-                <div class="nl-cell" data-l="app">應用</div>
-                <div class="nl-cell" data-l="tp">傳輸</div>
-                <div class="nl-cell" data-l="net">網路</div>
-                <div class="nl-cell" data-l="link">鏈路</div>
-              </div>
-            </div>
-            <span class="nl-hop" data-hop="c-r">→</span>
-            <div class="nl-node" data-node="router">
-              <div class="nl-node-title">路由器</div>
-              <div class="nl-node-sub">router · L3</div>
-              <div class="nl-nstack">
-                <div class="nl-cell" data-l="app" style="opacity:.35">應用</div>
-                <div class="nl-cell" data-l="tp" style="opacity:.35">傳輸</div>
-                <div class="nl-cell" data-l="net">網路</div>
-                <div class="nl-cell" data-l="link">鏈路</div>
-              </div>
-            </div>
-            <span class="nl-hop" data-hop="r-s">→</span>
-            <div class="nl-node" data-node="server">
-              <div class="nl-node-title">伺服器</div>
-              <div class="nl-node-sub">end host</div>
-              <div class="nl-nstack">
-                <div class="nl-cell" data-l="app">應用</div>
-                <div class="nl-cell" data-l="tp">傳輸</div>
-                <div class="nl-cell" data-l="net">網路</div>
-                <div class="nl-cell" data-l="link">鏈路</div>
-              </div>
-            </div>
+      <div class="nl-journey">
+        <div class="nl-node">
+          <div class="nl-node-title">你的電腦</div>
+          <div class="nl-node-sub">end host</div>
+          <div class="nl-nstack">
+            <div class="nl-cell on-app">應用</div>
+            <div class="nl-cell on-tp">傳輸</div>
+            <div class="nl-cell on-net">網路</div>
+            <div class="nl-cell on-link">鏈路</div>
           </div>
-          <div class="status-line" id="jn-status"></div>
-          <div style="margin-top:14px;display:flex;gap:8px;flex-wrap:wrap;">
-            <button class="btn primary" id="jn-next">下一步</button>
-            <button class="btn" id="jn-reset">重置</button>
+        </div>
+        <span class="nl-hop">─Frame─▸</span>
+        <div class="nl-node">
+          <div class="nl-node-title">路由器</div>
+          <div class="nl-node-sub">router · L3</div>
+          <div class="nl-nstack">
+            <div class="nl-cell off">應用</div>
+            <div class="nl-cell off">傳輸</div>
+            <div class="nl-cell on-net">網路</div>
+            <div class="nl-cell on-link">鏈路</div>
+          </div>
+        </div>
+        <span class="nl-hop">─換新 Frame─▸</span>
+        <div class="nl-node">
+          <div class="nl-node-title">伺服器</div>
+          <div class="nl-node-sub">end host</div>
+          <div class="nl-nstack">
+            <div class="nl-cell on-app">應用</div>
+            <div class="nl-cell on-tp">傳輸</div>
+            <div class="nl-cell on-net">網路</div>
+            <div class="nl-cell on-link">鏈路</div>
           </div>
         </div>
       </div>
-      <p class="cap">重點不在動畫，而在那個「路由器只點亮到網路層」的畫面：它證明了封裝的價值——中途設備不必也不能理解上層內容，各層真正做到了獨立。</p>
+      <p class="cap">看中間那一格：路由器的「應用」與「傳輸」是灰的——它拆到網路層讀完目的 IP 就轉發，上層內容對它是不透明的 payload。IP 位址一路不變，MAC 每一跳都換，所以箭頭上寫的是「換新 Frame」。</p>
+
+      <p>這張圖也是<strong>排錯時最有用的一張圖</strong>。當「連不上」發生時，資深工程師做的第一件事不是重開機，而是<strong>把症狀壓到某一層</strong>：能 ping 通卻連不上 port、DNS 解得出來卻沒反應、小請求正常但大檔案會卡住——每一種組合都指向不同的層。下面的診斷器讓你把手上量到的每一項填進去，它會算出嫌疑落在哪一層、哪幾層已經被排除，以及<strong>下一個最該量的是什麼</strong>：</p>
+
+      <!-- INTERACTIVE: 分層診斷器（E） -->
+      <div class="demo" id="demo-nd">
+        <div class="demo-bar">
+          <span class="label">互動 · 分層診斷器</span>
+          <span class="label" style="text-transform:none;font-family:var(--sans);font-size:12px;color:var(--text-2)">填入你量到的每一項，看問題被壓到哪一層</span>
+        </div>
+        <div class="demo-body">
+
+          <div class="nd-obs">
+            <div class="nd-ob">
+              <span class="ol">網域解不解得出 IP</span>
+              <select id="nd-dns" aria-label="網域解析結果">
+                <option value="unknown">尚未測</option>
+                <option value="ok" selected>解得出 IP</option>
+                <option value="fail">解不出來</option>
+              </select>
+            </div>
+            <div class="nd-ob">
+              <span class="ol">ping 預設閘道</span>
+              <select id="nd-gw" aria-label="預設閘道可達性">
+                <option value="unknown">尚未測</option>
+                <option value="ok" selected>通</option>
+                <option value="fail">不通</option>
+              </select>
+            </div>
+            <div class="nd-ob">
+              <span class="ol">ping 目的 IP</span>
+              <select id="nd-ping" aria-label="目的位址可達性">
+                <option value="unknown">尚未測</option>
+                <option value="ok" selected>通</option>
+                <option value="fail">不通</option>
+              </select>
+            </div>
+            <div class="nd-ob">
+              <span class="ol">連那個 port（nc / telnet）</span>
+              <select id="nd-tcp" aria-label="TCP 連線結果">
+                <option value="unknown">尚未測</option>
+                <option value="ok">連得上</option>
+                <option value="refused">connection refused</option>
+                <option value="timeout" selected>逾時、沒有任何回應</option>
+              </select>
+            </div>
+            <div class="nd-ob">
+              <span class="ol">伺服器端有沒有在聽那個 port</span>
+              <select id="nd-listen" aria-label="伺服器端監聽狀態">
+                <option value="unknown" selected>尚未測</option>
+                <option value="yes">有，ss 看得到</option>
+                <option value="no">沒有任何程式在聽</option>
+              </select>
+            </div>
+            <div class="nd-ob">
+              <span class="ol">TLS 握手</span>
+              <select id="nd-tls" aria-label="TLS 握手結果">
+                <option value="na" selected>尚未測／不適用</option>
+                <option value="ok">成功</option>
+                <option value="namemismatch">憑證名稱（SAN）不符</option>
+                <option value="handshakefail">握手失敗</option>
+              </select>
+            </div>
+            <div class="nd-ob">
+              <span class="ol">大封包 / 大 body</span>
+              <select id="nd-big" aria-label="大封包傳輸行為">
+                <option value="unknown" selected>尚未測</option>
+                <option value="ok">和小的一樣正常</option>
+                <option value="stalls">小的正常、大的會卡住</option>
+              </select>
+            </div>
+            <div class="nd-ob">
+              <span class="ol">目的地跟你同網段嗎</span>
+              <select id="nd-sub" aria-label="是否同網段">
+                <option value="unknown">不確定</option>
+                <option value="yes">同網段</option>
+                <option value="no" selected>跨網段</option>
+              </select>
+            </div>
+          </div>
+
+          <div class="nd-stack" id="nd-stack"></div>
+          <div id="nd-conflict"></div>
+          <div class="nd-next" id="nd-next"></div>
+          <div class="status-line" id="nd-status"></div>
+          <div class="nd-ev" id="nd-ev"></div>
+
+          <div class="legend">
+            <span><i class="dot" style="background:var(--l-app-soft);border-color:var(--l-app)"></i>應用層</span>
+            <span><i class="dot" style="background:var(--l-tp-soft);border-color:var(--l-tp)"></i>傳輸層</span>
+            <span><i class="dot" style="background:var(--l-net-soft);border-color:var(--l-net)"></i>網路層</span>
+            <span><i class="dot" style="background:var(--l-link-soft);border-color:var(--l-link)"></i>鏈路層</span>
+          </div>
+
+          <div style="margin-top:12px;display:flex;gap:8px;flex-wrap:wrap;">
+            <button class="btn primary" id="nd-clear">全部設為「尚未測」</button>
+            <button class="btn" id="nd-reset">重置為預設情境</button>
+          </div>
+
+        </div>
+      </div>
+      <p class="cap">嫌疑百分比是把每條被觸發的規則加減出來的分數正規化而成，不是查表：改任何一格都會讓五條長條同時重算。被壓到 0 分的層會標成「已排除」——排除比指認更有價值，因為它讓你不必再去量那一層。最下方的「下一個該量什麼」是<b>算</b>出來的：它把每個還沒量的檢查項的每一種可能結果都代進去重算一次分佈，挑能把不確定度（以 bit 計）壓最多的那一個。</p>
 
       <div class="callout accent">
         <div class="c-title"><span class="ic">串起來</span>從網址到畫面，各層各司其職</div>
