@@ -1,3 +1,12 @@
+<!-- demo-archetype: A｜時序推進（主，第 6 節「互動 Demo：Batching 與 KV 如何改寫延遲／吞吐」）＋B｜參數掃描（次，第 5 節「TTFT vs Throughput：怎麼取捨」）
+     主：讀者編請求台帳（8 筆各自短／長、到達間隔、長 prompt 長度）並設 slot 上限、KV 預算、排程策略
+     （static／continuous × prefill 優先／decode 優先），每按一次「下一 tick」就真的跑一次 iteration-level
+     排程器——誰被 admit、誰排隊、誰因 KV 觸頂被搶佔、每筆的 TTFT 與完成 tick、當下 tokens/s 與 GPU 忙碌
+     比例，全部由 computeSchedule(p) 依規則推導。選 A 在此合法：continuous batching 的定義本身就是「以
+     decode step 為粒度重做排程決策」，tick 不是敘事分鏡而是這個機制唯一的決策時點；每個 tick 的狀態由
+     參數＋排程規則算出，不存在 frames 陣列。
+     次：讀者拖到達率、prompt／生成長度、batch 上限、KV 預算（FP16／FP8）與 TTFT SLO，即時重算穩態 batch、
+     TTFT、tokens/s、GPU／KV 利用率與瓶頸歸因，並畫出 batch=1..32 的 TTFT–吞吐取捨軌跡與當前操作點。 -->
 <style>
   /* 本篇專屬：lis-* 命名空間（llm-inference-serving），不覆蓋全站 base 類別 */
   #lis-root {
@@ -39,19 +48,24 @@
   }
   .lis-phase ul { margin: 0; padding-left: 1.15em; font-size: 13px; color: var(--text-2); line-height: 1.65; }
 
-  .lis-flow {
-    display: flex; flex-wrap: wrap; gap: 6px; align-items: center;
-    margin: 12px 0; font-family: var(--mono); font-size: 11.5px;
+  /* 第 2 節：Prefill → Decode 時序 swimlane（每列一個時間步，欄固定不折行） */
+  .lis-lane {
+    display: grid; grid-template-columns: 76px repeat(3, 1fr); gap: 1px;
+    background: var(--border); border: 1px solid var(--border);
+    border-radius: 8px; overflow: hidden; margin: 14px 0 6px;
   }
-  .lis-chip {
-    border: 1px solid var(--border-strong); border-radius: 6px;
-    padding: 6px 10px; background: #fff; color: var(--text); font-weight: 600;
+  .lis-lane > div { background: #fff; padding: 8px 10px; font-size: 12px; line-height: 1.5; }
+  .lis-lane .lh {
+    background: var(--bg-soft); font-family: var(--mono); font-size: 11px;
+    font-weight: 700; color: var(--text-2);
   }
-  .lis-chip.prefill { background: var(--lis-prefill-soft); border-color: var(--lis-prefill); color: var(--lis-prefill); }
-  .lis-chip.decode { background: var(--lis-decode-soft); border-color: var(--lis-decode); color: var(--lis-decode); }
-  .lis-chip.kv { background: var(--lis-kv-soft); border-color: var(--lis-kv); color: var(--lis-kv); }
-  .lis-chip.batch { background: var(--lis-batch-soft); border-color: var(--lis-batch); color: var(--lis-batch); }
-  .lis-chip.op { background: var(--bg-soft); color: var(--text-3); border-style: dashed; font-weight: 500; }
+  .lis-lane .lt { background: var(--bg-soft); font-family: var(--mono); font-size: 11px; color: var(--text-3); }
+  .lis-lane .lc.pf { background: var(--lis-prefill-soft); }
+  .lis-lane .lc.dc { background: var(--lis-decode-soft); }
+  .lis-lane .lc.kv { background: var(--lis-kv-soft); }
+  @media (max-width: 720px) {
+    .lis-lane { grid-template-columns: 62px repeat(3, minmax(0, 1fr)); font-size: 11px; }
+  }
 
   .lis-pipeline {
     border: 1px solid var(--border); border-radius: var(--radius-sm);
@@ -96,62 +110,102 @@
     margin-right: 4px; vertical-align: -1px;
   }
 
-  /* Demo */
-  .lis-demo-controls {
-    display: flex; flex-wrap: wrap; gap: 8px; margin: 10px 0 8px; align-items: center;
+  /* ── 共用旋鈕列（兩個 demo 各自一份 markup，共用排版規則） ── */
+  .lis-knobs {
+    display: grid; grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 7px 20px; margin: 10px 0 4px;
   }
-  .lis-metric {
-    display: flex; flex-wrap: wrap; gap: 14px; margin: 8px 0 12px;
-    font-size: 13px; color: var(--text-2);
+  @media (max-width: 640px) { .lis-knobs { grid-template-columns: 1fr; } }
+  .lis-knobs label {
+    display: flex; align-items: center; gap: 8px;
+    font-size: 12.5px; color: var(--text-2); white-space: nowrap;
   }
-  .lis-metric strong { color: var(--text); font-family: var(--mono); font-size: 12.5px; }
-  .lis-panels {
-    display: grid; grid-template-columns: 1.1fr 1fr; gap: 12px; margin: 10px 0;
+  .lis-knobs input[type="range"] { flex: 1 1 auto; min-width: 70px; accent-color: var(--accent); }
+  .lis-knobs b {
+    font-family: var(--mono); font-size: 11.5px; color: var(--text);
+    min-width: 62px; text-align: right;
   }
-  @media (max-width: 720px) { .lis-panels { grid-template-columns: 1fr; } }
-  .lis-panel {
+  .lis-ctl { display: flex; flex-wrap: wrap; gap: 8px; margin: 10px 0 4px; align-items: center; }
+  .lis-card {
     border: 1px solid var(--border); border-radius: var(--radius-sm);
-    background: #fff; padding: 12px;
+    background: #fff; padding: 10px 12px;
   }
-  .lis-panel .pt {
-    font-family: var(--mono); font-size: 11px; color: var(--text-3);
-    letter-spacing: .04em; margin-bottom: 8px; font-weight: 600;
+  .lis-card .ct {
+    font-family: var(--mono); font-size: 10.5px; letter-spacing: .05em;
+    color: var(--text-3); font-weight: 700; margin-bottom: 7px;
   }
-  .lis-slot-row {
-    display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; min-height: 36px;
+
+  /* ── Demo 1：Continuous Batching Scheduler（lis-sc-*） ── */
+  .lis-sc-main { display: grid; grid-template-columns: 1fr 176px; gap: 12px; margin: 10px 0; }
+  @media (max-width: 720px) { .lis-sc-main { grid-template-columns: 1fr; } }
+  .lis-sc-grid { display: grid; gap: 2px; align-items: stretch; }
+  .lis-sc-th {
+    font-family: var(--mono); font-size: 9px; color: var(--text-3);
+    text-align: center; height: 13px; line-height: 13px;
   }
-  .lis-slot {
-    border: 1px solid var(--border-strong); border-radius: 6px;
-    padding: 6px 8px; font-family: var(--mono); font-size: 11px;
-    background: var(--bg-soft); color: var(--text-2); min-width: 72px; text-align: center;
+  .lis-sc-rh {
+    font-family: var(--mono); font-size: 9.5px; color: var(--text-3);
+    line-height: 19px; white-space: nowrap;
   }
-  .lis-slot.prefill { background: var(--lis-prefill-soft); border-color: var(--lis-prefill); color: var(--lis-prefill); font-weight: 600; }
-  .lis-slot.decode { background: var(--lis-decode-soft); border-color: var(--lis-decode); color: var(--lis-decode); font-weight: 600; }
-  .lis-slot.wait { background: var(--warn-soft); border-color: var(--warn); color: var(--warn); }
-  .lis-slot.idle { opacity: .55; border-style: dashed; }
-  .lis-kv-grid {
-    display: grid; grid-template-columns: repeat(8, 1fr); gap: 3px; margin-top: 4px;
+  .lis-sc-cell {
+    height: 19px; border-radius: 3px; border: 1px solid var(--border);
+    background: var(--bg-soft); font-family: var(--mono); font-size: 9px;
+    line-height: 17px; text-align: center; color: var(--text-3); overflow: hidden;
   }
-  .lis-kv-cell {
-    aspect-ratio: 1; border-radius: 3px; border: 1px solid var(--border);
-    background: var(--bg-soft);
+  .lis-sc-cell.pf { background: var(--lis-prefill-soft); border-color: var(--lis-prefill); color: var(--lis-prefill); font-weight: 700; }
+  .lis-sc-cell.dc { background: var(--lis-decode-soft); border-color: var(--lis-decode); color: var(--lis-decode); font-weight: 700; }
+  .lis-sc-cell.st { background: var(--warn-soft); border-color: var(--warn); color: var(--warn); }
+  .lis-sc-cell.pe { background: var(--bad-soft); border-color: var(--bad); color: var(--bad); font-weight: 700; }
+  .lis-sc-cell.ft { box-shadow: inset 0 -3px 0 var(--lis-batch); }
+  .lis-sc-cell.fin { box-shadow: inset 0 -3px 0 var(--text-3); }
+  .lis-sc-bud {
+    height: 30px; border: 1px solid var(--border); border-radius: 3px;
+    background: #fff; overflow: hidden; display: flex; flex-direction: column-reverse;
   }
-  .lis-kv-cell.on { background: var(--lis-kv); border-color: var(--lis-kv); }
-  .lis-kv-cell.hot { background: var(--lis-batch); border-color: var(--lis-batch); }
-  .lis-timeline {
-    border: 1px solid var(--border); border-radius: var(--radius-sm);
-    background: var(--bg-soft); padding: 10px 12px; margin-top: 8px;
-    font-family: var(--mono); font-size: 11.5px; line-height: 1.7; color: var(--text-2);
-    max-height: 160px; overflow-y: auto;
+  .lis-sc-bud span { display: block; width: 100%; }
+  .lis-sc-bud .u-pf { background: var(--lis-prefill); }
+  .lis-sc-bud .u-df { background: var(--lis-decode); }
+  .lis-sc-bud .u-ds { background: var(--lis-decode); opacity: .42; }
+  .lis-sc-gauge {
+    position: relative; height: 148px; border: 1px solid var(--border-strong);
+    border-radius: 6px; background: var(--bg-soft);
+    display: flex; flex-direction: column-reverse; overflow: hidden;
   }
-  .lis-timeline .ev { color: var(--text); }
-  .lis-verdict {
-    border: 1px solid var(--border); border-radius: var(--radius-sm);
-    padding: 12px; margin: 8px 0; background: #fff; font-size: 13.5px; line-height: 1.6;
+  .lis-sc-gauge > span {
+    display: block; width: 100%; background: var(--lis-kv);
+    border-top: 1px solid #fff; font-family: var(--mono); font-size: 8.5px;
+    color: #fff; text-align: center; overflow: hidden;
   }
-  .lis-verdict.tone-ok { border-left: 3px solid var(--ok); background: var(--ok-soft); }
-  .lis-verdict.tone-lock { border-left: 3px solid var(--warn); background: var(--warn-soft); }
-  .lis-verdict.tone-bad { border-left: 3px solid var(--bad); background: var(--bad-soft); }
+  .lis-sc-peak {
+    position: absolute; left: 0; right: 0; border-top: 2px dashed var(--bad);
+    font-family: var(--mono); font-size: 8.5px; color: var(--bad); padding-left: 3px;
+  }
+  .lis-sc-kpi { display: grid; grid-template-columns: 1fr auto; gap: 3px 8px; font-size: 11.5px; }
+  .lis-sc-kpi span { color: var(--text-2); }
+  .lis-sc-kpi b { font-family: var(--mono); font-size: 11.5px; color: var(--text); }
+  .lis-sc-kpi b.warn { color: var(--bad); }
+  .lis-sc-kind {
+    font-family: var(--mono); font-size: 11px; font-weight: 700; cursor: pointer;
+    border: 1px solid var(--border-strong); border-radius: 5px; padding: 2px 9px;
+    background: var(--lis-prefill-soft); color: var(--lis-prefill);
+  }
+  .lis-sc-kind.long { background: var(--lis-batch-soft); color: var(--lis-batch); border-color: var(--lis-batch); }
+  table.lis-sc-tbl td, table.lis-sc-tbl th { font-size: 12px; padding: 5px 8px; }
+  table.lis-sc-tbl td.num { font-family: var(--mono); font-size: 11.5px; }
+
+  /* ── Demo 2：TTFT / Throughput 取捨掃描（lis-tr-*） ── */
+  .lis-tr-main { display: grid; grid-template-columns: 1fr 172px; gap: 12px; margin: 10px 0; }
+  @media (max-width: 720px) { .lis-tr-main { grid-template-columns: 1fr; } }
+  .lis-tr-read { display: grid; grid-template-columns: 1fr auto; gap: 4px 8px; font-size: 11.5px; align-content: start; }
+  .lis-tr-read span { color: var(--text-2); }
+  .lis-tr-read b { font-family: var(--mono); font-size: 11.5px; color: var(--text); }
+  .lis-tr-read b.bad { color: var(--bad); }
+  .lis-tr-read b.ok { color: var(--ok); }
+  .lis-tr-bars { display: grid; grid-template-columns: 78px 1fr auto; gap: 5px 8px; align-items: center; margin: 8px 0 2px; font-size: 11.5px; color: var(--text-2); }
+  .lis-tr-track { height: 9px; border-radius: 5px; background: var(--bg-soft); border: 1px solid var(--border); overflow: hidden; }
+  .lis-tr-track i { display: block; height: 100%; background: var(--accent); }
+  .lis-tr-track i.hot { background: var(--bad); }
+  .lis-tr-bars b { font-family: var(--mono); font-size: 11px; color: var(--text); }
 </style>
 
 <div id="lis-root">
@@ -191,6 +245,7 @@
       <div class="lis-box b-batch"><div class="bn">Batching</div><div class="bs">連續批處理<br>抬吞吐、管排隊</div></div>
     </div>
   </div>
+  <p class="cap">看第一個盒與第三個盒的關係：Prefill 決定 TTFT，但它寫出的 KV Cache 會一路佔著顯存直到請求結束——所以「首 token 快不快」與「這台卡還能接幾個人」是同一段計算的兩個面向。</p>
 
   <div class="callout accent">
     <div class="c-title"><span class="ic">座標</span>與鄰近主題的切分</div>
@@ -234,16 +289,30 @@
 
   <p>產品面的「打字機效果」來自 Decode 串流；Infra 面則必須分開優化兩段：Prefill 要降 <var>TTFT</var>，Decode 要抬 <var>TPOT</var>（Time Per Output Token）與整體 tokens/s。把兩者綁在同一個同步 batch 裡，往往會讓長 prompt 請求拖死短請求的首 token。</p>
 
-  <div class="lis-flow">
-    <span class="lis-chip prefill">prompt tokens</span>
-    <span class="lis-chip op">→ prefill →</span>
-    <span class="lis-chip kv">KV written</span>
-    <span class="lis-chip op">→ loop →</span>
-    <span class="lis-chip decode">token<sub>t</sub></span>
-    <span class="lis-chip op">stream</span>
-    <span class="lis-chip decode">token<sub>t+1</sub></span>
-    <span class="lis-chip op">…</span>
+  <div class="lis-lane">
+    <div class="lh">時間步</div><div class="lh">GPU 在算什麼</div><div class="lh">KV Cache 怎麼變</div><div class="lh">客戶端看到什麼</div>
+
+    <div class="lt">prefill</div>
+    <div class="lc pf">一次吃完整 prompt（system + RAG context + 提問）</div>
+    <div class="lc kv">每一層寫入初始 K/V，長度＝prompt 長度</div>
+    <div class="lc">還沒有任何字——TTFT 正在計時</div>
+
+    <div class="lt">decode 1</div>
+    <div class="lc dc">讀權重與整段 KV，算出第 1 個 token</div>
+    <div class="lc kv">append 1 個 token 的 K/V</div>
+    <div class="lc">首字出現 → <strong>TTFT 在此定格</strong></div>
+
+    <div class="lt">decode 2…n</div>
+    <div class="lc dc">每步只產 1 個 token，重複 n−1 次</div>
+    <div class="lc kv">每步 +1 token 的 K/V，隨答案長度線性成長</div>
+    <div class="lc">逐字串流，節奏由 TPOT 決定</div>
+
+    <div class="lt">終止</div>
+    <div class="lc">命中 EOS／max_tokens／客戶端取消</div>
+    <div class="lc kv">整段 KV 一次釋放，空間還給別的請求</div>
+    <div class="lc">串流結束</div>
   </div>
+  <p class="cap">看第三欄與第四欄的落差：KV 從 prefill 那一刻就滿載寫入，客戶端卻要到 decode 第 1 步才看到第一個字——這一格的時間差就是 TTFT，也是本篇所有排程取捨的起點。</p>
 
   <div class="callout warn">
     <div class="c-title"><span class="ic">陷阱</span>把「模型延遲」當單一數字</div>
@@ -351,6 +420,7 @@
       <span><i style="background:var(--ok-soft);border:1px solid var(--border)"></i>KV Cache 可成長空間</span>
     </div>
   </div>
+  <p class="cap">該看的是最右邊那段：權重與 activation 是開機就固定的，只有 KV 那一段會隨「並發數 × 上下文長度」即時長大——容量規劃要規劃的就是這一段還剩多少。</p>
 
   <div class="callout warn">
     <div class="c-title"><span class="ic">陷阱</span>只看「模型放不放得進卡」</div>
@@ -416,6 +486,49 @@
 
   <p>實務上建議用產品 SLA 反推：聊天／客服把 TTFT p95 當硬約束，再在約束內最大化 tokens/s；離線評測或大量摘要任務則可接受較高 TTFT，換取更高 batch。必要時<strong>分池</strong>（interactive pool vs batch pool），比在單一佇列上調一個神奇參數更穩。</p>
 
+  <div class="demo" id="demo-lis-tradeoff">
+    <div class="demo-bar">
+      <span class="label">互動 · TTFT / Throughput 取捨掃描</span>
+      <span class="label" style="text-transform:none;font-family:var(--sans);font-size:12px;color:var(--text-2)">拖旋鈕，看操作點在取捨軌跡上往哪邊滑</span>
+    </div>
+    <div class="demo-body">
+      <p style="margin:0 0 8px;font-size:13px;color:var(--text-2);line-height:1.55;">模型（誠實申報，教學示意非實測）：一次 decode iteration 耗時 <code>9 + 0.55 × b</code> ms（固定項是整批共攤的權重讀取），prefill 吞吐 9000 token/s，但 prefill 只能吃 decode 沒用掉的那部分 GPU——<code>batch 越大，prefill 能分到的比例越小</code>。排隊延遲用 M/M/1 近似 <code>ρ/(1−ρ)</code>。KV 每 token 128 KiB（FP16）／64 KiB（FP8）。</p>
+
+      <div class="seg" role="group" aria-label="KV 精度">
+        <button data-tr-kv="fp16" aria-pressed="true">KV FP16</button>
+        <button data-tr-kv="fp8" aria-pressed="false">KV FP8（量化）</button>
+      </div>
+
+      <div class="lis-knobs">
+        <label>到達率 <input type="range" id="lis-tr-rps" min="1" max="60" step="1" value="3"><b id="lis-tr-rps-v">3 req/s</b></label>
+        <label>平均 prompt <input type="range" id="lis-tr-prompt" min="128" max="8192" step="128" value="2048"><b id="lis-tr-prompt-v">2048 tok</b></label>
+        <label>平均生成 <input type="range" id="lis-tr-gen" min="16" max="1024" step="16" value="256"><b id="lis-tr-gen-v">256 tok</b></label>
+        <label>batch 上限 <input type="range" id="lis-tr-batch" min="1" max="64" step="1" value="16"><b id="lis-tr-batch-v">16</b></label>
+        <label>KV 預算 <input type="range" id="lis-tr-kv" min="2" max="40" step="1" value="12"><b id="lis-tr-kv-v">12 GiB</b></label>
+        <label>TTFT SLO <input type="range" id="lis-tr-slo" min="200" max="5000" step="100" value="1200"><b id="lis-tr-slo-v">1200 ms</b></label>
+      </div>
+      <div class="lis-ctl"><button class="btn" id="lis-tr-reset">重置為預設</button></div>
+
+      <div class="lis-tr-main">
+        <div class="lis-card">
+          <div class="ct">取捨軌跡 · X＝可服務吞吐 tokens/s，Y＝TTFT ms（沿 batch 上限 b=1…32 掃描）</div>
+          <svg id="lis-tr-plot" viewBox="0 0 560 300" role="img" style="width:100%;height:auto">
+            <title>TTFT 對可服務吞吐的取捨軌跡，含 SLO 截線與當前操作點</title>
+            <g id="lis-tr-layer"></g>
+          </svg>
+        </div>
+        <div class="lis-card">
+          <div class="ct">當前操作點</div>
+          <div class="lis-tr-read" id="lis-tr-read"></div>
+        </div>
+      </div>
+
+      <div class="lis-tr-bars" id="lis-tr-bars"></div>
+      <div class="status-line" id="lis-tr-status">拖動任一旋鈕即時重算。</div>
+    </div>
+  </div>
+  <p class="cap">看軌跡的最低點：batch 上限往右拉，可服務吞吐一路上升，但 TTFT 先降後升——降是因為排隊變短，升是因為 decode 吃走了 prefill 的預算。最低點右邊那一段，就是「用首 token 換吞吐」真正發生的地方。</p>
+
   <div class="oneliner">
     <b>一句話答法</b>TTFT 與 throughput 常反向：加大 batch 抬吞吐但傷首 token；互動流量護 TTFT、批次流量護吞吐，必要時分池。
   </div>
@@ -426,57 +539,70 @@
     <span class="sec-num">06</span>
     <h2>互動 Demo：Batching 與 KV 如何改寫延遲／吞吐</h2>
   </div>
-  <p class="sec-sub">同一組請求，切換排程策略，觀察 GPU slot、KV 佔用與 TTFT／吞吐指標。</p>
+  <p class="sec-sub">編好請求台帳與 GPU／KV 預算，逐 tick 推進排程器，看 slot 怎麼換人、KV 什麼時候觸頂。</p>
 
-  <div class="demo" id="demo-lis-serve">
+  <div class="demo" id="demo-lis-sched">
     <div class="demo-bar">
-      <span class="label">互動 · Inference Scheduler</span>
-      <span class="label" style="text-transform:none;font-family:var(--sans);font-size:12px;color:var(--text-2)">切換策略後按「模擬一步」，看 batch 與 KV 的取捨</span>
+      <span class="label">互動 · Continuous Batching Scheduler</span>
+      <span class="label" style="text-transform:none;font-family:var(--sans);font-size:12px;color:var(--text-2)">設好台帳與預算，按「下一 tick」逐 iteration 跑排程器</span>
     </div>
     <div class="demo-body">
-      <p style="margin:0 0 8px;font-size:13px;color:var(--text-2);line-height:1.55;">場景：4 個並發請求（短問答 ×2、長 RAG 上下文 ×1、長答案摘要 ×1）。策略改變的是<strong>誰能進 GPU、KV 怎麼長</strong>——數字為教學示意，非真實 kernel 量測。</p>
+      <p style="margin:0 0 8px;font-size:13px;color:var(--text-2);line-height:1.55;">每按一次「下一 tick」就真的跑一次 iteration：先處理到達、再決定誰能 admit、再把該 tick 的計算預算分給 prefill 與 decode。規則（誠實申報，教學示意非實測）：一個 tick ＝ 20 ms、計算預算 512 unit；prefill 每 token 1 unit；decode 每 iteration 固定 160 unit（權重讀取，<strong>整批共攤</strong>）＋每序列 6 unit。KV 每 token 128 KiB（＝2 × 32 layers × 8 kv_heads × 128 head_dim × 2 B，FP16），故 1 GiB ＝ 8192 token。Admission 以「已寫入 ＋ 已承諾」的 KV 計；KV 觸頂而 decode 還要長時，最晚進來的那筆會被<strong>搶佔重算</strong>。</p>
 
       <div class="seg" role="group" aria-label="排程策略">
-        <button data-sc="static" aria-pressed="true">靜態 Batch</button>
-        <button data-sc="continuous" aria-pressed="false">Continuous</button>
-        <button data-sc="kv-tight" aria-pressed="false">Continuous + KV 緊縮</button>
+        <button data-sc-policy="continuous" aria-pressed="true">Continuous Batching</button>
+        <button data-sc-policy="static" aria-pressed="false">靜態 Batch</button>
+      </div>
+      <div class="seg" role="group" aria-label="計算預算優先權">
+        <button data-sc-pf="decode" aria-pressed="true">Decode 優先</button>
+        <button data-sc-pf="prefill" aria-pressed="false">Prefill 優先</button>
       </div>
 
-      <div class="lis-demo-controls">
-        <button class="btn primary" id="lis-btn-step">模擬一步</button>
-        <button class="btn" id="lis-btn-reset">重置</button>
+      <div class="lis-knobs">
+        <label>到達間隔 <input type="range" id="lis-sc-gap" min="0" max="6" step="1" value="2"><b id="lis-sc-gap-v">2 tick</b></label>
+        <label>slot 上限 <input type="range" id="lis-sc-batch" min="1" max="8" step="1" value="4"><b id="lis-sc-batch-v">4</b></label>
+        <label>KV 預算 <input type="range" id="lis-sc-kv" min="1" max="16" step="1" value="4"><b id="lis-sc-kv-v">4 GiB</b></label>
+        <label>長 prompt <input type="range" id="lis-sc-lp" min="512" max="4096" step="128" value="2048"><b id="lis-sc-lp-v">2048 tok</b></label>
       </div>
 
-      <div class="lis-metric">
-        <span>步驟 <strong id="lis-m-step">0</strong></span>
-        <span>活躍 batch <strong id="lis-m-batch">—</strong></span>
-        <span>TTFT（示意） <strong id="lis-m-ttft">—</strong></span>
-        <span>吞吐 tokens/s <strong id="lis-m-tps">—</strong></span>
-        <span>KV 佔用 <strong id="lis-m-kv">—</strong></span>
+      <div class="lis-ctl">
+        <button class="btn primary" id="lis-sc-next">下一 tick ▸</button>
+        <button class="btn" id="lis-sc-jump">快轉 5 tick ▸▸</button>
+        <button class="btn" id="lis-sc-reset">重置</button>
       </div>
 
-      <div class="lis-panels">
-        <div class="lis-panel">
-          <div class="pt">GPU ACTIVE SLOTS</div>
-          <div class="lis-slot-row" id="lis-slots"></div>
-          <div class="legend">
+      <div class="lis-sc-main">
+        <div class="lis-card">
+          <div class="ct">SLOT × TICK 佔用格帶（下緣橘線＝該筆的首 token、灰線＝EOS）</div>
+          <div class="lis-sc-grid" id="lis-sc-band"></div>
+          <div class="legend" style="margin-top:8px">
             <span><i class="dot ns-wait"></i>Prefill</span>
             <span><i class="dot ns-ok"></i>Decode</span>
-            <span><i class="dot ns-lock"></i>排隊</span>
-            <span><i class="dot ns-idle"></i>空閒</span>
+            <span><i class="dot ns-lock"></i>本 tick 沒分到預算</span>
+            <span><i class="dot ns-bad"></i>被搶佔重算</span>
+            <span><i class="dot ns-idle"></i>空 slot</span>
           </div>
         </div>
-        <div class="lis-panel">
-          <div class="pt">KV CACHE BLOCKS（32 blocks）</div>
-          <div class="lis-kv-grid" id="lis-kv-grid" aria-hidden="true"></div>
+        <div class="lis-card">
+          <div class="ct">KV 佔用 / 預算</div>
+          <div class="lis-sc-gauge" id="lis-sc-gauge"></div>
+          <div class="lis-sc-kpi" id="lis-sc-kpi" style="margin-top:9px"></div>
         </div>
       </div>
 
-      <div class="status-line" id="lis-status">選擇策略後按「模擬一步」。靜態 Batch 會等齊四筆；Continuous 允許動態進出。</div>
-      <div class="lis-verdict" id="lis-verdict">判定尚未產生——跑完數步後會摘要 TTFT／吞吐／KV 壓力。</div>
-      <div class="lis-timeline" id="lis-timeline" aria-live="polite"></div>
+      <div class="tbl-wrap">
+        <table class="lis-sc-tbl">
+          <thead>
+            <tr><th>請求</th><th>類型（可點）</th><th>prompt</th><th>生成</th><th>到達 tick</th><th>TTFT</th><th>完成 tick</th><th>進度</th></tr>
+          </thead>
+          <tbody id="lis-sc-rows"></tbody>
+        </table>
+      </div>
+
+      <div class="status-line" id="lis-sc-status">按「下一 tick」開始；點台帳的「類型」欄可把任一筆在短問答 ↔ 長 RAG 之間切換。</div>
     </div>
   </div>
+  <p class="cap">該看的是格帶上「同一個 slot 換人」的那幾格：continuous batching 讓完成的請求立刻讓出 slot 給排隊者，而靜態 Batch 會讓整條格帶先空著等齊、再一起走——右側 KV 量規則負責告訴你，這場調度還有沒有記憶體可以調。</p>
 
   <div class="oneliner">
     <b>一句話答法</b>Demo 要傳達的不是絕對數字，而是機制：靜態齊步走傷 TTFT；連續批處理抬吞吐；KV 空間不夠時再聰明的 scheduler 也只能拒單或換頁。

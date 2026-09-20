@@ -2,412 +2,718 @@
 (function () {
   "use strict";
 
-  var strategy = "static";
-  var step = 0;
-  var maxSteps = 6;
+  /* ===================== (1) 常數與參數表 ===================== */
 
-  var statusEl = document.getElementById("lis-status");
-  var verdictEl = document.getElementById("lis-verdict");
-  var slotsEl = document.getElementById("lis-slots");
-  var kvGridEl = document.getElementById("lis-kv-grid");
-  var timelineEl = document.getElementById("lis-timeline");
-  var btnStep = document.getElementById("lis-btn-step");
-  var btnReset = document.getElementById("lis-btn-reset");
-  var mStep = document.getElementById("lis-m-step");
-  var mBatch = document.getElementById("lis-m-batch");
-  var mTtft = document.getElementById("lis-m-ttft");
-  var mTps = document.getElementById("lis-m-tps");
-  var mKv = document.getElementById("lis-m-kv");
-  var segRoot = document.querySelector("#demo-lis-serve .seg");
+  /* 排程器（第 6 節）—— 誠實申報的模型常數 */
+  var KV_KIB_PER_TOKEN = 128;   /* 2 × 32 layers × 8 kv_heads × 128 head_dim × 2 B（FP16） */
+  var TOKENS_PER_GIB = 8192;    /* 1 GiB ÷ 128 KiB */
+  var TICK_MS = 20;             /* 一個 iteration 的示意 wall clock */
+  var TICK_BUDGET = 512;        /* 每 tick 的計算預算（unit） */
+  var DECODE_FIXED = 160;       /* 每 iteration 固定的權重讀取，整批共攤 */
+  var DECODE_PER_SEQ = 6;       /* 每多一條序列的邊際成本 */
+  var PROMPT_SHORT = 128;
+  var GEN_SHORT = 24;
+  var GEN_LONG = 192;
+  var BAND_WINDOW = 20;         /* 格帶顯示最近幾個 tick */
 
-  var REQ = [
-    { id: "A", label: "A·短問", kind: "short" },
-    { id: "B", label: "B·短問", kind: "short" },
-    { id: "C", label: "C·長RAG", kind: "rag" },
-    { id: "D", label: "D·長答案", kind: "long" }
-  ];
+  /* 取捨掃描（第 5 節） */
+  var ITER_BASE_MS = 9;         /* decode iteration 的固定成本 */
+  var ITER_PER_SEQ_MS = 0.55;   /* 每序列邊際成本 */
+  var PREFILL_TPS = 9000;       /* prefill 吞吐 token/s */
+  var KV_KIB_FP8 = 64;
+  var SWEEP_MAX_B = 32;
 
-  /* Each strategy: frames[0..n] describe GPU slots + kv blocks used + metrics + log */
-  var FRAMES = {
-    static: [
-      {
-        slots: [
-          { t: "A·等齊", c: "wait" },
-          { t: "B·等齊", c: "wait" },
-          { t: "C·Prefill", c: "prefill" },
-          { t: "D·等齊", c: "wait" }
-        ],
-        kv: 6,
-        batch: "1／等齊中",
-        ttft: "—（短請求被擋）",
-        tps: "0",
-        status: "靜態 Batch：必須湊滿同一批才開始 decode。C 的長 Prefill 先佔住，A/B/D 乾等。",
-        log: "t0  靜態批：等待四筆對齊；C 開始 prefill（長 context）"
-      },
-      {
-        slots: [
-          { t: "A·等齊", c: "wait" },
-          { t: "B·等齊", c: "wait" },
-          { t: "C·Prefill", c: "prefill" },
-          { t: "D·Prefill", c: "prefill" }
-        ],
-        kv: 14,
-        batch: "2／仍未齊",
-        ttft: "A/B 仍 0 token",
-        tps: "~40（僅 prefill）",
-        status: "C、D 陸續 prefill，KV 快速膨脹；短請求仍未拿到首 token。",
-        log: "t1  C/D prefill 寫入 KV；A/B 繼續排隊"
-      },
-      {
-        slots: [
-          { t: "A·Decode", c: "decode" },
-          { t: "B·Decode", c: "decode" },
-          { t: "C·Decode", c: "decode" },
-          { t: "D·Decode", c: "decode" }
-        ],
-        kv: 22,
-        batch: "4（齊步 decode）",
-        ttft: "A≈420ms（被拖）",
-        tps: "~180",
-        status: "四筆終於一起 decode。吞吐看起來「一次很多」，但 A/B 的 TTFT 已被長請求拖壞。",
-        log: "t2  批對齊完成 → 同步 decode；短請求 TTFT 惡化"
-      },
-      {
-        slots: [
-          { t: "A·完成", c: "idle" },
-          { t: "B·完成", c: "idle" },
-          { t: "C·Decode", c: "decode" },
-          { t: "D·Decode", c: "decode" }
-        ],
-        kv: 24,
-        batch: "2（尾部長請求）",
-        ttft: "A≈420ms",
-        tps: "~110（槽位閒置）",
-        status: "A/B 早已 EOS，但靜態批常要等整批結束或留下空洞——槽位與 KV 被長尾佔用。",
-        log: "t3  A/B 結束；C/D 長尾仍佔 batch／KV"
-      },
-      {
-        slots: [
-          { t: "—", c: "idle" },
-          { t: "—", c: "idle" },
-          { t: "C·Decode", c: "decode" },
-          { t: "D·Decode", c: "decode" }
-        ],
-        kv: 26,
-        batch: "2",
-        ttft: "A≈420ms · B≈420ms",
-        tps: "~95",
-        status: "長尾拖住資源。靜態策略的典型病徵：平均利用率看起來還行，互動 SLA 已碎。",
-        log: "t4  長尾 decode；短請求體驗已鎖定為差"
-      },
-      {
-        slots: [
-          { t: "—", c: "idle" },
-          { t: "—", c: "idle" },
-          { t: "C·完成", c: "idle" },
-          { t: "D·完成", c: "idle" }
-        ],
-        kv: 8,
-        batch: "0",
-        ttft: "A/B≈420ms（差）",
-        tps: "峰值高、均值不穩",
-        status: "結束。靜態 Batch：峰值吞吐可觀，但 TTFT 被齊步走懲罰。",
-        log: "t5  批結束，KV 釋放",
-        verdictTone: "tone-bad",
-        verdict: "判定：靜態 Batch 不適合互動 LLM。長 Prefill／長答案會綁架短請求的首 token；GPU 看似忙碌，SLA 卻掛了。"
-      }
-    ],
-    continuous: [
-      {
-        slots: [
-          { t: "A·Prefill", c: "prefill" },
-          { t: "B·Prefill", c: "prefill" },
-          { t: "—", c: "idle" },
-          { t: "—", c: "idle" }
-        ],
-        kv: 4,
-        batch: "2（動態）",
-        ttft: "A/B 即將出首 token",
-        tps: "~60",
-        status: "Continuous：短請求立刻進場 prefill，不必等 C/D 到齊。",
-        log: "t0  A/B 立即 prefill；C/D 在佇列"
-      },
-      {
-        slots: [
-          { t: "A·Decode", c: "decode" },
-          { t: "B·Decode", c: "decode" },
-          { t: "C·Prefill", c: "prefill" },
-          { t: "—", c: "idle" }
-        ],
-        kv: 12,
-        batch: "3",
-        ttft: "A≈90ms · B≈95ms",
-        tps: "~210",
-        status: "A/B 已在 decode 串流；C 的長 Prefill 併入同一步 iteration，不阻擋已開始的短請求。",
-        log: "t1  A/B decode；C 加入 prefill（iteration-level）"
-      },
-      {
-        slots: [
-          { t: "A·完成", c: "idle" },
-          { t: "B·Decode", c: "decode" },
-          { t: "C·Decode", c: "decode" },
-          { t: "D·Prefill", c: "prefill" }
-        ],
-        kv: 18,
-        batch: "3",
-        ttft: "A≈90ms（佳）",
-        tps: "~260",
-        status: "完成的請求立刻讓出 slot；D 動態加入。吞吐上升，TTFT 仍受控。",
-        log: "t2  A EOS 離場；D 加入；batch 重組"
-      },
-      {
-        slots: [
-          { t: "—", c: "idle" },
-          { t: "B·完成", c: "idle" },
-          { t: "C·Decode", c: "decode" },
-          { t: "D·Decode", c: "decode" }
-        ],
-        kv: 20,
-        batch: "2",
-        ttft: "A/B≈90–95ms",
-        tps: "~240",
-        status: "活躍集合只剩長請求。空出來的容量可接新互動流量（本 demo 未再注入）。",
-        log: "t3  短請求清空；C/D 續跑"
-      },
-      {
-        slots: [
-          { t: "—", c: "idle" },
-          { t: "—", c: "idle" },
-          { t: "C·Decode", c: "decode" },
-          { t: "D·Decode", c: "decode" }
-        ],
-        kv: 22,
-        batch: "2",
-        ttft: "維持前值",
-        tps: "~220",
-        status: "KV 隨 decode 緩步成長，但仍在預算內；scheduler 健康。",
-        log: "t4  KV 穩定成長；無拒單"
-      },
-      {
-        slots: [
-          { t: "—", c: "idle" },
-          { t: "—", c: "idle" },
-          { t: "C·完成", c: "idle" },
-          { t: "D·完成", c: "idle" }
-        ],
-        kv: 6,
-        batch: "0",
-        ttft: "A/B≈90ms（佳）",
-        tps: "高且平穩",
-        status: "結束。Continuous batching：短請求 TTFT 明顯改善，整體 tokens/s 也更高更穩。",
-        log: "t5  全部完成，KV 釋放",
-        verdictTone: "tone-ok",
-        verdict: "判定：Continuous batching 同時改善互動 TTFT 與平均吞吐。這是現代 LLM serving 的預設答案——再往上才是分頁 KV、prefix cache、分池。"
-      }
-    ],
-    "kv-tight": [
-      {
-        slots: [
-          { t: "A·Prefill", c: "prefill" },
-          { t: "B·Prefill", c: "prefill" },
-          { t: "—", c: "idle" },
-          { t: "—", c: "idle" }
-        ],
-        kv: 4,
-        batch: "2",
-        ttft: "A/B 進行中",
-        tps: "~60",
-        status: "策略仍是 Continuous，但 HBM 預算被刻意收緊（示意上限 ≈18 blocks）。",
-        log: "t0  KV 預算緊縮模式；A/B prefill"
-      },
-      {
-        slots: [
-          { t: "A·Decode", c: "decode" },
-          { t: "B·Decode", c: "decode" },
-          { t: "C·Prefill", c: "prefill" },
-          { t: "—", c: "idle" }
-        ],
-        kv: 14,
-        batch: "3",
-        ttft: "A≈90ms",
-        tps: "~200",
-        status: "C 的長 context 開始寫 KV，佔用逼近天花板。",
-        log: "t1  C 長 prefill → KV 急升"
-      },
-      {
-        slots: [
-          { t: "A·完成", c: "idle" },
-          { t: "B·Decode", c: "decode" },
-          { t: "C·Decode", c: "decode" },
-          { t: "D·拒單", c: "wait" }
-        ],
-        kv: 18,
-        batch: "2（D 被擋）",
-        ttft: "A≈90ms · D=REJECT",
-        tps: "~190",
-        status: "KV 觸頂：scheduler 拒絕或延後 D（admission control）。再聰明的 batching 也無法憑空變出 HBM。",
-        log: "t2  KV=18/18 → D admission rejected／queued"
-      },
-      {
-        slots: [
-          { t: "—", c: "idle" },
-          { t: "B·完成", c: "idle" },
-          { t: "C·Decode", c: "decode" },
-          { t: "D·拒單", c: "wait" }
-        ],
-        kv: 17,
-        batch: "1",
-        ttft: "D 仍在等 KV",
-        tps: "~120",
-        status: "B 結束釋出一點空間，但仍不夠 D 的預估 KV → 繼續擋。",
-        log: "t3  釋放不足；D 仍無法入場"
-      },
-      {
-        slots: [
-          { t: "—", c: "idle" },
-          { t: "—", c: "idle" },
-          { t: "C·Decode", c: "decode" },
-          { t: "D·等KV", c: "wait" }
-        ],
-        kv: 16,
-        batch: "1",
-        ttft: "互動 OK；D 飢餓",
-        tps: "~100",
-        status: "吞吐下降不是算力沒了，是記憶體 admission 在限流。監控上要分開看「算力飽和」vs「KV 飽和」。",
-        log: "t4  記憶體瓶頸主導；非 compute 瓶頸"
-      },
-      {
-        slots: [
-          { t: "—", c: "idle" },
-          { t: "—", c: "idle" },
-          { t: "C·完成", c: "idle" },
-          { t: "D·Prefill", c: "prefill" }
-        ],
-        kv: 10,
-        batch: "1（D 遲進）",
-        ttft: "D 嚴重惡化",
-        tps: "前半高、後半塌",
-        status: "C 結束後 D 才進場——成功率靠排隊換來，TTFT 已不可接受。治本是加容量、縮 context、或分池。",
-        log: "t5  C 釋放後 D 才 prefill",
-        verdictTone: "tone-lock",
-        verdict: "判定：Continuous 救得了調度，救不了顯存數學。KV 緊縮時必須搭配 admission control、max_concurrency、或更短有效 prompt；否則長請求會讓後到者飢餓。"
-      }
-    ]
+  var SCHED_DEFAULT = {
+    mix: "SSLSSLSS", arrivalGap: 2, maxBatch: 4, kvBudgetGiB: 4,
+    longPrompt: 2048, policy: "continuous", prefillFirst: false, tick: 0
+  };
+  var TRADE_DEFAULT = {
+    rps: 3, promptLen: 2048, genLen: 256, maxBatch: 16,
+    kvGiB: 12, kvDtype: "fp16", ttftSloMs: 1200
   };
 
-  function setMetrics(frame) {
-    mStep.textContent = String(step);
-    mBatch.textContent = frame.batch;
-    mTtft.textContent = frame.ttft;
-    mTps.textContent = frame.tps;
-    mKv.textContent = frame.kv + " / 32 blocks";
+  /* helper（compute 之前宣告，compute 只呼叫這些與 Math／Number／String） */
+  function clampNum(v, lo, hi, dflt) {
+    var n = Number(v);
+    if (isNaN(n)) n = dflt;
+    if (n < lo) n = lo;
+    if (n > hi) n = hi;
+    return n;
   }
-
-  function renderSlots(slots) {
-    slotsEl.innerHTML = "";
-    slots.forEach(function (s) {
-      var el = document.createElement("div");
-      el.className = "lis-slot " + s.c;
-      el.textContent = s.t;
-      slotsEl.appendChild(el);
-    });
-  }
-
-  function renderKv(used) {
-    kvGridEl.innerHTML = "";
-    var i;
-    for (i = 0; i < 32; i++) {
-      var cell = document.createElement("div");
-      cell.className = "lis-kv-cell";
-      if (i < used) {
-        cell.className += i >= 16 && strategy === "kv-tight" ? " hot" : " on";
-      }
-      kvGridEl.appendChild(cell);
+  function spendPrefill(reqs, order, budget, kvFree) {
+    var spent = 0, j, r, need, take;
+    for (j = 0; j < order.length && budget > 0 && kvFree > 0; j++) {
+      r = reqs[order[j]];
+      need = r.prompt - r.pfDone;
+      if (need <= 0) continue;
+      take = Math.min(need, budget, kvFree);
+      r.pfDone += take; r.kv += take;
+      budget -= take; kvFree -= take; spent += take;
     }
+    return spent;
+  }
+  function tpotMsAt(b) { return ITER_BASE_MS + ITER_PER_SEQ_MS * b; }
+  function prefillShareAt(b) {
+    var s = 1 - (DECODE_FIXED + DECODE_PER_SEQ * b) / TICK_BUDGET;
+    return s < 0.04 ? 0.04 : s;
   }
 
-  function appendLog(line) {
-    var div = document.createElement("div");
-    div.innerHTML = '<span class="ev">' + line + "</span>";
-    timelineEl.appendChild(div);
-    timelineEl.scrollTop = timelineEl.scrollHeight;
-  }
+  /* ===================== (2) compute 純函式 ===================== */
 
-  function showFrame(frame, withLog) {
-    renderSlots(frame.slots);
-    renderKv(frame.kv);
-    setMetrics(frame);
-    statusEl.textContent = frame.status;
-    if (withLog) appendLog(frame.log);
-    if (frame.verdict) {
-      verdictEl.className = "lis-verdict " + (frame.verdictTone || "");
-      verdictEl.textContent = frame.verdict;
-    }
-  }
+  // @probe fn       computeSchedule
+  // @probe baseline {"mix":"SSLSSLSS","arrivalGap":2,"maxBatch":4,"kvBudgetGiB":4,"longPrompt":2048,"policy":"continuous","prefillFirst":false,"tick":12}
+  // @probe sweep    {"mix":["SSSSSSSS","LLLLLLLL"],"arrivalGap":[0,6],"maxBatch":[1,8],"kvBudgetGiB":[1,16],"longPrompt":[512,4096],"policy":["static","continuous"],"prefillFirst":[false,true],"tick":[0,40]}
+  function computeSchedule(p) {
+    var mix = String(p.mix || "SSLSSLSS");
+    var gap = Math.round(clampNum(p.arrivalGap, 0, 6, 2));
+    var slots = Math.round(clampNum(p.maxBatch, 1, 8, 4));
+    var kvCap = Math.round(clampNum(p.kvBudgetGiB, 1, 16, 4)) * TOKENS_PER_GIB;
+    var longP = Math.round(clampNum(p.longPrompt, 512, 4096, 2048));
+    var isStatic = String(p.policy) === "static";
+    var pfFirst = p.prefillFirst === true || String(p.prefillFirst) === "true";
+    var endTick = Math.round(clampNum(p.tick, 0, 60, 0));
 
-  function currentFrames() {
-    return FRAMES[strategy];
-  }
-
-  function resetView() {
-    step = 0;
-    timelineEl.innerHTML = "";
-    verdictEl.className = "lis-verdict";
-    verdictEl.textContent = "判定尚未產生——跑完數步後會摘要 TTFT／吞吐／KV 壓力。";
-    mStep.textContent = "0";
-    mBatch.textContent = "—";
-    mTtft.textContent = "—";
-    mTps.textContent = "—";
-    mKv.textContent = "—";
-    renderSlots([
-      { t: "A·待命", c: "idle" },
-      { t: "B·待命", c: "idle" },
-      { t: "C·待命", c: "idle" },
-      { t: "D·待命", c: "idle" }
-    ]);
-    renderKv(0);
-    var hint = {
-      static: "靜態 Batch：按「模擬一步」開始等齊四筆。",
-      continuous: "Continuous：短請求可立即進場，逐步重組 batch。",
-      "kv-tight": "Continuous + KV 緊縮：觀察 admission control 何時擋下 D。"
-    };
-    statusEl.textContent = hint[strategy] || "按「模擬一步」開始。";
-  }
-
-  if (segRoot) {
-    segRoot.addEventListener("click", function (e) {
-      var btn = e.target.closest("button[data-sc]");
-      if (!btn) return;
-      strategy = btn.getAttribute("data-sc");
-      Array.prototype.forEach.call(segRoot.querySelectorAll("button[data-sc]"), function (b) {
-        b.setAttribute("aria-pressed", b === btn ? "true" : "false");
+    var reqs = [], i, j, k;
+    for (i = 0; i < mix.length; i++) {
+      var isLong = mix.charAt(i) === "L";
+      reqs.push({
+        id: "R" + (i + 1), long: isLong, arrive: i * gap,
+        prompt: isLong ? longP : PROMPT_SHORT,
+        gen: isLong ? GEN_LONG : GEN_SHORT,
+        phase: "unborn", pfDone: 0, genDone: 0, kv: 0, slot: -1,
+        order: -1, ttftTick: -1, doneTick: -1, restarts: 0
       });
-      resetView();
-    });
-  }
+    }
+    var slotOwner = [];
+    for (k = 0; k < slots; k++) slotOwner.push(-1);
 
-  if (btnStep) {
-    btnStep.addEventListener("click", function () {
-      var frames = currentFrames();
-      if (step >= frames.length) {
-        statusEl.textContent = "本策略已模擬完畢。可重置或切換其他策略。";
-        return;
+    var kvUsed = 0, orderSeq = 0, emitted = 0, wasted = 0;
+    var band = [], budgets = [], kvSeries = [], busySum = 0;
+    var preemptions = 0, blockedTicks = 0, stallTicks = 0;
+    var t;
+
+    for (t = 0; t <= endTick; t++) {
+      var before = [];
+      for (i = 0; i < reqs.length; i++) before.push({ pf: reqs[i].pfDone, gen: reqs[i].genDone });
+
+      /* 1. 到達（確定性：第 i 筆在 i × gap） */
+      for (i = 0; i < reqs.length; i++) if (reqs[i].phase === "unborn" && reqs[i].arrive <= t) reqs[i].phase = "queued";
+
+      /* 2. Admission */
+      var active = 0, queued = 0, allArrived = true;
+      for (i = 0; i < reqs.length; i++) {
+        if (reqs[i].phase === "prefill" || reqs[i].phase === "decode") active++;
+        if (reqs[i].phase === "queued") queued++;
+        if (reqs[i].phase === "unborn") allArrived = false;
       }
-      var frame = frames[step];
-      step += 1;
-      showFrame(frame, true);
-      if (step >= frames.length && !frame.verdict) {
-        /* last frame should always have verdict; fallback */
+      var blocked = false;
+      var kvCommitted = kvUsed;
+      for (i = 0; i < reqs.length; i++) if (reqs[i].phase === "prefill") kvCommitted += reqs[i].prompt - reqs[i].pfDone;
+      /* 靜態 Batch：整批 drain 完才開下一批，且要湊滿 slot（或已無新到達）才開跑 */
+      var gate = isStatic ? (active === 0 && (queued >= slots || (allArrived && queued > 0))) : true;
+      if (gate) {
+        for (i = 0; i < reqs.length && active < slots; i++) {
+          if (reqs[i].phase !== "queued") continue;
+          if (kvCommitted + reqs[i].prompt > kvCap) { blocked = true; continue; }
+          kvCommitted += reqs[i].prompt;
+          var s = -1;
+          for (k = 0; k < slots; k++) if (slotOwner[k] === -1) { s = k; break; }
+          if (s === -1) break;
+          slotOwner[s] = i; reqs[i].slot = s; reqs[i].phase = "prefill";
+          reqs[i].order = orderSeq++; active++;
+        }
       }
+      if (blocked) blockedTicks++;
+      var slotStart = slotOwner.slice(0);
+
+      /* 3. 本 tick 的計算預算分配 */
+      var decoders = [], prefillers = [];
+      for (i = 0; i < reqs.length; i++) {
+        if (reqs[i].phase === "decode") decoders.push(i);
+        if (reqs[i].phase === "prefill") prefillers.push(i);
+      }
+      prefillers.sort(function (a, b) { return reqs[a].order - reqs[b].order; });
+      var decodeCost = decoders.length > 0 ? DECODE_FIXED + DECODE_PER_SEQ * decoders.length : 0;
+      var budget = TICK_BUDGET, pfUnits = 0, decodeRan = false;
+
+      if (pfFirst) {
+        pfUnits = spendPrefill(reqs, prefillers, budget, kvCap - kvUsed);
+        budget -= pfUnits; kvUsed += pfUnits;
+        if (decoders.length > 0) {
+          if (budget >= decodeCost) { decodeRan = true; budget -= decodeCost; }
+          else stallTicks++;
+        }
+      } else {
+        if (decoders.length > 0 && budget >= decodeCost) { decodeRan = true; budget -= decodeCost; }
+        pfUnits = spendPrefill(reqs, prefillers, budget, kvCap - kvUsed);
+        budget -= pfUnits; kvUsed += pfUnits;
+      }
+
+      /* 4. Decode step（KV 觸頂 → 搶佔最晚進來的那筆，重算） */
+      var decodedCount = 0;
+      if (decodeRan) {
+        while (kvCap - kvUsed < decoders.length && decoders.length > 0) {
+          var victim = decoders[0];
+          for (j = 1; j < decoders.length; j++) if (reqs[decoders[j]].order > reqs[victim].order) victim = decoders[j];
+          var vr = reqs[victim];
+          kvUsed -= vr.kv; wasted += vr.kv;
+          vr.kv = 0; vr.pfDone = 0; vr.genDone = 0; vr.restarts++;
+          slotOwner[vr.slot] = -1; vr.slot = -1; vr.phase = "queued"; vr.order = -1;
+          preemptions++;
+          var nd = [];
+          for (j = 0; j < decoders.length; j++) if (decoders[j] !== victim) nd.push(decoders[j]);
+          decoders = nd;
+        }
+        decodedCount = decoders.length;
+        for (j = 0; j < decoders.length; j++) {
+          var r2 = reqs[decoders[j]];
+          r2.genDone++; r2.kv++; kvUsed++; emitted++;
+          if (r2.ttftTick === -1) r2.ttftTick = t;
+          if (r2.genDone >= r2.gen) {
+            r2.phase = "done"; r2.doneTick = t;
+            kvUsed -= r2.kv; r2.kv = 0;
+            slotOwner[r2.slot] = -1; r2.slot = -1;
+          }
+        }
+      }
+
+      /* 5. prefill → decode（下一個 tick 才開始產 token） */
+      for (i = 0; i < reqs.length; i++) if (reqs[i].phase === "prefill" && reqs[i].pfDone >= reqs[i].prompt) reqs[i].phase = "decode";
+
+      /* 6. 記帳 */
+      var row = [];
+      for (k = 0; k < slots; k++) {
+        var oi = slotStart[k];
+        if (oi === -1) { row.push({ id: "", ph: "idle", first: false, last: false }); continue; }
+        var rr = reqs[oi], ph;
+        if (rr.pfDone > before[oi].pf) ph = "prefill";
+        else if (rr.genDone > before[oi].gen) ph = "decode";
+        else if (rr.phase === "queued") ph = "preempt";
+        else ph = "stall";
+        row.push({ id: rr.id, ph: ph, first: rr.ttftTick === t, last: rr.doneTick === t });
+      }
+      band.push(row);
+      var decFixed = decodeRan && decodedCount > 0 ? DECODE_FIXED : 0;
+      var decSeq = decodeRan ? DECODE_PER_SEQ * decodedCount : 0;
+      var used = pfUnits + decFixed + decSeq;
+      budgets.push({ prefill: pfUnits, decFixed: decFixed, decSeq: decSeq, used: used });
+      busySum += used / TICK_BUDGET;
+      kvSeries.push(kvUsed);
+    }
+
+    /* 7. 指標 */
+    var ttft = [], rows = [], doneCount = 0, queuedNow = 0, inflight = 0, makespan = -1;
+    for (i = 0; i < reqs.length; i++) {
+      var r = reqs[i];
+      var ms = r.ttftTick >= 0 ? (r.ttftTick - r.arrive + 1) * TICK_MS : -1;
+      ttft.push(ms);
+      if (r.phase === "done") { doneCount++; if (r.doneTick + 1 > makespan) makespan = r.doneTick + 1; }
+      if (r.phase === "queued" || r.phase === "unborn") queuedNow++;
+      if (r.phase === "prefill" || r.phase === "decode") inflight++;
+      rows.push({
+        id: r.id, kind: r.long ? "L" : "S", prompt: r.prompt, gen: r.gen,
+        arrive: r.arrive, ttftMs: ms, doneTick: r.doneTick, phase: r.phase, kv: r.kv,
+        progress: r.gen > 0 ? Math.round(r.genDone / r.gen * 100) : 0, restarts: r.restarts
+      });
+    }
+    var ticks = endTick + 1;
+    var elapsedSec = ticks * TICK_MS / 1000;
+    var kvPeak = 0;
+    for (i = 0; i < kvSeries.length; i++) if (kvSeries[i] > kvPeak) kvPeak = kvSeries[i];
+    var served = [];
+    for (i = 0; i < ttft.length; i++) if (ttft[i] >= 0) served.push(ttft[i]);
+    served.sort(function (a, b) { return a - b; });
+    var lastB = budgets[ticks - 1];
+
+    var narr = "t=" + endTick + "｜在跑 " + inflight + " 筆、佇列 " + queuedNow + " 筆、完成 " + doneCount + " 筆"
+      + "｜本 tick GPU 用掉 " + Math.round(lastB.used / TICK_BUDGET * 100) + "%"
+      + "（prefill " + lastB.prefill + " ＋ decode " + (lastB.decFixed + lastB.decSeq) + " units）"
+      + "｜KV " + kvSeries[ticks - 1] + "/" + kvCap + " tok（" + (kvSeries[ticks - 1] / kvCap * 100).toFixed(1) + "%）"
+      + "｜累計產出 " + emitted + " token，平均 " + (emitted / elapsedSec).toFixed(1) + " tok/s";
+    if (preemptions > 0) narr += "｜已發生 " + preemptions + " 次搶佔，白算 " + wasted + " token 的 KV";
+    if (blockedTicks > 0) narr += "｜有 " + blockedTicks + " 個 tick 因 KV 不足擋下新請求";
+
+    return {
+      band: band, budgets: budgets, kvSeries: kvSeries, rows: rows,
+      slots: slots, ticks: ticks, kvCap: kvCap,
+      kvNow: kvSeries[ticks - 1],
+      kvNowPct: Number((kvSeries[ticks - 1] / kvCap * 100).toFixed(1)),
+      kvPeakPct: Number((kvPeak / kvCap * 100).toFixed(1)),
+      emitted: emitted, wasted: wasted,
+      tokensPerSec: Number((emitted / elapsedSec).toFixed(1)),
+      gpuBusyPct: Number((busySum / ticks * 100).toFixed(1)),
+      ttftMs: ttft,
+      ttftMedian: served.length ? served[Math.floor((served.length - 1) / 2)] : -1,
+      ttftMax: served.length ? served[served.length - 1] : -1,
+      firstTokenCount: served.length,
+      preemptions: preemptions, blockedTicks: blockedTicks, decodeStallTicks: stallTicks,
+      doneCount: doneCount, queuedNow: queuedNow, inflight: inflight,
+      makespanTicks: doneCount === reqs.length ? makespan : -1,
+      narration: narr
+    };
+  }
+
+  // @probe fn       computeTradeoff
+  // @probe baseline {"rps":3,"promptLen":2048,"genLen":256,"maxBatch":16,"kvGiB":12,"kvDtype":"fp16","ttftSloMs":1200}
+  // @probe sweep    {"rps":[1,60],"promptLen":[128,8192],"genLen":[16,1024],"maxBatch":[1,64],"kvGiB":[2,40],"kvDtype":["fp16","fp8"],"ttftSloMs":[200,5000]}
+  function computeTradeoff(p) {
+    var rps = clampNum(p.rps, 1, 60, 3);
+    var promptLen = Math.round(clampNum(p.promptLen, 128, 8192, 2048));
+    var genLen = Math.round(clampNum(p.genLen, 16, 1024, 256));
+    var maxBatch = Math.round(clampNum(p.maxBatch, 1, 64, 16));
+    var kvGiB = clampNum(p.kvGiB, 2, 40, 12);
+    var fp8 = String(p.kvDtype) === "fp8";
+    var slo = Math.round(clampNum(p.ttftSloMs, 200, 5000, 1200));
+
+    var kibPerTok = fp8 ? KV_KIB_FP8 : KV_KIB_PER_TOKEN;
+    var kvTokens = Math.floor(kvGiB * 1048576 / kibPerTok);
+    var avgKvPerSeq = promptLen + genLen / 2;
+    var bMaxKv = Math.max(1, Math.floor(kvTokens / avgKvPerSeq));
+    var prefillMs = promptLen / PREFILL_TPS * 1000;
+    var demandTps = rps * genLen;
+
+    /* 沿 batch 上限 b = 1…32 掃描出取捨軌跡 */
+    var curve = [], b, best = -1, bestTtft = -1, sloMin = -1, sloMax = -1;
+    for (b = 1; b <= SWEEP_MAX_B; b++) {
+      var cap = Math.min(b, bMaxKv);
+      var capTps = cap * 1000 / tpotMsAt(cap);
+      var rho = demandTps / capTps;
+      var effPrefill = prefillMs / prefillShareAt(cap);
+      var tt = rho < 1 ? effPrefill + rho / (1 - rho) * tpotMsAt(cap) : -1;
+      curve.push({
+        b: b, cap: cap, capTps: capTps, servedTps: Math.min(demandTps, capTps),
+        rho: rho, ttftMs: tt, feasible: tt >= 0 && tt <= slo
+      });
+      if (tt >= 0 && (bestTtft < 0 || tt < bestTtft)) { bestTtft = tt; best = b; }
+      if (tt >= 0 && tt <= slo) { if (sloMin < 0) sloMin = b; sloMax = b; }
+    }
+
+    var bCap = Math.min(maxBatch, bMaxKv);
+    var capTpsNow = bCap * 1000 / tpotMsAt(bCap);
+    var rhoNow = demandTps / capTpsNow;
+    var overload = rhoNow >= 1;
+    var bEff = overload ? bCap : rhoNow * bCap;
+    var bRun = Math.max(1, bEff);
+    var effPrefillNow = prefillMs / prefillShareAt(bCap);
+    var waitMs = overload ? -1 : rhoNow / (1 - rhoNow) * tpotMsAt(bCap);
+    var ttftNow = overload ? -1 : effPrefillNow + waitMs;
+    var capBy = bMaxKv < maxBatch ? "KV 容量" : "batch 上限";
+    var bottleneck;
+    if (overload) {
+      bottleneck = "過載：需求 " + demandTps.toFixed(0) + " tok/s 超過容量 " + capTpsNow.toFixed(0)
+        + " tok/s，佇列無界——得加到 ~" + Math.ceil(rhoNow) + " 張卡、降到達率，或縮短有效 prompt。";
+    } else if (rhoNow >= 0.8) {
+      bottleneck = "接近飽和（ρ=" + rhoNow.toFixed(2) + "）：併發上限來自「" + capBy
+        + "」，排隊已貢獻 " + waitMs.toFixed(0) + " ms 的 TTFT。";
+    } else {
+      bottleneck = "流量未飽和（ρ=" + rhoNow.toFixed(2) + "）：併發上限「" + capBy
+        + "」仍有餘裕，TTFT 由 prefill 的 " + effPrefillNow.toFixed(0) + " ms 主導。";
+    }
+
+    return {
+      kvTokens: kvTokens, bMaxKv: bMaxKv, bCap: bCap,
+      bEff: Number(bEff.toFixed(2)),
+      tokensPerSec: Number(Math.min(demandTps, capTpsNow).toFixed(0)),
+      capacityTps: Number(capTpsNow.toFixed(0)),
+      demandTps: Number(demandTps.toFixed(0)),
+      tpotMs: Number(tpotMsAt(bRun).toFixed(2)),
+      prefillMs: Number(prefillMs.toFixed(1)),
+      effPrefillMs: Number(effPrefillNow.toFixed(1)),
+      queueWaitMs: overload ? -1 : Number(waitMs.toFixed(1)),
+      ttftMs: overload ? -1 : Number(ttftNow.toFixed(0)),
+      headroomMs: overload ? -1 : Number((slo - ttftNow).toFixed(0)),
+      sloMs: slo,
+      gpuUtilPct: Number(Math.min(100, rhoNow * 100).toFixed(1)),
+      kvUtilPct: Number(Math.min(100, bEff * avgKvPerSeq / kvTokens * 100).toFixed(1)),
+      overload: overload, gpusNeeded: overload ? Math.ceil(rhoNow) : 1,
+      bottleneck: bottleneck, capBy: capBy,
+      bestB: best, bestTtftMs: best > 0 ? Number(bestTtft.toFixed(0)) : -1,
+      sloFeasibleBMin: sloMin, sloFeasibleBMax: sloMax,
+      curve: curve
+    };
+  }
+
+  /* ===================== (3) DOM 參照 ===================== */
+
+  var schedRoot = document.getElementById("demo-lis-sched");
+  var scBand = document.getElementById("lis-sc-band");
+  var scGauge = document.getElementById("lis-sc-gauge");
+  var scKpi = document.getElementById("lis-sc-kpi");
+  var scRows = document.getElementById("lis-sc-rows");
+  var scStatus = document.getElementById("lis-sc-status");
+  var scNext = document.getElementById("lis-sc-next");
+  var scJump = document.getElementById("lis-sc-jump");
+  var scReset = document.getElementById("lis-sc-reset");
+  var scKnob = {
+    gap: document.getElementById("lis-sc-gap"),
+    batch: document.getElementById("lis-sc-batch"),
+    kv: document.getElementById("lis-sc-kv"),
+    lp: document.getElementById("lis-sc-lp")
+  };
+  var scKnobOut = {
+    gap: document.getElementById("lis-sc-gap-v"),
+    batch: document.getElementById("lis-sc-batch-v"),
+    kv: document.getElementById("lis-sc-kv-v"),
+    lp: document.getElementById("lis-sc-lp-v")
+  };
+
+  var tradeRoot = document.getElementById("demo-lis-tradeoff");
+  var trLayer = document.getElementById("lis-tr-layer");
+  var trRead = document.getElementById("lis-tr-read");
+  var trBars = document.getElementById("lis-tr-bars");
+  var trStatus = document.getElementById("lis-tr-status");
+  var trReset = document.getElementById("lis-tr-reset");
+  var trKnob = {
+    rps: document.getElementById("lis-tr-rps"),
+    prompt: document.getElementById("lis-tr-prompt"),
+    gen: document.getElementById("lis-tr-gen"),
+    batch: document.getElementById("lis-tr-batch"),
+    kv: document.getElementById("lis-tr-kv"),
+    slo: document.getElementById("lis-tr-slo")
+  };
+  var trKnobOut = {
+    rps: document.getElementById("lis-tr-rps-v"),
+    prompt: document.getElementById("lis-tr-prompt-v"),
+    gen: document.getElementById("lis-tr-gen-v"),
+    batch: document.getElementById("lis-tr-batch-v"),
+    kv: document.getElementById("lis-tr-kv-v"),
+    slo: document.getElementById("lis-tr-slo-v")
+  };
+
+  var schedState = {
+    mix: SCHED_DEFAULT.mix, arrivalGap: SCHED_DEFAULT.arrivalGap,
+    maxBatch: SCHED_DEFAULT.maxBatch, kvBudgetGiB: SCHED_DEFAULT.kvBudgetGiB,
+    longPrompt: SCHED_DEFAULT.longPrompt, policy: SCHED_DEFAULT.policy,
+    prefillFirst: SCHED_DEFAULT.prefillFirst, tick: SCHED_DEFAULT.tick
+  };
+  var tradeState = {
+    rps: TRADE_DEFAULT.rps, promptLen: TRADE_DEFAULT.promptLen, genLen: TRADE_DEFAULT.genLen,
+    maxBatch: TRADE_DEFAULT.maxBatch, kvGiB: TRADE_DEFAULT.kvGiB,
+    kvDtype: TRADE_DEFAULT.kvDtype, ttftSloMs: TRADE_DEFAULT.ttftSloMs
+  };
+
+  /* ===================== (4) render：只讀 state 畫出來 ===================== */
+
+  var PHASE_CLASS = { prefill: "pf", decode: "dc", stall: "st", preempt: "pe", idle: "" };
+
+  function renderSchedBand(st) {
+    var from = Math.max(0, st.ticks - BAND_WINDOW);
+    var cols = st.ticks - from;
+    scBand.innerHTML = "";
+    scBand.style.gridTemplateColumns = "30px repeat(" + cols + ", minmax(0, 1fr))";
+    var frag = document.createDocumentFragment(), i, k, d;
+
+    d = document.createElement("div"); d.className = "lis-sc-th"; frag.appendChild(d);
+    for (i = from; i < st.ticks; i++) {
+      d = document.createElement("div"); d.className = "lis-sc-th";
+      d.textContent = (i % 2 === 0 || i === st.ticks - 1) ? String(i) : "";
+      frag.appendChild(d);
+    }
+    for (k = 0; k < st.slots; k++) {
+      d = document.createElement("div"); d.className = "lis-sc-rh"; d.textContent = "S" + k;
+      frag.appendChild(d);
+      for (i = from; i < st.ticks; i++) {
+        var c = st.band[i][k];
+        d = document.createElement("div");
+        d.className = "lis-sc-cell " + (PHASE_CLASS[c.ph] || "") + (c.first ? " ft" : "") + (c.last ? " fin" : "");
+        d.textContent = c.id;
+        d.setAttribute("title", "t=" + i + " · slot " + k + " · " + (c.id || "空") + " · " + c.ph);
+        frag.appendChild(d);
+      }
+    }
+    d = document.createElement("div"); d.className = "lis-sc-rh"; d.textContent = "預算";
+    frag.appendChild(d);
+    for (i = from; i < st.ticks; i++) {
+      var bu = st.budgets[i];
+      d = document.createElement("div"); d.className = "lis-sc-bud";
+      d.innerHTML =
+        '<span class="u-pf" style="height:' + (bu.prefill / TICK_BUDGET * 100).toFixed(1) + '%"></span>' +
+        '<span class="u-df" style="height:' + (bu.decFixed / TICK_BUDGET * 100).toFixed(1) + '%"></span>' +
+        '<span class="u-ds" style="height:' + (bu.decSeq / TICK_BUDGET * 100).toFixed(1) + '%"></span>';
+      d.setAttribute("title", "t=" + i + " · prefill " + bu.prefill + " ＋ decode " + (bu.decFixed + bu.decSeq) + " / " + TICK_BUDGET + " unit");
+      frag.appendChild(d);
+    }
+    scBand.appendChild(frag);
+  }
+
+  function renderSchedGauge(st) {
+    var html = "", i;
+    for (i = 0; i < st.rows.length; i++) {
+      if (st.rows[i].kv <= 0) continue;
+      var pct = st.rows[i].kv / st.kvCap * 100;
+      html += '<span style="height:' + pct.toFixed(2) + '%">' + (pct > 7 ? st.rows[i].id : "") + "</span>";
+    }
+    html += '<div class="lis-sc-peak" style="bottom:' + Math.min(99, st.kvPeakPct).toFixed(2) + '%">峰值 ' + st.kvPeakPct + "%</div>";
+    scGauge.innerHTML = html;
+  }
+
+  function renderSchedKpi(st) {
+    var rowsHtml = [
+      ["KV 現值", st.kvNow + " / " + st.kvCap + " tok", false],
+      ["KV 現值佔比", st.kvNowPct + " %", false],
+      ["tokens/s", st.tokensPerSec, false],
+      ["GPU 忙碌", st.gpuBusyPct + " %", false],
+      ["完成 / 在跑 / 排隊", st.doneCount + " / " + st.inflight + " / " + st.queuedNow, false],
+      ["搶佔次數", st.preemptions + "（白算 " + st.wasted + " tok）", st.preemptions > 0],
+      ["KV 擋單 tick", st.blockedTicks, st.blockedTicks > 0],
+      ["decode 停擺 tick", st.decodeStallTicks, st.decodeStallTicks > 0],
+      ["全部完成於", st.makespanTicks > 0 ? "t=" + (st.makespanTicks - 1) : "尚未", false]
+    ];
+    var html = "", i;
+    for (i = 0; i < rowsHtml.length; i++) {
+      html += "<span>" + rowsHtml[i][0] + "</span><b" + (rowsHtml[i][2] ? ' class="warn"' : "") + ">" + rowsHtml[i][1] + "</b>";
+    }
+    scKpi.innerHTML = html;
+  }
+
+  function renderSchedRows(st) {
+    var html = "", i;
+    for (i = 0; i < st.rows.length; i++) {
+      var r = st.rows[i];
+      html += "<tr><td class=\"num\">" + r.id + "</td>"
+        + '<td><button type="button" class="lis-sc-kind' + (r.kind === "L" ? " long" : "") + '" data-sc-idx="' + i + '">'
+        + (r.kind === "L" ? "L 長 RAG" : "S 短問答") + "</button></td>"
+        + '<td class="num">' + r.prompt + "</td>"
+        + '<td class="num">' + r.gen + "</td>"
+        + '<td class="num">' + r.arrive + "</td>"
+        + '<td class="num">' + (r.ttftMs >= 0 ? r.ttftMs + " ms" : "—") + "</td>"
+        + '<td class="num">' + (r.doneTick >= 0 ? r.doneTick : "—") + "</td>"
+        + '<td class="num">' + r.progress + "%" + (r.restarts > 0 ? "（重算 ×" + r.restarts + "）" : "") + "</td></tr>";
+    }
+    scRows.innerHTML = html;
+  }
+
+  function renderSchedKnobs() {
+    scKnobOut.gap.textContent = schedState.arrivalGap + " tick";
+    scKnobOut.batch.textContent = String(schedState.maxBatch);
+    scKnobOut.kv.textContent = schedState.kvBudgetGiB + " GiB（" + (schedState.kvBudgetGiB * TOKENS_PER_GIB) + " tok）";
+    scKnobOut.lp.textContent = schedState.longPrompt + " tok";
+  }
+
+  function renderSched() {
+    var st = computeSchedule(schedState);
+    renderSchedKnobs();
+    renderSchedBand(st);
+    renderSchedGauge(st);
+    renderSchedKpi(st);
+    renderSchedRows(st);
+    scStatus.textContent = st.narration;
+  }
+
+  function trPlotSvg(st) {
+    var X0 = 62, X1 = 544, Y0 = 20, Y1 = 254, i, pt;
+    var xMax = 1;
+    for (i = 0; i < st.curve.length; i++) if (st.curve[i].capTps > xMax) xMax = st.curve[i].capTps;
+    var yMax = st.sloMs * 1.25;
+    if (st.bestTtftMs > 0 && st.bestTtftMs * 2.4 > yMax) yMax = st.bestTtftMs * 2.4;
+    if (st.ttftMs > 0 && st.ttftMs * 1.3 > yMax) yMax = st.ttftMs * 1.3;
+    function px(v) { return X0 + v / xMax * (X1 - X0); }
+    function py(v) { return Y1 - Math.min(v, yMax) / yMax * (Y1 - Y0); }
+
+    var s = "";
+    /* SLO 之下的可行區 */
+    if (st.sloMs <= yMax) {
+      s += '<rect x="' + X0 + '" y="' + py(st.sloMs).toFixed(1) + '" width="' + (X1 - X0)
+        + '" height="' + (Y1 - py(st.sloMs)).toFixed(1) + '" fill="var(--ok-soft)" opacity="0.7"></rect>';
+    }
+    /* 軸 */
+    s += '<line x1="' + X0 + '" y1="' + Y0 + '" x2="' + X0 + '" y2="' + Y1 + '" stroke="var(--border-strong)"></line>';
+    s += '<line x1="' + X0 + '" y1="' + Y1 + '" x2="' + X1 + '" y2="' + Y1 + '" stroke="var(--border-strong)"></line>';
+    var ax;
+    for (ax = 0; ax <= 2; ax++) {
+      var xv = xMax * ax / 2, yv = yMax * ax / 2;
+      s += '<text x="' + px(xv).toFixed(1) + '" y="' + (Y1 + 15) + '" font-size="11" font-family="var(--mono)" fill="#6b7076" text-anchor="middle">' + xv.toFixed(0) + "</text>";
+      s += '<text x="' + (X0 - 6) + '" y="' + (py(yv) + 4).toFixed(1) + '" font-size="11" font-family="var(--mono)" fill="#6b7076" text-anchor="end">' + yv.toFixed(0) + "</text>";
+    }
+    s += '<text x="' + ((X0 + X1) / 2) + '" y="' + (Y1 + 32) + '" font-size="11" font-family="var(--mono)" fill="#6b7076" text-anchor="middle">可服務吞吐 tokens/s</text>';
+    s += '<text x="14" y="' + ((Y0 + Y1) / 2) + '" font-size="11" font-family="var(--mono)" fill="#6b7076" text-anchor="middle" transform="rotate(-90 14 ' + ((Y0 + Y1) / 2) + ')">TTFT ms</text>';
+    /* SLO 截線 */
+    if (st.sloMs <= yMax) {
+      s += '<line x1="' + X0 + '" y1="' + py(st.sloMs).toFixed(1) + '" x2="' + X1 + '" y2="' + py(st.sloMs).toFixed(1)
+        + '" stroke="var(--ok)" stroke-dasharray="5 4"></line>';
+      s += '<text x="' + (X1 - 2) + '" y="' + (py(st.sloMs) - 5).toFixed(1) + '" font-size="11" font-family="var(--mono)" fill="#3f7a5a" text-anchor="end">SLO ' + st.sloMs + " ms</text>";
+    }
+    /* 軌跡 */
+    var path = "", started = false;
+    for (i = 0; i < st.curve.length; i++) {
+      pt = st.curve[i];
+      if (pt.ttftMs < 0 || pt.ttftMs > yMax) { started = false; continue; }
+      path += (started ? " L " : " M ") + px(pt.capTps).toFixed(1) + " " + py(pt.ttftMs).toFixed(1);
+      started = true;
+    }
+    if (path) s += '<path d="' + path + '" fill="none" stroke="var(--accent)" stroke-width="2"></path>';
+    for (i = 0; i < st.curve.length; i++) {
+      pt = st.curve[i];
+      if (pt.ttftMs < 0 || pt.ttftMs > yMax) {
+        s += '<path d="M ' + (px(pt.capTps) - 4).toFixed(1) + " " + (Y0 + 8) + " L " + px(pt.capTps).toFixed(1) + " " + Y0
+          + " L " + (px(pt.capTps) + 4).toFixed(1) + " " + (Y0 + 8) + ' Z" fill="none" stroke="var(--bad)"></path>';
+        continue;
+      }
+      s += '<circle cx="' + px(pt.capTps).toFixed(1) + '" cy="' + py(pt.ttftMs).toFixed(1) + '" r="'
+        + (2 + pt.b / 16).toFixed(1) + '" fill="' + (pt.feasible ? "var(--ok)" : "var(--warn)") + '"></circle>';
+    }
+    /* 最低點與當前操作點 */
+    if (st.bestB > 0) {
+      pt = st.curve[st.bestB - 1];
+      s += '<text x="' + px(pt.capTps).toFixed(1) + '" y="' + (py(pt.ttftMs) - 9).toFixed(1)
+        + '" font-size="11" font-family="var(--mono)" fill="#6b7076" text-anchor="middle">最低 b=' + st.bestB + "</text>";
+    }
+    var opIdx = Math.min(st.bCap, SWEEP_MAX_B) - 1;
+    pt = st.curve[opIdx];
+    if (pt) {
+      var oy = pt.ttftMs < 0 || pt.ttftMs > yMax ? Y0 + 8 : py(pt.ttftMs);
+      s += '<circle cx="' + px(pt.capTps).toFixed(1) + '" cy="' + oy.toFixed(1)
+        + '" r="8" fill="none" stroke="' + (st.overload ? "var(--bad)" : "var(--accent)") + '" stroke-width="2.5"></circle>';
+      s += '<text x="' + px(pt.capTps).toFixed(1) + '" y="' + (oy + 22).toFixed(1)
+        + '" font-size="11" font-family="var(--mono)" fill="#262a2f" text-anchor="middle">現在 b=' + st.bCap + "</text>";
+    }
+    return s;
+  }
+
+  function renderTradeKnobs() {
+    trKnobOut.rps.textContent = tradeState.rps + " req/s";
+    trKnobOut.prompt.textContent = tradeState.promptLen + " tok";
+    trKnobOut.gen.textContent = tradeState.genLen + " tok";
+    trKnobOut.batch.textContent = String(tradeState.maxBatch);
+    trKnobOut.kv.textContent = tradeState.kvGiB + " GiB";
+    trKnobOut.slo.textContent = tradeState.ttftSloMs + " ms";
+  }
+
+  function renderTrade() {
+    var st = computeTradeoff(tradeState);
+    renderTradeKnobs();
+    trLayer.innerHTML = trPlotSvg(st);
+
+    var items = [
+      ["併發上限 b", st.bCap + "（batch " + tradeState.maxBatch + " / KV " + st.bMaxKv + "）", ""],
+      ["穩態併發", st.bEff, ""],
+      ["實際吞吐", st.tokensPerSec + " tok/s", ""],
+      ["容量吞吐", st.capacityTps + " tok/s", ""],
+      ["TPOT", st.tpotMs + " ms", ""],
+      ["prefill（原始）", st.prefillMs + " ms", ""],
+      ["prefill（被 decode 擠壓後）", st.effPrefillMs + " ms", ""],
+      ["排隊等待", st.queueWaitMs >= 0 ? st.queueWaitMs + " ms" : "∞", st.queueWaitMs < 0 ? "bad" : ""],
+      ["TTFT", st.ttftMs >= 0 ? st.ttftMs + " ms" : "∞（過載）", st.ttftMs < 0 ? "bad" : ""],
+      ["SLO headroom", st.ttftMs < 0 ? "—" : (st.headroomMs >= 0 ? "+" : "") + st.headroomMs + " ms",
+        st.ttftMs < 0 || st.headroomMs < 0 ? "bad" : "ok"],
+      ["軌跡最低點", st.bestB > 0 ? "b=" + st.bestB + "（" + st.bestTtftMs + " ms）" : "全段過載", st.bestB > 0 ? "" : "bad"],
+      ["滿足 SLO 的 b", st.sloFeasibleBMin > 0 ? st.sloFeasibleBMin + " – " + st.sloFeasibleBMax : "無", st.sloFeasibleBMin > 0 ? "ok" : "bad"],
+      ["需要幾張卡", st.gpusNeeded, st.gpusNeeded > 1 ? "bad" : ""]
+    ];
+    var html = "", i;
+    for (i = 0; i < items.length; i++) {
+      html += "<span>" + items[i][0] + "</span><b" + (items[i][2] ? ' class="' + items[i][2] + '"' : "") + ">" + items[i][1] + "</b>";
+    }
+    trRead.innerHTML = html;
+
+    var bars = [
+      ["GPU 利用率", st.gpuUtilPct, st.gpuUtilPct >= 95],
+      ["KV 利用率", st.kvUtilPct, st.kvUtilPct >= 90]
+    ];
+    var bh = "";
+    for (i = 0; i < bars.length; i++) {
+      bh += "<span>" + bars[i][0] + '</span><div class="lis-tr-track"><i class="' + (bars[i][2] ? "hot" : "")
+        + '" style="width:' + Math.min(100, bars[i][1]).toFixed(1) + '%"></i></div><b>' + bars[i][1] + "%</b>";
+    }
+    trBars.innerHTML = bh;
+
+    trStatus.textContent = st.bottleneck;
+  }
+
+  /* ===================== (5) 事件綁定 ===================== */
+
+  function bindSeg(root, attr, handler) {
+    var group = root.querySelector('.seg [data-' + attr + ']');
+    if (!group) return;
+    var seg = group.parentNode;
+    seg.addEventListener("click", function (e) {
+      var btn = e.target.closest("button[data-" + attr + "]");
+      if (!btn) return;
+      var all = seg.querySelectorAll("button[data-" + attr + "]"), i;
+      for (i = 0; i < all.length; i++) all[i].setAttribute("aria-pressed", all[i] === btn ? "true" : "false");
+      handler(btn.getAttribute("data-" + attr));
     });
   }
 
-  if (btnReset) {
-    btnReset.addEventListener("click", function () {
-      resetView();
+  if (schedRoot && scBand && scRows) {
+    bindSeg(schedRoot, "sc-policy", function (v) { schedState.policy = v; schedState.tick = 0; renderSched(); });
+    bindSeg(schedRoot, "sc-pf", function (v) { schedState.prefillFirst = v === "prefill"; schedState.tick = 0; renderSched(); });
+
+    scKnob.gap.addEventListener("input", function () { schedState.arrivalGap = Number(this.value); schedState.tick = 0; renderSched(); });
+    scKnob.batch.addEventListener("input", function () { schedState.maxBatch = Number(this.value); schedState.tick = 0; renderSched(); });
+    scKnob.kv.addEventListener("input", function () { schedState.kvBudgetGiB = Number(this.value); schedState.tick = 0; renderSched(); });
+    scKnob.lp.addEventListener("input", function () { schedState.longPrompt = Number(this.value); schedState.tick = 0; renderSched(); });
+
+    scRows.addEventListener("click", function (e) {
+      var btn = e.target.closest("button[data-sc-idx]");
+      if (!btn) return;
+      var idx = parseInt(btn.getAttribute("data-sc-idx"), 10);
+      var chars = schedState.mix.split("");
+      chars[idx] = chars[idx] === "L" ? "S" : "L";
+      schedState.mix = chars.join("");
+      schedState.tick = 0;
+      renderSched();
     });
+
+    scNext.addEventListener("click", function () {
+      if (schedState.tick >= 60) { scStatus.textContent = "已到本 demo 的 tick 上限（t=60）。按「重置」重跑，或改參數看不同的排程結果。"; return; }
+      schedState.tick += 1; renderSched();
+    });
+    scJump.addEventListener("click", function () {
+      schedState.tick = Math.min(60, schedState.tick + 5); renderSched();
+    });
+    scReset.addEventListener("click", function () {
+      schedState.mix = SCHED_DEFAULT.mix;
+      schedState.arrivalGap = SCHED_DEFAULT.arrivalGap;
+      schedState.maxBatch = SCHED_DEFAULT.maxBatch;
+      schedState.kvBudgetGiB = SCHED_DEFAULT.kvBudgetGiB;
+      schedState.longPrompt = SCHED_DEFAULT.longPrompt;
+      schedState.policy = SCHED_DEFAULT.policy;
+      schedState.prefillFirst = SCHED_DEFAULT.prefillFirst;
+      schedState.tick = 0;
+      scKnob.gap.value = SCHED_DEFAULT.arrivalGap;
+      scKnob.batch.value = SCHED_DEFAULT.maxBatch;
+      scKnob.kv.value = SCHED_DEFAULT.kvBudgetGiB;
+      scKnob.lp.value = SCHED_DEFAULT.longPrompt;
+      var segs = schedRoot.querySelectorAll(".seg button"), i;
+      for (i = 0; i < segs.length; i++) {
+        var v = segs[i].getAttribute("data-sc-policy") || segs[i].getAttribute("data-sc-pf");
+        segs[i].setAttribute("aria-pressed", (v === "continuous" || v === "decode") ? "true" : "false");
+      }
+      renderSched();
+    });
+
+    renderSched();
   }
 
-  resetView();
+  if (tradeRoot && trLayer && trRead) {
+    bindSeg(tradeRoot, "tr-kv", function (v) { tradeState.kvDtype = v; renderTrade(); });
+    trKnob.rps.addEventListener("input", function () { tradeState.rps = Number(this.value); renderTrade(); });
+    trKnob.prompt.addEventListener("input", function () { tradeState.promptLen = Number(this.value); renderTrade(); });
+    trKnob.gen.addEventListener("input", function () { tradeState.genLen = Number(this.value); renderTrade(); });
+    trKnob.batch.addEventListener("input", function () { tradeState.maxBatch = Number(this.value); renderTrade(); });
+    trKnob.kv.addEventListener("input", function () { tradeState.kvGiB = Number(this.value); renderTrade(); });
+    trKnob.slo.addEventListener("input", function () { tradeState.ttftSloMs = Number(this.value); renderTrade(); });
+    trReset.addEventListener("click", function () {
+      tradeState.rps = TRADE_DEFAULT.rps;
+      tradeState.promptLen = TRADE_DEFAULT.promptLen;
+      tradeState.genLen = TRADE_DEFAULT.genLen;
+      tradeState.maxBatch = TRADE_DEFAULT.maxBatch;
+      tradeState.kvGiB = TRADE_DEFAULT.kvGiB;
+      tradeState.kvDtype = TRADE_DEFAULT.kvDtype;
+      tradeState.ttftSloMs = TRADE_DEFAULT.ttftSloMs;
+      trKnob.rps.value = TRADE_DEFAULT.rps;
+      trKnob.prompt.value = TRADE_DEFAULT.promptLen;
+      trKnob.gen.value = TRADE_DEFAULT.genLen;
+      trKnob.batch.value = TRADE_DEFAULT.maxBatch;
+      trKnob.kv.value = TRADE_DEFAULT.kvGiB;
+      trKnob.slo.value = TRADE_DEFAULT.ttftSloMs;
+      var segs = tradeRoot.querySelectorAll(".seg button[data-tr-kv]"), i;
+      for (i = 0; i < segs.length; i++) segs[i].setAttribute("aria-pressed", segs[i].getAttribute("data-tr-kv") === "fp16" ? "true" : "false");
+      renderTrade();
+    });
+
+    renderTrade();
+  }
 })();
 </script>
