@@ -2,456 +2,417 @@
 (function () {
   "use strict";
 
-  // frame 欄位：
-  //   ph(discover/delegate/progress/done) active(client/remote) tone(wait/ok/warn/bad)
-  //   dir, kind(discover/request/event/result/error), json, status, caption
-  //   taskState(顯示在 pill 上的 Task 狀態文字)
+  /* ================= (1) 常數與參數表 ================= */
 
-  var F_IDLE = {
-    ph: null, active: [], tone: "wait",
-    dir: "尚未開始", kind: null,
-    json: "// 選一個情境，按「下一步」開始發現與委派。",
-    status: "Orchestrator 準備把合約 CTR-2048 委派給 Compliance Agent。按「下一步」先讀 Agent Card。",
-    caption: "四階段：發現 Card → 送出委派 → 狀態回報 → 終態／產物。全程是兩個 Agent 之間的 A2A 往返。",
-    taskState: "—"
-  };
+  var HUMAN_REPLY_SEC = 45;     // client 端補料／補授權的人工反應時間（秒）
+  var PUSH_DELIVERY_SEC = 1;    // webhook 投遞延遲（秒）
 
-  var COMMON = [
-    F_IDLE,
-    {
-      ph: "discover", active: ["client", "remote"], tone: "wait",
-      dir: "Orchestrator → Compliance", kind: "discover",
-      json: [
-        "GET /.well-known/agent.json",
-        "Host: agents.example.com",
-        "",
-        "// 期望回傳 Agent Card（skills / auth / url）"
-      ].join("\n"),
-      status: "① 發現：Orchestrator 向 Compliance 的 well-known 路徑索取 Agent Card。",
-      caption: "委派前先讀名片——確認對方有沒有 review-contract 這個 skill。",
-      taskState: "—"
-    },
-    {
-      ph: "discover", active: ["remote", "client"], tone: "wait",
-      dir: "Compliance → Orchestrator", kind: "discover",
-      json: [
-        "{",
-        '  "name": "compliance-agent",',
-        '  "url": "https://agents.example.com/compliance",',
-        '  "version": "1.2.0",',
-        '  "skills": [{ "id": "review-contract", "description": "合約政策檢查" }],',
-        '  "capabilities": { "streaming": true }',
-        "}"
-      ].join("\n"),
-      status: "② Card 到手：確認有 review-contract，且支援 streaming。可以開始委派。",
-      caption: "Card 是機器可讀的自我描述；沒有它，後面的 Task 語意就對不齊。",
-      taskState: "—"
-    }
+  var TERMINAL = { completed: 1, failed: 1, canceled: 1, rejected: 1 };
+
+  var EVENT_ORDER = [
+    "progress", "artifact", "askInput", "askAuth", "complete",
+    "fail", "reject", "resume", "cancel", "refine"
   ];
 
-  var SCENARIOS = {
-    normal: COMMON.concat([
-      {
-        ph: "delegate", active: ["client", "remote"], tone: "wait",
-        dir: "Orchestrator → Compliance", kind: "request",
-        json: [
-          "{",
-          '  "jsonrpc": "2.0",',
-          '  "id": 1,',
-          '  "method": "message/send",',
-          '  "params": {',
-          '    "message": {',
-          '      "role": "user",',
-          '      "parts": [',
-          '        { "type": "text", "text": "請審核合約 CTR-2048" },',
-          '        { "type": "data", "data": { "contractId": "CTR-2048" } }',
-          "      ]",
-          "    }",
-          "  }",
-          "}"
-        ].join("\n"),
-        status: "③ 委派：送出 message/send，帶 TextPart + DataPart（合約 id）。",
-        caption: "Message 承載意圖；真正的工作容器是接下來會建立的 Task。",
-        taskState: "—"
-      },
-      {
-        ph: "delegate", active: ["remote"], tone: "wait",
-        dir: "Compliance → Orchestrator", kind: "event",
-        json: [
-          "{",
-          '  "jsonrpc": "2.0",',
-          '  "id": 1,',
-          '  "result": {',
-          '    "id": "task-9f3a",',
-          '    "contextId": "ctx-77",',
-          '    "status": { "state": "submitted" }',
-          "  }",
-          "}"
-        ].join("\n"),
-        status: "④ Task 建立：遠端回傳 task-9f3a，狀態 submitted。",
-        caption: "從此之後，雙方用 taskId 追蹤同一份工作，而不是一輪就丟棄的 RPC。",
-        taskState: "submitted"
-      },
-      {
-        ph: "progress", active: ["remote"], tone: "wait",
-        dir: "Compliance → Orchestrator", kind: "event",
-        json: [
-          "{",
-          '  "kind": "TaskStatusUpdateEvent",',
-          '  "taskId": "task-9f3a",',
-          '  "status": { "state": "working" }',
-          "}"
-        ].join("\n"),
-        status: "⑤ 狀態回報：SSE／串流事件把狀態推進到 working。",
-        caption: "串流只是通道；狀態語意仍是同一套 Task lifecycle。",
-        taskState: "working"
-      },
-      {
-        ph: "done", active: ["remote", "client"], tone: "ok",
-        dir: "Compliance → Orchestrator", kind: "result",
-        json: [
-          "{",
-          '  "kind": "TaskStatusUpdateEvent",',
-          '  "taskId": "task-9f3a",',
-          '  "status": { "state": "completed" },',
-          '  "final": true',
-          "}",
-          "",
-          "{",
-          '  "kind": "TaskArtifactUpdateEvent",',
-          '  "taskId": "task-9f3a",',
-          '  "artifact": {',
-          '    "name": "review-report",',
-          '    "parts": [{ "type": "data", "data": { "verdict": "pass", "findings": [] } }]',
-          "  }",
-          "}"
-        ].join("\n"),
-        status: "⑥ 完成：終態 completed，並附上 review-report Artifact。Task 此後不可變。",
-        caption: "交卷用 Artifact；若要 refinement，應開新 Task（可共用 contextId），不要改寫舊終態。",
-        taskState: "completed"
-      }
-    ]),
-
-    needinput: COMMON.concat([
-      {
-        ph: "delegate", active: ["client", "remote"], tone: "wait",
-        dir: "Orchestrator → Compliance", kind: "request",
-        json: [
-          "{",
-          '  "jsonrpc": "2.0",',
-          '  "id": 1,',
-          '  "method": "message/send",',
-          '  "params": {',
-          '    "message": {',
-          '      "role": "user",',
-          '      "parts": [',
-          '        { "type": "text", "text": "請審核合約 CTR-2048" },',
-          '        { "type": "data", "data": { "contractId": "CTR-2048" } }',
-          "      ]",
-          "    }",
-          "  }",
-          "}"
-        ].join("\n"),
-        status: "③ 委派：送出 message/send（這次合約缺管轄條款附件）。",
-        caption: "遠端稍後會發現資料不足——這正是 input-required 存在的理由。",
-        taskState: "—"
-      },
-      {
-        ph: "delegate", active: ["remote"], tone: "wait",
-        dir: "Compliance → Orchestrator", kind: "event",
-        json: [
-          "{",
-          '  "result": {',
-          '    "id": "task-9f3a",',
-          '    "status": { "state": "submitted" }',
-          "  }",
-          "}"
-        ].join("\n"),
-        status: "④ Task 建立：submitted。",
-        caption: "狀態機開始運轉。",
-        taskState: "submitted"
-      },
-      {
-        ph: "progress", active: ["remote"], tone: "warn",
-        dir: "Compliance → Orchestrator", kind: "event",
-        json: [
-          "{",
-          '  "kind": "TaskStatusUpdateEvent",',
-          '  "taskId": "task-9f3a",',
-          '  "status": {',
-          '    "state": "input-required",',
-          '    "message": {',
-          '      "parts": [{ "type": "text", "text": "缺少管轄地條款附件，請補上 governingLaw.pdf" }]',
-          "    }",
-          "  }",
-          "}"
-        ].join("\n"),
-        status: "⑤ 中斷：進入 input-required——遠端缺附件，任務暫停但可恢復。",
-        caption: "這不是失敗；同一 taskId 補訊息後可以繼續，不必重開一輪委派。",
-        taskState: "input-required"
-      },
-      {
-        ph: "progress", active: ["client", "remote"], tone: "wait",
-        dir: "Orchestrator → Compliance", kind: "request",
-        json: [
-          "{",
-          '  "method": "message/send",',
-          '  "params": {',
-          '    "message": {',
-          '      "taskId": "task-9f3a",',
-          '      "role": "user",',
-          '      "parts": [{ "type": "text", "text": "已附上 governingLaw.pdf" }]',
-          "    }",
-          "  }",
-          "}"
-        ].join("\n"),
-        status: "⑥ 補料：用同一個 taskId 再送一則 Message，提供缺少的附件說明。",
-        caption: "可恢復中斷的價值：多輪對話留在同一任務脈絡裡。",
-        taskState: "input-required"
-      },
-      {
-        ph: "progress", active: ["remote"], tone: "wait",
-        dir: "Compliance → Orchestrator", kind: "event",
-        json: [
-          "{",
-          '  "kind": "TaskStatusUpdateEvent",',
-          '  "taskId": "task-9f3a",',
-          '  "status": { "state": "working" }',
-          "}"
-        ].join("\n"),
-        status: "⑦ 恢復：資料齊了，狀態回到 working。",
-        caption: "從中斷態回到進行中——仍是同一個 Task。",
-        taskState: "working"
-      },
-      {
-        ph: "done", active: ["remote", "client"], tone: "ok",
-        dir: "Compliance → Orchestrator", kind: "result",
-        json: [
-          "{",
-          '  "kind": "TaskStatusUpdateEvent",',
-          '  "taskId": "task-9f3a",',
-          '  "status": { "state": "completed" },',
-          '  "final": true',
-          "}",
-          "",
-          "{",
-          '  "kind": "TaskArtifactUpdateEvent",',
-          '  "artifact": {',
-          '    "name": "review-report",',
-          '    "parts": [{ "type": "data", "data": { "verdict": "pass", "notes": "管轄條款已核對" } }]',
-          "  }",
-          "}"
-        ].join("\n"),
-        status: "⑧ 完成：補料後審核通過，交卷 Artifact。",
-        caption: "input-required → 補 Message → working → completed：多輪委派的標準姿勢。",
-        taskState: "completed"
-      }
-    ]),
-
-    failed: COMMON.concat([
-      {
-        ph: "delegate", active: ["client", "remote"], tone: "wait",
-        dir: "Orchestrator → Compliance", kind: "request",
-        json: [
-          "{",
-          '  "method": "message/send",',
-          '  "params": {',
-          '    "message": {',
-          '      "parts": [',
-          '        { "type": "text", "text": "請審核合約 CTR-2048" },',
-          '        { "type": "data", "data": { "contractId": "CTR-2048" } }',
-          "      ]",
-          "    }",
-          "  }",
-          "}"
-        ].join("\n"),
-        status: "③ 委派：送出 message/send。",
-        caption: "這次遠端內部政策引擎會在執行期失敗。",
-        taskState: "—"
-      },
-      {
-        ph: "delegate", active: ["remote"], tone: "wait",
-        dir: "Compliance → Orchestrator", kind: "event",
-        json: [
-          "{",
-          '  "result": {',
-          '    "id": "task-9f3a",',
-          '    "status": { "state": "submitted" }',
-          "  }",
-          "}"
-        ].join("\n"),
-        status: "④ Task 建立：submitted。",
-        caption: "任務已被接受，即將進入 working。",
-        taskState: "submitted"
-      },
-      {
-        ph: "progress", active: ["remote"], tone: "wait",
-        dir: "Compliance → Orchestrator", kind: "event",
-        json: [
-          "{",
-          '  "kind": "TaskStatusUpdateEvent",',
-          '  "taskId": "task-9f3a",',
-          '  "status": { "state": "working" }',
-          "}"
-        ].join("\n"),
-        status: "⑤ 進入 working：開始跑政策檢查。",
-        caption: "到目前為止與正常路徑相同。",
-        taskState: "working"
-      },
-      {
-        ph: "done", active: ["remote", "client"], tone: "bad",
-        dir: "Compliance → Orchestrator", kind: "error",
-        json: [
-          "{",
-          '  "kind": "TaskStatusUpdateEvent",',
-          '  "taskId": "task-9f3a",',
-          '  "status": {',
-          '    "state": "failed",',
-          '    "message": {',
-          '      "parts": [{ "type": "text", "text": "政策引擎逾時：無法完成條款比對" }]',
-          "    }",
-          "  },",
-          '  "final": true',
-          "}"
-        ].join("\n"),
-        status: "⑥ 失敗：終態 failed。Task 不可變；重試應開新 Task（可共用 contextId）。",
-        caption: "failed 與 input-required 不同：前者是終態，後者可恢復。不要把失敗當中斷硬塞後續訊息。",
-        taskState: "failed"
-      }
-    ])
+  var EVENTS = {
+    progress: { label: "progress",  side: "remote", desc: "回報進度" },
+    artifact: { label: "artifact",  side: "remote", desc: "送出中繼 Artifact" },
+    askInput: { label: "askInput",  side: "remote", desc: "要求補充輸入" },
+    askAuth:  { label: "askAuth",   side: "remote", desc: "要求額外授權" },
+    complete: { label: "complete",  side: "remote", desc: "完成並附最終 Artifact" },
+    fail:     { label: "fail",      side: "remote", desc: "執行失敗" },
+    reject:   { label: "reject",    side: "remote", desc: "拒收這次委派" },
+    resume:   { label: "resume",    side: "client", desc: "補送 Message（同 taskId）" },
+    cancel:   { label: "cancel",    side: "client", desc: "呼叫 tasks/cancel" },
+    refine:   { label: "refine",    side: "client", desc: "在既有結果上再修改" }
   };
 
-  var root = document.getElementById("demo-a2a-delegate");
-  if (!root) return;
+  /* 轉移表：有 next 即合法；只有 why 即不合法（why 是規則本身，不是情境旁白） */
+  var TRANSITIONS = {
+    "submitted": {
+      progress: { next: "working" },
+      artifact: { why: "尚未開工，沒有可交付的產出" },
+      askInput: { next: "input-required" },
+      askAuth:  { next: "auth-required" },
+      complete: { why: "還沒進入 working，不可能直接交卷" },
+      fail:     { next: "failed" },
+      reject:   { next: "rejected" },
+      resume:   { why: "沒有待補項目——remote 並未要求輸入或授權" },
+      cancel:   { next: "canceled" },
+      refine:   { why: "Task 還沒進終態，沒有可 refine 的結果" }
+    },
+    "working": {
+      progress: { next: "working" },
+      artifact: { next: "working", artifact: 1 },
+      askInput: { next: "input-required" },
+      askAuth:  { next: "auth-required" },
+      complete: { next: "completed", artifact: 1 },
+      fail:     { next: "failed" },
+      reject:   { why: "已經開工，拒收只能發生在 Task 被接受之前" },
+      resume:   { why: "remote 沒有要求輸入，多送一則訊息不會推進狀態" },
+      cancel:   { next: "canceled" },
+      refine:   { why: "Task 還沒進終態，沒有可 refine 的結果" }
+    },
+    "input-required": {
+      progress: { why: "remote 正在等你的輸入，不會自己往前走" },
+      artifact: { why: "缺料，沒有可交付的產出" },
+      askInput: { why: "已經在等輸入，不會重複要求" },
+      askAuth:  { why: "請先解決待補的輸入" },
+      complete: { why: "缺料，無法交卷" },
+      fail:     { next: "failed" },
+      reject:   { why: "Task 已被接受，不可再拒收" },
+      resume:   { next: "working" },
+      cancel:   { next: "canceled" },
+      refine:   { why: "Task 還沒進終態，沒有可 refine 的結果" }
+    },
+    "auth-required": {
+      progress: { why: "未取得授權前 remote 不得執行" },
+      artifact: { why: "未授權，沒有可交付的產出" },
+      askInput: { why: "請先完成授權" },
+      askAuth:  { why: "已經在等授權，不會重複要求" },
+      complete: { why: "未授權，不得交卷" },
+      fail:     { next: "failed" },
+      reject:   { why: "Task 已被接受，不可再拒收" },
+      resume:   { next: "working" },
+      cancel:   { next: "canceled" },
+      refine:   { why: "Task 還沒進終態，沒有可 refine 的結果" }
+    }
+  };
 
-  var scenario = "normal";
-  var step = 0;
+  var TERMINAL_WHY = {
+    cancel: "終態不可取消——這個 Task 已經鎖死",
+    refine: "終態不可變；refinement 請以同一個 contextId 開新 Task",
+    _: "終態不可變，不再接受任何事件"
+  };
 
-  var btnNext = document.getElementById("a2a-btn-next");
-  var btnReset = document.getElementById("a2a-btn-reset");
-  var wire = document.getElementById("a2a-wire");
-  var wireDir = document.getElementById("a2a-wire-dir");
-  var wireKind = document.getElementById("a2a-wire-kind");
-  var jsonEl = document.getElementById("a2a-json");
-  var statusEl = document.getElementById("a2a-status");
-  var captionEl = document.getElementById("a2a-caption");
-  var taskPill = document.getElementById("a2a-taskpill");
-  var phases = root.querySelectorAll(".a2a-phase");
-  var lanes = root.querySelectorAll(".a2a-lane");
-  var segBtns = root.querySelectorAll(".seg button");
+  var STATE_TONE = {
+    "submitted": "wait", "working": "wait",
+    "input-required": "warn", "auth-required": "warn",
+    "completed": "ok", "failed": "bad", "canceled": "bad", "rejected": "bad"
+  };
 
-  function frames() {
-    return SCENARIOS[scenario] || SCENARIOS.normal;
+  var MODE_LABEL = { poll: "輪詢 tasks/get", sse: "SSE 串流", push: "Push webhook" };
+
+  /* ================= (2) compute 純函式 ================= */
+
+  /* compute 依賴的 helper，一律宣告在 compute* 之前 */
+  function parseSeq(raw) {
+    var parts = String(raw == null ? "" : raw).split(",");
+    var out = [];
+    for (var i = 0; i < parts.length; i++) {
+      var t = parts[i].trim();
+      if (t && EVENTS[t]) { out.push(t); }
+    }
+    return out;
   }
 
-  function kindClass(kind) {
-    if (kind === "discover") return "k-discover";
-    if (kind === "request") return "k-request";
-    if (kind === "event") return "k-event";
-    if (kind === "result") return "k-result";
-    if (kind === "error") return "k-error";
-    return "";
+  function legalMap(state) {
+    var m = {};
+    var row = TERMINAL[state] ? null : TRANSITIONS[state];
+    for (var i = 0; i < EVENT_ORDER.length; i++) {
+      var ev = EVENT_ORDER[i];
+      m[ev] = !!(row && row[ev] && row[ev].next);
+    }
+    return m;
   }
 
-  function pillClass(state) {
-    if (state === "completed") return "tp-ok";
-    if (state === "failed" || state === "canceled" || state === "rejected") return "tp-bad";
-    if (state === "input-required" || state === "auth-required") return "tp-warn";
-    if (state === "submitted" || state === "working") return "tp-wait";
-    return "";
+  function r1(x) { return Math.round(x * 10) / 10; }
+
+  // @probe fn       computeTaskRun
+  // @probe baseline {"notifyMode":"poll","pollSec":10,"workSec":120,"authRequired":false,"eventSeq":"progress,askInput,resume,progress,complete","step":5}
+  // @probe sweep    {"notifyMode":["poll","push"],"pollSec":[2,60],"workSec":[10,600],"authRequired":[false,true],"eventSeq":["progress","progress,askInput,resume,artifact,complete,refine"],"step":[0,5]}
+  function computeTaskRun(p) {
+    var i;
+    var seq = parseSeq(p.eventSeq);
+    var n = seq.length;
+
+    var step = Number(p.step);
+    if (isNaN(step)) step = n;
+    var limit = Math.max(0, Math.min(step, n));
+
+    var progressTotal = 0;
+    for (i = 0; i < n; i++) { if (seq[i] === "progress") progressTotal += 1; }
+
+    var workSec = Math.max(1, Number(p.workSec) || 0);
+    var dtProgress = workSec / Math.max(1, progressTotal);
+
+    var state = p.authRequired ? "auth-required" : "submitted";
+    var visited = {};
+    visited[state] = 1;
+    var walked = {};
+
+    var elapsed = 0, stateChanges = 0, statusEvents = 0;
+    var messages = 1, resumes = 0, artifacts = 0;
+    var steps = [], rejected = [];
+
+    for (i = 0; i < limit; i++) {
+      var ev = seq[i];
+      var atEnd = !!TERMINAL[state];
+      var rule = atEnd ? null : TRANSITIONS[state][ev];
+
+      if (!rule || !rule.next) {
+        var why = atEnd
+          ? (TERMINAL_WHY[ev] || TERMINAL_WHY._)
+          : (rule && rule.why ? rule.why : "這個事件在目前狀態沒有定義的轉移");
+        rejected.push({ idx: i + 1, ev: ev, state: state, why: why });
+        steps.push({ idx: i + 1, ev: ev, ok: false, from: state, to: state,
+                     dt: 0, elapsed: r1(elapsed), why: why });
+        continue;
+      }
+
+      var from = state;
+      var dt = 0;
+      if (ev === "progress") { dt = dtProgress; }
+      else if (ev === "resume") { dt = HUMAN_REPLY_SEC; }
+
+      elapsed += dt;
+      state = rule.next;
+      visited[state] = 1;
+      walked[from + ">" + state] = 1;
+
+      if (state !== from) { stateChanges += 1; }
+      if (EVENTS[ev].side === "remote") { statusEvents += 1; }
+      if (ev === "resume") { resumes += 1; messages += 1; }
+      if (ev === "askInput" || ev === "askAuth") { messages += 1; }
+      artifacts += rule.artifact || 0;
+
+      steps.push({ idx: i + 1, ev: ev, ok: true, from: from, to: state,
+                   dt: r1(dt), elapsed: r1(elapsed), why: "" });
+    }
+
+    var pollSec = Math.max(1, Number(p.pollSec) || 1);
+    var polls = Math.ceil(elapsed / pollSec);
+
+    var req = {
+      poll: 1 + polls + resumes,        // message/send + 每個間隔一次 tasks/get + 每次補料一次 send
+      sse:  1 + resumes,                // message/stream 一條長連線 + 補料
+      push: 1 + resumes + 1             // message/send + 補料 + 終態取回完整 Task
+    };
+    var deliveries = { poll: 0, sse: statusEvents, push: stateChanges };
+    var stale = { poll: r1(pollSec / 2), sse: 0, push: PUSH_DELIVERY_SEC };
+    var connSec = { poll: 0, sse: r1(elapsed), push: 0 };
+
+    var mode = (p.notifyMode === "sse" || p.notifyMode === "push") ? p.notifyMode : "poll";
+
+    return {
+      mode: mode,
+      state: state,
+      tone: STATE_TONE[state] || "wait",
+      terminal: !!TERMINAL[state],
+      applied: limit,
+      seqLen: n,
+      elapsedSec: r1(elapsed),
+      dtProgress: r1(dtProgress),
+      stateChanges: stateChanges,
+      statusEvents: statusEvents,
+      messageCount: messages,
+      artifactCount: artifacts,
+      resumeCount: resumes,
+      rejectedCount: rejected.length,
+      rejected: rejected,
+      steps: steps,
+      visited: visited,
+      walked: walked,
+      polls: polls,
+      wastedPolls: Math.max(0, polls - stateChanges),
+      req: req,
+      deliveries: deliveries,
+      stale: stale,
+      connSec: connSec,
+      clientReq: req[mode],
+      reqSavedVsPoll: req.poll - req[mode],
+      legal: legalMap(state)
+    };
   }
 
-  function laneClass(tone) {
-    if (tone === "ok") return "a2a-on-ok";
-    if (tone === "bad") return "a2a-on-bad";
-    if (tone === "warn") return "a2a-on-warn";
-    return "a2a-on-wait";
-  }
+  /* ================= (3) DOM 參照 ================= */
+
+  var root = document.getElementById("demo-a2a-task");
+  if (!root) { return; }
+
+  var segBtns = [].slice.call(root.querySelectorAll(".seg button"));
+  var pollIn = document.getElementById("a2ax-poll");
+  var pollVal = document.getElementById("a2ax-poll-v");
+  var workIn = document.getElementById("a2ax-work");
+  var workVal = document.getElementById("a2ax-work-v");
+  var authIn = document.getElementById("a2ax-auth");
+  var padEl = document.getElementById("a2ax-pad");
+  var bookEl = document.getElementById("a2ax-book");
+  var modesEl = document.getElementById("a2ax-modes");
+  var noteEl = document.getElementById("a2ax-note");
+  var statusEl = document.getElementById("a2ax-status");
+  var backBtn = document.getElementById("a2ax-back");
+  var fwdBtn = document.getElementById("a2ax-fwd");
+  var resetBtn = document.getElementById("a2ax-reset");
+  var nodeEls = [].slice.call(root.querySelectorAll(".a2ax-graph .nd"));
+  var edgeEls = [].slice.call(root.querySelectorAll(".a2ax-graph .eg"));
+
+  var state = { notifyMode: "poll", pollSec: 10, workSec: 120, authRequired: false, eventSeq: "", step: 0 };
+  var lastRejectState = "";
+
+  /* ================= (4) render ================= */
 
   function render() {
-    var list = frames();
-    if (step < 0) step = 0;
-    if (step >= list.length) step = list.length - 1;
-    var f = list[step];
+    var r = computeTaskRun(state);
 
-    // phases
-    var order = ["discover", "delegate", "progress", "done"];
-    var curIdx = f.ph ? order.indexOf(f.ph) : -1;
-    phases.forEach(function (el) {
-      var ph = el.getAttribute("data-ph");
-      var idx = order.indexOf(ph);
-      el.classList.remove("ph-done", "ph-active", "ph-bad", "ph-warn");
-      if (curIdx < 0) return;
-      if (idx < curIdx) el.classList.add("ph-done");
-      else if (idx === curIdx) {
-        el.classList.add("ph-active");
-        if (f.tone === "bad") el.classList.add("ph-bad");
-        if (f.tone === "warn") el.classList.add("ph-warn");
+    pollVal.textContent = state.pollSec + " s";
+    workVal.textContent = state.workSec + " s";
+
+    for (var s = 0; s < segBtns.length; s++) {
+      segBtns[s].setAttribute("aria-pressed", segBtns[s].getAttribute("data-mode") === r.mode ? "true" : "false");
+    }
+
+    /* 事件盤 */
+    var pad = "";
+    for (var i = 0; i < EVENT_ORDER.length; i++) {
+      var ev = EVENT_ORDER[i];
+      var meta = EVENTS[ev];
+      pad += '<button type="button" class="a2ax-ev ' + (r.legal[ev] ? "ev-ok" : "ev-no") +
+             '" data-ev="' + ev + '" data-side="' + meta.side + '">' + meta.label +
+             '<span class="evs">' + meta.desc + "</span></button>";
+    }
+    padEl.innerHTML = pad;
+
+    /* 狀態圖：節點走位 + 走過的邊 */
+    for (i = 0; i < nodeEls.length; i++) {
+      var nd = nodeEls[i];
+      var name = nd.getAttribute("data-state");
+      nd.setAttribute("class", "nd" +
+        (r.visited[name] ? " seen" : "") +
+        (name === r.state ? " cur tone-" + r.tone : "") +
+        (name === lastRejectState ? " rej" : ""));
+    }
+    for (i = 0; i < edgeEls.length; i++) {
+      var eg = edgeEls[i];
+      var on = !!r.walked[eg.getAttribute("data-edge")];
+      eg.setAttribute("class", "eg" + (on ? " walk" : ""));
+      var pth = eg.querySelector("path");
+      if (pth) { pth.setAttribute("marker-end", on ? "url(#a2ax-ah-on)" : "url(#a2ax-ah)"); }
+    }
+
+    /* 帳目卡 */
+    bookEl.innerHTML =
+      cell("目前狀態", r.state, r.terminal ? "終態 · 不可變" : "中間態 · 可再推進") +
+      cell("累計耗時", r.elapsedSec + " s", "每個 progress 佔 " + r.dtProgress + " s，resume 等 " + HUMAN_REPLY_SEC + " s") +
+      cell("狀態變更", r.stateChanges + " 次", "共收下 " + r.statusEvents + " 則 remote 事件") +
+      cell("Message 數", r.messageCount + " 則", "初始 1 + 補料 " + r.resumeCount + " + remote 索取") +
+      cell("Artifact 數", r.artifactCount + " 份", "中繼產出與最終交卷合計") +
+      cell("被拒事件", r.rejectedCount + " 個", "轉移表擋下、狀態未變");
+
+    /* 三通道成本對照 */
+    var rows = [
+      ["client 請求數", r.req.poll, r.req.sse, r.req.push],
+      ["remote 推送／串流", r.deliveries.poll, r.deliveries.sse, r.deliveries.push],
+      ["狀態陳舊延遲", r.stale.poll + " s", r.stale.sse + " s", r.stale.push + " s"],
+      ["連線佔用", r.connSec.poll + " s", r.connSec.sse + " s", r.connSec.push + " s"],
+      ["空輪詢（沒變還問）", r.wastedPolls, "—", "—"]
+    ];
+    var html = '<div class="mh">回報通道</div>';
+    var order = ["poll", "sse", "push"];
+    for (i = 0; i < order.length; i++) {
+      html += '<div class="mh mc' + (order[i] === r.mode ? " cur" : "") + '">' + MODE_LABEL[order[i]] + "</div>";
+    }
+    for (i = 0; i < rows.length; i++) {
+      html += '<div class="ml">' + rows[i][0] + "</div>";
+      for (var c = 0; c < 3; c++) {
+        html += '<div class="mc' + (order[c] === r.mode ? " cur" : "") + '">' + rows[i][c + 1] + "</div>";
       }
-    });
+    }
+    modesEl.innerHTML = html;
 
-    // lanes
-    lanes.forEach(function (el) {
-      var role = el.getAttribute("data-role");
-      el.classList.remove("a2a-on", "a2a-on-wait", "a2a-on-ok", "a2a-on-warn", "a2a-on-bad");
-      if (f.active && f.active.indexOf(role) !== -1) {
-        el.classList.add("a2a-on", laneClass(f.tone));
-      }
-    });
-
-    // wire
-    wire.classList.remove("tone-wait", "tone-ok", "tone-warn", "tone-bad");
-    wire.classList.add("tone-" + (f.tone || "wait"));
-    wireDir.textContent = f.dir || "";
-    if (f.kind) {
-      wireKind.style.display = "";
-      wireKind.className = "a2a-wire-kind " + kindClass(f.kind);
-      wireKind.textContent = f.kind;
+    /* 說明句：由狀態 + 事件 + 數字拼出 */
+    var last = r.steps.length ? r.steps[r.steps.length - 1] : null;
+    var tone = "";
+    var txt;
+    if (!last) {
+      txt = "尚未注入事件。Task 起始於 <code>" + r.state + "</code>（" +
+            (state.authRequired ? "Agent Card 宣告需授權，所以一建立就卡在授權" : "未要求額外授權") +
+            "）。目前這條序列在" + MODE_LABEL[r.mode] + "下已花 " + r.clientReq + " 次 client 請求。";
+    } else if (last.ok) {
+      tone = " nt-ok";
+      txt = "第 " + last.idx + " 個事件 <code>" + last.ev + "</code>（" + EVENTS[last.ev].desc +
+            "）在 <code>" + last.from + "</code> 合法 → <code>" + last.to + "</code>；本步推進 " + last.dt +
+            " s，累計 " + last.elapsed + " s。改用" + MODE_LABEL[r.mode] + "後 client 共需 " + r.clientReq +
+            " 次請求，比輪詢" + (r.reqSavedVsPoll > 0 ? "少 " + r.reqSavedVsPoll + " 次" : "相同") +
+            "，狀態陳舊延遲 " + r.stale[r.mode] + " s。";
     } else {
-      wireKind.style.display = "none";
+      tone = " nt-bad";
+      txt = "第 " + last.idx + " 個事件 <code>" + last.ev + "</code>（" + EVENTS[last.ev].desc +
+            "）在 <code>" + last.from + "</code> <strong>不合法</strong>：" + last.why +
+            "。狀態維持 <code>" + r.state + "</code>，累計被拒 " + r.rejectedCount + " 個事件、耗時仍是 " +
+            r.elapsedSec + " s。";
     }
-    jsonEl.textContent = f.json || "";
-    statusEl.textContent = f.status || "";
-    if (captionEl) captionEl.textContent = f.caption || "";
+    noteEl.className = "a2ax-note" + tone;
+    noteEl.innerHTML = txt;
 
-    // task pill
-    var ts = f.taskState || "—";
-    taskPill.textContent = "Task · " + ts;
-    taskPill.className = "a2a-taskpill " + pillClass(ts);
+    statusEl.textContent = "序列 " + r.applied + " / " + r.seqLen + " 個事件已套用｜狀態 " + r.state +
+      "｜" + MODE_LABEL[r.mode] + " " + r.clientReq + " 次請求｜空輪詢 " + r.wastedPolls +
+      "｜被拒 " + r.rejectedCount;
 
-    // next button
-    var atEnd = step >= list.length - 1;
-    btnNext.disabled = atEnd;
-    btnNext.textContent = atEnd ? "已結束" : "下一步";
+    backBtn.disabled = r.applied <= 0;
+    fwdBtn.disabled = r.applied >= r.seqLen;
   }
 
-  function setScenario(sc) {
-    scenario = sc;
-    step = 0;
-    segBtns.forEach(function (b) {
-      b.setAttribute("aria-pressed", b.getAttribute("data-sc") === sc ? "true" : "false");
-    });
-    render();
+  function cell(k, v, n) {
+    return '<div><div class="bk">' + k + '</div><div class="bv">' + v + '</div><div class="bn">' + n + "</div></div>";
   }
 
-  segBtns.forEach(function (b) {
-    b.addEventListener("click", function () {
-      setScenario(b.getAttribute("data-sc"));
-    });
-  });
+  /* ================= (5) 事件綁定 ================= */
 
-  btnNext.addEventListener("click", function () {
-    if (step < frames().length - 1) {
-      step += 1;
+  for (var b = 0; b < segBtns.length; b++) {
+    segBtns[b].addEventListener("click", function () {
+      state.notifyMode = this.getAttribute("data-mode");
       render();
-    }
-  });
+    });
+  }
 
-  btnReset.addEventListener("click", function () {
-    step = 0;
+  pollIn.addEventListener("input", function () {
+    state.pollSec = Number(pollIn.value);
+    render();
+  });
+  workIn.addEventListener("input", function () {
+    state.workSec = Number(workIn.value);
+    render();
+  });
+  authIn.addEventListener("change", function () {
+    state.authRequired = !!authIn.checked;
+    state.eventSeq = "";
+    state.step = 0;
+    lastRejectState = "";
     render();
   });
 
-  setScenario("normal");
+  padEl.addEventListener("click", function (e) {
+    var t = e.target;
+    while (t && t !== padEl && !t.getAttribute("data-ev")) { t = t.parentNode; }
+    if (!t || t === padEl) { return; }
+    var ev = t.getAttribute("data-ev");
+
+    // 游標若不在尾端，注入新事件時截斷後面的序列
+    var seq = parseSeq(state.eventSeq).slice(0, state.step);
+    seq.push(ev);
+    state.eventSeq = seq.join(",");
+    state.step = seq.length;
+
+    var probe = computeTaskRun(state);
+    var lastStep = probe.steps[probe.steps.length - 1];
+    lastRejectState = (lastStep && !lastStep.ok) ? lastStep.from : "";
+    render();
+  });
+
+  backBtn.addEventListener("click", function () {
+    if (state.step > 0) { state.step -= 1; lastRejectState = ""; render(); }
+  });
+  fwdBtn.addEventListener("click", function () {
+    if (state.step < parseSeq(state.eventSeq).length) { state.step += 1; lastRejectState = ""; render(); }
+  });
+  resetBtn.addEventListener("click", function () {
+    state.eventSeq = "";
+    state.step = 0;
+    lastRejectState = "";
+    render();
+  });
+
+  render();
 })();
 </script>
