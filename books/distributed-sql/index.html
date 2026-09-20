@@ -1376,7 +1376,7 @@
         <a href="#s2"><span class="n">02</span>核心架構</a>
         <a href="#s3"><span class="n">03</span>分片、複寫與交易</a>
         <a href="#s4"><span class="n">04</span>時間戳與一致性讀取</a>
-        <a href="#s5"><span class="n">05</span>互動：查詢與提交路徑</a>
+        <a href="#s5"><span class="n">05</span>互動：把一條 SQL 拆成分散式執行計畫</a>
         <a href="#s6"><span class="n">06</span>選型與風險</a>
       </div>
     </nav>
@@ -1392,7 +1392,12 @@
     <!-- ===================== MAIN CONTENT ===================== -->
     <main>
       <div class="inner">
-        <style>
+        <!-- demo-archetype: F｜拆解器（主，第 5 節「互動：把一條 SQL 拆成分散式執行計畫」） — 讀者給一條 SQL（語句型態、WHERE 的起始 key
+     與區間寬度），再設定表的 range 切分數、客戶端所在區、跨區 RTT、副本擺放與 Follower Read 開關，demo 真的把它拆成分散式執行
+     計畫：由 key 區間與切分邊界算出觸及哪幾個 range／Raft group，逐階段攤開誰在哪一層做了什麼、花幾次可並行的跨區往返，並導出
+     1PC／2PC、關鍵路徑延遲、RPC 數與 follower read 的陳舊上界或 leaseholder read 的不確定窗。
+     選 F 是因為本篇的核心命題是「一條 SQL 在分散式下究竟被拆成什麼」，那是一個結構分解問題，不是一段固定流程、也不是一次選型。 -->
+<style>
   .ds-grid {
     display: grid;
     grid-template-columns: repeat(3, 1fr);
@@ -1478,183 +1483,188 @@
     margin-bottom: 4px;
   }
 
-  .sql-demo {
+  .dsx-wrap {
     display: grid;
-    grid-template-columns: 220px 1fr;
+    grid-template-columns: 234px 1fr;
     gap: 18px;
+    align-items: start;
   }
 
-  .sql-controls {
+  .dsx-ctl {
     display: grid;
-    gap: 12px;
+    gap: 11px;
     align-content: start;
   }
 
-  .sql-controls .seg {
+  .dsx-fld {
     display: grid;
-    grid-template-columns: 1fr;
+    gap: 5px;
+  }
+
+  .dsx-lbl {
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--text-3);
+    letter-spacing: .04em;
+  }
+
+  .dsx-lbl b {
+    color: var(--accent);
+    font-weight: 700;
+  }
+
+  .dsx-ctl .seg {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
     border-radius: var(--radius-sm);
   }
 
-  .sql-controls .seg button {
-    text-align: left;
+  .dsx-ctl .seg button {
+    padding: 6px 8px;
+    border-right: 1px solid var(--border);
     border-bottom: 1px solid var(--border);
   }
 
-  .sql-controls .seg button:last-child {
+  .dsx-ctl .seg button:nth-child(2n) {
+    border-right: none;
+  }
+
+  .dsx-ctl .seg button:nth-last-child(-n + 2) {
     border-bottom: none;
   }
 
-  .sql-board {
-    display: grid;
-    gap: 12px;
+  .dsx-ctl input[type="range"] {
+    width: 100%;
+    accent-color: var(--accent);
   }
 
-  .sql-nodes {
-    display: grid;
-    grid-template-columns: repeat(3, 1fr);
-    gap: 10px;
-  }
-
-  .sql-node {
-    border: 1.5px solid var(--border-strong);
-    border-radius: var(--radius-sm);
-    background: #fff;
-    padding: 11px 9px;
-    min-height: 86px;
-    transition: background .18s, border-color .18s, transform .18s;
-  }
-
-  .sql-node.ns-wait,
-  .sql-node.ns-lock,
-  .sql-node.ns-ok,
-  .sql-node.ns-bad {
-    transform: translateY(-1px);
-  }
-
-  .sql-node.is-dim {
-    opacity: 0.34;
-    filter: grayscale(0.2);
-    transform: none;
-  }
-
-  .sql-node.is-focus {
-    opacity: 1;
-    filter: none;
-    box-shadow: 0 0 0 2px var(--accent), 0 6px 16px rgba(63, 97, 136, 0.16);
-    transform: translateY(-2px);
-    z-index: 1;
-    position: relative;
-  }
-
-  .sql-node.is-focus.ns-wait,
-  .sql-node.is-focus.ns-lock,
-  .sql-node.is-focus.ns-ok,
-  .sql-node.is-focus.ns-bad {
-    transform: translateY(-2px);
-  }
-
-  .sql-stepbar {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 10px;
-    margin-bottom: 12px;
-    font-size: 12.5px;
-    color: var(--text-2);
+  .dsx-ctl select {
+    width: 100%;
     font-family: var(--mono);
+    font-size: 12px;
+    color: var(--text);
+    background: #fff;
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius-sm);
+    padding: 6px 8px;
   }
 
-  .sql-stepbar b {
-    color: var(--accent);
-    font-weight: 600;
+  .dsx-out {
+    display: grid;
+    gap: 10px;
+    min-width: 0;
   }
 
-  .sql-board .flowsteps {
-    margin-top: 0;
-    margin-bottom: 14px;
+  .dsx-sql {
+    margin: 0;
+    background: var(--code-bg);
     border: 1px solid var(--border);
     border-radius: var(--radius-sm);
-    background: var(--bg-soft);
-    padding: 4px 12px;
+    padding: 10px 12px;
+    overflow-x: auto;
   }
 
-  .sql-board .flowsteps .stepitem {
-    padding: 8px 0;
-  }
-
-  .sql-board .flowsteps .stepitem.cur {
-    background: var(--accent-soft);
-    margin: 0 -12px;
-    padding-left: 12px;
-    padding-right: 12px;
-    border-radius: var(--radius-sm);
-  }
-
-  .sql-actions {
-    display: flex;
-    gap: 8px;
-    margin-top: 14px;
-    flex-wrap: wrap;
-  }
-
-  .sql-log .log-line.cur {
-    border-color: var(--accent-line);
-    background: var(--accent-soft);
-    color: var(--text);
-  }
-
-  .sql-log .log-line.cur b {
-    color: var(--accent);
-  }
-
-  .sql-node .node-name {
-    font-weight: 700;
-    font-size: 13px;
-    line-height: 1.35;
-  }
-
-  .sql-node .node-role {
+  .dsx-sql code {
     font-family: var(--mono);
-    color: var(--text-3);
+    font-size: 12.5px;
+    line-height: 1.55;
+    color: var(--text);
+    white-space: pre;
+  }
+
+  .dsx-svgbox {
+    min-width: 0;
+  }
+
+  .dsx-svg {
+    width: 100%;
+    height: auto;
+    display: block;
+  }
+  .dsx-svg text {
+    font-family: var(--mono);
+    fill: var(--text);
+  }
+
+  .dsx-svg .t-mut { fill: var(--text-3); }
+  .dsx-svg .t-sub { fill: var(--text-2); }
+  .dsx-svg .t-acc { fill: var(--accent); }
+  .dsx-svg .t-ok  { fill: var(--ok); }
+
+  .dsx-svg .seg-box {
+    fill: #fff;
+    stroke: var(--border-strong);
+    stroke-width: 1;
+  }
+
+  .dsx-svg .seg-box.hit-ok  { fill: var(--ok-soft); stroke: var(--ok); }
+  .dsx-svg .seg-box.hit-far { fill: var(--accent-soft); stroke: var(--accent); }
+  .dsx-svg .seg-box.hit-w   { fill: var(--warn-soft); stroke: var(--warn); }
+
+  .dsx-svg .tick    { stroke: var(--border-strong); stroke-width: 1; }
+  .dsx-svg .row-sep { stroke: var(--border); stroke-width: 1; }
+  .dsx-svg .brk     { fill: none; stroke: var(--accent); stroke-width: 1.5; }
+  .dsx-svg .crit    { stroke: var(--bad); stroke-width: 1; stroke-dasharray: 4 3; }
+
+  .dsx-svg .bar     { fill: var(--border-strong); }
+  .dsx-svg .bar.hop { fill: var(--accent); }
+  .dsx-svg .bar.loc { fill: var(--ok); }
+  .dsx-svg .bar.q   { fill: var(--warn); }
+  .dsx-svg .bar.off { fill: none; stroke: var(--text-3); stroke-width: 1; stroke-dasharray: 3 2; }
+
+  .dsx-out .cap {
+    margin: 0 0 2px;
+  }
+
+  .dsx-figs {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 8px;
+  }
+
+  .dsx-fig {
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    background: #fff;
+    padding: 8px 9px;
+  }
+
+  .dsx-fig .fk {
+    font-family: var(--mono);
     font-size: 11px;
-    margin-top: 4px;
+    color: var(--text-3);
+    letter-spacing: .04em;
   }
 
-  .sql-node .node-note {
-    color: var(--text-2);
-    font-size: 12.5px;
-    margin-top: 6px;
-  }
-
-  .sql-log {
-    display: grid;
-    gap: 8px;
-  }
-
-  .sql-log .log-line {
-    border: 1px solid var(--border);
-    border-radius: var(--radius-sm);
-    background: #fff;
-    padding: 9px 11px;
-    font-size: 13px;
-    color: var(--text-2);
-  }
-
-  .sql-log .log-line b {
+  .dsx-fig .fv {
+    font-family: var(--mono);
+    font-size: 15px;
+    font-weight: 700;
     color: var(--text);
+    margin-top: 3px;
+  }
+
+  .dsx-fig.hot .fv {
+    color: var(--bad);
+  }
+
+  .dsx-fig.cool .fv {
+    color: var(--ok);
   }
 
   @media (max-width: 760px) {
     .ds-grid,
-    .flow-steps,
-    .sql-nodes {
+    .flow-steps {
       grid-template-columns: 1fr;
     }
 
     .arch-layer,
-    .sql-demo {
+    .dsx-wrap {
       grid-template-columns: 1fr;
+    }
+
+    .dsx-figs {
+      grid-template-columns: repeat(2, 1fr);
     }
   }
 </style>
@@ -1881,84 +1891,95 @@
 <section id="s5">
   <div class="sec-head">
     <span class="sec-num">05</span>
-    <h2>互動：查詢與提交路徑</h2>
+    <h2>互動：把一條 SQL 拆成分散式執行計畫</h2>
   </div>
-  <p class="sec-sub">用四種情境觀察 Distributed SQL 如何在路由、Consensus、時間戳與讀取延遲之間取捨。</p>
+  <p class="sec-sub">同一條語句，換個 key、換個切分、換個客戶端所在區，執行計畫與延遲組成就完全不同。</p>
 
-  <p>下方模擬器把一個 NewSQL cluster 簡化成 Gateway、Metadata、Clock、兩個 Range leaseholder 與跨區 Replica。切換情境後按「下一步」，觀察不同 request path 會啟用哪些元件，以及哪裡會形成 latency 或 availability 的瓶頸。</p>
+  <p>下方的拆解器不播劇本：它先用你給的 key 區間去對照 range 邊界，算出這條語句會落在哪幾個 Raft group，再逐階段攤開每一層做了什麼、花掉幾次跨區往返、哪些往返可以並行。三個最值得盯的翻轉：<strong>觸及一個 range 的寫入走 1PC、觸及兩個以上就必須走 2PC</strong>；<strong>扇出的多個 range 是並行的，關鍵路徑取最慢那一個，不是加總</strong>；<strong>Follower Read 是逐 range 判定的</strong>——同一條 scan 完全可能一半由本地副本服務、一半還是得跨區找 leaseholder。</p>
 
   <div class="demo" id="demo-distributed-sql">
     <div class="demo-bar">
-      <span class="label">互動 · Distributed SQL request path</span>
-      <span class="label" style="text-transform:none;font-family:var(--sans);font-size:12px;color:var(--text-2)">選擇情境後逐步執行</span>
+      <span class="label">互動 · SQL 執行計畫拆解器</span>
+      <span class="label" style="text-transform:none;font-family:var(--sans);font-size:12px;color:var(--text-2)">改語句、key 區間、切分與副本擺放</span>
     </div>
     <div class="demo-body">
-      <div class="sql-demo">
-        <div class="sql-controls">
-          <div class="seg" role="group" aria-label="Distributed SQL 情境切換">
-            <button data-mode="single" aria-pressed="true">單分片寫入</button>
-            <button data-mode="cross" aria-pressed="false">跨分片交易</button>
-            <button data-mode="follower" aria-pressed="false">Follower Read</button>
-            <button data-mode="outage" aria-pressed="false">區域故障</button>
+      <div class="dsx-wrap">
+        <div class="dsx-ctl">
+          <div class="dsx-fld">
+            <span class="dsx-lbl">語句型態</span>
+            <div class="seg" id="dsx-stmt" role="group" aria-label="語句型態">
+              <button data-stmt="point" aria-pressed="false">Point read</button>
+              <button data-stmt="scan" aria-pressed="true">Range scan</button>
+              <button data-stmt="write1" aria-pressed="false">單列寫入</button>
+              <button data-stmt="txn" aria-pressed="false">跨列交易</button>
+            </div>
           </div>
-          <div class="legend">
-            <span><i class="dot ns-idle"></i>未參與</span>
-            <span><i class="dot ns-wait"></i>路由 / 等待</span>
-            <span><i class="dot ns-lock"></i>鎖定 / 複製中</span>
-            <span><i class="dot ns-ok"></i>成功</span>
-            <span><i class="dot ns-bad"></i>故障 / 重試</span>
+          <div class="dsx-fld">
+            <span class="dsx-lbl">WHERE 起始 key　<b id="dsx-lo-v">240</b></span>
+            <input type="range" id="dsx-lo" min="0" max="990" step="10" value="240" aria-label="WHERE 起始 key">
           </div>
+          <div class="dsx-fld">
+            <span class="dsx-lbl">WHERE 區間寬度　<b id="dsx-span-v">180</b></span>
+            <input type="range" id="dsx-span" min="1" max="400" step="1" value="180" aria-label="WHERE 區間寬度">
+          </div>
+          <div class="dsx-fld">
+            <span class="dsx-lbl">表切成幾個 range　<b id="dsx-rc-v">4</b></span>
+            <input type="range" id="dsx-rc" min="2" max="8" step="1" value="4" aria-label="range 切分數">
+          </div>
+          <div class="dsx-fld">
+            <span class="dsx-lbl">客戶端所在區</span>
+            <select id="dsx-client" aria-label="客戶端所在區">
+              <option value="0">us-east</option>
+              <option value="1" selected>eu-west</option>
+              <option value="2">ap-northeast</option>
+              <option value="3">sa-east</option>
+            </select>
+          </div>
+          <div class="dsx-fld">
+            <span class="dsx-lbl">跨半圈 RTT　<b id="dsx-rtt-v">70</b> ms</span>
+            <input type="range" id="dsx-rtt" min="10" max="180" step="5" value="70" aria-label="跨區 RTT 基準">
+          </div>
+          <div class="dsx-fld">
+            <span class="dsx-lbl">副本擺放（3 副本）</span>
+            <select id="dsx-spread" aria-label="副本擺放">
+              <option value="1" selected>跨三區各一副本</option>
+              <option value="0">三副本同區</option>
+            </select>
+          </div>
+          <div class="dsx-fld">
+            <span class="dsx-lbl">Follower Read</span>
+            <div class="seg" id="dsx-fr" role="group" aria-label="Follower Read">
+              <button data-fr="1" aria-pressed="true">開</button>
+              <button data-fr="0" aria-pressed="false">關</button>
+            </div>
+          </div>
+          <button class="btn" id="dsx-reset">Reset</button>
         </div>
 
-        <div class="sql-board">
-          <div class="sql-stepbar" id="sql-stepbar"><span>步驟 <b>0</b> / 4</span><span>尚未開始</span></div>
-          <div class="flowsteps" id="sql-steps" aria-label="情境步驟清單"></div>
-          <div class="status-line" id="sql-status">選擇情境並按「下一步」，觀察 SQL request 會碰到哪些協調點。</div>
-          <div class="sql-nodes" id="sql-nodes">
-            <div class="sql-node" data-node="gateway">
-              <div class="node-name">SQL Gateway</div>
-              <div class="node-role">parse / plan</div>
-              <div class="node-note">等待請求</div>
-            </div>
-            <div class="sql-node" data-node="meta">
-              <div class="node-name">Metadata</div>
-              <div class="node-role">range map</div>
-              <div class="node-note">查詢分片位置</div>
-            </div>
-            <div class="sql-node" data-node="clock">
-              <div class="node-name">Clock / TS</div>
-              <div class="node-role">MVCC timestamp</div>
-              <div class="node-note">產生讀寫時間戳</div>
-            </div>
-            <div class="sql-node" data-node="rangeA">
-              <div class="node-name">Range A</div>
-              <div class="node-role">leaseholder</div>
-              <div class="node-note">本地 key range</div>
-            </div>
-            <div class="sql-node" data-node="rangeB">
-              <div class="node-name">Range B</div>
-              <div class="node-role">leaseholder</div>
-              <div class="node-note">另一個 key range</div>
-            </div>
-            <div class="sql-node" data-node="replica">
-              <div class="node-name">Remote Replicas</div>
-              <div class="node-role">Raft majority</div>
-              <div class="node-note">跨區複寫</div>
-            </div>
+        <div class="dsx-out">
+          <pre class="dsx-sql"><code id="dsx-sql">SELECT …</code></pre>
+          <div class="status-line" id="dsx-status">拖動左側控制項，執行計畫會即時重算。</div>
+
+          <div class="dsx-svgbox" id="dsx-ruler"></div>
+          <p class="cap">尺上的邊界是由「切分數」算出來的，不是畫死的；上方括號是 WHERE 的 key 區間，被它蓋到的 range 才會進入執行計畫。每段下方標的是實際服務者（<code>F</code>＝本地 follower、<code>L</code>＝leaseholder）。時鐘模型採 HLC，所以計畫裡沒有 commit wait；若換成 TrueTime，提交後還要多等一段 2ε 的 commit wait 才能回覆客戶端。</p>
+
+          <div class="legend">
+            <span><i class="dot ns-idle"></i>未觸及 range</span>
+            <span><i class="dot ns-ok"></i>本地副本服務</span>
+            <span><i class="dot ns-wait"></i>跨區 leaseholder</span>
+            <span><i class="dot ns-lock"></i>寫入（含 quorum 等待）</span>
           </div>
-          <div class="sql-log" id="sql-log">
-            <div class="log-line"><b>準備：</b>目前尚未送出 request。</div>
-          </div>
-          <div class="sql-actions">
-            <button class="btn primary" id="sql-next">開始模擬</button>
-            <button class="btn" id="sql-reset">Reset</button>
-          </div>
+
+          <div class="dsx-svgbox" id="dsx-gantt"></div>
+          <p class="cap">扇出那一列的細條是每個 range 各自的往返，它們<strong>共用同一段 x</strong>（同時發出），所以該階段的長度是<strong>取最慢的一條，不是把它們加總</strong>。虛線框的 intent resolve 畫在總延遲右側，代表它是背景清理、<strong>不計入關鍵路徑</strong>，但仍然要花 RPC。扇出列裡的 quorum 等待，就是 Leader Election 與 Raft 篇談 commitIndex 要靠 majority ack 才能推進的那一段。</p>
+
+          <div class="dsx-figs" id="dsx-figs"></div>
         </div>
       </div>
     </div>
   </div>
 
-  <p class="cap">觀察重點：單分片寫入只碰一個 Consensus group；跨分片交易要協調多個 group；Follower Read 降低 latency 但讀較舊 snapshot；區域故障時 majority placement 直接決定可用性。</p>
+  <p class="cap">觀察重點：把區間寬度從 1 拉大到跨越切分邊界的那一刻，提交協定會從 1PC 翻成 2PC、計畫多出一段 transaction record 往返——這正是「跨分片交易貴在哪裡」的具體數字。</p>
 
   <div class="oneliner">
     <b>一句話答法</b>Distributed SQL 的 request path 越跨分片、越跨區、越要求最新，就越容易被 Consensus、timestamp uncertainty 與交易重試主導延遲。
@@ -2095,379 +2116,518 @@
 (function () {
   "use strict";
 
+  /* ================= (1) 常數與參數表 ================= */
+
+  var KEY_MIN = 0;
+  var KEY_MAX = 1000;                   /* 示範表 orders 的 order_id 空間 */
+  var REGIONS = ["us-east", "eu-west", "ap-northeast", "sa-east"];
+  var REGION_SHORT = ["use", "euw", "apne", "sae"];
+  var REGION_LON = [-77, 4, 139, -46];  /* 各區經度；區間 RTT 由圓弧距離換算，不是 RTT 查表 */
+  var LOCAL_RTT_MS = 2;                 /* 同區節點往返 */
+  var PARSE_MS = 1;                     /* Gateway 解析 + 規劃 */
+  var META_MS = 1;                      /* range descriptor 命中本地快取 */
+  var MERGE_MS = 1;                     /* 結果合併 / 回覆 */
+  var REPLICAS = 3;                     /* 每個 range 的副本數（本 demo 固定） */
+  var MAX_CLOCK_OFFSET_MS = 500;        /* HLC 最大時鐘偏移 => leaseholder read 的不確定窗 */
+  var CLOSED_TS_LAG_MS = 3000;          /* closed timestamp 落後目標 */
+  var DEFAULTS = {
+    stmt: "scan", keyLo: 240, keySpan: 180, rangeCount: 4,
+    clientRegion: 1, rttCrossMs: 70, spreadReplicas: true, followerRead: true
+  };
+
+  /* ================= (2) 純函式：helper 與 computePlan ================= */
+
+  function clampInt(v, lo, hi) {
+    var n = parseInt(v, 10);
+    if (isNaN(n)) n = lo;
+    return Math.max(lo, Math.min(hi, n));
+  }
+
+  /* 兩條經線之間的圓弧夾角（0–180 度） */
+  function arcDeg(a, b) {
+    var d = Math.abs(a - b) % 360;
+    return d > 180 ? 360 - d : d;
+  }
+
+  /* 區域間往返：同區是機房內延遲，跨區依經度距離佔半圈的比例縮放 */
+  function rttOf(ra, rb, rttCrossMs) {
+    if (ra === rb) return LOCAL_RTT_MS;
+    return Math.round(rttCrossMs * arcDeg(REGION_LON[ra], REGION_LON[rb]) / 180);
+  }
+
+  function replicaRegionsOf(lease, spread) {
+    var out = [lease];
+    var k;
+    if (!spread) {
+      for (k = 1; k < REPLICAS; k++) out.push(lease);
+      return out;
+    }
+    for (k = 1; k < REPLICAS; k++) out.push((lease + k) % REGIONS.length);
+    return out;
+  }
+
+  /* 把 key 空間平均切成 n 段，餘數分給前面幾段；leaseholder 依序輪派到各區 */
+  function splitRanges(n, spread) {
+    var base = Math.floor((KEY_MAX - KEY_MIN) / n);
+    var extra = (KEY_MAX - KEY_MIN) - base * n;
+    var out = [];
+    var cur = KEY_MIN;
+    var i;
+    for (i = 0; i < n; i++) {
+      var w = base + (i < extra ? 1 : 0);
+      var lease = i % REGIONS.length;
+      out.push({
+        id: i + 1, lo: cur, hi: cur + w - 1, width: w,
+        lease: lease, leaseName: REGIONS[lease], leaseShort: REGION_SHORT[lease],
+        replicas: replicaRegionsOf(lease, spread)
+      });
+      cur += w;
+    }
+    return out;
+  }
+
+  function overlaps(r, lo, hi) { return lo <= r.hi && hi >= r.lo; }
+
+  /* 3 副本的 quorum 只需要最快的那一個 follower 回 ack */
+  function quorumWaitOf(r, rttCrossMs) {
+    var best = -1;
+    var i;
+    for (i = 1; i < r.replicas.length; i++) {
+      var t = rttOf(r.lease, r.replicas[i], rttCrossMs);
+      if (best < 0 || t < best) best = t;
+    }
+    return best < 0 ? 0 : best;
+  }
+
+  function sqlTextOf(stmt, lo, hi) {
+    if (stmt === "point") return "SELECT * FROM orders WHERE order_id = " + lo + ";";
+    if (stmt === "write1") return "UPDATE orders SET status = 'paid' WHERE order_id = " + lo + ";";
+    if (stmt === "txn") {
+      return "BEGIN;\n  UPDATE orders SET status = 'paid'\n   WHERE order_id BETWEEN " + lo + " AND " + hi + ";\nCOMMIT;";
+    }
+    return "SELECT order_id, status FROM orders\n WHERE order_id BETWEEN " + lo + " AND " + hi + ";";
+  }
+
+  // @probe fn       computePlan
+  // @probe baseline {"stmt":"scan","keyLo":240,"keySpan":180,"rangeCount":4,"clientRegion":1,"rttCrossMs":70,"spreadReplicas":true,"followerRead":true}
+  // @probe sweep    {"stmt":["point","txn"],"keyLo":[0,960],"keySpan":[1,400],"rangeCount":[2,8],"clientRegion":[0,3],"rttCrossMs":[10,180],"spreadReplicas":[false,true],"followerRead":[false,true]}
+  function computePlan(p) {
+    var stmt = String(p.stmt);
+    var isWrite = stmt === "write1" || stmt === "txn";
+    var singleKey = stmt === "point" || stmt === "write1";
+    var spread = !!p.spreadReplicas;
+    var follower = !!p.followerRead;
+    var rc = clampInt(p.rangeCount, 2, 8);
+    var rttCrossMs = clampInt(p.rttCrossMs, 1, 400);
+    var client = clampInt(p.clientRegion, 0, REGIONS.length - 1);
+
+    var ranges = splitRanges(rc, spread);
+    var lo = clampInt(p.keyLo, KEY_MIN, KEY_MAX - 1);
+    var span = singleKey ? 1 : Math.max(1, clampInt(p.keySpan, 1, KEY_MAX));
+    var hi = Math.min(lo + span - 1, KEY_MAX - 1);
+
+    /* --- 觸及哪幾個 range：真的拿 WHERE 區間去和切分邊界相交 --- */
+    var touched = [];
+    var i, r;
+    for (i = 0; i < ranges.length; i++) {
+      r = ranges[i];
+      if (!overlaps(r, lo, hi)) continue;
+      var localReplica = r.replicas.indexOf(client) >= 0;
+      var byFollower = !isWrite && follower && localReplica;
+      var servedRegion = byFollower ? client : r.lease;
+      var clientHop = rttOf(client, servedRegion, rttCrossMs);
+      var quorumMs = isWrite ? quorumWaitOf(r, rttCrossMs) : 0;
+      touched.push({
+        id: r.id, lo: r.lo, hi: r.hi, lease: r.lease,
+        leaseName: r.leaseName, leaseShort: r.leaseShort, replicas: r.replicas,
+        hitLo: Math.max(lo, r.lo), hitHi: Math.min(hi, r.hi),
+        localReplica: localReplica, byFollower: byFollower,
+        servedRegion: servedRegion, servedName: REGIONS[servedRegion],
+        servedShort: REGION_SHORT[servedRegion],
+        clientHop: clientHop, clientHopCross: servedRegion !== client,
+        quorumMs: quorumMs, quorumCross: isWrite && quorumMs > LOCAL_RTT_MS,
+        costMs: clientHop + quorumMs
+      });
+    }
+
+    var n = touched.length;
+    var sumCost = 0, maxCost = 0, followerServed = 0, leaderRead = 0, slowest = null;
+    for (i = 0; i < n; i++) {
+      sumCost += touched[i].costMs;
+      if (touched[i].costMs > maxCost) { maxCost = touched[i].costMs; slowest = touched[i]; }
+      if (touched[i].byFollower) followerServed++;
+      else if (!isWrite) leaderRead++;
+    }
+
+    /* --- 單 range 寫入可以 1PC；跨 range 一定要 2PC --- */
+    var twoPC = isWrite && n > 1;
+    var protocol = !isWrite ? "唯讀" : (twoPC ? "2PC" : "1PC");
+
+    /* --- 逐階段攤開，時間由上一階段結束處接續 --- */
+    var phases = [];
+    var at = 0;
+    function addPhase(o) { o.startMs = at; at += o.durMs; phases.push(o); return o; }
+
+    addPhase({ key: "parse", name: "解析與計畫", sub: "Gateway", durMs: PARSE_MS, cross: 0 });
+    addPhase({ key: "route", name: "range 定位", sub: "Metadata · 本地快取", durMs: META_MS, cross: 0 });
+    addPhase({ key: "ts", name: "HLC 時間戳", sub: "Gateway · 0 RTT", durMs: 0, cross: 0 });
+
+    addPhase({
+      key: "fanout",
+      name: isWrite ? (twoPC ? "intent 扇出" : "寫入扇出") : "讀取扇出",
+      sub: (isWrite ? "Leaseholder+Raft" : (followerServed === n && n > 0 ? "本地 Follower" : "Leaseholder"))
+        + " · " + n + " 並行",
+      durMs: maxCost,
+      cross: slowest ? ((slowest.clientHopCross ? 1 : 0) + (slowest.quorumCross ? 1 : 0)) : 0,
+      bars: touched
+    });
+
+    if (twoPC) {
+      var coord = touched[0];
+      var coordHop = rttOf(client, coord.lease, rttCrossMs);
+      addPhase({
+        key: "commit", name: "commit record", sub: "Coordinator r" + coord.id + " · " + coord.leaseShort,
+        durMs: coordHop + coord.quorumMs,
+        cross: (coord.lease !== client ? 1 : 0) + (coord.quorumCross ? 1 : 0),
+        hopMs: coordHop, quorumMs: coord.quorumMs
+      });
+    }
+
+    addPhase({
+      key: "reply", name: isWrite ? "回覆 client" : "合併並回覆",
+      sub: isWrite ? (twoPC ? "Gateway" : "Gateway · 1PC 免二階段") : "Gateway",
+      durMs: MERGE_MS, cross: 0
+    });
+
+    var totalMs = at;
+
+    /* --- intent resolve 是背景清理，有成本但不在關鍵路徑上 --- */
+    var asyncMs = 0;
+    if (twoPC) {
+      for (i = 0; i < n; i++) {
+        var tr = rttOf(client, touched[i].lease, rttCrossMs);
+        if (tr > asyncMs) asyncMs = tr;
+      }
+      phases.push({
+        key: "resolve", name: "intent resolve", sub: "背景清理 · 不計延遲",
+        durMs: asyncMs, startMs: totalMs, cross: 0, offPath: true
+      });
+    }
+
+    var crossRttCount = 0;
+    for (i = 0; i < phases.length; i++) {
+      if (!phases[i].offPath) crossRttCount += phases[i].cross;
+    }
+
+    var rpcCount = n
+      + (isWrite ? n * 2 * (REPLICAS - 1) : 0)
+      + (twoPC ? 1 + 2 * (REPLICAS - 1) + n : 0);
+
+    /* --- follower read 的陳舊上界含 closed timestamp 傳播的半程 --- */
+    var stalenessMs = 0;
+    if (followerServed > 0) {
+      var lag = 0;
+      for (i = 0; i < n; i++) {
+        if (!touched[i].byFollower) continue;
+        var prop = rttOf(touched[i].lease, client, rttCrossMs);
+        if (prop > lag) lag = prop;
+      }
+      stalenessMs = CLOSED_TS_LAG_MS + Math.round(lag / 2);
+    }
+    var uncertaintyMs = leaderRead > 0 ? MAX_CLOCK_OFFSET_MS : 0;
+
+    /* --- 反事實：同一條語句若每個 range 都由 leaseholder 服務要多久 --- */
+    var leaderPathMs = 0;
+    for (i = 0; i < n; i++) {
+      var lp = rttOf(client, touched[i].lease, rttCrossMs) + touched[i].quorumMs;
+      if (lp > leaderPathMs) leaderPathMs = lp;
+    }
+
+    return {
+      stmt: stmt, isWrite: isWrite, singleKey: singleKey,
+      sqlText: sqlTextOf(stmt, lo, hi),
+      keyLo: lo, keyHi: hi, keySpanEff: hi - lo + 1,
+      clientRegion: client, clientName: REGIONS[client], clientShort: REGION_SHORT[client],
+      ranges: ranges, touched: touched, phases: phases,
+      touchedCount: n, rangeCount: rc, rangeWidth: ranges.length ? ranges[0].width : 0,
+      firstRangeId: n ? touched[0].id : 0, lastRangeId: n ? touched[n - 1].id : 0,
+      totalMs: totalMs, asyncMs: asyncMs,
+      serialSumMs: sumCost, parallelSavedMs: sumCost - maxCost,
+      crossRttCount: crossRttCount, rpcCount: rpcCount,
+      commitProtocol: protocol,
+      prepareRounds: isWrite ? 1 : 0, commitRounds: twoPC ? 1 : 0,
+      followerServed: followerServed, leaderRead: leaderRead,
+      stalenessMs: stalenessMs, uncertaintyMs: uncertaintyMs,
+      leaderPathMs: leaderPathMs
+    };
+  }
+
+  /* ================= (3) DOM 參照 ================= */
+
   var root = document.getElementById("demo-distributed-sql");
   if (!root) return;
 
-  var defaultNotes = {
-    gateway: "等待請求",
-    meta: "查詢分片位置",
-    clock: "產生讀寫時間戳",
-    rangeA: "本地 key range",
-    rangeB: "另一個 key range",
-    replica: "跨區複寫"
+  var elStmt = document.getElementById("dsx-stmt");
+  var elFr = document.getElementById("dsx-fr");
+  var elLo = document.getElementById("dsx-lo");
+  var elSpan = document.getElementById("dsx-span");
+  var elRc = document.getElementById("dsx-rc");
+  var elClient = document.getElementById("dsx-client");
+  var elRtt = document.getElementById("dsx-rtt");
+  var elSpread = document.getElementById("dsx-spread");
+  var elReset = document.getElementById("dsx-reset");
+  var outLo = document.getElementById("dsx-lo-v");
+  var outSpan = document.getElementById("dsx-span-v");
+  var outRc = document.getElementById("dsx-rc-v");
+  var outRtt = document.getElementById("dsx-rtt-v");
+  var outSql = document.getElementById("dsx-sql");
+  var outStatus = document.getElementById("dsx-status");
+  var boxRuler = document.getElementById("dsx-ruler");
+  var boxGantt = document.getElementById("dsx-gantt");
+  var boxFigs = document.getElementById("dsx-figs");
+
+  var state = {
+    stmt: DEFAULTS.stmt, keyLo: DEFAULTS.keyLo, keySpan: DEFAULTS.keySpan,
+    rangeCount: DEFAULTS.rangeCount, clientRegion: DEFAULTS.clientRegion,
+    rttCrossMs: DEFAULTS.rttCrossMs, spreadReplicas: DEFAULTS.spreadReplicas,
+    followerRead: DEFAULTS.followerRead
   };
 
-  var modes = {
-    single: {
-      title: "單分片寫入",
-      intro: "單分片寫入只需要定位 key range，然後由該 range 的 leaseholder 複製到 Raft majority。",
-      steps: [
-        {
-          sx: "1",
-          label: "Gateway 解析 SQL，判定為單分片 mutation",
-          status: "<b>Step 1 · Parse & Plan</b>：Gateway 解析 INSERT/UPDATE，確認 predicate 可定位到單一 range。",
-          focus: ["gateway"],
-          states: { gateway: ["ns-wait", "parse + plan"] },
-          log: "<b>Step 1:</b> SQL Gateway 解析請求，產生單分片執行計畫。"
-        },
-        {
-          sx: "2",
-          label: "Metadata 回傳 Range A leaseholder",
-          status: "<b>Step 2 · Route</b>：Range map 告訴 Gateway 這筆 key 屬於 Range A，不需要碰 Range B。",
-          focus: ["gateway", "meta", "rangeA"],
-          states: {
-            gateway: ["ns-ok", "plan ready"],
-            meta: ["ns-wait", "lookup Range A"],
-            rangeA: ["ns-wait", "leaseholder selected"]
-          },
-          log: "<b>Step 2:</b> Metadata 完成 range lookup，request 導向 Range A leaseholder。"
-        },
-        {
-          sx: "3",
-          label: "Range A append log，等待 Raft majority",
-          status: "<b>Step 3 · Consensus</b>：寫入 append 到 Consensus log，等待 majority ACK 才算 durable。",
-          focus: ["rangeA", "replica"],
-          states: {
-            rangeA: ["ns-lock", "append log"],
-            replica: ["ns-lock", "majority ACK"]
-          },
-          log: "<b>Step 3:</b> 單一 Raft group 達成 majority，寫入具備 durability。"
-        },
-        {
-          sx: "4",
-          label: "Range A committed，Client 收到 OK",
-          status: "<b>Step 4 · Commit</b>：寫入在 Range A committed；主要成本是一次 Consensus round。",
-          focus: ["gateway", "rangeA", "replica"],
-          states: {
-            gateway: ["ns-ok", "return OK"],
-            rangeA: ["ns-ok", "committed"],
-            replica: ["ns-ok", "replicated"]
-          },
-          log: "<b>Step 4:</b> 單分片交易完成；未穿越第二個 Consensus group。"
-        }
-      ]
-    },
-    cross: {
-      title: "跨分片交易",
-      intro: "跨分片交易會同時碰到 Range A 與 Range B；每個 range 各自有 Consensus，還需要 transaction record 統一 commit。",
-      steps: [
-        {
-          sx: "1",
-          label: "Planner 發現需同時更新 Range A + B",
-          status: "<b>Step 1 · Distributed Plan</b>：訂單與庫存落在不同 key range，需要分散式執行計畫。",
-          focus: ["gateway", "meta"],
-          states: {
-            gateway: ["ns-wait", "distributed plan"],
-            meta: ["ns-wait", "lookup A + B"]
-          },
-          log: "<b>Step 1:</b> Planner 發現 transaction 需要同時更新兩個 ranges。"
-        },
-        {
-          sx: "2",
-          label: "Clock 產生交易 timestamp，開啟 txn",
-          status: "<b>Step 2 · Timestamp</b>：交易取得 provisional timestamp，用來排序 MVCC 版本；後續可能因衝突 retry。",
-          focus: ["clock", "gateway"],
-          states: {
-            clock: ["ns-wait", "assign ts"],
-            gateway: ["ns-lock", "txn open"]
-          },
-          log: "<b>Step 2:</b> 交易取得 provisional timestamp，後續可能因衝突被 push 或 retry。"
-        },
-        {
-          sx: "3",
-          label: "兩個 range 寫入 intents，各自走 Consensus",
-          status: "<b>Step 3 · Write Intents</b>：Range A 與 Range B 寫入 provisional intents，兩邊都要通過各自的 Consensus。",
-          focus: ["rangeA", "rangeB", "replica"],
-          states: {
-            rangeA: ["ns-lock", "intent written"],
-            rangeB: ["ns-lock", "intent written"],
-            replica: ["ns-lock", "two groups ACK"]
-          },
-          log: "<b>Step 3:</b> 每個 touched range 都要複製 provisional write。"
-        },
-        {
-          sx: "4",
-          label: "Transaction record committed，intents resolved",
-          status: "<b>Step 4 · Atomic Commit</b>：Atomicity 來自 transaction protocol；Consensus 只保護各分片自己的 log。",
-          focus: ["gateway", "clock", "rangeA", "rangeB", "replica"],
-          states: {
-            gateway: ["ns-ok", "commit response"],
-            clock: ["ns-ok", "commit ts"],
-            rangeA: ["ns-ok", "resolved"],
-            rangeB: ["ns-ok", "resolved"],
-            replica: ["ns-ok", "durable"]
-          },
-          log: "<b>Step 4:</b> Transaction record committed 後，兩個 range 的 intents 被 resolve。"
-        }
-      ]
-    },
-    follower: {
-      title: "Follower Read",
-      intro: "Follower Read 讓讀取在本地副本完成，但必須選擇足夠舊、已確定安全的 MVCC timestamp。",
-      steps: [
-        {
-          sx: "1",
-          label: "Gateway 判定可接受 bounded staleness",
-          status: "<b>Step 1 · Read Plan</b>：唯讀查詢可接受例如 5 秒前的 safe timestamp。",
-          focus: ["gateway", "clock"],
-          states: {
-            gateway: ["ns-wait", "read-only plan"],
-            clock: ["ns-wait", "safe timestamp"]
-          },
-          log: "<b>Step 1:</b> 系統選擇 bounded staleness 的 safe timestamp。"
-        },
-        {
-          sx: "2",
-          label: "Metadata 導向本地 follower replica",
-          status: "<b>Step 2 · Local Route</b>：Query 被導向近端 follower，不必跨區找 leaseholder。",
-          focus: ["meta", "replica"],
-          states: {
-            meta: ["ns-wait", "local replica"],
-            replica: ["ns-wait", "serve snapshot"]
-          },
-          log: "<b>Step 2:</b> Metadata 找到本地 follower replica，降低跨區 RTT。"
-        },
-        {
-          sx: "3",
-          label: "Follower 以 MVCC snapshot 回傳舊版本",
-          status: "<b>Step 3 · Snapshot Read</b>：讀到的是安全 snapshot，不保證最新。",
-          focus: ["replica", "clock"],
-          states: {
-            replica: ["ns-ok", "snapshot read"],
-            clock: ["ns-ok", "bounded stale"]
-          },
-          log: "<b>Step 3:</b> Follower 用 MVCC snapshot 回傳舊但一致的資料版本。"
-        },
-        {
-          sx: "4",
-          label: "Client 快速取得結果（非 read-your-writes）",
-          status: "<b>Step 4 · Fast Response</b>：Follower Read 是 latency optimization；若要 read-your-writes 需改走 leaseholder。",
-          focus: ["gateway", "replica"],
-          states: {
-            gateway: ["ns-ok", "fast response"],
-            replica: ["ns-ok", "local read"]
-          },
-          log: "<b>Step 4:</b> Follower Read 是 latency optimization，語意是 bounded staleness。"
-        }
-      ]
-    },
-    outage: {
-      title: "區域故障",
-      intro: "區域故障時，能否繼續讀寫取決於 replica placement、majority 是否仍存在，以及 leaseholder 能否轉移。",
-      steps: [
-        {
-          sx: "1",
-          label: "Remote region 故障，部分 replicas 不可達",
-          status: "<b>Step 1 · Region Down</b>：跨區副本不可達，cluster 開始重新評估 lease 與 majority。",
-          focus: ["replica", "gateway"],
-          states: {
-            replica: ["ns-bad", "region down"],
-            gateway: ["ns-wait", "reroute"]
-          },
-          log: "<b>Step 1:</b> 跨區副本不可達，cluster 開始重新評估 lease 與 majority。"
-        },
-        {
-          sx: "2",
-          label: "Metadata 檢查 quorum：A 可寫、B 失去 majority",
-          status: "<b>Step 2 · Quorum Check</b>：Range A 仍可寫；Range B 因 majority 不足只能拒絕強一致寫入。",
-          focus: ["meta", "rangeA", "rangeB"],
-          states: {
-            meta: ["ns-wait", "check quorum"],
-            rangeA: ["ns-lock", "majority ok"],
-            rangeB: ["ns-bad", "no majority"]
-          },
-          log: "<b>Step 2:</b> Range A 仍可寫；Range B 因 majority 不足只能拒絕強一致寫入。"
-        },
-        {
-          sx: "3",
-          label: "Gateway 對可用 range 繼續服務，其餘 unavailable",
-          status: "<b>Step 3 · Partial Service</b>：Distributed SQL 寧可拒絕不安全寫入，也不產生 split-brain。",
-          focus: ["gateway", "rangeA", "rangeB"],
-          states: {
-            gateway: ["ns-lock", "partial service"],
-            rangeA: ["ns-ok", "serve writes"],
-            rangeB: ["ns-bad", "unavailable"]
-          },
-          log: "<b>Step 3:</b> Gateway 對可用 range 繼續服務，對不可用 range 回傳 retry / unavailable。"
-        },
-        {
-          sx: "4",
-          label: "恢復後追 log；placement 決定 RPO / 可用性",
-          status: "<b>Step 4 · Recovery</b>：Replica placement 是 availability 與 latency 的核心設計決策。",
-          focus: ["gateway", "rangeA", "rangeB", "replica"],
-          states: {
-            gateway: ["ns-ok", "safe result"],
-            rangeA: ["ns-ok", "consistent"],
-            rangeB: ["ns-bad", "retry needed"],
-            replica: ["ns-bad", "catch-up later"]
-          },
-          log: "<b>Step 4:</b> 故障恢復後 replica 追 log；跨區 RPO=0 通常意味著較低可用性。"
-        }
-      ]
+  /* ================= (4) render：只讀 plan 畫出來 ================= */
+
+  function rnd(v) { return Math.round(v * 10) / 10; }
+
+  function rulerSvg(plan) {
+    var X0 = 30, X1 = 690, W = X1 - X0, H = 126;
+    function xk(k) { return Math.round((X0 + (k / KEY_MAX) * W) * 10) / 10; }
+
+    var s = ['<svg class="dsx-svg" viewBox="0 0 720 ' + H + '" role="img" aria-labelledby="dsx-rt">'];
+    s.push('<title id="dsx-rt">key 空間切分尺：range 邊界與被這條語句觸及的區段</title>');
+    s.push('<rect x="0" y="0" width="720" height="' + H + '" fill="#ffffff"/>');
+
+    var bx0 = xk(plan.keyLo), bx1 = xk(plan.keyHi + 1);
+    s.push('<text x="' + X0 + '" y="12" font-size="11" class="t-mut">order_id 空間 0–999　／　WHERE '
+      + (plan.singleKey ? ("= " + plan.keyLo) : (plan.keyLo + " – " + plan.keyHi))
+      + "（" + plan.keySpanEff + " keys）</text>");
+    s.push('<path class="brk" d="M' + bx0 + ' 32 V22 H' + bx1 + ' V32"/>');
+
+    var i, r, t;
+    for (i = 0; i < plan.ranges.length; i++) {
+      r = plan.ranges[i];
+      var hit = null;
+      var j;
+      for (j = 0; j < plan.touched.length; j++) {
+        if (plan.touched[j].id === r.id) { hit = plan.touched[j]; break; }
+      }
+      var x = xk(r.lo), w = xk(r.hi + 1) - xk(r.lo);
+      var cls = "seg-box";
+      if (hit) cls += plan.isWrite ? " hit-w" : (hit.byFollower ? " hit-ok" : " hit-far");
+      s.push('<rect class="' + cls + '" x="' + x + '" y="40" width="' + rnd(w - 1) + '" height="36" rx="4"/>');
+      s.push('<text x="' + (x + w / 2) + '" y="57" font-size="12" text-anchor="middle" font-weight="700">r' + r.id + "</text>");
+      s.push('<text x="' + (x + w / 2) + '" y="70" font-size="11" text-anchor="middle" class="t-mut">' + r.leaseShort + "</text>");
+      s.push('<line class="tick" x1="' + x + '" y1="78" x2="' + x + '" y2="84"/>');
+      s.push('<text x="' + x + '" y="96" font-size="11" text-anchor="' + (i === 0 ? "start" : "middle") + '" class="t-mut">' + r.lo + "</text>");
     }
-  };
+    s.push('<line class="tick" x1="' + X1 + '" y1="78" x2="' + X1 + '" y2="84"/>');
+    s.push('<text x="' + X1 + '" y="96" font-size="11" text-anchor="end" class="t-mut">1000</text>');
 
-  var nodeEls = {};
-  Array.prototype.forEach.call(root.querySelectorAll(".sql-node"), function (el) {
-    nodeEls[el.getAttribute("data-node")] = el;
-  });
-
-  var buttons = root.querySelectorAll(".seg button");
-  var statusEl = document.getElementById("sql-status");
-  var logEl = document.getElementById("sql-log");
-  var stepsEl = document.getElementById("sql-steps");
-  var stepbarEl = document.getElementById("sql-stepbar");
-  var nextBtn = document.getElementById("sql-next");
-  var resetBtn = document.getElementById("sql-reset");
-  var mode = "single";
-  var stepIndex = 0;
-  var nodeState = {};
-
-  function setNodeState(el, klass, note) {
-    el.classList.remove("ns-idle", "ns-wait", "ns-lock", "ns-ok", "ns-bad");
-    el.classList.add(klass);
-    var noteEl = el.querySelector(".node-note");
-    if (noteEl) noteEl.textContent = note;
+    for (i = 0; i < plan.touched.length; i++) {
+      t = plan.touched[i];
+      var tx = xk(t.lo) + (xk(t.hi + 1) - xk(t.lo)) / 2;
+      var mark = plan.isWrite
+        ? ("L " + t.leaseShort + " " + t.clientHop + "+" + t.quorumMs)
+        : ((t.byFollower ? "F " : "L ") + t.servedShort + " " + t.clientHop + "ms");
+      s.push('<text x="' + tx + '" y="116" font-size="11" text-anchor="middle" class="'
+        + (t.byFollower ? "t-ok" : "t-acc") + '">' + mark + "</text>");
+    }
+    s.push("</svg>");
+    return s.join("");
   }
 
-  function resetNodes() {
-    nodeState = {};
-    Object.keys(nodeEls).forEach(function (key) {
-      var el = nodeEls[key];
-      el.classList.remove("is-dim", "is-focus");
-      setNodeState(el, "ns-idle", defaultNotes[key] || "待命");
-    });
-  }
+  function ganttSvg(plan) {
+    var LX = 10, PX = 208, PW = 418, RX = 634;
+    var top = 40, rowH = 30;
+    var rows = plan.phases.length;
+    var H = top + rows * rowH + 10;
+    var maxT = plan.totalMs + plan.asyncMs;
+    if (maxT < 1) maxT = 1;
+    function xt(ms) { return Math.round((PX + (ms / maxT) * PW) * 10) / 10; }
 
-  function renderNodeBoard(step) {
-    var focus = step ? step.focus || Object.keys(step.states) : [];
+    var s = ['<svg class="dsx-svg" viewBox="0 0 720 ' + H + '" role="img" aria-labelledby="dsx-gt">'];
+    s.push('<title id="dsx-gt">關鍵路徑階梯：每個執行階段的起訖時間與跨區往返次數</title>');
+    s.push('<rect x="0" y="0" width="720" height="' + H + '" fill="#ffffff"/>');
 
-    Object.keys(nodeEls).forEach(function (key) {
-      var el = nodeEls[key];
-      el.classList.remove("is-dim", "is-focus");
+    s.push('<text x="' + LX + '" y="16" font-size="11" class="t-mut">執行階段</text>');
+    s.push('<text x="' + RX + '" y="16" font-size="11" class="t-mut">耗時 · 跨區</text>');
+    var k;
+    for (k = 0; k <= 2; k++) {
+      var tv = Math.round(maxT * k / 2);
+      s.push('<line class="tick" x1="' + xt(tv) + '" y1="24" x2="' + xt(tv) + '" y2="' + (H - 6) + '" stroke-opacity="0.5"/>');
+      s.push('<text x="' + xt(tv) + '" y="16" font-size="11" text-anchor="' + (k === 0 ? "start" : (k === 2 ? "end" : "middle")) + '" class="t-mut">' + tv + "ms</text>");
+    }
+    s.push('<line class="crit" x1="' + xt(plan.totalMs) + '" y1="24" x2="' + xt(plan.totalMs) + '" y2="' + (H - 6) + '"/>');
 
-      var st = nodeState[key];
-      if (st) {
-        setNodeState(el, st[0], st[1]);
+    var i, ph;
+    for (i = 0; i < rows; i++) {
+      ph = plan.phases[i];
+      var y = top + i * rowH;
+      s.push('<line class="row-sep" x1="' + LX + '" y1="' + (y - 4) + '" x2="' + (RX + 78) + '" y2="' + (y - 4) + '"/>');
+      s.push('<text x="' + LX + '" y="' + (y + 11) + '" font-size="12" font-weight="700">' + ph.name + "</text>");
+      s.push('<text x="' + LX + '" y="' + (y + 24) + '" font-size="11" class="t-mut">' + ph.sub + "</text>");
+
+      var x0 = xt(ph.startMs);
+      var x1 = xt(ph.startMs + ph.durMs);
+      if (x1 - x0 < 2) x1 = x0 + 2;
+
+      if (ph.offPath) {
+        s.push('<rect class="bar off" x="' + x0 + '" y="' + (y + 6) + '" width="' + rnd(x1 - x0) + '" height="12" rx="2"/>');
+      } else if (ph.bars) {
+        var n = ph.bars.length;
+        var subH = Math.max(3, Math.floor((18 - (n - 1) * 2) / n));
+        var j;
+        for (j = 0; j < n; j++) {
+          var b = ph.bars[j];
+          var by = y + 4 + j * (subH + 2);
+          var hx = xt(ph.startMs + b.clientHop);
+          if (hx - x0 < 1.5) hx = x0 + 1.5;
+          s.push('<rect class="bar ' + (b.clientHopCross ? "hop" : "loc") + '" x="' + x0 + '" y="' + by + '" width="' + rnd(hx - x0) + '" height="' + subH + '" rx="1.5"/>');
+          if (b.quorumMs > 0) {
+            var qx = xt(ph.startMs + b.clientHop + b.quorumMs);
+            if (qx - hx < 1.5) qx = hx + 1.5;
+            s.push('<rect class="bar q" x="' + hx + '" y="' + by + '" width="' + rnd(qx - hx) + '" height="' + subH + '" rx="1.5"/>');
+          }
+          var lx = xt(ph.startMs + b.costMs) + 4;
+          if (lx < RX - 26) s.push('<text x="' + lx + '" y="' + (by + subH) + '" font-size="11" class="t-mut">r' + b.id + "</text>");
+        }
+      } else if (ph.key === "commit") {
+        var chx = xt(ph.startMs + ph.hopMs);
+        if (chx - x0 < 1.5) chx = x0 + 1.5;
+        s.push('<rect class="bar hop" x="' + x0 + '" y="' + (y + 6) + '" width="' + rnd(chx - x0) + '" height="12" rx="2"/>');
+        s.push('<rect class="bar q" x="' + chx + '" y="' + (y + 6) + '" width="' + rnd(Math.max(1.5, x1 - chx)) + '" height="12" rx="2"/>');
       } else {
-        setNodeState(el, "ns-idle", defaultNotes[key] || "待命");
+        s.push('<rect class="bar" x="' + x0 + '" y="' + (y + 6) + '" width="' + rnd(x1 - x0) + '" height="12" rx="2"/>');
       }
 
-      if (!step) {
-        el.classList.add("is-dim");
-        return;
-      }
-
-      if (focus.indexOf(key) >= 0) {
-        el.classList.add("is-focus");
-      } else if (!st || st[0] === "ns-idle") {
-        el.classList.add("is-dim");
-      }
-    });
-  }
-
-  function renderSteps() {
-    var scenario = modes[mode];
-    stepsEl.innerHTML = "";
-    scenario.steps.forEach(function (s, i) {
-      var d = document.createElement("div");
-      var cls = "stepitem";
-      if (i < stepIndex) cls += " done";
-      if (i === stepIndex - 1) cls += " cur";
-      d.className = cls;
-      d.innerHTML = '<span class="sx">' + s.sx + '</span><span>' + s.label + '</span>';
-      stepsEl.appendChild(d);
-    });
-  }
-
-  function renderStepbar(label) {
-    var total = modes[mode].steps.length;
-    var current = stepIndex;
-    var right = label || (current === 0 ? "尚未開始" : "進行中");
-    stepbarEl.innerHTML = "<span>步驟 <b>" + current + "</b> / " + total + "</span><span>" + right + "</span>";
-  }
-
-  function setLog(html, append) {
-    if (!append) {
-      logEl.innerHTML = "";
+      var right = ph.durMs + "ms";
+      if (ph.cross > 0) right += " · ×" + ph.cross;
+      if (ph.offPath) right += " · 背景";
+      s.push('<text x="' + RX + '" y="' + (y + 16) + '" font-size="11" class="t-sub">' + right + "</text>");
     }
-    Array.prototype.forEach.call(logEl.querySelectorAll(".log-line.cur"), function (line) {
-      line.classList.remove("cur");
-    });
-    var line = document.createElement("div");
-    line.className = "log-line cur";
-    line.innerHTML = html;
-    logEl.appendChild(line);
-    line.scrollIntoView({ block: "nearest", behavior: "smooth" });
+    s.push("</svg>");
+    return s.join("");
   }
 
-  function renderIntro() {
-    resetNodes();
-    stepIndex = 0;
-    var scenario = modes[mode];
-    statusEl.innerHTML = "<b>" + scenario.title + "：</b>" + scenario.intro;
-    setLog("<b>準備：</b>按「開始模擬」逐步觀察 " + scenario.title + " 的 request path。", false);
-    renderSteps();
-    renderStepbar("按「開始模擬」");
-    renderNodeBoard(null);
-    nextBtn.textContent = "開始模擬";
-    nextBtn.disabled = false;
-  }
-
-  function setMode(nextMode) {
-    mode = nextMode;
-    Array.prototype.forEach.call(buttons, function (btn) {
-      btn.setAttribute("aria-pressed", String(btn.getAttribute("data-mode") === mode));
-    });
-    renderIntro();
-  }
-
-  function nextStep() {
-    var scenario = modes[mode];
-    if (stepIndex >= scenario.steps.length) {
-      renderIntro();
-      return;
+  function figsHtml(plan) {
+    var semantic = plan.isWrite
+      ? (plan.commitRounds > 0 ? "prepare 1 + commit 1 輪" : "commit 搭同一輪 Raft")
+      : (plan.followerServed > 0
+          ? ("陳舊 ≤ " + plan.stalenessMs + "ms")
+          : ("不確定窗 " + plan.uncertaintyMs + "ms"));
+    var items = [
+      { k: "觸及 range", v: plan.touchedCount + " / " + plan.rangeCount, c: "" },
+      { k: "提交協定", v: plan.commitProtocol, c: plan.commitRounds > 0 ? "hot" : "" },
+      { k: "關鍵路徑", v: plan.totalMs + " ms", c: plan.totalMs > 60 ? "hot" : "cool" },
+      { k: "跨區往返", v: plan.crossRttCount + " 次", c: plan.crossRttCount > 2 ? "hot" : "" },
+      { k: "並行省下", v: plan.parallelSavedMs + " ms", c: plan.parallelSavedMs > 0 ? "cool" : "" },
+      { k: "RPC 訊息", v: plan.rpcCount + " 則", c: "" },
+      { k: "背景 resolve", v: plan.asyncMs > 0 ? plan.asyncMs + " ms" : "—", c: "" },
+      { k: "讀寫語意", v: semantic, c: "" }
+    ];
+    var out = [];
+    var i;
+    for (i = 0; i < items.length; i++) {
+      out.push('<div class="dsx-fig ' + items[i].c + '"><div class="fk">' + items[i].k
+        + '</div><div class="fv">' + items[i].v + "</div></div>");
     }
+    return out.join("");
+  }
 
-    var step = scenario.steps[stepIndex];
-    Object.keys(step.states).forEach(function (key) {
-      nodeState[key] = step.states[key];
-    });
+  function statusText(plan) {
+    var ids = [];
+    var i;
+    for (i = 0; i < plan.touched.length; i++) ids.push("r" + plan.touched[i].id);
+    var head = "這條語句從 " + plan.clientName + " 發出，觸及 " + plan.touchedCount
+      + " 個 range（" + (ids.length ? ids.join("、") : "無") + "）。";
+    if (plan.isWrite) {
+      return head + "寫入必須落在 leaseholder 並等 quorum，"
+        + (plan.commitRounds > 0
+            ? ("跨 " + plan.touchedCount + " 個 Raft group 所以走 2PC：prepare 1 輪 + commit record 1 輪，關鍵路徑 " + plan.totalMs + " ms，另有 " + plan.asyncMs + " ms 的 intent resolve 在背景跑。")
+            : ("只碰一個 Raft group，commit 可以搭在同一輪 Raft 裡（1PC），關鍵路徑 " + plan.totalMs + " ms。"));
+    }
+    return head + plan.followerServed + " 個由本地副本服務、" + plan.leaderRead
+      + " 個要走 leaseholder；關鍵路徑 " + plan.totalMs + " ms，全部改走 leaseholder 會是 "
+      + plan.leaderPathMs + " ms，"
+      + (plan.followerServed > 0
+          ? ("代價是本地那幾個讀到的是 " + plan.stalenessMs + " ms 以內的舊 snapshot。")
+          : ("而 leaseholder read 要承擔 " + plan.uncertaintyMs + " ms 的 HLC 不確定窗。"));
+  }
 
-    stepIndex += 1;
-    statusEl.innerHTML = step.status;
-    renderNodeBoard(step);
-    setLog(step.log, stepIndex > 1);
-    renderSteps();
-    renderStepbar(step.label);
-
-    if (stepIndex >= scenario.steps.length) {
-      nextBtn.textContent = "重播情境";
-    } else {
-      nextBtn.textContent = "下一步 (" + (stepIndex + 1) + "/" + scenario.steps.length + ")";
+  function setPressed(group, attr, value) {
+    var btns = group.querySelectorAll("button");
+    var i;
+    for (i = 0; i < btns.length; i++) {
+      btns[i].setAttribute("aria-pressed", String(btns[i].getAttribute(attr) === value));
     }
   }
 
-  Array.prototype.forEach.call(buttons, function (btn) {
-    btn.addEventListener("click", function () {
-      setMode(btn.getAttribute("data-mode"));
-    });
+  function render() {
+    var plan = computePlan(state);
+    outLo.textContent = String(state.keyLo);
+    outSpan.textContent = plan.singleKey ? "1（單 key 無區間）" : String(state.keySpan);
+    outRc.textContent = String(state.rangeCount);
+    outRtt.textContent = String(state.rttCrossMs);
+    outSql.textContent = plan.sqlText;
+    outStatus.textContent = statusText(plan);
+    boxRuler.innerHTML = rulerSvg(plan);
+    boxGantt.innerHTML = ganttSvg(plan);
+    boxFigs.innerHTML = figsHtml(plan);
+    setPressed(elStmt, "data-stmt", state.stmt);
+    setPressed(elFr, "data-fr", state.followerRead ? "1" : "0");
+    elSpan.disabled = plan.singleKey;
+  }
+
+  /* ================= (5) 事件綁定 ================= */
+
+  elStmt.addEventListener("click", function (e) {
+    var v = e.target.getAttribute("data-stmt");
+    if (!v) return;
+    state.stmt = v;
+    render();
   });
 
-  nextBtn.addEventListener("click", nextStep);
-  resetBtn.addEventListener("click", renderIntro);
+  elFr.addEventListener("click", function (e) {
+    var v = e.target.getAttribute("data-fr");
+    if (!v) return;
+    state.followerRead = v === "1";
+    render();
+  });
 
-  renderIntro();
+  elLo.addEventListener("input", function () { state.keyLo = parseInt(elLo.value, 10); render(); });
+  elSpan.addEventListener("input", function () { state.keySpan = parseInt(elSpan.value, 10); render(); });
+  elRc.addEventListener("input", function () { state.rangeCount = parseInt(elRc.value, 10); render(); });
+  elRtt.addEventListener("input", function () { state.rttCrossMs = parseInt(elRtt.value, 10); render(); });
+  elClient.addEventListener("change", function () { state.clientRegion = parseInt(elClient.value, 10); render(); });
+  elSpread.addEventListener("change", function () { state.spreadReplicas = elSpread.value === "1"; render(); });
+
+  elReset.addEventListener("click", function () {
+    state.stmt = DEFAULTS.stmt;
+    state.keyLo = DEFAULTS.keyLo;
+    state.keySpan = DEFAULTS.keySpan;
+    state.rangeCount = DEFAULTS.rangeCount;
+    state.clientRegion = DEFAULTS.clientRegion;
+    state.rttCrossMs = DEFAULTS.rttCrossMs;
+    state.spreadReplicas = DEFAULTS.spreadReplicas;
+    state.followerRead = DEFAULTS.followerRead;
+    elLo.value = String(state.keyLo);
+    elSpan.value = String(state.keySpan);
+    elRc.value = String(state.rangeCount);
+    elRtt.value = String(state.rttCrossMs);
+    elClient.value = String(state.clientRegion);
+    elSpread.value = state.spreadReplicas ? "1" : "0";
+    render();
+  });
+
+  render();
 })();
 </script>
 
