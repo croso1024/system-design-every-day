@@ -1,3 +1,9 @@
+<!-- demo-archetype: A｜時序推進（真狀態機模擬器，主，第 5 節） — 讀者設定回報通道（輪詢／SSE／push）、
+     輪詢間隔、remote 預計工時與「此 skill 是否需授權」，再逐一注入 Task 事件（進度、要求輸入、
+     補料、拒收、取消、失敗、交卷、終態後 refine）；demo 用轉移表判定每個事件在當下狀態是否合法、
+     算出新狀態、累計耗時、三種回報通道各需幾次請求、空輪詢數與狀態陳舊延遲。
+     選 A 是因為本篇的核心命題就是 Task lifecycle 這台狀態機——但它必須被「驅動」而不是被「播放」，
+     所以每一步的狀態與帳目都由參數與轉移表算出，沒有任何預寫的 frame。 -->
 <style>
   /* 本篇專屬：a2a-*（Agent-to-Agent Protocol）命名空間，不覆蓋全站 base 類別 */
   #a2a-root {
@@ -41,96 +47,101 @@
     background: #fff; border: 1px solid var(--border); border-radius: 8px; padding: 12px;
   }
 
-  /* ===== s3：Task 狀態機 ===== */
-  .a2a-sm {
-    display: flex; flex-wrap: wrap; gap: 8px; align-items: center;
-    margin: 14px 0 8px; font-family: var(--mono); font-size: 11.5px;
+  /* ===== s5 Demo：Task 狀態機模擬器（a2ax-） ===== */
+  .a2ax-setup {
+    display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px 18px;
+    margin: 12px 0; align-items: end;
   }
-  .a2a-sm-node {
-    border: 1px solid var(--border-strong); border-radius: 8px;
-    padding: 7px 11px; background: #fff; font-weight: 600; color: var(--text);
+  @media (max-width: 620px) { .a2ax-setup { grid-template-columns: 1fr; } }
+  .a2ax-knob { display: flex; flex-direction: column; gap: 5px; }
+  .a2ax-knob > label {
+    font-family: var(--mono); font-size: 11px; font-weight: 700; color: var(--text-2);
+    display: flex; justify-content: space-between; gap: 8px; align-items: baseline;
   }
-  .a2a-sm-node.sm-active { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); }
-  .a2a-sm-node.sm-ok { background: var(--ok-soft); border-color: var(--ok); color: var(--ok); }
-  .a2a-sm-node.sm-warn { background: var(--warn-soft); border-color: var(--warn); color: var(--warn); }
-  .a2a-sm-node.sm-bad { background: var(--bad-soft); border-color: var(--bad); color: var(--bad); }
-  .a2a-sm-arrow { color: var(--text-3); font-size: 13px; }
+  .a2ax-knob > label b { color: var(--a2a-client); font-size: 12.5px; }
+  .a2ax-knob input[type="range"] { width: 100%; accent-color: var(--a2a-client); }
+  .a2ax-check {
+    display: flex; align-items: center; gap: 7px; font-size: 12.5px;
+    color: var(--text-2); line-height: 1.45;
+  }
 
-  /* ===== Demo：委派時序 ===== */
-  .a2a-phases {
-    display: flex; flex-wrap: wrap; gap: 6px; align-items: center;
-    margin: 12px 0; font-family: var(--mono); font-size: 11.5px;
+  .a2ax-stage {
+    display: grid; grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr); gap: 12px;
+    margin: 12px 0 10px; align-items: start;
   }
-  .a2a-phase {
-    border: 1px solid var(--border-strong); border-radius: 6px;
-    padding: 5px 9px; background: #fff; color: var(--text-3); font-weight: 600;
-    transition: background .2s, border-color .2s, color .2s, opacity .2s;
-  }
-  .a2a-phase.ph-done { color: var(--text-2); border-color: var(--border-strong); background: var(--bg-soft); }
-  .a2a-phase.ph-active { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); }
-  .a2a-phase.ph-active.ph-bad { background: var(--bad-soft); border-color: var(--bad); color: var(--bad); }
-  .a2a-phase.ph-active.ph-warn { background: var(--warn-soft); border-color: var(--warn); color: var(--warn); }
-  .a2a-phase-sep { color: var(--text-3); font-size: 12px; }
+  @media (max-width: 720px) { .a2ax-stage { grid-template-columns: 1fr; } }
 
-  .a2a-lanes {
-    display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin: 10px 0;
+  .a2ax-graph {
+    border: 1px solid var(--border); border-radius: var(--radius-sm);
+    background: #fff; padding: 6px;
   }
-  @media (max-width: 620px) { .a2a-lanes { grid-template-columns: 1fr; } }
-  .a2a-lane {
-    border: 1.5px solid var(--border-strong); border-radius: 10px;
-    background: #fff; padding: 11px 12px; text-align: center;
-    display: flex; flex-direction: column; gap: 3px; opacity: .6;
-    transition: box-shadow .2s, border-color .2s, background .2s, opacity .2s, transform .2s;
-  }
-  .a2a-lane[data-role="client"] { border-top: 3px solid var(--a2a-client); }
-  .a2a-lane[data-role="remote"] { border-top: 3px solid var(--a2a-remote); }
-  .a2a-lane .ln { font-family: var(--mono); font-size: 13px; font-weight: 700; color: var(--text); }
-  .a2a-lane .ls { font-size: 11px; color: var(--text-2); line-height: 1.45; }
-  .a2a-lane.a2a-on { opacity: 1; }
-  .a2a-lane.a2a-on-wait { opacity: 1; background: var(--accent-soft); border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); transform: translateY(-1px); }
-  .a2a-lane.a2a-on-ok { opacity: 1; background: var(--ok-soft); border-color: var(--ok); box-shadow: 0 0 0 3px var(--ok-soft); }
-  .a2a-lane.a2a-on-warn { opacity: 1; background: var(--warn-soft); border-color: var(--warn); box-shadow: 0 0 0 3px var(--warn-soft); }
-  .a2a-lane.a2a-on-bad { opacity: 1; background: var(--bad-soft); border-color: var(--bad); box-shadow: 0 0 0 3px var(--bad-soft); }
+  .a2ax-graph svg { width: 100%; height: auto; display: block; }
+  .a2ax-graph .nd rect.bx { fill: #fff; stroke: var(--border-strong); stroke-width: 1; }
+  .a2ax-graph .nd rect.halo { fill: none; stroke: none; stroke-width: 2; }
+  .a2ax-graph .nd text { font-family: var(--mono); font-size: 11.5px; fill: #262a2f; }
+  .a2ax-graph .nd.seen rect.bx { fill: var(--bg-soft); }
+  .a2ax-graph .nd.cur rect.bx { fill: var(--accent-soft); stroke: var(--accent); stroke-width: 2.5; }
+  .a2ax-graph .nd.cur.tone-ok rect.bx { fill: var(--ok-soft); stroke: var(--ok); }
+  .a2ax-graph .nd.cur.tone-bad rect.bx { fill: var(--bad-soft); stroke: var(--bad); }
+  .a2ax-graph .nd.cur.tone-warn rect.bx { fill: var(--warn-soft); stroke: var(--warn); }
+  .a2ax-graph .nd.rej rect.halo { stroke: var(--bad); }
+  .a2ax-graph .eg path { fill: none; stroke: #b9bec4; stroke-width: 1; }
+  .a2ax-graph .eg text { font-family: var(--mono); font-size: 10px; fill: #8b9096; }
+  .a2ax-graph .eg.walk path { stroke: #3f6188; stroke-width: 2; }
+  .a2ax-graph .eg.walk text { fill: #3f6188; font-weight: 700; }
 
-  .a2a-taskpill {
-    display: inline-flex; align-items: center; gap: 6px;
-    font-family: var(--mono); font-size: 11px; font-weight: 600;
-    padding: 4px 10px; border-radius: 20px; border: 1px solid var(--border-strong);
-    background: #fff; color: var(--text-3); margin: 4px 0 8px;
+  .a2ax-pad { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; }
+  .a2ax-ev {
+    border: 1px solid var(--border-strong); border-radius: 8px; background: #fff;
+    padding: 7px 9px; text-align: left; cursor: pointer; font: inherit;
+    font-family: var(--mono); font-size: 11px; font-weight: 700; color: var(--text);
+    line-height: 1.3;
   }
-  .a2a-taskpill.tp-wait { color: var(--accent); border-color: var(--accent); background: var(--accent-soft); }
-  .a2a-taskpill.tp-ok { color: var(--ok); border-color: var(--ok); background: var(--ok-soft); }
-  .a2a-taskpill.tp-warn { color: var(--warn); border-color: var(--warn); background: var(--warn-soft); }
-  .a2a-taskpill.tp-bad { color: var(--bad); border-color: var(--bad); background: var(--bad-soft); }
+  .a2ax-ev .evs {
+    display: block; font-family: var(--sans); font-size: 10.5px; font-weight: 400;
+    color: var(--text-3); margin-top: 2px;
+  }
+  .a2ax-ev[data-side="remote"] { border-left: 3px solid var(--a2a-remote); }
+  .a2ax-ev[data-side="client"] { border-left: 3px solid var(--a2a-client); }
+  .a2ax-ev.ev-ok:hover { background: var(--ok-soft); border-color: var(--ok); }
+  .a2ax-ev.ev-no { opacity: .5; background: var(--bg-soft); }
+  .a2ax-ev.ev-no:hover { opacity: .85; background: var(--bad-soft); border-color: var(--bad); }
 
-  .a2a-wire {
+  .a2ax-book {
+    display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 1px;
+    background: var(--border); border: 1px solid var(--border);
+    border-radius: 8px; overflow: hidden; margin: 10px 0 8px;
+  }
+  @media (max-width: 620px) { .a2ax-book { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+  .a2ax-book > div { background: #fff; padding: 8px 10px; }
+  .a2ax-book .bk { font-family: var(--mono); font-size: 10.5px; color: var(--text-3); letter-spacing: .03em; }
+  .a2ax-book .bv { font-family: var(--mono); font-size: 15px; font-weight: 700; color: var(--text); margin-top: 3px; }
+  .a2ax-book .bn { font-size: 10.5px; color: var(--text-3); line-height: 1.4; margin-top: 2px; }
+
+  .a2ax-modes {
+    display: grid; grid-template-columns: 116px repeat(3, minmax(0, 1fr)); gap: 1px;
+    background: var(--border); border: 1px solid var(--border);
+    border-radius: 8px; overflow: hidden; margin: 8px 0;
+  }
+  .a2ax-modes > div {
+    background: #fff; padding: 7px 9px; font-family: var(--mono); font-size: 11.5px; color: var(--text);
+  }
+  .a2ax-modes .mh { background: var(--bg-soft); font-weight: 700; color: var(--text-2); font-size: 11px; }
+  .a2ax-modes .ml { background: var(--bg-soft); color: var(--text-3); font-size: 11px; }
+  .a2ax-modes .mc.cur { background: var(--accent-soft); color: var(--accent); font-weight: 700; }
+  @media (max-width: 620px) { .a2ax-modes { grid-template-columns: 96px repeat(3, minmax(0, 1fr)); font-size: 11px; } }
+
+  .a2ax-note {
     border: 1px solid var(--border); border-left: 3px solid var(--border-strong);
-    border-radius: var(--radius-sm); background: var(--bg-soft); padding: 10px 12px; margin: 10px 0;
-    transition: border-color .2s;
+    border-radius: 8px; background: var(--bg-soft); padding: 9px 11px; margin: 8px 0;
+    font-size: 12.5px; color: var(--text-2); line-height: 1.6;
   }
-  .a2a-wire.tone-wait { border-left-color: var(--accent); }
-  .a2a-wire.tone-ok { border-left-color: var(--ok); }
-  .a2a-wire.tone-warn { border-left-color: var(--warn); }
-  .a2a-wire.tone-bad { border-left-color: var(--bad); }
-  .a2a-wire-meta { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 6px; }
-  .a2a-wire-dir { font-family: var(--mono); font-size: 12px; font-weight: 700; color: var(--text); }
-  .a2a-wire-kind {
-    font-family: var(--mono); font-size: 10px; letter-spacing: .05em;
-    padding: 2px 7px; border-radius: 20px; border: 1px solid var(--border-strong); color: var(--text-3);
-  }
-  .a2a-wire-kind.k-discover { color: var(--a2a-card); border-color: var(--a2a-card); }
-  .a2a-wire-kind.k-request { color: var(--a2a-client); border-color: var(--a2a-client); }
-  .a2a-wire-kind.k-event { color: var(--accent); border-color: var(--accent); }
-  .a2a-wire-kind.k-result { color: var(--ok); border-color: var(--ok); }
-  .a2a-wire-kind.k-error { color: var(--bad); border-color: var(--bad); }
-  .a2a-json {
-    margin: 0; font-family: var(--mono); font-size: 12px; line-height: 1.55;
-    color: var(--text); white-space: pre; overflow-x: auto; background: transparent;
-  }
+  .a2ax-note.nt-ok { border-left-color: var(--ok); background: var(--ok-soft); color: var(--text); }
+  .a2ax-note.nt-bad { border-left-color: var(--bad); background: var(--bad-soft); color: var(--text); }
+  .a2ax-note.nt-warn { border-left-color: var(--warn); background: var(--warn-soft); color: var(--text); }
+  .a2ax-note code { font-family: var(--mono); font-size: 11.5px; }
 
-  .a2a-controls {
-    display: flex; flex-wrap: wrap; gap: 8px; margin: 10px 0 8px; align-items: center;
-  }
+  .a2ax-controls { display: flex; flex-wrap: wrap; gap: 8px; margin: 10px 0 8px; align-items: center; }
 </style>
 
 <div id="a2a-root">
@@ -279,20 +290,27 @@
 
   <p>在 A2A 裡，互動的單位不是「一次 request／response」，而是一個<strong>有 id、有狀態、可長跑</strong>的 <strong>Task</strong>。呼叫端送出委派後，遠端 Agent 回的是 Task（或其串流事件），狀態沿一條定義好的狀態機前進。這讓「查一下天氣」與「審核一份要跑兩天的合規流程」能共用同一套契約。</p>
 
-  <div class="a2a-sm" aria-label="Task 狀態機概覽">
-    <span class="a2a-sm-node sm-active">submitted</span>
-    <span class="a2a-sm-arrow">→</span>
-    <span class="a2a-sm-node sm-active">working</span>
-    <span class="a2a-sm-arrow">→</span>
-    <span class="a2a-sm-node sm-warn">input-required</span>
-    <span class="a2a-sm-arrow">/</span>
-    <span class="a2a-sm-node sm-ok">completed</span>
-    <span class="a2a-sm-arrow">·</span>
-    <span class="a2a-sm-node sm-bad">failed</span>
-    <span class="a2a-sm-arrow">·</span>
-    <span class="a2a-sm-node sm-bad">canceled</span>
-  </div>
-  <p class="cap">簡化視圖：中間態可往終態收斂；<code>input-required</code>（以及規格中的 <code>auth-required</code>）是可恢復的中斷，不是終態。</p>
+  <pre class="mermaid">
+stateDiagram-v2
+    state "auth-required" as authReq
+    state "input-required" as inputReq
+    [*] --> submitted
+    submitted --> working: 開始執行
+    submitted --> authReq: 需授權
+    submitted --> rejected: 拒收
+    authReq --> working: 補授權
+    working --> working: 進度／產出
+    working --> inputReq: 缺資料
+    inputReq --> working: 補資料
+    working --> completed: 交卷
+    working --> failed: 失敗
+    working --> canceled: 取消
+    completed --> [*]
+    failed --> [*]
+    canceled --> [*]
+    rejected --> [*]
+</pre>
+  <p class="cap">看兩個地方：<code>authReq</code>／<code>inputReq</code> 都有一條<strong>回到 <code>working</code> 的箭頭</strong>——它們是可恢復的中斷，不是終態；而四個終態只出得去（<code>[*]</code>），沒有任何箭頭回到中間態，這就是「終態不可變」的圖形化寫法。</p>
 
   <div class="tbl-wrap">
     <table>
@@ -435,79 +453,169 @@
 </section>
 
 <section id="s5">
-  <div class="sec-head"><span class="sec-num">05</span><h2>互動 Demo：兩 Agent 完成一次委派</h2></div>
-  <p class="sec-sub">把 Card 發現、Task 狀態推進、中斷補料與交卷，收成一條可逐步播放的訊息時序。</p>
+  <div class="sec-head"><span class="sec-num">05</span><h2>互動 Demo：驅動一個 Task 走完生命週期</h2></div>
+  <p class="sec-sub">狀態機不是拿來看的，是拿來撞的：同一個事件在不同狀態下合不合法、合法時帳目怎麼變。</p>
 
-  <p>場景設定：<strong>Orchestrator Agent</strong>（Client）要把一份合約審核委派給 <strong>Compliance Agent</strong>（Remote）。兩者之間只走 A2A——不展開 MCP、也不展示單一 Agent 內部 runtime。選一個情境，按「下一步」觀察每一則訊息與 Task 狀態如何變化：</p>
+  <p>場景設定：<strong>Orchestrator Agent</strong>（Client）把「審核合約 <code>CTR-2048</code>」委派給 <strong>Compliance Agent</strong>（Remote）。下面這台模擬器沒有劇本——你先設定條件（回報通道、輪詢間隔、remote 預計工時、此 skill 是否需要額外授權），然後<strong>自己決定每一步要注入哪個事件</strong>。事件是否合法由轉移表判定；狀態、耗時、三種回報通道各需幾次請求，全部即時算出。</p>
 
-  <div class="demo" id="demo-a2a-delegate">
+  <div class="demo" id="demo-a2a-task">
     <div class="demo-bar">
-      <span class="label">互動 · A2A 委派任務訊息時序</span>
-      <span class="label" style="text-transform:none;font-family:var(--sans);font-size:12px;color:var(--text-2)">選情境後按「下一步」逐步推進</span>
+      <span class="label">互動 · Task 生命週期狀態機</span>
+      <span class="label" style="text-transform:none;font-family:var(--sans);font-size:12px;color:var(--text-2)">設定條件 → 注入事件 → 看轉移表判定與帳目</span>
     </div>
     <div class="demo-body">
-      <p style="font-size:13px;color:var(--text-2);margin:2px 0 10px">
-        任務：Orchestrator 委派「審核合約 <code>CTR-2048</code>」。觀察 Agent Card 發現 → <code>message/send</code> → Task 狀態事件 → Artifact 交卷（或中斷／失敗）的完整時序。
-      </p>
-
-      <div class="seg" role="group" aria-label="情境切換">
-        <button data-sc="normal" aria-pressed="true">正常委派完成</button>
-        <button data-sc="needinput" aria-pressed="false">中途需要補充</button>
-        <button data-sc="failed" aria-pressed="false">遠端執行失敗</button>
+      <div class="seg" role="group" aria-label="狀態回報通道">
+        <button data-mode="poll" aria-pressed="true">輪詢 tasks/get</button>
+        <button data-mode="sse" aria-pressed="false">SSE 串流</button>
+        <button data-mode="push" aria-pressed="false">Push webhook</button>
       </div>
 
-      <div class="a2a-phases" aria-label="委派階段">
-        <span class="a2a-phase" data-ph="discover">① 發現 Card</span>
-        <span class="a2a-phase-sep">›</span>
-        <span class="a2a-phase" data-ph="delegate">② 送出委派</span>
-        <span class="a2a-phase-sep">›</span>
-        <span class="a2a-phase" data-ph="progress">③ 狀態回報</span>
-        <span class="a2a-phase-sep">›</span>
-        <span class="a2a-phase" data-ph="done">④ 終態／產物</span>
-      </div>
-
-      <div class="a2a-lanes">
-        <div class="a2a-lane" data-role="client">
-          <span class="ln">Orchestrator</span>
-          <span class="ls">Client Agent · 發起委派</span>
+      <div class="a2ax-setup">
+        <div class="a2ax-knob">
+          <label for="a2ax-poll">輪詢間隔 <b id="a2ax-poll-v">10 s</b></label>
+          <input type="range" id="a2ax-poll" min="2" max="60" step="1" value="10">
         </div>
-        <div class="a2a-lane" data-role="remote">
-          <span class="ln">Compliance</span>
-          <span class="ls">Remote Agent · 執行審核</span>
+        <div class="a2ax-knob">
+          <label for="a2ax-work">remote 預計總工時 <b id="a2ax-work-v">120 s</b></label>
+          <input type="range" id="a2ax-work" min="10" max="600" step="10" value="120">
+        </div>
+        <div class="a2ax-knob" style="grid-column:1 / -1">
+          <label class="a2ax-check"><input type="checkbox" id="a2ax-auth"> Agent Card 宣告此 skill 需額外授權（Task 一建立就落在 <code>auth-required</code>）</label>
         </div>
       </div>
 
-      <div>
-        <span class="a2a-taskpill" id="a2a-taskpill">Task · —</span>
-      </div>
+      <div class="a2ax-stage">
+        <div class="a2ax-graph">
+          <svg viewBox="0 0 640 330" role="img" aria-labelledby="a2ax-gtitle">
+            <title id="a2ax-gtitle">A2A Task 狀態機：目前狀態與已走過的轉移</title>
+            <defs>
+              <marker id="a2ax-ah" viewBox="0 0 8 8" refX="7.5" refY="4" markerWidth="7" markerHeight="7" orient="auto">
+                <path d="M0 0 L8 4 L0 8 Z" fill="#b9bec4"></path>
+              </marker>
+              <marker id="a2ax-ah-on" viewBox="0 0 8 8" refX="7.5" refY="4" markerWidth="7" markerHeight="7" orient="auto">
+                <path d="M0 0 L8 4 L0 8 Z" fill="#3f6188"></path>
+              </marker>
+            </defs>
 
-      <div class="a2a-wire" id="a2a-wire">
-        <div class="a2a-wire-meta">
-          <span class="a2a-wire-dir" id="a2a-wire-dir">尚未開始</span>
-          <span class="a2a-wire-kind" id="a2a-wire-kind" style="display:none"></span>
+            <g class="eg" data-edge="submitted&gt;rejected">
+              <path d="M145 52 L236 52" marker-end="url(#a2ax-ah)"></path>
+              <text x="190" y="44" text-anchor="middle">reject</text>
+            </g>
+            <g class="eg" data-edge="submitted&gt;auth-required">
+              <path d="M86 69 L86 140" marker-end="url(#a2ax-ah)"></path>
+              <text x="93" y="108" text-anchor="start">askAuth</text>
+            </g>
+            <g class="eg" data-edge="submitted&gt;working">
+              <path d="M138 68 L240 146" marker-end="url(#a2ax-ah)"></path>
+              <text x="207" y="104" text-anchor="middle">progress</text>
+            </g>
+            <g class="eg" data-edge="auth-required&gt;working">
+              <path d="M145 162 L236 162" marker-end="url(#a2ax-ah)"></path>
+              <text x="190" y="154" text-anchor="middle">resume</text>
+            </g>
+            <g class="eg" data-edge="working&gt;input-required">
+              <path d="M292 179 L292 250" marker-end="url(#a2ax-ah)"></path>
+              <text x="286" y="218" text-anchor="end">askInput</text>
+            </g>
+            <g class="eg" data-edge="input-required&gt;working">
+              <path d="M310 255 L310 184" marker-end="url(#a2ax-ah)"></path>
+              <text x="316" y="218" text-anchor="start">resume</text>
+            </g>
+            <g class="eg" data-edge="working&gt;working">
+              <path d="M266 145 C 252 104, 348 104, 334 145" marker-end="url(#a2ax-ah)"></path>
+              <text x="300" y="100" text-anchor="middle">progress / artifact</text>
+            </g>
+            <g class="eg" data-edge="working&gt;completed">
+              <path d="M359 153 L466 68" marker-end="url(#a2ax-ah)"></path>
+              <text x="410" y="99" text-anchor="middle">complete</text>
+            </g>
+            <g class="eg" data-edge="working&gt;failed">
+              <path d="M359 162 L466 162" marker-end="url(#a2ax-ah)"></path>
+              <text x="412" y="154" text-anchor="middle">fail</text>
+            </g>
+            <g class="eg" data-edge="working&gt;canceled">
+              <path d="M359 172 L466 256" marker-end="url(#a2ax-ah)"></path>
+              <text x="406" y="229" text-anchor="middle">cancel</text>
+            </g>
+            <g class="eg" data-edge="input-required&gt;canceled">
+              <path d="M359 272 L466 272" marker-end="url(#a2ax-ah)"></path>
+              <text x="412" y="264" text-anchor="middle">cancel</text>
+            </g>
+
+            <g class="nd" data-state="submitted">
+              <rect class="halo" x="24" y="31" width="124" height="42" rx="10"></rect>
+              <rect class="bx" x="27" y="35" width="118" height="34" rx="8"></rect>
+              <text x="86" y="57" text-anchor="middle">submitted</text>
+            </g>
+            <g class="nd" data-state="rejected">
+              <rect class="halo" x="238" y="31" width="124" height="42" rx="10"></rect>
+              <rect class="bx" x="241" y="35" width="118" height="34" rx="8"></rect>
+              <text x="300" y="57" text-anchor="middle">rejected</text>
+            </g>
+            <g class="nd" data-state="auth-required">
+              <rect class="halo" x="24" y="141" width="124" height="42" rx="10"></rect>
+              <rect class="bx" x="27" y="145" width="118" height="34" rx="8"></rect>
+              <text x="86" y="167" text-anchor="middle">auth-required</text>
+            </g>
+            <g class="nd" data-state="working">
+              <rect class="halo" x="238" y="141" width="124" height="42" rx="10"></rect>
+              <rect class="bx" x="241" y="145" width="118" height="34" rx="8"></rect>
+              <text x="300" y="167" text-anchor="middle">working</text>
+            </g>
+            <g class="nd" data-state="input-required">
+              <rect class="halo" x="238" y="251" width="124" height="42" rx="10"></rect>
+              <rect class="bx" x="241" y="255" width="118" height="34" rx="8"></rect>
+              <text x="300" y="277" text-anchor="middle">input-required</text>
+            </g>
+            <g class="nd" data-state="completed">
+              <rect class="halo" x="465" y="31" width="124" height="42" rx="10"></rect>
+              <rect class="bx" x="468" y="35" width="118" height="34" rx="8"></rect>
+              <text x="527" y="57" text-anchor="middle">completed</text>
+            </g>
+            <g class="nd" data-state="failed">
+              <rect class="halo" x="465" y="141" width="124" height="42" rx="10"></rect>
+              <rect class="bx" x="468" y="145" width="118" height="34" rx="8"></rect>
+              <text x="527" y="167" text-anchor="middle">failed</text>
+            </g>
+            <g class="nd" data-state="canceled">
+              <rect class="halo" x="465" y="251" width="124" height="42" rx="10"></rect>
+              <rect class="bx" x="468" y="255" width="118" height="34" rx="8"></rect>
+              <text x="527" y="277" text-anchor="middle">canceled</text>
+            </g>
+
+            <text x="527" y="312" text-anchor="middle" font-size="10" fill="#8b9096">終態不可變</text>
+          </svg>
         </div>
-        <pre class="a2a-json" id="a2a-json">// 選一個情境，按「下一步」開始發現與委派。</pre>
+
+        <div class="a2ax-pad" id="a2ax-pad" role="group" aria-label="注入事件"></div>
       </div>
 
-      <div class="a2a-controls">
-        <button class="btn primary" id="a2a-btn-next">下一步</button>
-        <button class="btn" id="a2a-btn-reset">重置</button>
+      <div class="a2ax-book" id="a2ax-book"></div>
+
+      <div class="a2ax-modes" id="a2ax-modes"></div>
+
+      <div class="a2ax-note" id="a2ax-note">先設定條件，再從右側事件盤注入第一個事件。灰掉的按鈕代表該事件在目前狀態不合法——按下去會告訴你為什麼。</div>
+
+      <div class="a2ax-controls">
+        <button class="btn" id="a2ax-back">◂ 退回上一步</button>
+        <button class="btn" id="a2ax-fwd">前進一步 ▸</button>
+        <button class="btn primary" id="a2ax-reset">清空序列</button>
         <div class="legend">
-          <span><i class="dot ns-idle"></i>待命</span>
-          <span><i class="dot ns-wait"></i>傳送／處理中</span>
-          <span><i class="dot ns-lock"></i>等待輸入</span>
-          <span><i class="dot ns-ok"></i>成功</span>
-          <span><i class="dot ns-bad"></i>失敗</span>
+          <span><i class="dot ns-idle"></i>未到達</span>
+          <span><i class="dot ns-wait"></i>目前狀態</span>
+          <span><i class="dot ns-lock"></i>可恢復中斷</span>
+          <span><i class="dot ns-ok"></i>成功終態</span>
+          <span><i class="dot ns-bad"></i>失敗終態</span>
         </div>
       </div>
 
-      <div class="status-line" id="a2a-status">選一個情境，按「下一步」開始這次 A2A 委派。</div>
-      <p class="cap" id="a2a-caption" style="text-align:center">四階段：發現 Agent Card → 送出委派 Message → Task 狀態回報 → 終態與 Artifact。全程是兩個 Agent 之間的 A2A 往返。</p>
+      <div class="status-line" id="a2ax-status">尚未注入任何事件。</div>
+      <p class="cap" style="text-align:center">圖上畫出最常走的 11 條轉移；<code>fail</code>／<code>cancel</code> 從任何非終態都合法，走到未畫出的轉移時只會高亮節點。真正的判準是轉移表，不是這張圖的線。</p>
     </div>
   </div>
 
   <div class="oneliner">
-    <b>一句話答法</b>一次 A2A 委派＝讀 Agent Card → <code>message/send</code> 建立 Task → 狀態事件（可含 input-required 補料）→ 終態交卷 Artifact。Demo 把這條時序拆成可逐步檢視的訊息流。
+    <b>一句話答法</b>A2A 的每一步都是「事件 × 目前狀態 → 轉移表」：合法就換狀態並累計訊息／Artifact／往返，不合法就被擋下並說明理由。回報通道（輪詢／SSE／push）不改狀態語意，只改你要付幾次請求、等多久才知道狀態變了。
   </div>
 </section>
 
