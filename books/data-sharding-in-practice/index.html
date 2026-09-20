@@ -1376,7 +1376,7 @@
         <a href="#s2"><span class="n">02</span>四大典型應用場景</a>
         <a href="#s3"><span class="n">03</span>Co-location 與資料模型</a>
         <a href="#s4"><span class="n">04</span>線上遷移與 Rebalance SOP</a>
-        <a href="#s5"><span class="n">05</span>互動 Demo：多租戶遷移模擬器</a>
+        <a href="#s5"><span class="n">05</span>互動 Demo：擴容策略並排對照</a>
         <a href="#s6"><span class="n">06</span>面試考點與架構折衷</a>
       </div>
     </nav>
@@ -1392,7 +1392,13 @@
     <!-- ===================== MAIN CONTENT ===================== -->
     <main>
       <div class="inner">
-        <!-- ============ 01 總覽與定位 ============ -->
+        <!-- demo-archetype: C｜並排對照（主，第 5 節） — 讀者調租戶數、大小傾斜、巨鯨倍數、分片數 N 與擴容數 k、
+     搬遷頻寬與寫入速率，並切換「停機搬 / 線上雙寫＋回填＋切流」；同一組租戶與同一組擴容前落點同時餵給
+     Hash `% N` 重分配與 Directory 路由表兩種策略，即時算出兩側的搬遷筆數與資料量、擴容後每片組成與傾斜比、
+     巨鯨是否被隔離、回填有效頻寬與窗口長度（含「回填追不上雙寫」的不收斂判定）與切流 blast radius。
+     選 C 是因為第 4 節的命題本來就是「同一次擴容，改 map 與改 N 的代價差多少」——那是一組數字的對照，
+     不是一段流程。 -->
+<!-- ============ 01 總覽與定位 ============ -->
 <section id="s1">
   <div class="sec-head">
     <span class="sec-num">01</span>
@@ -1672,59 +1678,83 @@
 <section id="s5">
   <div class="sec-head">
     <span class="sec-num">05</span>
-    <h2>互動 Demo：多租戶遷移模擬器</h2>
+    <h2>互動 Demo：擴容策略並排對照</h2>
   </div>
-  <p class="sec-sub">Directory Sharding 下，把 hot tenant 從共享 shard 遷到專用 shard 的六階段流程。</p>
+  <p class="sec-sub">同一組租戶與同一次擴容，餵給 Hash <code>% N</code> 與 Directory 兩種策略，比搬遷量、窗口與傾斜。</p>
 
-  <p>下方模擬一個 3-shard 的多租戶 SaaS：<strong>Tenant A</strong>（小）、<strong>Tenant B</strong>（中）、<strong>Tenant VIP</strong>（大，佔 Shard 2 過半容量）。按「下一步」走完整遷移 SOP，觀察 dual-write、backfill、cutover 各階段的路由與狀態變化。</p>
+  <p>下方左右兩欄吃的是<strong>完全相同的輸入</strong>：同一組租戶（大小依傾斜參數與巨鯨倍數決定）、同一組擴容前落點（<code>hash % N</code>）、同一條搬遷頻寬與寫入速率。差別只在擴容時怎麼決定新落點——左欄把 N 改成 N+k 讓算式重算，右欄只改路由表。上一節的六階段 SOP（dual-write → backfill → verify → cutover）在兩欄用的是<strong>同一套成本公式</strong>，兩邊秒數不同純粹是因為要搬的量不同。</p>
 
-  <div class="demo" id="demo-migrate">
+  <div class="demo" id="demo-rebalance">
     <div class="demo-bar">
-      <span class="label">互動 · 多租戶 Directory 遷移</span>
-      <span class="label" style="text-transform:none;font-family:var(--sans);font-size:12px;color:var(--text-2)">逐步執行遷移 SOP</span>
+      <span class="label">互動 · 擴容策略並排對照</span>
+      <span class="label" style="text-transform:none;font-family:var(--sans);font-size:12px;color:var(--text-2)">同一組輸入，兩種策略的數字差</span>
     </div>
     <div class="demo-body">
-      <div class="mg-controls">
-        <div class="seg" role="group" aria-label="檢視模式">
-          <button data-view="map" aria-pressed="true">路由表</button>
-          <button data-view="shards" aria-pressed="false">Shard 負載</button>
+      <div class="rb-ctl">
+        <label class="rb-knob"><span>租戶數 <b data-out="tenants">24</b></span>
+          <input type="range" data-knob="tenants" min="8" max="40" step="1" value="24"></label>
+        <label class="rb-knob"><span>大小傾斜 <b data-out="skew">60</b></span>
+          <input type="range" data-knob="skew" min="0" max="100" step="5" value="60"></label>
+        <label class="rb-knob"><span>巨鯨倍數 <b data-out="whaleX">6</b>×</span>
+          <input type="range" data-knob="whaleX" min="1" max="15" step="1" value="6"></label>
+        <label class="rb-knob"><span>目前分片 N = <b data-out="shards">4</b></span>
+          <input type="range" data-knob="shards" min="3" max="8" step="1" value="4"></label>
+        <label class="rb-knob"><span>擴容 +<b data-out="addShards">2</b> 片</span>
+          <input type="range" data-knob="addShards" min="1" max="4" step="1" value="2"></label>
+        <label class="rb-knob"><span>搬遷頻寬 <b data-out="bandwidthMBps">80</b> MB/s</span>
+          <input type="range" data-knob="bandwidthMBps" min="20" max="400" step="10" value="80"></label>
+        <label class="rb-knob"><span>寫入速率 <b data-out="writeMBps">12</b> MB/s</span>
+          <input type="range" data-knob="writeMBps" min="1" max="60" step="1" value="12"></label>
+      </div>
+
+      <div class="rb-head">
+        <div class="seg" role="group" aria-label="遷移方式">
+          <button type="button" data-mode="1" aria-pressed="true">線上：雙寫＋回填＋切流</button>
+          <button type="button" data-mode="0" aria-pressed="false">停機搬</button>
         </div>
-        <div class="mg-btns">
-          <button class="btn primary" id="mg-next" type="button">下一步</button>
-          <button class="btn" id="mg-reset" type="button">Reset</button>
+        <div class="rb-acts">
+          <button class="btn primary" id="rb-preset" type="button">載入巨鯨情境</button>
+          <button class="btn" id="rb-reset" type="button">Reset</button>
         </div>
       </div>
 
-      <div class="mg-phase" id="mg-phase">階段 0 / 6 · 初始狀態</div>
-
-      <div class="mg-canvas" id="mg-canvas">
-        <div class="mg-panel" id="mg-map-panel">
-          <div class="mg-panel-title">Shard Map（Directory）</div>
-          <div class="mg-map" id="mg-map"></div>
+      <div class="rb-split">
+        <div class="rb-side">
+          <div class="rb-side-hd"><b>Hash <code>% N</code> 重分配</b><span>N 一改，全體落點跟著算式重算</span></div>
+          <div class="rb-rows" id="rb-hash-body"></div>
+          <div class="rb-stats" id="rb-hash-stats"></div>
         </div>
-        <div class="mg-panel" id="mg-shard-panel" hidden>
-          <div class="mg-panel-title">Physical Shards</div>
-          <div class="mg-shards" id="mg-shards"></div>
+        <div class="rb-side">
+          <div class="rb-side-hd"><b>Directory 路由表</b><span>只改 map：先清鄰居隔離巨鯨，再填平</span></div>
+          <div class="rb-rows" id="rb-dir-body"></div>
+          <div class="rb-stats" id="rb-dir-stats"></div>
         </div>
       </div>
 
       <div class="legend">
-        <span><i class="dot ns-idle"></i>閒置 / 正常</span>
-        <span><i class="dot ns-lock"></i>遷移中（雙寫）</span>
-        <span><i class="dot ns-wait"></i>Backfill 進行中</span>
-        <span><i class="dot ns-ok"></i>已切換完成</span>
-        <span><i class="dot ns-bad"></i>Hot / 超載</span>
+        <span><i class="dot ns-idle"></i>原地未動</span>
+        <span><i class="dot ns-lock"></i>本次搬入</span>
+        <span><i class="dot ns-bad"></i>巨鯨（仍有鄰居）</span>
+        <span><i class="dot ns-ok"></i>巨鯨已獨佔一片</span>
       </div>
 
-      <div class="status-line" id="mg-status">
-        初始：Tenant VIP 與 Tenant B 共用 Shard 2，VIP 流量佔 62% 容量，形成 hot spot。目標：將 VIP 遷到新建的 Shard 4（Dedicated）。
+      <div class="rb-cmp">
+        <table>
+          <thead>
+            <tr><th>指標</th><th>Hash <code>% N</code></th><th>Directory</th><th>差異</th></tr>
+          </thead>
+          <tbody id="rb-cmp-body"></tbody>
+        </table>
       </div>
+
+      <div class="rb-verdict" id="rb-verdict"></div>
+      <div class="status-line" id="rb-status"></div>
     </div>
   </div>
-  <p class="cap">洞察：Directory 的價值不在公式優雅，而在 control plane 可對單一 tenant 做精細遷移——這是多租戶 SaaS 的實務標配。</p>
+  <p class="cap">看兩欄的「搬遷資料量」與巨鯨那一格：Directory 省下的不是演算法優雅度，而是實際要過網路的位元組——而且它隔離巨鯨的方式是<strong>把鄰居清走</strong>，不是搬那隻 240 GB 的鯨魚。</p>
 
   <div class="oneliner">
-    <b>一句話答法</b>Demo 展示 Directory 遷移的 dual-write → backfill → cutover 節奏；面試時應能逐步說出每階段 router 行為與回滾策略。
+    <b>一句話答法</b>同一次擴容，Hash <code>% N</code> 要搬的是「算式重算後落點改變的全部資料」，Directory 只搬「為了隔離與填平所必需的那幾筆」；代價換成一張要進關鍵路徑的路由表，而回填能不能收斂，取決於雙寫吃掉多少頻寬。
   </div>
 </section>
 
@@ -1811,144 +1841,237 @@
 </section>
 
 <style>
-  .mg-controls {
+  /* ---- 擴容策略並排對照 demo ---- */
+  .rb-ctl {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+    gap: 10px 16px;
+    margin-bottom: 14px;
+  }
+  .rb-knob {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+  .rb-knob > span {
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--text-2);
+  }
+  .rb-knob > span b {
+    color: var(--accent);
+    font-weight: 700;
+  }
+  .rb-knob input[type="range"] {
+    width: 100%;
+    accent-color: var(--accent);
+  }
+  .rb-head {
     display: flex;
     align-items: center;
     justify-content: space-between;
     gap: 12px;
     flex-wrap: wrap;
-    margin-bottom: 16px;
-  }
-  .mg-btns {
-    display: flex;
-    gap: 8px;
-  }
-  .mg-phase {
-    font-family: var(--mono);
-    font-size: 12px;
-    color: var(--accent);
-    letter-spacing: .06em;
     margin-bottom: 14px;
-    padding: 8px 12px;
-    background: var(--accent-soft);
-    border-radius: var(--radius-sm);
-    border: 1px solid var(--accent-line);
   }
-  .mg-canvas {
-    min-height: 200px;
-  }
-  .mg-panel-title {
-    font-family: var(--mono);
-    font-size: 11px;
-    letter-spacing: .1em;
-    text-transform: uppercase;
-    color: var(--text-3);
-    margin-bottom: 12px;
-  }
-  .mg-map {
+  .rb-acts {
     display: flex;
-    flex-direction: column;
     gap: 8px;
   }
-  .mg-row {
+  .rb-split {
     display: grid;
-    grid-template-columns: 120px 1fr 80px;
-    gap: 10px;
-    align-items: center;
-    padding: 10px 12px;
+    grid-template-columns: 1fr 1fr;
+    gap: 14px;
+  }
+  .rb-side {
     border: 1px solid var(--border);
     border-radius: var(--radius-sm);
-    background: var(--bg-soft);
-    font-size: 13.5px;
-    transition: background .25s, border-color .25s;
-  }
-  .mg-row .tenant {
-    font-weight: 600;
-  }
-  .mg-row .shard-tag {
-    font-family: var(--mono);
-    font-size: 12px;
-    padding: 3px 8px;
-    border-radius: 4px;
-    border: 1px solid var(--border-strong);
     background: #fff;
-    text-align: center;
+    padding: 12px;
   }
-  .mg-row .load-bar {
-    height: 8px;
-    background: #e9e7e3;
-    border-radius: 4px;
+  .rb-side-hd {
+    margin-bottom: 10px;
+  }
+  .rb-side-hd b {
+    display: block;
+    font-size: 13px;
+    color: var(--text);
+  }
+  .rb-side-hd span {
+    display: block;
+    font-size: 11px;
+    color: var(--text-3);
+    margin-top: 2px;
+    line-height: 1.5;
+  }
+  .rb-rows {
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+  }
+  .rb-shard {
+    display: grid;
+    grid-template-columns: 58px 1fr 66px;
+    gap: 6px;
+    align-items: center;
+  }
+  .rb-sid {
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--text-2);
+    white-space: nowrap;
+  }
+  .rb-sid i {
+    font-style: normal;
+    font-size: 9px;
+    margin-left: 3px;
+    padding: 1px 3px;
+    border-radius: 3px;
+    border: 1px solid var(--border-strong);
+    color: var(--text-3);
+  }
+  .rb-bar {
+    display: flex;
+    flex-wrap: nowrap;
+    height: 24px;
+    background: #f1efec;
+    border: 1px solid var(--border);
+    border-radius: 5px;
     overflow: hidden;
   }
-  .mg-row .load-fill {
-    height: 100%;
-    border-radius: 4px;
-    transition: width .4s ease, background .3s;
+  /* 租戶格：寬度 = 資料量比例；min-width 讓 40 租戶時最小的格子仍可見可 hover */
+  .rb-cell {
+    flex: 0 0 auto;
+    min-width: 6px;
+    overflow: hidden;
+    white-space: nowrap;
+    text-align: center;
+    font-family: var(--mono);
+    font-size: 9.5px;
+    line-height: 22px;
+    color: var(--text-3);
+    background: #fff;
+    box-shadow: inset -1px 0 0 var(--border);
+    cursor: help;
   }
-  .mg-row.state-lock {
-    border-color: var(--warn);
+  .rb-cell.mv {
     background: var(--warn-soft);
+    color: var(--text);
+    box-shadow: inset 0 0 0 2px var(--warn);
   }
-  .mg-row.state-wait {
-    border-color: var(--accent);
+  .rb-cell.wh {
+    background: var(--bad-soft);
+    color: var(--text);
+    box-shadow: inset 0 0 0 2px var(--bad);
+  }
+  .rb-cell.wh.mv {
+    background: var(--warn-soft);
+    box-shadow: inset 0 0 0 2px var(--bad);
+  }
+  .rb-cell.wh.iso {
+    background: var(--ok-soft);
+    box-shadow: inset 0 0 0 2px var(--ok);
+  }
+  .rb-fig {
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--text-2);
+    text-align: right;
+  }
+  .rb-stats {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 6px;
+    margin-top: 12px;
+  }
+  .rb-stat {
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--bg-soft);
+    padding: 6px 8px;
+  }
+  .rb-stat em {
+    display: block;
+    font-style: normal;
+    font-size: 10px;
+    color: var(--text-3);
+    letter-spacing: .04em;
+  }
+  .rb-stat strong {
+    display: block;
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--text);
+    margin-top: 2px;
+  }
+  .rb-cmp {
+    margin-top: 16px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    overflow-x: auto;
+  }
+  .rb-cmp table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 12px;
+    background: #fff;
+  }
+  .rb-cmp th,
+  .rb-cmp td {
+    border-bottom: 1px solid var(--border);
+    padding: 7px 10px;
+    text-align: left;
+    vertical-align: top;
+  }
+  .rb-cmp thead th {
+    background: var(--bg-soft);
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--text-2);
+    white-space: nowrap;
+  }
+  .rb-cmp tbody th {
+    font-weight: 600;
+    color: var(--text-2);
+    white-space: nowrap;
+  }
+  .rb-cmp tbody td {
+    font-family: var(--mono);
+    color: var(--text);
+  }
+  .rb-cmp tbody td:last-child {
+    color: var(--text-2);
+  }
+  .rb-cmp tbody tr:last-child th,
+  .rb-cmp tbody tr:last-child td {
+    border-bottom: none;
+  }
+  .rb-verdict {
+    margin-top: 14px;
+    padding: 10px 12px;
+    border-radius: var(--radius-sm);
+    border: 1px solid var(--accent-line);
+    border-left-width: 3px;
     background: var(--accent-soft);
+    font-size: 13px;
+    line-height: 1.7;
+    color: var(--text);
   }
-  .mg-row.state-ok {
+  .rb-verdict.ok {
     border-color: var(--ok);
     background: var(--ok-soft);
   }
-  .mg-shards {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
-    gap: 12px;
-  }
-  .mg-shard-card {
-    border: 1.5px solid var(--border-strong);
-    border-radius: var(--radius-sm);
-    padding: 14px 12px;
-    text-align: center;
-    background: #fff;
-    transition: background .25s, border-color .25s;
-  }
-  .mg-shard-card .sname {
-    font-weight: 700;
-    font-size: 14px;
-    margin-bottom: 4px;
-  }
-  .mg-shard-card .smeta {
-    font-family: var(--mono);
-    font-size: 11px;
-    color: var(--text-3);
-    margin-bottom: 10px;
-  }
-  .mg-shard-card .sbar {
-    height: 10px;
-    background: #e9e7e3;
-    border-radius: 5px;
-    overflow: hidden;
-    margin-bottom: 6px;
-  }
-  .mg-shard-card .sfill {
-    height: 100%;
-    border-radius: 5px;
-    transition: width .4s ease, background .3s;
-  }
-  .mg-shard-card .spct {
-    font-family: var(--mono);
-    font-size: 12px;
-    color: var(--text-2);
-  }
-  .mg-shard-card.hot {
-    border-color: var(--bad);
-    background: var(--bad-soft);
-  }
-  .mg-shard-card.migrating {
+  .rb-verdict.warn {
     border-color: var(--warn);
     background: var(--warn-soft);
   }
-  .mg-shard-card.new-shard {
-    border-style: dashed;
-    border-color: var(--accent);
+  .rb-verdict.bad {
+    border-color: var(--bad);
+    background: var(--bad-soft);
+  }
+  @media (max-width: 720px) {
+    .rb-split { grid-template-columns: 1fr; }
+    .rb-shard { grid-template-columns: 50px 1fr 58px; }
   }
 </style>
 
@@ -2026,218 +2149,494 @@
   
 <script>
 (function () {
-  const demo = document.getElementById('demo-migrate');
+  "use strict";
+
+  /* ================= (1) 常數與參數表 ================= */
+  var BASE_GB = 40;          /* 最大非巨鯨租戶的基準資料量（GB） */
+  var ALPHA_MAX = 1.4;       /* 傾斜滑桿 100 對應的冪律指數 */
+  var ISOLATE_RATIO = 1.4;   /* 超過「擴容後平均片負載」這個倍數，才值得獨立隔離 */
+  var BALANCE_TOL = 0.15;    /* 目錄式填平的容忍帶：max <= mean*(1+TOL) 就收手 */
+  var VERIFY_RATIO = 0.15;   /* verify 階段相對 backfill 的耗時比例 */
+  var CUTOVER_TTL = 30;      /* map 版本傳播 TTL（秒），線上切流的風險窗 */
+  var MAX_ITER = 400;        /* 填平迴圈上限，保證終止 */
+
+  var TENANT_MIN = 8, TENANT_MAX = 40;
+  var SHARD_MIN = 3, SHARD_MAX = 8;
+  var ADD_MIN = 1, ADD_MAX = 4;
+  var BW_MIN = 20, BW_MAX = 400;
+  var WR_MIN = 1, WR_MAX = 60;
+  var WHALE_MIN = 1, WHALE_MAX = 15;
+
+  var DEFAULTS = {
+    tenants: 24, skew: 60, whaleX: 6, shards: 4,
+    addShards: 2, bandwidthMBps: 80, writeMBps: 12, online: 1
+  };
+  var PRESET_WHALE = {
+    tenants: 28, skew: 70, whaleX: 12, shards: 4,
+    addShards: 2, bandwidthMBps: 80, writeMBps: 12, online: 1
+  };
+
+  function clampNum(v, lo, hi) {
+    var n = Number(v);
+    if (isNaN(n)) return lo;
+    return n < lo ? lo : (n > hi ? hi : n);
+  }
+  function clampInt(v, lo, hi) { return Math.round(clampNum(v, lo, hi)); }
+  function r1(x) { return Math.round(x * 10) / 10; }
+  function r2(x) { return Math.round(x * 100) / 100; }
+
+  /* 32-bit 確定性雜湊（無隨機數）：租戶序號 -> 均勻打散的雜湊值 */
+  function hash32(n) {
+    var h = (n + 1) >>> 0;
+    h = Math.imul(h ^ (h >>> 15), 2246822507);
+    h ^= h >>> 13;
+    h = Math.imul(h, 3266489909);
+    h ^= h >>> 16;
+    return h >>> 0;
+  }
+
+  function loadsOf(place, sizes, shardCount) {
+    var out = [], i;
+    for (i = 0; i < shardCount; i++) out.push(0);
+    for (i = 0; i < sizes.length; i++) out[place[i]] += sizes[i];
+    return out;
+  }
+  function membersOf(place, shard) {
+    var out = [], i;
+    for (i = 0; i < place.length; i++) if (place[i] === shard) out.push(i);
+    return out;
+  }
+  function lightestShard(loads, banned) {
+    var best = -1, bestV = 0, s;
+    for (s = 0; s < loads.length; s++) {
+      if (s === banned) continue;
+      if (best < 0 || loads[s] < bestV) { best = s; bestV = loads[s]; }
+    }
+    return best;
+  }
+  function heaviestShard(loads, banned) {
+    var best = -1, bestV = 0, s;
+    for (s = 0; s < loads.length; s++) {
+      if (s === banned) continue;
+      if (best < 0 || loads[s] > bestV) { best = s; bestV = loads[s]; }
+    }
+    return best;
+  }
+
+  /* 目錄式規劃：先用「清鄰居」而非「搬巨鯨」達成隔離，再貪婪填平 */
+  function directoryPlan(before, sizes, shardCount, total) {
+    var place = before.slice();
+    var loads = loadsOf(place, sizes, shardCount);
+    var mean = total / shardCount;
+    var dedicated = -1;
+    var i, guard, members, m;
+
+    if (sizes[0] > mean * ISOLATE_RATIO) {
+      dedicated = place[0];
+      members = membersOf(place, dedicated);
+      for (i = 0; i < members.length; i++) {
+        m = members[i];
+        if (m === 0) continue;
+        var dst = lightestShard(loads, dedicated);
+        if (dst < 0) break;
+        loads[place[m]] -= sizes[m];
+        place[m] = dst;
+        loads[dst] += sizes[m];
+      }
+    }
+
+    var poolCount = shardCount - (dedicated >= 0 ? 1 : 0);
+    var poolTotal = total - (dedicated >= 0 ? sizes[0] : 0);
+    var poolMean = poolCount > 0 ? poolTotal / poolCount : 0;
+
+    for (guard = 0; guard < MAX_ITER; guard++) {
+      var hi = heaviestShard(loads, dedicated);
+      var lo = lightestShard(loads, dedicated);
+      if (hi < 0 || lo < 0 || hi === lo) break;
+      if (loads[hi] <= poolMean * (1 + BALANCE_TOL)) break;
+      var cand = membersOf(place, hi);
+      var pick = -1, pickScore = Math.max(loads[hi], loads[lo]);
+      for (i = 0; i < cand.length; i++) {
+        var t = cand[i];
+        var score = Math.max(loads[hi] - sizes[t], loads[lo] + sizes[t]);
+        if (score < pickScore - 0.0001) { pickScore = score; pick = t; }
+      }
+      if (pick < 0) break;
+      loads[hi] -= sizes[pick];
+      place[pick] = lo;
+      loads[lo] += sizes[pick];
+    }
+    return { place: place, dedicated: dedicated };
+  }
+
+  /* 單側指標：搬遷量、負載分佈、隔離狀態、遷移窗口、blast radius */
+  function sideMetrics(kind, place, before, sizes, shardCount, cfg) {
+    var i, s;
+    var movedCount = 0, movedGB = 0, maxMovedGB = 0;
+    var mvFlag = [];
+    for (i = 0; i < sizes.length; i++) {
+      var mv = place[i] !== before[i];
+      mvFlag.push(mv);
+      if (mv) {
+        movedCount++;
+        movedGB += sizes[i];
+        if (sizes[i] > maxMovedGB) maxMovedGB = sizes[i];
+      }
+    }
+    movedGB = r1(movedGB);
+
+    var loads = loadsOf(place, sizes, shardCount);
+    var maxLoad = 0;
+    for (s = 0; s < shardCount; s++) if (loads[s] > maxLoad) maxLoad = loads[s];
+    var mean = cfg.total / shardCount;
+    var skewRatio = mean > 0 ? r2(maxLoad / mean) : 0;
+
+    var whaleShard = place[0];
+    var whaleNeighbors = membersOf(place, whaleShard).length - 1;
+
+    var movedShare = cfg.total > 0 ? movedGB / cfg.total : 0;
+    var movedMB = movedGB * 1024;
+    var dualMBps = 0, netMBps = cfg.bw, converge = 1;
+    var backfillSec = 0, windowSec = 0, downtimeSec = 0, backlogGB = 0, riskSec = 0;
+
+    if (cfg.online) {
+      dualMBps = cfg.wr * movedShare;
+      netMBps = cfg.bw - dualMBps;
+      if (netMBps <= 0) {
+        converge = 0;
+        netMBps = 0;
+        backfillSec = -1;
+        windowSec = -1;
+      } else {
+        backfillSec = Math.ceil(movedMB / netMBps);
+        windowSec = Math.ceil(backfillSec * (1 + VERIFY_RATIO)) + CUTOVER_TTL;
+      }
+      riskSec = CUTOVER_TTL;
+    } else {
+      downtimeSec = Math.ceil(movedMB / cfg.bw);
+      windowSec = downtimeSec;
+      backlogGB = r1(cfg.wr * downtimeSec / 1024);
+      riskSec = downtimeSec;
+    }
+
+    var blastPct = kind === "hash"
+      ? r1(movedShare * 100)
+      : (cfg.total > 0 ? r1(maxMovedGB / cfg.total * 100) : 0);
+
+    return {
+      kind: kind,
+      place: place,
+      moved: mvFlag,
+      movedCount: movedCount,
+      movedTenantPct: sizes.length > 0 ? r1(movedCount / sizes.length * 100) : 0,
+      movedGB: movedGB,
+      movedDataPct: r1(movedShare * 100),
+      loads: loads,
+      maxLoadGB: r1(maxLoad),
+      maxLoadPct: cfg.total > 0 ? r1(maxLoad / cfg.total * 100) : 0,
+      skewRatio: skewRatio,
+      whaleShard: whaleShard,
+      whaleNeighbors: whaleNeighbors,
+      whaleIsolated: whaleNeighbors === 0 ? 1 : 0,
+      netMBps: r1(netMBps),
+      dualMBps: r1(dualMBps),
+      converge: converge,
+      backfillSec: backfillSec,
+      windowSec: windowSec,
+      downtimeSec: downtimeSec,
+      backlogGB: backlogGB,
+      riskSec: riskSec,
+      blastPct: blastPct,
+      dirEntries: kind === "dir" ? sizes.length : 0
+    };
+  }
+
+  function cellsFor(side, sizes, shardCount, scale) {
+    var rows = [], s, i;
+    for (s = 0; s < shardCount; s++) rows.push([]);
+    for (i = 0; i < sizes.length; i++) {
+      rows[side.place[i]].push({
+        id: "T" + i,
+        gb: sizes[i],
+        widthPct: scale > 0 ? r2(sizes[i] / scale * 100) : 0,
+        moved: side.moved[i] ? 1 : 0,
+        whale: i === 0 ? 1 : 0
+      });
+    }
+    for (s = 0; s < shardCount; s++) {
+      rows[s].sort(function (a, b) { return b.gb - a.gb; });
+    }
+    return rows;
+  }
+
+  /* ================= (2) compute 純函式 ================= */
+  // @probe fn       computeRebalance
+  // @probe baseline {"tenants":24,"skew":60,"whaleX":6,"shards":4,"addShards":2,"bandwidthMBps":80,"writeMBps":12,"online":1}
+  // @probe sweep    {"tenants":[8,40],"skew":[0,100],"whaleX":[1,15],"shards":[3,8],"addShards":[1,4],"bandwidthMBps":[20,400],"writeMBps":[1,60],"online":[0,1]}
+  function computeRebalance(p) {
+    var T = clampInt(p.tenants, TENANT_MIN, TENANT_MAX);
+    var skew = clampNum(p.skew, 0, 100);
+    var whaleX = clampNum(p.whaleX, WHALE_MIN, WHALE_MAX);
+    var N = clampInt(p.shards, SHARD_MIN, SHARD_MAX);
+    var K = clampInt(p.addShards, ADD_MIN, ADD_MAX);
+    var M = N + K;
+    var bw = clampNum(p.bandwidthMBps, BW_MIN, BW_MAX);
+    var wr = clampNum(p.writeMBps, WR_MIN, WR_MAX);
+    var online = Number(p.online) ? 1 : 0;
+    var alpha = skew / 100 * ALPHA_MAX;
+
+    var sizes = [], total = 0, i;
+    for (i = 0; i < T; i++) {
+      var g = BASE_GB * Math.pow(i + 1, -alpha);
+      if (i === 0) g = g * whaleX;
+      g = r1(g);
+      sizes.push(g);
+      total += g;
+    }
+    total = r1(total);
+
+    /* 兩側共用同一組擴容前落點：這才叫「同一組輸入」 */
+    var before = [], hashAfter = [];
+    for (i = 0; i < T; i++) {
+      var h = hash32(i);
+      before.push(h % N);
+      hashAfter.push(h % M);
+    }
+
+    var plan = directoryPlan(before, sizes, M, total);
+    var cfg = { total: total, bw: bw, wr: wr, online: online };
+
+    var hashSide = sideMetrics("hash", hashAfter, before, sizes, M, cfg);
+    var dirSide = sideMetrics("dir", plan.place, before, sizes, M, cfg);
+
+    var scale = Math.max(hashSide.maxLoadGB, dirSide.maxLoadGB);
+    hashSide.rows = cellsFor(hashSide, sizes, M, scale);
+    dirSide.rows = cellsFor(dirSide, sizes, M, scale);
+    hashSide.dedicated = -1;
+    dirSide.dedicated = plan.dedicated;
+
+    var savedGB = r1(hashSide.movedGB - dirSide.movedGB);
+    var savedPct = hashSide.movedGB > 0 ? r1(savedGB / hashSide.movedGB * 100) : 0;
+    var windowRatio = 0;
+    if (hashSide.converge && dirSide.converge && dirSide.windowSec > 0) {
+      windowRatio = r1(hashSide.windowSec / dirSide.windowSec);
+    }
+
+    return {
+      params: {
+        tenants: T, skew: skew, whaleX: whaleX, shards: N, addShards: K,
+        shardsAfter: M, bandwidthMBps: bw, writeMBps: wr, online: online
+      },
+      totalGB: total,
+      whaleGB: sizes[0],
+      whaleSharePct: total > 0 ? r1(sizes[0] / total * 100) : 0,
+      meanShardGB: r1(total / M),
+      isolateThresholdGB: r1(total / M * ISOLATE_RATIO),
+      sizes: sizes,
+      hash: hashSide,
+      dir: dirSide,
+      summary: {
+        movedGBHash: hashSide.movedGB,
+        movedGBDir: dirSide.movedGB,
+        movedCountHash: hashSide.movedCount,
+        movedCountDir: dirSide.movedCount,
+        windowSecHash: hashSide.windowSec,
+        windowSecDir: dirSide.windowSec,
+        skewHash: hashSide.skewRatio,
+        skewDir: dirSide.skewRatio,
+        blastHash: hashSide.blastPct,
+        blastDir: dirSide.blastPct,
+        backlogHash: hashSide.backlogGB,
+        backlogDir: dirSide.backlogGB,
+        convergeHash: hashSide.converge,
+        convergeDir: dirSide.converge,
+        savedGB: savedGB,
+        savedPct: savedPct,
+        windowRatio: windowRatio
+      }
+    };
+  }
+
+  /* ================= (3) DOM 參照 ================= */
+  var demo = document.getElementById("demo-rebalance");
   if (!demo) return;
 
-  const PHASES = [
-    {
-      name: '0 / 6 · 初始狀態',
-      status: '初始：Tenant VIP 與 Tenant B 共用 Shard 2，VIP 流量佔 62% 容量，形成 hot spot。目標：將 VIP 遷到新建的 Shard 4（Dedicated）。',
-      map: [
-        { tenant: 'Tenant A', shard: 'Shard 1', load: 18, state: '' },
-        { tenant: 'Tenant B', shard: 'Shard 2', load: 28, state: '' },
-        { tenant: 'Tenant VIP', shard: 'Shard 2', load: 62, state: 'hot' }
-      ],
-      shards: [
-        { name: 'Shard 1', pct: 18, tenants: 'A', state: '' },
-        { name: 'Shard 2', pct: 90, tenants: 'B, VIP', state: 'hot' },
-        { name: 'Shard 3', pct: 12, tenants: '—', state: '' }
-      ]
-    },
-    {
-      name: '1 / 6 · Plan',
-      status: 'Plan：建立 Shard 4（Dedicated），更新 control plane 遷移計畫。Router 仍走舊 map，線上流量不受影響。',
-      map: [
-        { tenant: 'Tenant A', shard: 'Shard 1', load: 18, state: '' },
-        { tenant: 'Tenant B', shard: 'Shard 2', load: 28, state: '' },
-        { tenant: 'Tenant VIP', shard: 'Shard 2 → 4', load: 62, state: 'hot' }
-      ],
-      shards: [
-        { name: 'Shard 1', pct: 18, tenants: 'A', state: '' },
-        { name: 'Shard 2', pct: 90, tenants: 'B, VIP', state: 'hot' },
-        { name: 'Shard 3', pct: 12, tenants: '—', state: '' },
-        { name: 'Shard 4', pct: 0, tenants: '（新建）', state: 'new-shard' }
-      ]
-    },
-    {
-      name: '2 / 6 · Dual-write',
-      status: 'Dual-write：Router 對 Tenant VIP 的寫入同時落 Shard 2（舊）與 Shard 4（新）。讀仍走 Shard 2，確保切換前一致性。',
-      map: [
-        { tenant: 'Tenant A', shard: 'Shard 1', load: 18, state: '' },
-        { tenant: 'Tenant B', shard: 'Shard 2', load: 28, state: '' },
-        { tenant: 'Tenant VIP', shard: '2 + 4 雙寫', load: 62, state: 'lock' }
-      ],
-      shards: [
-        { name: 'Shard 1', pct: 18, tenants: 'A', state: '' },
-        { name: 'Shard 2', pct: 90, tenants: 'B, VIP', state: 'migrating' },
-        { name: 'Shard 3', pct: 12, tenants: '—', state: '' },
-        { name: 'Shard 4', pct: 8, tenants: 'VIP（新寫）', state: 'migrating' }
-      ]
-    },
-    {
-      name: '3 / 6 · Backfill',
-      status: 'Backfill：背景 job 將 VIP 歷史資料從 Shard 2 複製到 Shard 4，節流 50 MB/s。追 incremental changelog，lag 從 2h 降至 30s。',
-      map: [
-        { tenant: 'Tenant A', shard: 'Shard 1', load: 18, state: '' },
-        { tenant: 'Tenant B', shard: 'Shard 2', load: 28, state: '' },
-        { tenant: 'Tenant VIP', shard: '2 + 4 雙寫', load: 62, state: 'wait' }
-      ],
-      shards: [
-        { name: 'Shard 1', pct: 18, tenants: 'A', state: '' },
-        { name: 'Shard 2', pct: 90, tenants: 'B, VIP', state: 'migrating' },
-        { name: 'Shard 3', pct: 12, tenants: '—', state: '' },
-        { name: 'Shard 4', pct: 55, tenants: 'VIP（backfill 78%）', state: 'migrating' }
-      ]
-    },
-    {
-      name: '4 / 6 · Verify',
-      status: 'Verify：抽樣 10k rows checksum 一致；shadow read Shard 4 與 Shard 2 diff = 0。Map version 準備從 v12 → v13。',
-      map: [
-        { tenant: 'Tenant A', shard: 'Shard 1', load: 18, state: '' },
-        { tenant: 'Tenant B', shard: 'Shard 2', load: 28, state: '' },
-        { tenant: 'Tenant VIP', shard: '待切 → Shard 4', load: 62, state: 'wait' }
-      ],
-      shards: [
-        { name: 'Shard 1', pct: 18, tenants: 'A', state: '' },
-        { name: 'Shard 2', pct: 90, tenants: 'B, VIP', state: 'migrating' },
-        { name: 'Shard 3', pct: 12, tenants: '—', state: '' },
-        { name: 'Shard 4', pct: 62, tenants: 'VIP（已同步）', state: '' }
-      ]
-    },
-    {
-      name: '5 / 6 · Cutover',
-      status: 'Cutover：Map v13 生效，Tenant VIP 讀寫皆路由至 Shard 4。Shard 2 負載降至 28%，hot spot 解除。舊副本保留 7 天 rollback window。',
-      map: [
-        { tenant: 'Tenant A', shard: 'Shard 1', load: 18, state: '' },
-        { tenant: 'Tenant B', shard: 'Shard 2', load: 28, state: '' },
-        { tenant: 'Tenant VIP', shard: 'Shard 4', load: 62, state: 'ok' }
-      ],
-      shards: [
-        { name: 'Shard 1', pct: 18, tenants: 'A', state: '' },
-        { name: 'Shard 2', pct: 28, tenants: 'B', state: '' },
-        { name: 'Shard 3', pct: 12, tenants: '—', state: '' },
-        { name: 'Shard 4', pct: 62, tenants: 'VIP', state: '' }
-      ]
-    },
-    {
-      name: '6 / 6 · Cleanup',
-      status: 'Cleanup：停止 dual-write，刪除 Shard 2 上 VIP 舊副本。遷移完成——Dedicated shard 就緒，Tenant B 恢復正常鄰居環境。',
-      map: [
-        { tenant: 'Tenant A', shard: 'Shard 1', load: 18, state: '' },
-        { tenant: 'Tenant B', shard: 'Shard 2', load: 28, state: '' },
-        { tenant: 'Tenant VIP', shard: 'Shard 4', load: 62, state: 'ok' }
-      ],
-      shards: [
-        { name: 'Shard 1', pct: 18, tenants: 'A', state: '' },
-        { name: 'Shard 2', pct: 28, tenants: 'B', state: '' },
-        { name: 'Shard 3', pct: 12, tenants: '—', state: '' },
-        { name: 'Shard 4', pct: 62, tenants: 'VIP', state: '' }
-      ]
+  var KNOBS = ["tenants", "skew", "whaleX", "shards", "addShards", "bandwidthMBps", "writeMBps"];
+  var inputs = {};
+  var readouts = {};
+  KNOBS.forEach(function (k) {
+    inputs[k] = demo.querySelector('[data-knob="' + k + '"]');
+    readouts[k] = demo.querySelector('[data-out="' + k + '"]');
+  });
+  var modeBtns = Array.prototype.slice.call(demo.querySelectorAll("[data-mode]"));
+  var presetBtn = demo.querySelector("#rb-preset");
+  var resetBtn = demo.querySelector("#rb-reset");
+  var hashBody = demo.querySelector("#rb-hash-body");
+  var dirBody = demo.querySelector("#rb-dir-body");
+  var hashStats = demo.querySelector("#rb-hash-stats");
+  var dirStats = demo.querySelector("#rb-dir-stats");
+  var cmpBody = demo.querySelector("#rb-cmp-body");
+  var verdictEl = demo.querySelector("#rb-verdict");
+  var statusEl = demo.querySelector("#rb-status");
+  var state = { tenants: 0, skew: 0, whaleX: 0, shards: 0, addShards: 0, bandwidthMBps: 0, writeMBps: 0, online: 1 };
+
+  /* ================= (4) render —— 只讀 compute 的結果畫出來 ================= */
+  function esc(s) {
+    return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+  }
+  function secText(v) {
+    if (v < 0) return "不收斂";
+    if (v < 90) return v + " 秒";
+    if (v < 5400) return r1(v / 60) + " 分";
+    return r1(v / 3600) + " 小時";
+  }
+
+  function rowsHTML(side, res) {
+    return side.rows.map(function (cells, s) {
+      var isNew = s >= res.params.shards;
+      var isDed = s === side.dedicated;
+      var inner = cells.map(function (c) {
+        var cls = "rb-cell";
+        if (c.moved) cls += " mv";
+        if (c.whale) cls += " wh";
+        if (c.whale && side.whaleIsolated) cls += " iso";
+        var tip = c.id + "・" + c.gb + " GB・" + (c.moved ? "本次搬入" : "原地") + (c.whale ? "・巨鯨" : "");
+        return '<span class="' + cls + '" style="width:' + c.widthPct + '%" title="' + esc(tip) + '">' + c.id + "</span>";
+      }).join("");
+      var tag = isDed ? "專屬" : (isNew ? "新增" : "");
+      return '<div class="rb-shard">' +
+        '<span class="rb-sid">S' + s + (tag ? '<i>' + tag + "</i>" : "") + "</span>" +
+        '<span class="rb-bar">' + inner + "</span>" +
+        '<span class="rb-fig">' + r1(side.loads[s]) + " GB</span>" +
+        "</div>";
+    }).join("");
+  }
+
+  function statsHTML(side, res) {
+    var items = [
+      ["搬遷資料量", side.movedGB + " GB（" + side.movedDataPct + "%）"],
+      ["搬遷租戶", side.movedCount + " / " + res.params.tenants + "（" + side.movedTenantPct + "%）"],
+      [res.params.online ? "雙寫窗口" : "停機時間", secText(side.windowSec)],
+      ["擴容後傾斜比", side.skewRatio + "×"],
+      ["切流影響面", side.blastPct + "%"],
+      ["巨鯨鄰居", side.whaleNeighbors + " 個" + (side.whaleIsolated ? "（已隔離）" : "")]
+    ];
+    if (!res.params.online) items.push(["停機積壓寫入", side.backlogGB + " GB"]);
+    return items.map(function (it) {
+      return '<div class="rb-stat"><em>' + it[0] + "</em><strong>" + it[1] + "</strong></div>";
+    }).join("");
+  }
+
+  function cmpHTML(res) {
+    var h = res.hash, d = res.dir, on = res.params.online;
+    var rows = [
+      ["搬遷租戶數", h.movedCount + " / " + res.params.tenants, d.movedCount + " / " + res.params.tenants, (h.movedCount - d.movedCount) + " 筆"],
+      ["搬遷資料量", h.movedGB + " GB", d.movedGB + " GB", res.summary.savedGB + " GB（" + res.summary.savedPct + "%）"],
+      [on ? "回填有效頻寬" : "搬遷頻寬", h.netMBps + " MB/s", d.netMBps + " MB/s", on ? ("雙寫吃掉 " + h.dualMBps + " / " + d.dualMBps + " MB/s") : "無線上流量競爭"],
+      [on ? "雙寫窗口" : "停機時間", secText(h.windowSec), secText(d.windowSec), res.summary.windowRatio > 0 ? (res.summary.windowRatio + "× 長") : "無法比（有一側不收斂）"],
+      ["擴容後最重片", h.maxLoadGB + " GB（" + h.maxLoadPct + "%）", d.maxLoadGB + " GB（" + d.maxLoadPct + "%）", r2(h.skewRatio - d.skewRatio) + "× 傾斜差"],
+      ["巨鯨隔離", h.whaleIsolated ? "是" : ("否，鄰居 " + h.whaleNeighbors + " 個"), d.whaleIsolated ? "是（S" + d.whaleShard + " 專屬）" : ("否，鄰居 " + d.whaleNeighbors + " 個"), d.whaleIsolated && !h.whaleIsolated ? "只有目錄式辦得到" : "本組輸入下無差異"],
+      ["同一瞬間受影響流量", h.blastPct + "%（big-bang）", d.blastPct + "%（逐租戶）", r1(h.blastPct - d.blastPct) + " 個百分點"],
+      ["路由表維護成本", "0 筆（算式即路由）", d.dirEntries + " 筆（map service 進關鍵路徑）", "目錄式的代價在這一列"]
+    ];
+    if (!on) {
+      rows.push(["停機積壓寫入", h.backlogGB + " GB", d.backlogGB + " GB", r1(h.backlogGB - d.backlogGB) + " GB"]);
     }
-  ];
-
-  let phaseIdx = 0;
-  let viewMode = 'map';
-
-  const phaseEl = demo.querySelector('#mg-phase');
-  const statusEl = demo.querySelector('#mg-status');
-  const mapEl = demo.querySelector('#mg-map');
-  const shardsEl = demo.querySelector('#mg-shards');
-  const mapPanel = demo.querySelector('#mg-map-panel');
-  const shardPanel = demo.querySelector('#mg-shard-panel');
-  const nextBtn = demo.querySelector('#mg-next');
-  const resetBtn = demo.querySelector('#mg-reset');
-  const viewBtns = Array.from(demo.querySelectorAll('[data-view]'));
-
-  function loadColor(pct) {
-    if (pct >= 85) return 'var(--bad)';
-    if (pct >= 60) return 'var(--warn)';
-    return 'var(--ok)';
+    return rows.map(function (r) {
+      return "<tr><th>" + r[0] + "</th><td>" + r[1] + "</td><td>" + r[2] + "</td><td>" + r[3] + "</td></tr>";
+    }).join("");
   }
 
-  function rowStateClass(state) {
-    if (state === 'lock') return 'state-lock';
-    if (state === 'wait') return 'state-wait';
-    if (state === 'ok') return 'state-ok';
-    return '';
-  }
-
-  function renderMap(rows) {
-    mapEl.innerHTML = rows.map(function (r) {
-      var cls = rowStateClass(r.state === 'hot' ? '' : r.state);
-      var fillColor = r.state === 'hot' ? 'var(--bad)' : loadColor(r.load);
-      return (
-        '<div class="mg-row ' + cls + '">' +
-          '<span class="tenant">' + r.tenant + '</span>' +
-          '<div class="load-bar"><div class="load-fill" style="width:' + r.load + '%;background:' + fillColor + '"></div></div>' +
-          '<span class="shard-tag">' + r.shard + '</span>' +
-        '</div>'
-      );
-    }).join('');
-  }
-
-  function renderShards(shards) {
-    shardsEl.innerHTML = shards.map(function (s) {
-      var cardCls = s.state || '';
-      return (
-        '<div class="mg-shard-card ' + cardCls + '">' +
-          '<div class="sname">' + s.name + '</div>' +
-          '<div class="smeta">' + s.tenants + '</div>' +
-          '<div class="sbar"><div class="sfill" style="width:' + s.pct + '%;background:' + loadColor(s.pct) + '"></div></div>' +
-          '<div class="spct">' + s.pct + '%</div>' +
-        '</div>'
-      );
-    }).join('');
-  }
-
-  function render() {
-    var phase = PHASES[phaseIdx];
-    phaseEl.textContent = '階段 ' + phase.name;
-    statusEl.textContent = phase.status;
-    renderMap(phase.map);
-    renderShards(phase.shards);
-
-    if (phaseIdx >= PHASES.length - 1) {
-      nextBtn.disabled = true;
-      nextBtn.textContent = '完成';
+  function verdictHTML(res) {
+    var h = res.hash, d = res.dir, s = res.summary;
+    var cls = "rb-verdict", txt;
+    if (!h.converge && !d.converge) {
+      cls += " bad";
+      txt = "兩側都不收斂：寫入 " + res.params.writeMBps + " MB/s 造成的雙寫量已吃掉全部 " +
+        res.params.bandwidthMBps + " MB/s 頻寬，回填追不上雙寫，窗口永遠關不起來。先降寫入或加頻寬，再談策略。";
+    } else if (!h.converge) {
+      cls += " bad";
+      txt = "Hash % N 側不收斂：要搬 " + h.movedGB + " GB（全量的 " + h.movedDataPct +
+        "%），雙寫佔掉 " + h.dualMBps + " MB/s、超過 " + res.params.bandwidthMBps +
+        " MB/s 頻寬，回填追不上雙寫；目錄式只搬 " + d.movedGB + " GB，窗口 " + secText(d.windowSec) + "就收得掉。";
+    } else if (!d.converge) {
+      cls += " bad";
+      txt = "目錄式這一側不收斂：搬 " + d.movedGB + " GB 的雙寫量 " + d.dualMBps +
+        " MB/s 已超過 " + res.params.bandwidthMBps + " MB/s 頻寬，回填追不上雙寫。";
+    } else if (s.savedGB > 0) {
+      cls += " ok";
+      txt = "同一組輸入下，目錄式少搬 " + s.savedGB + " GB（少 " + s.savedPct + "%）、" +
+        (res.params.online ? "雙寫窗口" : "停機時間") + "從" + secText(h.windowSec) + "縮到" + secText(d.windowSec) +
+        "（" + s.windowRatio + "× 差）、傾斜比 " + h.skewRatio + "× → " + d.skewRatio + "×；" +
+        (d.whaleIsolated ? ("巨鯨 " + res.whaleGB + " GB 已獨佔 S" + d.whaleShard + "。") : ("巨鯨 " + res.whaleGB + " GB 仍有 " + d.whaleNeighbors + " 個鄰居。")) +
+        "代價是 " + d.dirEntries + " 筆路由表進入關鍵路徑。";
     } else {
-      nextBtn.disabled = false;
-      nextBtn.textContent = '下一步';
+      cls += " warn";
+      txt = "這組輸入下目錄式沒佔到便宜：兩側搬遷量 " + h.movedGB + " GB vs " + d.movedGB +
+        " GB、傾斜比 " + h.skewRatio + "× vs " + d.skewRatio + "×，卻仍要多養 " + d.dirEntries +
+        " 筆路由表。把傾斜或巨鯨倍數調高，差距才會出現。";
     }
+    verdictEl.className = cls;
+    verdictEl.textContent = txt;
   }
 
-  function setView(mode) {
-    viewMode = mode;
-    viewBtns.forEach(function (btn) {
-      btn.setAttribute('aria-pressed', btn.dataset.view === mode ? 'true' : 'false');
-    });
-    mapPanel.hidden = mode !== 'map';
-    shardPanel.hidden = mode !== 'shards';
+  function statusText(res) {
+    var p = res.params;
+    return p.tenants + " 個租戶共 " + res.totalGB + " GB，最大租戶 " + res.whaleGB + " GB（佔 " +
+      res.whaleSharePct + "%）；S0–S" + (p.shards - 1) + " 擴到 S0–S" + (p.shardsAfter - 1) +
+      "，擴容後平均每片 " + res.meanShardGB + " GB，隔離門檻 " + res.isolateThresholdGB + " GB（平均的 " + ISOLATE_RATIO + " 倍）。" +
+      (p.online
+        ? "線上模式：只有被搬的 key 走雙寫，切流靠 map 版本傳播，風險窗 " + CUTOVER_TTL + " 秒。"
+        : "停機模式：頻寬全給搬遷，但停機期間的寫入全部積壓待補。");
   }
 
-  viewBtns.forEach(function (btn) {
-    btn.addEventListener('click', function () {
-      setView(btn.dataset.view);
+  function render(res) {
+    KNOBS.forEach(function (k) {
+      if (readouts[k]) readouts[k].textContent = state[k];
+    });
+    modeBtns.forEach(function (b) {
+      b.setAttribute("aria-pressed", Number(b.getAttribute("data-mode")) === state.online ? "true" : "false");
+    });
+    hashBody.innerHTML = rowsHTML(res.hash, res);
+    dirBody.innerHTML = rowsHTML(res.dir, res);
+    hashStats.innerHTML = statsHTML(res.hash, res);
+    dirStats.innerHTML = statsHTML(res.dir, res);
+    cmpBody.innerHTML = cmpHTML(res);
+    verdictHTML(res);
+    statusEl.textContent = statusText(res);
+  }
+
+  /* ================= (5) 事件綁定 ================= */
+  function sync() {
+    KNOBS.forEach(function (k) {
+      if (inputs[k]) state[k] = Number(inputs[k].value);
+    });
+    render(computeRebalance(state));
+  }
+
+  function applyPreset(preset) {
+    KNOBS.forEach(function (k) {
+      if (inputs[k]) inputs[k].value = preset[k];
+    });
+    state.online = preset.online;
+    sync();
+  }
+
+  KNOBS.forEach(function (k) {
+    if (inputs[k]) inputs[k].addEventListener("input", sync);
+  });
+  modeBtns.forEach(function (b) {
+    b.addEventListener("click", function () {
+      state.online = Number(b.getAttribute("data-mode"));
+      sync();
     });
   });
+  if (presetBtn) presetBtn.addEventListener("click", function () { applyPreset(PRESET_WHALE); });
+  if (resetBtn) resetBtn.addEventListener("click", function () { applyPreset(DEFAULTS); });
 
-  nextBtn.addEventListener('click', function () {
-    if (phaseIdx < PHASES.length - 1) {
-      phaseIdx++;
-      render();
-    }
-  });
-
-  resetBtn.addEventListener('click', function () {
-    phaseIdx = 0;
-    setView('map');
-    render();
-  });
-
-  setView('map');
-  render();
+  applyPreset(DEFAULTS);
 })();
-  </script>
+</script>
 
 
 <!-- FULLSCREEN-FEATURE:START -->

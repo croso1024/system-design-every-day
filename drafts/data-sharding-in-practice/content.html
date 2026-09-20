@@ -1,3 +1,9 @@
+<!-- demo-archetype: C｜並排對照（主，第 5 節） — 讀者調租戶數、大小傾斜、巨鯨倍數、分片數 N 與擴容數 k、
+     搬遷頻寬與寫入速率，並切換「停機搬 / 線上雙寫＋回填＋切流」；同一組租戶與同一組擴容前落點同時餵給
+     Hash `% N` 重分配與 Directory 路由表兩種策略，即時算出兩側的搬遷筆數與資料量、擴容後每片組成與傾斜比、
+     巨鯨是否被隔離、回填有效頻寬與窗口長度（含「回填追不上雙寫」的不收斂判定）與切流 blast radius。
+     選 C 是因為第 4 節的命題本來就是「同一次擴容，改 map 與改 N 的代價差多少」——那是一組數字的對照，
+     不是一段流程。 -->
 <!-- ============ 01 總覽與定位 ============ -->
 <section id="s1">
   <div class="sec-head">
@@ -278,59 +284,83 @@
 <section id="s5">
   <div class="sec-head">
     <span class="sec-num">05</span>
-    <h2>互動 Demo：多租戶遷移模擬器</h2>
+    <h2>互動 Demo：擴容策略並排對照</h2>
   </div>
-  <p class="sec-sub">Directory Sharding 下，把 hot tenant 從共享 shard 遷到專用 shard 的六階段流程。</p>
+  <p class="sec-sub">同一組租戶與同一次擴容，餵給 Hash <code>% N</code> 與 Directory 兩種策略，比搬遷量、窗口與傾斜。</p>
 
-  <p>下方模擬一個 3-shard 的多租戶 SaaS：<strong>Tenant A</strong>（小）、<strong>Tenant B</strong>（中）、<strong>Tenant VIP</strong>（大，佔 Shard 2 過半容量）。按「下一步」走完整遷移 SOP，觀察 dual-write、backfill、cutover 各階段的路由與狀態變化。</p>
+  <p>下方左右兩欄吃的是<strong>完全相同的輸入</strong>：同一組租戶（大小依傾斜參數與巨鯨倍數決定）、同一組擴容前落點（<code>hash % N</code>）、同一條搬遷頻寬與寫入速率。差別只在擴容時怎麼決定新落點——左欄把 N 改成 N+k 讓算式重算，右欄只改路由表。上一節的六階段 SOP（dual-write → backfill → verify → cutover）在兩欄用的是<strong>同一套成本公式</strong>，兩邊秒數不同純粹是因為要搬的量不同。</p>
 
-  <div class="demo" id="demo-migrate">
+  <div class="demo" id="demo-rebalance">
     <div class="demo-bar">
-      <span class="label">互動 · 多租戶 Directory 遷移</span>
-      <span class="label" style="text-transform:none;font-family:var(--sans);font-size:12px;color:var(--text-2)">逐步執行遷移 SOP</span>
+      <span class="label">互動 · 擴容策略並排對照</span>
+      <span class="label" style="text-transform:none;font-family:var(--sans);font-size:12px;color:var(--text-2)">同一組輸入，兩種策略的數字差</span>
     </div>
     <div class="demo-body">
-      <div class="mg-controls">
-        <div class="seg" role="group" aria-label="檢視模式">
-          <button data-view="map" aria-pressed="true">路由表</button>
-          <button data-view="shards" aria-pressed="false">Shard 負載</button>
+      <div class="rb-ctl">
+        <label class="rb-knob"><span>租戶數 <b data-out="tenants">24</b></span>
+          <input type="range" data-knob="tenants" min="8" max="40" step="1" value="24"></label>
+        <label class="rb-knob"><span>大小傾斜 <b data-out="skew">60</b></span>
+          <input type="range" data-knob="skew" min="0" max="100" step="5" value="60"></label>
+        <label class="rb-knob"><span>巨鯨倍數 <b data-out="whaleX">6</b>×</span>
+          <input type="range" data-knob="whaleX" min="1" max="15" step="1" value="6"></label>
+        <label class="rb-knob"><span>目前分片 N = <b data-out="shards">4</b></span>
+          <input type="range" data-knob="shards" min="3" max="8" step="1" value="4"></label>
+        <label class="rb-knob"><span>擴容 +<b data-out="addShards">2</b> 片</span>
+          <input type="range" data-knob="addShards" min="1" max="4" step="1" value="2"></label>
+        <label class="rb-knob"><span>搬遷頻寬 <b data-out="bandwidthMBps">80</b> MB/s</span>
+          <input type="range" data-knob="bandwidthMBps" min="20" max="400" step="10" value="80"></label>
+        <label class="rb-knob"><span>寫入速率 <b data-out="writeMBps">12</b> MB/s</span>
+          <input type="range" data-knob="writeMBps" min="1" max="60" step="1" value="12"></label>
+      </div>
+
+      <div class="rb-head">
+        <div class="seg" role="group" aria-label="遷移方式">
+          <button type="button" data-mode="1" aria-pressed="true">線上：雙寫＋回填＋切流</button>
+          <button type="button" data-mode="0" aria-pressed="false">停機搬</button>
         </div>
-        <div class="mg-btns">
-          <button class="btn primary" id="mg-next" type="button">下一步</button>
-          <button class="btn" id="mg-reset" type="button">Reset</button>
+        <div class="rb-acts">
+          <button class="btn primary" id="rb-preset" type="button">載入巨鯨情境</button>
+          <button class="btn" id="rb-reset" type="button">Reset</button>
         </div>
       </div>
 
-      <div class="mg-phase" id="mg-phase">階段 0 / 6 · 初始狀態</div>
-
-      <div class="mg-canvas" id="mg-canvas">
-        <div class="mg-panel" id="mg-map-panel">
-          <div class="mg-panel-title">Shard Map（Directory）</div>
-          <div class="mg-map" id="mg-map"></div>
+      <div class="rb-split">
+        <div class="rb-side">
+          <div class="rb-side-hd"><b>Hash <code>% N</code> 重分配</b><span>N 一改，全體落點跟著算式重算</span></div>
+          <div class="rb-rows" id="rb-hash-body"></div>
+          <div class="rb-stats" id="rb-hash-stats"></div>
         </div>
-        <div class="mg-panel" id="mg-shard-panel" hidden>
-          <div class="mg-panel-title">Physical Shards</div>
-          <div class="mg-shards" id="mg-shards"></div>
+        <div class="rb-side">
+          <div class="rb-side-hd"><b>Directory 路由表</b><span>只改 map：先清鄰居隔離巨鯨，再填平</span></div>
+          <div class="rb-rows" id="rb-dir-body"></div>
+          <div class="rb-stats" id="rb-dir-stats"></div>
         </div>
       </div>
 
       <div class="legend">
-        <span><i class="dot ns-idle"></i>閒置 / 正常</span>
-        <span><i class="dot ns-lock"></i>遷移中（雙寫）</span>
-        <span><i class="dot ns-wait"></i>Backfill 進行中</span>
-        <span><i class="dot ns-ok"></i>已切換完成</span>
-        <span><i class="dot ns-bad"></i>Hot / 超載</span>
+        <span><i class="dot ns-idle"></i>原地未動</span>
+        <span><i class="dot ns-lock"></i>本次搬入</span>
+        <span><i class="dot ns-bad"></i>巨鯨（仍有鄰居）</span>
+        <span><i class="dot ns-ok"></i>巨鯨已獨佔一片</span>
       </div>
 
-      <div class="status-line" id="mg-status">
-        初始：Tenant VIP 與 Tenant B 共用 Shard 2，VIP 流量佔 62% 容量，形成 hot spot。目標：將 VIP 遷到新建的 Shard 4（Dedicated）。
+      <div class="rb-cmp">
+        <table>
+          <thead>
+            <tr><th>指標</th><th>Hash <code>% N</code></th><th>Directory</th><th>差異</th></tr>
+          </thead>
+          <tbody id="rb-cmp-body"></tbody>
+        </table>
       </div>
+
+      <div class="rb-verdict" id="rb-verdict"></div>
+      <div class="status-line" id="rb-status"></div>
     </div>
   </div>
-  <p class="cap">洞察：Directory 的價值不在公式優雅，而在 control plane 可對單一 tenant 做精細遷移——這是多租戶 SaaS 的實務標配。</p>
+  <p class="cap">看兩欄的「搬遷資料量」與巨鯨那一格：Directory 省下的不是演算法優雅度，而是實際要過網路的位元組——而且它隔離巨鯨的方式是<strong>把鄰居清走</strong>，不是搬那隻 240 GB 的鯨魚。</p>
 
   <div class="oneliner">
-    <b>一句話答法</b>Demo 展示 Directory 遷移的 dual-write → backfill → cutover 節奏；面試時應能逐步說出每階段 router 行為與回滾策略。
+    <b>一句話答法</b>同一次擴容，Hash <code>% N</code> 要搬的是「算式重算後落點改變的全部資料」，Directory 只搬「為了隔離與填平所必需的那幾筆」；代價換成一張要進關鍵路徑的路由表，而回填能不能收斂，取決於雙寫吃掉多少頻寬。
   </div>
 </section>
 
@@ -417,143 +447,236 @@
 </section>
 
 <style>
-  .mg-controls {
+  /* ---- 擴容策略並排對照 demo ---- */
+  .rb-ctl {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+    gap: 10px 16px;
+    margin-bottom: 14px;
+  }
+  .rb-knob {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+  .rb-knob > span {
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--text-2);
+  }
+  .rb-knob > span b {
+    color: var(--accent);
+    font-weight: 700;
+  }
+  .rb-knob input[type="range"] {
+    width: 100%;
+    accent-color: var(--accent);
+  }
+  .rb-head {
     display: flex;
     align-items: center;
     justify-content: space-between;
     gap: 12px;
     flex-wrap: wrap;
-    margin-bottom: 16px;
-  }
-  .mg-btns {
-    display: flex;
-    gap: 8px;
-  }
-  .mg-phase {
-    font-family: var(--mono);
-    font-size: 12px;
-    color: var(--accent);
-    letter-spacing: .06em;
     margin-bottom: 14px;
-    padding: 8px 12px;
-    background: var(--accent-soft);
-    border-radius: var(--radius-sm);
-    border: 1px solid var(--accent-line);
   }
-  .mg-canvas {
-    min-height: 200px;
-  }
-  .mg-panel-title {
-    font-family: var(--mono);
-    font-size: 11px;
-    letter-spacing: .1em;
-    text-transform: uppercase;
-    color: var(--text-3);
-    margin-bottom: 12px;
-  }
-  .mg-map {
+  .rb-acts {
     display: flex;
-    flex-direction: column;
     gap: 8px;
   }
-  .mg-row {
+  .rb-split {
     display: grid;
-    grid-template-columns: 120px 1fr 80px;
-    gap: 10px;
-    align-items: center;
-    padding: 10px 12px;
+    grid-template-columns: 1fr 1fr;
+    gap: 14px;
+  }
+  .rb-side {
     border: 1px solid var(--border);
     border-radius: var(--radius-sm);
-    background: var(--bg-soft);
-    font-size: 13.5px;
-    transition: background .25s, border-color .25s;
-  }
-  .mg-row .tenant {
-    font-weight: 600;
-  }
-  .mg-row .shard-tag {
-    font-family: var(--mono);
-    font-size: 12px;
-    padding: 3px 8px;
-    border-radius: 4px;
-    border: 1px solid var(--border-strong);
     background: #fff;
-    text-align: center;
+    padding: 12px;
   }
-  .mg-row .load-bar {
-    height: 8px;
-    background: #e9e7e3;
-    border-radius: 4px;
+  .rb-side-hd {
+    margin-bottom: 10px;
+  }
+  .rb-side-hd b {
+    display: block;
+    font-size: 13px;
+    color: var(--text);
+  }
+  .rb-side-hd span {
+    display: block;
+    font-size: 11px;
+    color: var(--text-3);
+    margin-top: 2px;
+    line-height: 1.5;
+  }
+  .rb-rows {
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+  }
+  .rb-shard {
+    display: grid;
+    grid-template-columns: 58px 1fr 66px;
+    gap: 6px;
+    align-items: center;
+  }
+  .rb-sid {
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--text-2);
+    white-space: nowrap;
+  }
+  .rb-sid i {
+    font-style: normal;
+    font-size: 9px;
+    margin-left: 3px;
+    padding: 1px 3px;
+    border-radius: 3px;
+    border: 1px solid var(--border-strong);
+    color: var(--text-3);
+  }
+  .rb-bar {
+    display: flex;
+    flex-wrap: nowrap;
+    height: 24px;
+    background: #f1efec;
+    border: 1px solid var(--border);
+    border-radius: 5px;
     overflow: hidden;
   }
-  .mg-row .load-fill {
-    height: 100%;
-    border-radius: 4px;
-    transition: width .4s ease, background .3s;
+  /* 租戶格：寬度 = 資料量比例；min-width 讓 40 租戶時最小的格子仍可見可 hover */
+  .rb-cell {
+    flex: 0 0 auto;
+    min-width: 6px;
+    overflow: hidden;
+    white-space: nowrap;
+    text-align: center;
+    font-family: var(--mono);
+    font-size: 9.5px;
+    line-height: 22px;
+    color: var(--text-3);
+    background: #fff;
+    box-shadow: inset -1px 0 0 var(--border);
+    cursor: help;
   }
-  .mg-row.state-lock {
-    border-color: var(--warn);
+  .rb-cell.mv {
     background: var(--warn-soft);
+    color: var(--text);
+    box-shadow: inset 0 0 0 2px var(--warn);
   }
-  .mg-row.state-wait {
-    border-color: var(--accent);
+  .rb-cell.wh {
+    background: var(--bad-soft);
+    color: var(--text);
+    box-shadow: inset 0 0 0 2px var(--bad);
+  }
+  .rb-cell.wh.mv {
+    background: var(--warn-soft);
+    box-shadow: inset 0 0 0 2px var(--bad);
+  }
+  .rb-cell.wh.iso {
+    background: var(--ok-soft);
+    box-shadow: inset 0 0 0 2px var(--ok);
+  }
+  .rb-fig {
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--text-2);
+    text-align: right;
+  }
+  .rb-stats {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 6px;
+    margin-top: 12px;
+  }
+  .rb-stat {
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--bg-soft);
+    padding: 6px 8px;
+  }
+  .rb-stat em {
+    display: block;
+    font-style: normal;
+    font-size: 10px;
+    color: var(--text-3);
+    letter-spacing: .04em;
+  }
+  .rb-stat strong {
+    display: block;
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--text);
+    margin-top: 2px;
+  }
+  .rb-cmp {
+    margin-top: 16px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    overflow-x: auto;
+  }
+  .rb-cmp table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 12px;
+    background: #fff;
+  }
+  .rb-cmp th,
+  .rb-cmp td {
+    border-bottom: 1px solid var(--border);
+    padding: 7px 10px;
+    text-align: left;
+    vertical-align: top;
+  }
+  .rb-cmp thead th {
+    background: var(--bg-soft);
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--text-2);
+    white-space: nowrap;
+  }
+  .rb-cmp tbody th {
+    font-weight: 600;
+    color: var(--text-2);
+    white-space: nowrap;
+  }
+  .rb-cmp tbody td {
+    font-family: var(--mono);
+    color: var(--text);
+  }
+  .rb-cmp tbody td:last-child {
+    color: var(--text-2);
+  }
+  .rb-cmp tbody tr:last-child th,
+  .rb-cmp tbody tr:last-child td {
+    border-bottom: none;
+  }
+  .rb-verdict {
+    margin-top: 14px;
+    padding: 10px 12px;
+    border-radius: var(--radius-sm);
+    border: 1px solid var(--accent-line);
+    border-left-width: 3px;
     background: var(--accent-soft);
+    font-size: 13px;
+    line-height: 1.7;
+    color: var(--text);
   }
-  .mg-row.state-ok {
+  .rb-verdict.ok {
     border-color: var(--ok);
     background: var(--ok-soft);
   }
-  .mg-shards {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
-    gap: 12px;
-  }
-  .mg-shard-card {
-    border: 1.5px solid var(--border-strong);
-    border-radius: var(--radius-sm);
-    padding: 14px 12px;
-    text-align: center;
-    background: #fff;
-    transition: background .25s, border-color .25s;
-  }
-  .mg-shard-card .sname {
-    font-weight: 700;
-    font-size: 14px;
-    margin-bottom: 4px;
-  }
-  .mg-shard-card .smeta {
-    font-family: var(--mono);
-    font-size: 11px;
-    color: var(--text-3);
-    margin-bottom: 10px;
-  }
-  .mg-shard-card .sbar {
-    height: 10px;
-    background: #e9e7e3;
-    border-radius: 5px;
-    overflow: hidden;
-    margin-bottom: 6px;
-  }
-  .mg-shard-card .sfill {
-    height: 100%;
-    border-radius: 5px;
-    transition: width .4s ease, background .3s;
-  }
-  .mg-shard-card .spct {
-    font-family: var(--mono);
-    font-size: 12px;
-    color: var(--text-2);
-  }
-  .mg-shard-card.hot {
-    border-color: var(--bad);
-    background: var(--bad-soft);
-  }
-  .mg-shard-card.migrating {
+  .rb-verdict.warn {
     border-color: var(--warn);
     background: var(--warn-soft);
   }
-  .mg-shard-card.new-shard {
-    border-style: dashed;
-    border-color: var(--accent);
+  .rb-verdict.bad {
+    border-color: var(--bad);
+    background: var(--bad-soft);
+  }
+  @media (max-width: 720px) {
+    .rb-split { grid-template-columns: 1fr; }
+    .rb-shard { grid-template-columns: 50px 1fr 58px; }
   }
 </style>
