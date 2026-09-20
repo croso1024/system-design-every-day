@@ -2,237 +2,433 @@
 (function () {
   "use strict";
 
-  var TERMINAL = { final: 1, timed_out: 1, cancelled: 1, failed: 1 };
+  /* ============================================================
+     (1) 常數與參數表
+     ============================================================ */
+  var BASE_TOKENS = 1200;      // 每輪 prompt 的固定底：system prompt + 工具 schema + 使用者訊息
+  var PRICE_PER_MTOK = 3.0;    // USD / 1M tokens
+  var BACKOFF_BASE = 500;      // ms，第一次重試前的等待
+  var BACKOFF_CAP = 4000;      // ms，指數退避的上限
+  var RETRY_MAX = [0, 2, 3];   // retryPolicy 0=不重試 1=固定 2 次 2=指數退避上限 3 次
 
-  // 各情境：maxIter / budgetTotal / frames。
-  // frame 欄位：st(當前狀態) visited(已走過) iter budget msgs ckpt(checkpoint 標籤) tone(覆寫 active 色) status caption
-  var SCENARIOS = {
-    normal: {
-      maxIter: 5, budgetTotal: 30,
-      frames: [
-        { st: "pending", visited: [], iter: 0, budget: 30, msgs: 1, ckpt: "建立 job",
-          status: "請求受理：建立 job 與 idempotency key，狀態 = pending。context 目前只有使用者訊息（1 則）。",
-          caption: "狀態機起點。此刻若 client 重送相同請求，會命中同一個 idempotency key。" },
-        { st: "running", visited: ["pending"], iter: 1, budget: 28, msgs: 1, ckpt: "pending→running",
-          status: "① 狀態轉 running：把 context 送進 LLM（經 LLM Gateway）推理下一步。iteration = 1。",
-          caption: "第一次進 running：LLM 讀完使用者問題，準備決定要不要用工具。" },
-        { st: "tool_calls", visited: ["pending", "running"], iter: 1, budget: 26, msgs: 2, ckpt: "running→tool_calls",
-          status: "② LLM 決定呼叫 get_order(order_id=\"A1234\")，狀態轉 tool_calls。runtime 執行工具（模型不碰真實系統）。context = 2 則。",
-          caption: "決策與執行分離：模型只輸出意圖，runtime 才真的去查 DB。" },
-        { st: "running", visited: ["pending", "running", "tool_calls"], iter: 2, budget: 24, msgs: 3, ckpt: "tool_calls→running",
-          status: "③ 工具結果回寫（status=已出貨, tracking=SF123），狀態轉回 running 續推理。iteration = 2、context = 3 則。",
-          caption: "running ⇄ tool_calls 的一次來回，就是一輪 Agent Loop；context 隨之增長。" },
-        { st: "final", visited: ["pending", "running", "tool_calls"], iter: 2, budget: 22, msgs: 4, ckpt: "→ final ✓",
-          status: "④ LLM 判斷資訊足夠，輸出最終答案：『您的訂單已出貨，預計 7/21 送達。』狀態 = final（終態，job 可回收）。",
-          caption: "抵達終態。試試「模擬 client 重試」，看 idempotency 如何避免整段重跑。" }
-      ]
-    },
-    multi: {
-      maxIter: 5, budgetTotal: 30,
-      frames: [
-        { st: "pending", visited: [], iter: 0, budget: 30, msgs: 1, ckpt: "建立 job",
-          status: "請求受理，狀態 = pending。這次會需要兩個工具，正好觀察 context 怎麼一路長大。",
-          caption: "同一個請求，這次示範多輪工具往返。" },
-        { st: "running", visited: ["pending"], iter: 1, budget: 28, msgs: 1, ckpt: "pending→running",
-          status: "① running：LLM 推理，決定先查訂單。iteration = 1。",
-          caption: "第一輪推理。" },
-        { st: "tool_calls", visited: ["pending", "running"], iter: 1, budget: 26, msgs: 2, ckpt: "running→tool_calls",
-          status: "② tool_calls：執行 get_order(\"A1234\")。context = 2 則。",
-          caption: "第一個工具。" },
-        { st: "running", visited: ["pending", "running", "tool_calls"], iter: 2, budget: 23, msgs: 3, ckpt: "tool_calls→running",
-          status: "③ 回寫（已出貨, tracking=SF123）→ running。LLM 看到有物流單號，決定再查物流時效。iteration = 2、context = 3 則。",
-          caption: "讀完第一個結果，模型自己決定還要再查一次。" },
-        { st: "tool_calls", visited: ["pending", "running", "tool_calls"], iter: 2, budget: 20, msgs: 4, ckpt: "running→tool_calls",
-          status: "④ tool_calls：執行 get_shipping(\"SF123\")。context = 4 則。",
-          caption: "第二個工具——步數事前無法預知，這是 Agent 的特性。" },
-        { st: "running", visited: ["pending", "running", "tool_calls"], iter: 3, budget: 17, msgs: 5, ckpt: "tool_calls→running",
-          status: "⑤ 回寫（預計 7/21 送達）→ running。iteration = 3、context = 5 則——注意每輪 context 都在變大。",
-          caption: "context 膨脹具象化：走越多輪，每次送進 LLM 的 token 越多、越慢越貴（s3）。" },
-        { st: "final", visited: ["pending", "running", "tool_calls"], iter: 3, budget: 15, msgs: 6, ckpt: "→ final ✓",
-          status: "⑥ final：資訊足夠，回覆『已出貨，預計 7/21 送達』。本次共 3 iteration、2 次工具、context 長到 6 則。",
-          caption: "多輪版終態。對照『正常完成』：同一種請求，步數與 context 都可能不同。" }
-      ]
-    },
-    toolfail: {
-      maxIter: 5, budgetTotal: 30,
-      frames: [
-        { st: "pending", visited: [], iter: 0, budget: 30, msgs: 1, ckpt: "建立 job",
-          status: "請求受理，狀態 = pending。這次物流工具會出錯，看 runtime 怎麼不讓整個請求死掉。",
-          caption: "示範工具失敗時的韌性。" },
-        { st: "running", visited: ["pending"], iter: 1, budget: 28, msgs: 1, ckpt: "pending→running",
-          status: "① running：先查訂單。iteration = 1。",
-          caption: "照常起手。" },
-        { st: "tool_calls", visited: ["pending", "running"], iter: 1, budget: 26, msgs: 2, ckpt: "running→tool_calls",
-          status: "② tool_calls：get_order(\"A1234\") 成功（已出貨, tracking=SF123）。",
-          caption: "第一個工具正常。" },
-        { st: "running", visited: ["pending", "running", "tool_calls"], iter: 2, budget: 23, msgs: 3, ckpt: "tool_calls→running",
-          status: "③ 回寫成功結果 → running。LLM 決定呼叫物流工具查時效。iteration = 2。",
-          caption: "準備呼叫第二個工具。" },
-        { st: "tool_calls", tone: "bad", visited: ["pending", "running", "tool_calls"], iter: 2, budget: 20, msgs: 4, ckpt: "工具錯誤已記錄",
-          status: "④ tool_calls：get_shipping(\"SF123\") 逾時／回錯！runtime 不讓整個請求 failed，而是把 error 當成一則 observation 回寫 context（s4）。",
-          caption: "關鍵韌性點：工具失敗 → 錯誤回餵，而非整個請求崩掉。" },
-        { st: "running", visited: ["pending", "running", "tool_calls"], iter: 3, budget: 17, msgs: 5, ckpt: "tool_calls→running",
-          status: "⑤ running：LLM 讀到物流查詢失敗，改用訂單既有的『預計出貨時間』作答，不再重試物流工具。iteration = 3。",
-          caption: "模型讀懂錯誤並換策略——這是 Agent 相對死板 pipeline 的價值。" },
-        { st: "final", visited: ["pending", "running", "tool_calls"], iter: 3, budget: 15, msgs: 6, ckpt: "→ final ✓",
-          status: "⑥ final：『您的訂單已出貨；物流時效暫時查詢不到，稍後可再確認。』在工具失敗下仍給出有用回覆。",
-          caption: "失敗被吸收成一次觀察，請求照樣抵達 final。" }
-      ]
-    },
-    timeout: {
-      maxIter: 5, budgetTotal: 12,
-      frames: [
-        { st: "pending", visited: [], iter: 0, budget: 12, msgs: 1, ckpt: "建立 job",
-          status: "請求受理，狀態 = pending。這次 wall-clock 預算只有 12s，且工具很慢——看預算怎麼被吃光。",
-          caption: "示範 wall-clock 逾時中止。" },
-        { st: "running", visited: ["pending"], iter: 1, budget: 10, msgs: 1, ckpt: "pending→running",
-          status: "① running：LLM 推理。iteration = 1、預算剩 10s。",
-          caption: "預算開始倒數。" },
-        { st: "tool_calls", visited: ["pending", "running"], iter: 1, budget: 6, msgs: 2, ckpt: "running→tool_calls",
-          status: "② tool_calls：呼叫一個很慢的工具，等待中……預算剩 6s。",
-          caption: "慢工具吃掉大半預算。" },
-        { st: "running", visited: ["pending", "running", "tool_calls"], iter: 2, budget: 3, msgs: 3, ckpt: "tool_calls→running",
-          status: "③ 回寫後 → running，LLM 還想再呼叫工具。iteration = 2、預算只剩 3s。",
-          caption: "距離逾時只剩一步。" },
-        { st: "timed_out", visited: ["pending", "running", "tool_calls"], iter: 2, budget: 0, msgs: 3, ckpt: "→ timed_out",
-          status: "④ wall-clock 預算耗盡！狀態機在下一個安全邊界檢查時中止，狀態 = timed_out（終態）。已送出的工具副作用無法收回（s5）。",
-          caption: "逾時中止：回傳明確失敗或部分結果，而不是無限燒 token。" }
-      ]
-    },
-    cancel: {
-      maxIter: 5, budgetTotal: 30,
-      frames: [
-        { st: "pending", visited: [], iter: 0, budget: 30, msgs: 1, ckpt: "建立 job",
-          status: "請求受理，狀態 = pending。這次會在工具執行到一半時，使用者按下停止。",
-          caption: "示範合作式取消。" },
-        { st: "running", visited: ["pending"], iter: 1, budget: 28, msgs: 1, ckpt: "pending→running",
-          status: "① running：LLM 決定呼叫一個會扣款的工具。iteration = 1。",
-          caption: "注意：這次的工具帶有不可逆副作用。" },
-        { st: "tool_calls", visited: ["pending", "running"], iter: 1, budget: 25, msgs: 2, ckpt: "running→tool_calls",
-          status: "② tool_calls：payment 工具執行中……此時使用者關閉頁面／按下停止，取消訊號進來（只設旗標，不硬砍）。",
-          caption: "取消訊號抵達，但工具已經在跑了。" },
-        { st: "cancelled", visited: ["pending", "running", "tool_calls"], iter: 1, budget: 24, msgs: 2, ckpt: "→ cancelled",
-          status: "③ 合作式取消：狀態機在下一個安全邊界檢查到旗標，乾淨停在 cancelled 並存檔。但 payment 若已送出，這筆扣款收不回——只能靠補償（退款）或冪等善後（s5）。",
-          caption: "取消止的是『未來的步驟』，不是『已發生的副作用』。" }
-      ]
-    }
+  var DEFAULTS = {
+    maxIter: 4, pDonePct: 40, pFailPct: 20, toolMs: 900, toolTimeoutMs: 3000,
+    llmMs: 700, ctxGrow: 900, budgetMs: 12000, ckptEvery: 1, retryPolicy: 1
   };
 
-  var RETRY_MSG = {
-    final: "🔁 模擬 client 重試：偵測到相同 idempotency key，且原 job 狀態 = final。runtime 直接回傳既有結果，不重跑狀態機——get_order、扣款等副作用工具不會二次觸發。這就是 request 級冪等。",
-    other: function (st) {
-      return "🔁 模擬 client 重試：原 job 為 " + st + " 終態。帶相同 idempotency key 重放時，runtime 會先命中這個已結束的 job（回傳其終態結果）；即使改以續跑，也能依已記錄的 tool_call_id 跳過『已執行過』的副作用工具（tool-call 級冪等），避免重複扣款／建單。";
-    }
-  };
+  /* ============================================================
+     (2) compute* 純函式（不得碰 DOM）
+     ============================================================ */
 
-  var scenario = "normal";
-  var stepIdx = 0;
-
-  var root = document.getElementById("demo-art-fsm");
-  var iterEl = document.getElementById("art-iter");
-  var iterMaxEl = document.getElementById("art-itermax");
-  var budgetEl = document.getElementById("art-budget");
-  var budgetTotalEl = document.getElementById("art-budgettotal");
-  var msgsEl = document.getElementById("art-msgs");
-  var ckptEl = document.getElementById("art-ckpt");
-  var statusEl = document.getElementById("art-status");
-  var captionEl = document.getElementById("art-caption");
-  var btnNext = document.getElementById("art-btn-next");
-  var btnRetry = document.getElementById("art-btn-retry");
-  var btnReset = document.getElementById("art-btn-reset");
-
-  function setText(el, text) { if (el) el.textContent = text; }
-
-  function toneOf(st, override) {
-    if (override) return "st-" + override;
-    if (st === "final") return "st-ok";
-    if (TERMINAL[st]) return "st-bad";   // timed_out / cancelled / failed
-    return "st-wait";                     // pending / running / tool_calls
+  function clampNum(v, lo, hi) {
+    var n = Number(v);
+    if (!(n === n)) n = lo;          // NaN
+    return n < lo ? lo : (n > hi ? hi : n);
   }
 
-  function renderStates(frame) {
-    var nodes = root.querySelectorAll(".art-state");
-    nodes.forEach(function (el) {
-      var id = el.getAttribute("data-st");
-      el.classList.remove("st-idle", "st-visited", "st-wait", "st-ok", "st-bad");
-      if (id === frame.st) {
-        el.classList.add(toneOf(frame.st, frame.tone));
-      } else if (frame.visited.indexOf(id) !== -1) {
-        el.classList.add("st-visited");
-      } else {
-        el.classList.add("st-idle");
+  function clampInt(v, lo, hi) {
+    return Math.round(clampNum(v, lo, hi));
+  }
+
+  // 第 n 輪之前（含第 n 輪）的累積 prompt token：n*BASE + grow*n(n-1)/2
+  function tokensThrough(n, grow) {
+    if (n <= 0) return 0;
+    return n * BASE_TOKENS + grow * n * (n - 1) / 2;
+  }
+
+  // 第 k 次嘗試（k >= 2）之前的退避等待
+  function retryWait(policy, k) {
+    if (policy === 0) return 0;
+    if (policy === 1) return BACKOFF_BASE;
+    var w = BACKOFF_BASE * Math.pow(2, k - 2);
+    return w > BACKOFF_CAP ? BACKOFF_CAP : w;
+  }
+
+  // @probe fn       computeAgentBudget
+  // @probe baseline {"maxIter":4,"pDonePct":40,"pFailPct":20,"toolMs":900,"toolTimeoutMs":3000,"llmMs":700,"ctxGrow":900,"budgetMs":12000,"ckptEvery":1,"retryPolicy":1}
+  // @probe sweep    {"maxIter":[1,8],"pDonePct":[10,90],"pFailPct":[0,60],"toolMs":[100,4000],"toolTimeoutMs":[500,8000],"llmMs":[200,3000],"ctxGrow":[200,3000],"budgetMs":[3000,60000],"ckptEvery":[0,3],"retryPolicy":[0,2]}
+  function computeAgentBudget(p) {
+    var maxIter = clampInt(p.maxIter, 1, 8);
+    var pDone = clampNum(p.pDonePct, 0, 100) / 100;
+    var pFail = clampNum(p.pFailPct, 0, 100) / 100;
+    var toolMs = clampNum(p.toolMs, 0, 60000);
+    var toolTimeoutMs = clampNum(p.toolTimeoutMs, 0, 60000);
+    var llmMs = clampNum(p.llmMs, 0, 60000);
+    var ctxGrow = clampNum(p.ctxGrow, 0, 100000);
+    var budgetMs = clampNum(p.budgetMs, 0, 600000);
+    var ckptEvery = clampInt(p.ckptEvery, 0, 3);
+    var policy = clampInt(p.retryPolicy, 0, 2);
+
+    var retries = RETRY_MAX[policy];
+    var attempts = retries + 1;
+
+    /* --- 一次「用工具」的分支：j 次失敗後成功（j = 0..retries），或全部耗盡 --- */
+    var branches = [];
+    var j, a, ms;
+    for (j = 0; j <= retries; j++) {
+      ms = 0;
+      for (a = 1; a <= j; a++) { ms += toolTimeoutMs + retryWait(policy, a + 1); }
+      ms += toolMs;
+      branches.push({ prob: Math.pow(pFail, j) * (1 - pFail), ms: ms, exhausted: false });
+    }
+    ms = 0;
+    for (a = 1; a <= attempts; a++) {
+      ms += toolTimeoutMs;
+      if (a < attempts) ms += retryWait(policy, a + 1);
+    }
+    branches.push({ prob: Math.pow(pFail, attempts), ms: ms, exhausted: true });
+
+    var toolSuccessPerIter = 1 - Math.pow(pFail, attempts);
+    var attemptsPerUse = Math.pow(pFail, attempts) * attempts;
+    for (j = 0; j <= retries; j++) {
+      attemptsPerUse += Math.pow(pFail, j) * (1 - pFail) * (j + 1);
+    }
+
+    /* --- 逐輪推進機率質量（確定性列舉，不用隨機數） --- */
+    var frontier = [{ t: 0, prob: 1 }];
+    var cols = [];
+    var reach = [];
+    var terminals = [];
+    var mass = { final: 0, timeout: 0, failed: 0, cap: 0 };
+    var expIter = 0, expTokens = 0, toolUseMass = 0;
+    var i, k, b, atom, col, enter, nextMap, key, t1, t2, pd, pt, pb;
+
+    function land(kind, time, prob, iter, column) {
+      if (prob <= 0) return;
+      mass[kind] += prob;
+      column[kind] += prob;
+      expIter += prob * iter;
+      expTokens += prob * tokensThrough(iter, ctxGrow);
+      terminals.push({ t: time, prob: prob });
+    }
+
+    for (i = 1; i <= maxIter && frontier.length; i++) {
+      enter = 0;
+      for (k = 0; k < frontier.length; k++) enter += frontier[k].prob;
+      reach.push(enter);
+      col = { iter: i, enter: enter, cont: 0, final: 0, timeout: 0, failed: 0, cap: 0 };
+      nextMap = {};
+
+      for (k = 0; k < frontier.length; k++) {
+        atom = frontier[k];
+
+        // 分支 A：模型直接收斂 → final（除非這一步就撞穿預算）
+        pd = atom.prob * pDone;
+        t1 = atom.t + llmMs;
+        land(t1 > budgetMs ? "timeout" : "final", t1, pd, i, col);
+
+        // 分支 B：模型丟出 tool call
+        pt = atom.prob * (1 - pDone);
+        if (pt > 0) {
+          toolUseMass += pt;
+          for (b = 0; b < branches.length; b++) {
+            pb = pt * branches[b].prob;
+            if (pb <= 0) continue;
+            t2 = atom.t + llmMs + branches[b].ms;
+            if (t2 > budgetMs) {
+              land("timeout", t2, pb, i, col);
+            } else if (branches[b].exhausted) {
+              land("failed", t2, pb, i, col);
+            } else if (i === maxIter) {
+              land("cap", t2, pb, i, col);
+            } else {
+              key = String(Math.round(t2));
+              nextMap[key] = (nextMap[key] || 0) + pb;
+              col.cont += pb;
+            }
+          }
+        }
       }
-    });
+
+      frontier = [];
+      for (key in nextMap) {
+        if (Object.prototype.hasOwnProperty.call(nextMap, key)) {
+          frontier.push({ t: Number(key), prob: nextMap[key] });
+        }
+      }
+      cols.push(col);
+    }
+
+    /* --- 延遲分位 --- */
+    terminals.sort(function (x, y) { return x.t - y.t; });
+    function quantile(q) {
+      var acc = 0;
+      for (var z = 0; z < terminals.length; z++) {
+        acc += terminals[z].prob;
+        if (acc >= q) return terminals[z].t;
+      }
+      return terminals.length ? terminals[terminals.length - 1].t : 0;
+    }
+
+    /* --- checkpoint：當機後要重跑多少 token --- */
+    var wSum = 0, rCkpt = 0, rNone = 0, last;
+    for (i = 1; i <= reach.length; i++) {
+      wSum += reach[i - 1];
+      last = ckptEvery === 0 ? 0 : Math.floor((i - 1) / ckptEvery) * ckptEvery;
+      rCkpt += reach[i - 1] * (tokensThrough(i, ctxGrow) - tokensThrough(last, ctxGrow));
+      rNone += reach[i - 1] * tokensThrough(i, ctxGrow);
+    }
+    var replayTokens = wSum > 0 ? rCkpt / wSum : 0;
+    var replayNoCkpt = wSum > 0 ? rNone / wSum : 0;
+    var replaySavedPct = replayNoCkpt > 0 ? (replayNoCkpt - replayTokens) / replayNoCkpt * 100 : 0;
+
+    var expToolAttempts = toolUseMass * attemptsPerUse;
+
+    return {
+      maxIter: maxIter,
+      retries: retries,
+      attempts: attempts,
+      cols: cols,
+      pFinal: mass.final,
+      pTimeout: mass.timeout,
+      pFailed: mass.failed,
+      pIterCap: mass.cap,
+      massCheck: mass.final + mass.timeout + mass.failed + mass.cap,
+      expIter: expIter,
+      expTokens: expTokens,
+      expCost: expTokens / 1e6 * PRICE_PER_MTOK,
+      p50Ms: quantile(0.5),
+      p99Ms: quantile(0.99),
+      toolSuccessPerIter: toolSuccessPerIter,
+      attemptsPerUse: attemptsPerUse,
+      expToolAttempts: expToolAttempts,
+      replayTokens: replayTokens,
+      replayNoCkpt: replayNoCkpt,
+      replaySavedPct: replaySavedPct
+    };
   }
 
-  function renderMeters(sc, frame) {
-    setText(iterEl, frame.iter);
-    setText(iterMaxEl, sc.maxIter);
-    setText(budgetEl, frame.budget);
-    setText(budgetTotalEl, sc.budgetTotal);
-    setText(msgsEl, frame.msgs);
+  /* ============================================================
+     (3) DOM 參照
+     ============================================================ */
+  var root = document.getElementById("demo-arb-budget");
+  if (!root) return;
 
-    // 預算過低時轉紅
-    if (budgetEl) budgetEl.classList.toggle("warnv", frame.budget <= 2);
+  var KNOBS = [
+    { key: "maxIter", el: "arb-maxiter", out: "arb-v-maxiter" },
+    { key: "pDonePct", el: "arb-pdone", out: "arb-v-pdone" },
+    { key: "pFailPct", el: "arb-pfail", out: "arb-v-pfail" },
+    { key: "toolMs", el: "arb-toolms", out: "arb-v-toolms" },
+    { key: "toolTimeoutMs", el: "arb-totimeout", out: "arb-v-totimeout" },
+    { key: "llmMs", el: "arb-llmms", out: "arb-v-llmms" },
+    { key: "ctxGrow", el: "arb-ctx", out: "arb-v-ctx" },
+    { key: "budgetMs", el: "arb-budget", out: "arb-v-budget" },
+    { key: "ckptEvery", el: "arb-ckpt", out: "arb-v-ckpt" }
+  ];
 
-    // checkpoint 標籤 + 綠色高亮
-    setText(ckptEl, frame.ckpt || "—");
-    var mv = ckptEl ? ckptEl.parentElement : null;
-    if (mv) mv.classList.toggle("ck-on", !!frame.ckpt);
+  var svgEl = document.getElementById("arb-svg");
+  var ledgerEl = document.getElementById("arb-ledger");
+  var statusEl = document.getElementById("arb-status");
+  var btnReset = document.getElementById("arb-btn-reset");
+  var segBtns = root.querySelectorAll(".seg button");
+
+  var state = {
+    maxIter: DEFAULTS.maxIter, pDonePct: DEFAULTS.pDonePct, pFailPct: DEFAULTS.pFailPct,
+    toolMs: DEFAULTS.toolMs, toolTimeoutMs: DEFAULTS.toolTimeoutMs, llmMs: DEFAULTS.llmMs,
+    ctxGrow: DEFAULTS.ctxGrow, budgetMs: DEFAULTS.budgetMs, ckptEvery: DEFAULTS.ckptEvery,
+    retryPolicy: DEFAULTS.retryPolicy
+  };
+
+  /* ============================================================
+     (4) render —— 只讀 state / 結果畫出來
+     ============================================================ */
+  var CKPT_LABEL = ["不存檔", "每輪", "每 2 輪", "每 3 輪"];
+  var POLICY_LABEL = ["不重試", "固定重試 2 次", "指數退避（上限 3 次）"];
+
+  function pct(x) { return (x * 100).toFixed(2) + "%"; }
+  function sec(ms) { return (ms / 1000).toFixed(2) + " s"; }
+  function tok(n) { return Math.round(n).toLocaleString("en-US"); }
+
+  function knobLabel(key, v) {
+    if (key === "maxIter") return String(v);
+    if (key === "pDonePct" || key === "pFailPct") return v + "%";
+    if (key === "ctxGrow") return v + " tok";
+    if (key === "budgetMs") return (v / 1000).toFixed(1) + " s";
+    if (key === "ckptEvery") return CKPT_LABEL[v];
+    return v + " ms";
   }
 
-  function renderStep() {
-    var sc = SCENARIOS[scenario];
-    var frame = sc.frames[stepIdx];
-    if (!frame) return;
-
-    renderStates(frame);
-    renderMeters(sc, frame);
-    setText(statusEl, frame.status);
-    setText(captionEl, frame.caption);
-
-    btnNext.disabled = stepIdx >= sc.frames.length - 1;
-    btnRetry.disabled = !TERMINAL[frame.st];
-  }
-
-  function reset() {
-    stepIdx = 0;
-    renderStep();
-  }
-
-  function next() {
-    var frames = SCENARIOS[scenario].frames;
-    if (stepIdx < frames.length - 1) {
-      stepIdx += 1;
-      renderStep();
+  function renderKnobs() {
+    for (var i = 0; i < KNOBS.length; i++) {
+      var input = document.getElementById(KNOBS[i].el);
+      var out = document.getElementById(KNOBS[i].out);
+      if (input) input.value = state[KNOBS[i].key];
+      if (out) out.textContent = knobLabel(KNOBS[i].key, state[KNOBS[i].key]);
+    }
+    for (var s = 0; s < segBtns.length; s++) {
+      segBtns[s].setAttribute(
+        "aria-pressed",
+        Number(segBtns[s].getAttribute("data-retry")) === state.retryPolicy ? "true" : "false"
+      );
     }
   }
 
-  function retry() {
-    var frame = SCENARIOS[scenario].frames[stepIdx];
-    if (!frame || !TERMINAL[frame.st]) return;
-    if (frame.st === "final") {
-      setText(statusEl, RETRY_MSG.final);
-    } else {
-      setText(statusEl, RETRY_MSG.other(frame.st));
+  function renderChart(r) {
+    var W = 720, H = 214, padL = 46, padR = 14, padT = 14, padB = 36;
+    var plotW = W - padL - padR, plotH = H - padT - padB;
+    var n = r.cols.length || 1;
+    var colW = plotW / n;
+    var bw = Math.min(54, colW * 0.62);
+    var base = padT + plotH;
+    var svg = [];
+    var i, c, x, y, h, txt;
+
+    var SEGS = [
+      { k: "cont", fill: "var(--accent)", op: "0.80" },
+      { k: "final", fill: "var(--ok)", op: "0.85" },
+      { k: "cap", fill: "var(--text-3)", op: "0.55" },
+      { k: "failed", fill: "var(--warn)", op: "0.85" },
+      { k: "timeout", fill: "var(--bad)", op: "0.85" }
+    ];
+
+    // y 軸刻度
+    var ticks = [0, 0.25, 0.5, 0.75, 1];
+    for (i = 0; i < ticks.length; i++) {
+      y = base - ticks[i] * plotH;
+      svg.push('<line x1="' + padL + '" y1="' + y.toFixed(1) + '" x2="' + (W - padR) +
+        '" y2="' + y.toFixed(1) + '" stroke="var(--border-strong)" stroke-width="1" ' +
+        (ticks[i] === 0 ? '' : 'stroke-dasharray="2 4" ') + 'opacity="' + (ticks[i] === 0 ? 1 : 0.7) + '"/>');
+      svg.push('<text x="' + (padL - 8) + '" y="' + (y + 4).toFixed(1) +
+        '" text-anchor="end" font-family="var(--mono)" font-size="11" fill="#9aa0a8">' +
+        Math.round(ticks[i] * 100) + '%</text>');
     }
+
+    for (i = 0; i < r.cols.length; i++) {
+      c = r.cols[i];
+      x = padL + colW * i + (colW - bw) / 2;
+      y = base;
+      for (var s = 0; s < SEGS.length; s++) {
+        h = c[SEGS[s].k] * plotH;
+        if (h <= 0.4) continue;
+        y -= h;
+        svg.push('<rect x="' + x.toFixed(1) + '" y="' + y.toFixed(1) + '" width="' + bw.toFixed(1) +
+          '" height="' + h.toFixed(1) + '" fill="' + SEGS[s].fill + '" opacity="' + SEGS[s].op +
+          '" stroke="#ffffff" stroke-width="0.5"/>');
+      }
+      // 柱頂：進入該輪的質量
+      svg.push('<text x="' + (x + bw / 2).toFixed(1) + '" y="' + (base - c.enter * plotH - 5).toFixed(1) +
+        '" text-anchor="middle" font-family="var(--mono)" font-size="11" fill="#262a2f">' +
+        (c.enter * 100).toFixed(1) + '</text>');
+      // X 軸：輪次
+      svg.push('<text x="' + (x + bw / 2).toFixed(1) + '" y="' + (base + 16) +
+        '" text-anchor="middle" font-family="var(--mono)" font-size="11" fill="#6b7178">iter ' +
+        c.iter + '</text>');
+    }
+
+    txt = '柱頂數字＝進入該輪的機率質量（%）；每輪的 LLM 往返 ' + state.llmMs + ' ms，工具成功 ' +
+      state.toolMs + ' ms、逾時吃滿 ' + state.toolTimeoutMs + ' ms';
+    svg.push('<text x="' + padL + '" y="' + (base + 31) +
+      '" font-family="var(--mono)" font-size="11" fill="#9aa0a8">' + txt + '</text>');
+
+    svgEl.innerHTML =
+      '<title id="arb-svg-title">每一輪迭代的機率質量如何分流成 final、timed_out、failed、撞上限與續跑</title>' +
+      svg.join("");
   }
 
-  root.querySelectorAll(".seg button").forEach(function (btn) {
-    btn.addEventListener("click", function () {
-      root.querySelectorAll(".seg button").forEach(function (b) {
-        b.setAttribute("aria-pressed", "false");
+  function row(cls, k, v, vcls, w) {
+    return '<div class="arb-row' + (cls ? " " + cls : "") + '">' +
+      '<span class="rk">' + k + '</span>' +
+      '<span class="rv' + (vcls ? " " + vcls : "") + '">' + v + '</span>' +
+      '<span class="rw">' + w + '</span></div>';
+  }
+
+  function renderLedger(r) {
+    var contLast = r.cols.length ? r.cols[r.cols.length - 1].cont : 0;
+    var html = [];
+
+    html.push(row("hi", "抵達 final", pct(r.pFinal), "okv",
+      "逐輪脫離的綠色質量相加：每輪有 " + state.pDonePct + "% 的質量直接收斂，" + r.maxIter +
+      " 輪之後只剩 " + pct(r.pIterCap + contLast) + " 沒能收斂。"));
+
+    html.push(row("", "撞 wall-clock → timed_out", pct(r.pTimeout), r.pTimeout > 0.05 ? "warnv" : "",
+      "預算 " + sec(state.budgetMs) + "；在狀態邊界檢查到累積耗時超標就轉終態，p99 已到 " + sec(r.p99Ms) + "。"));
+
+    html.push(row("", "撞 max iterations", pct(r.pIterCap), "",
+      "跑滿 " + r.maxIter + " 輪仍未收斂的殘餘質量，理論值為 (1−" + (state.pDonePct / 100).toFixed(2) +
+      ")^" + r.maxIter + " 再扣掉中途逾時與失敗的部分。"));
+
+    html.push(row("", "重試耗盡 → failed", pct(r.pFailed), r.pFailed > 0.02 ? "warnv" : "",
+      "單輪工具要連錯 " + r.attempts + " 次才走到這裡，機率 " +
+      (Math.pow(state.pFailPct / 100, r.attempts) * 100).toFixed(3) + "%／輪。"));
+
+    html.push(row("hi", "四種結局質量總和", r.massCheck.toFixed(3),
+      Math.abs(r.massCheck - 1) < 0.0005 ? "okv" : "warnv",
+      "final ＋ timed_out ＋ 撞上限 ＋ failed 必須恰好等於 1.000——這是推演沒有漏掉分支的自我驗算。"));
+
+    html.push(row("", "期望迭代數", r.expIter.toFixed(3), "",
+      "Σ（該結局機率 × 已用輪數）；上限是 " + r.maxIter + " 輪。"));
+
+    html.push(row("", "期望 token", tok(r.expTokens), "",
+      "每輪 prompt ＝ 1,200 ＋（已跑輪數 × " + state.ctxGrow + "）；跑滿 " + r.maxIter + " 輪累積 " +
+      tok(tokensThrough(r.maxIter, state.ctxGrow)) + " tok，成長是二次的。"));
+
+    html.push(row("", "期望成本", "$" + r.expCost.toFixed(4), "",
+      "期望 token ÷ 1M × $3.0；把迭代上限砍半，這個數字掉得比一半還多。"));
+
+    html.push(row("hi", "延遲 p50 / p99", sec(r.p50Ms) + " / " + sec(r.p99Ms), "",
+      "對所有終止路徑依耗時排序後取分位。重試買到的成功率，代價全寫在 p99 上。"));
+
+    html.push(row("", "期望工具嘗試次數", r.expToolAttempts.toFixed(3), "",
+      POLICY_LABEL[state.retryPolicy] + "：每次用到工具平均打 " + r.attemptsPerUse.toFixed(3) +
+      " 次，單輪工具成功率 " + (r.toolSuccessPerIter * 100).toFixed(2) + "%。"));
+
+    html.push(row("", "當機重跑成本", tok(r.replayTokens) + " tok",
+      r.replaySavedPct > 0 ? "okv" : "warnv",
+      "checkpoint " + CKPT_LABEL[state.ckptEvery] + "：比完全不存檔的 " + tok(r.replayNoCkpt) +
+      " tok 省下 " + r.replaySavedPct.toFixed(1) + "%。"));
+
+    ledgerEl.innerHTML = html.join("");
+  }
+
+  function renderStatus(r) {
+    statusEl.textContent =
+      "目前設定：" + POLICY_LABEL[state.retryPolicy] + "、上限 " + r.maxIter + " 輪、預算 " +
+      sec(state.budgetMs) + "。這次請求有 " + pct(r.pFinal) + " 的機率抵達 final，" +
+      pct(r.pTimeout) + " 撞預算、" + pct(r.pIterCap) + " 撞迭代上限、" + pct(r.pFailed) +
+      " 重試耗盡；期望花 " + tok(r.expTokens) + " tok（$" + r.expCost.toFixed(4) + "），p99 延遲 " +
+      sec(r.p99Ms) + "。";
+  }
+
+  function render() {
+    var r = computeAgentBudget(state);
+    renderKnobs();
+    renderChart(r);
+    renderLedger(r);
+    renderStatus(r);
+  }
+
+  /* ============================================================
+     (5) 事件綁定
+     ============================================================ */
+  for (var i = 0; i < KNOBS.length; i++) {
+    (function (knob) {
+      var input = document.getElementById(knob.el);
+      if (!input) return;
+      input.addEventListener("input", function () {
+        state[knob.key] = Number(input.value);
+        render();
       });
-      btn.setAttribute("aria-pressed", "true");
-      scenario = btn.getAttribute("data-sc");
-      reset();
+    })(KNOBS[i]);
+  }
+
+  for (var s = 0; s < segBtns.length; s++) {
+    (function (btn) {
+      btn.addEventListener("click", function () {
+        state.retryPolicy = Number(btn.getAttribute("data-retry"));
+        render();
+      });
+    })(segBtns[s]);
+  }
+
+  if (btnReset) {
+    btnReset.addEventListener("click", function () {
+      for (var key in DEFAULTS) {
+        if (Object.prototype.hasOwnProperty.call(DEFAULTS, key)) state[key] = DEFAULTS[key];
+      }
+      render();
     });
-  });
+  }
 
-  btnNext.addEventListener("click", next);
-  btnRetry.addEventListener("click", retry);
-  btnReset.addEventListener("click", reset);
-
-  reset();
+  render();
 })();
 </script>
