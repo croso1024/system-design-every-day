@@ -2,295 +2,514 @@
 (function () {
   "use strict";
 
-  var HOPS = [
-    {
-      id: "h1",
-      phase: "ingest",
-      proto: "ORCH",
-      cls: "hop-orch",
-      title: "受理理賠 CLM-9912",
-      body: "使用者／上游系統把案件丟給 Claims Orchestrator（內部事件或 API，尚不需協定標籤）。",
-      actors: ["orch"]
-    },
-    {
-      id: "h2",
-      phase: "tools",
-      proto: "MCP",
-      cls: "hop-mcp",
-      title: "查保單與案件主檔",
-      body: "Orchestrator 經 MCP Client 呼叫 Policy／Claims MCP Server（tools/call），屬工具邊界。",
-      actors: ["orch", "tools"]
-    },
-    {
-      id: "h3",
-      phase: "delegate",
-      proto: "A2A",
-      cls: "hop-a2a",
-      title: "委派 Fraud Agent",
-      body: "讀 Agent Card → message/send 建立 Task。對等邊界：只傳業務意圖與案件摘要，不塞 MCP schema。",
-      actors: ["orch", "fraud"]
-    },
-    {
-      id: "h4",
-      phase: "delegate",
-      proto: "A2A",
-      cls: "hop-a2a",
-      title: "委派 Compliance Agent",
-      body: "同樣走 A2A Task。兩個專責 Agent 可並行；Orchestrator 只追蹤 Task 狀態與 Artifact。",
-      actors: ["orch", "comp"]
-    },
-    {
-      id: "h5",
-      phase: "inner",
-      proto: "MCP",
-      cls: "hop-mcp",
-      title: "Fraud 內部打特徵／黑名單工具",
-      body: "Fraud Agent 自己的 MCP tools（特徵商店、裝置指紋）。對 Orchestrator 不可見——正交邊界。",
-      actors: ["fraud", "tools"]
-    },
-    {
-      id: "h6",
-      phase: "inner",
-      proto: "MCP",
-      cls: "hop-mcp",
-      title: "Compliance 內部打政策引擎",
-      body: "Compliance 用 MCP 連政策／法規檢索。換掉內部工具不應弄破對外 A2A 契約。",
-      actors: ["comp", "tools"]
-    },
-    {
-      id: "h7",
-      phase: "merge",
-      proto: "A2A",
-      cls: "hop-a2a",
-      title: "回收 Artifact 並彙整",
-      body: "兩邊 Task completed，交回風險分數與合規意見 Artifact；Orchestrator 決定賠付／人工審核。",
-      actors: ["orch", "fraud", "comp"]
-    }
+  /* ================= (1) 常數與參數表 ================= */
+
+  var CAND = ["MCP", "A2A", "ACPC", "DIRECT"];
+  var CAND_LABEL = { MCP: "MCP", A2A: "A2A", ACPC: "ACP 相容層", DIRECT: "直接呼叫" };
+  var CAND_HINT = {
+    MCP: "工具邊界：tools／resources／prompts",
+    A2A: "對等邊界：Agent Card + Task + Artifact",
+    ACPC: "對等邊界的遷移適配層（BeeAI 系遺產）",
+    DIRECT: "內部 API／函式呼叫，不上協定"
+  };
+  var BASE_TAX = { MCP: 2, A2A: 5, ACPC: 7, DIRECT: 1 };
+  var CROSS_ORG_TAX = 1.4;
+  var PEER_LAYERS = { A2A: 1, ACPC: 1 };
+
+  /* 12 條加權規則：命中即把權重加進各候選。兩個 demo 共用同一份判準。 */
+  var RULES = [
+    { id: "R1",  note: "對端是工具／資料源",            w: { MCP: 4, DIRECT: 2, A2A: -3 },
+      when: function (a) { return a.peerKind === "tool"; } },
+    { id: "R2",  note: "對端是自主 Agent",              w: { A2A: 4, ACPC: 1, MCP: -3 },
+      when: function (a) { return a.peerKind === "agent"; } },
+    { id: "R3",  note: "對端是同進程內部函式",          w: { DIRECT: 5, A2A: -4, MCP: -2 },
+      when: function (a) { return a.peerKind === "internalFn"; } },
+    { id: "R4",  note: "任務狀態由對端持有",            w: { A2A: 3, ACPC: 2, MCP: -2, DIRECT: -2 },
+      when: function (a) { return a.stateOwner === "callee"; } },
+    { id: "R5",  note: "長任務（分鐘～天級）",          w: { A2A: 3, ACPC: 2, MCP: -2, DIRECT: -3 },
+      when: function (a) { return a.duration === "long"; } },
+    { id: "R6",  note: "秒級同步完成",                  w: { MCP: 2, DIRECT: 2 },
+      when: function (a) { return a.duration === "sync"; } },
+    { id: "R7",  note: "跨組織／跨信任邊界",            w: { A2A: 3, ACPC: 1, DIRECT: -3 },
+      when: function (a) { return a.orgBoundary === "cross-org"; } },
+    { id: "R8",  note: "同一個 process 內",             w: { DIRECT: 4, A2A: -3, MCP: -1 },
+      when: function (a) { return a.orgBoundary === "same-process"; } },
+    { id: "R9",  note: "需要執行期發現對端能力",        w: { A2A: 2, MCP: 2, DIRECT: -3 },
+      when: function (a) { return !!a.needDiscovery; } },
+    { id: "R10", note: "需要 streaming／過程可見",      w: { A2A: 2, MCP: 1, DIRECT: -1 },
+      when: function (a) { return !!a.needStream; } },
+    { id: "R11", note: "需要 human-in-the-loop 補料",   w: { A2A: 3, MCP: -2, DIRECT: -2 },
+      when: function (a) { return !!a.needHITL; } },
+    { id: "R12", note: "須與既有 ACP／BeeAI 生態相容",  w: { ACPC: 5, A2A: 1 },
+      when: function (a) { return !!a.legacyAcp; } }
   ];
 
-  // legacy scenario: hop 3 becomes ACP legacy then migrate note
-  var LEGACY_OVERRIDE = {
-    h3: {
-      proto: "ACP→A2A",
-      cls: "hop-acp",
-      title: "舊 Fraud 服務仍講 ACP",
-      body: "歷史 BeeAI／ACP 端點。正確做法：A2AServer 適配或遷移，而不是讓 Orchestrator 永久雙協定客戶端。",
-      note: "遺產視角：對等層出現 ACP 時，標成遷移項——短期適配、中期收斂到 A2A，避免雙 gateway 永駐。"
-    },
-    h7: {
-      note: "彙整前確認 Fraud 路徑已經適配器轉成 A2A Task／Artifact，對外觀測只看到一條對等標準。"
+  /* 矛盾偵測：與評分獨立，分數再高也擋不住答案本身互相打架 */
+  var CONFLICTS = [
+    { id: "C1", hard: true,
+      say: "你說對端是「工具」，卻要求長任務／對端持有狀態／human-in-the-loop——那其實是一個 Agent，不是 tool。",
+      when: function (a) { return a.peerKind === "tool" && (a.duration === "long" || a.stateOwner === "callee" || !!a.needHITL); } },
+    { id: "C2", hard: true,
+      say: "同進程內部函式不可能跨組織；先確定它到底在不在你的部署邊界內。",
+      when: function (a) { return a.peerKind === "internalFn" && a.orgBoundary === "cross-org"; } },
+    { id: "C3", hard: true,
+      say: "同一個 process 內不需要執行期發現——直接看得到型別簽名，discovery 是白付的協定稅。",
+      when: function (a) { return a.orgBoundary === "same-process" && !!a.needDiscovery; } },
+    { id: "C4", hard: true,
+      say: "ACP 是對等層協定，與工具邊界無關；工具生態的遺產問題要回 MCP 那條線談。",
+      when: function (a) { return !!a.legacyAcp && a.peerKind === "tool"; } },
+    { id: "C5", hard: false,
+      say: "秒級同步任務通常不需要 streaming 通道；先確認這個需求是真的，還是從長任務場景抄來的。",
+      when: function (a) { return !!a.needStream && a.duration === "sync" && !a.needHITL; } }
+  ];
+
+  var PRESETS = {
+    delegate: { peerKind: "agent", stateOwner: "callee", duration: "long", orgBoundary: "cross-org",
+                needDiscovery: true, needStream: true, needHITL: true, legacyAcp: false },
+    crm:      { peerKind: "tool", stateOwner: "caller", duration: "sync", orgBoundary: "same-org",
+                needDiscovery: false, needStream: false, needHITL: false, legacyAcp: false },
+    legacy:   { peerKind: "agent", stateOwner: "callee", duration: "long", orgBoundary: "cross-org",
+                needDiscovery: true, needStream: false, needHITL: false, legacyAcp: true }
+  };
+
+  /* hop 屬性 → 引擎輸入子集（次 demo 用） */
+  var TARGETS = {
+    tool:     { label: "工具／資料源", a: { peerKind: "tool",       stateOwner: "caller", duration: "sync" } },
+    peer:     { label: "對等 Agent",   a: { peerKind: "agent",      stateOwner: "callee", duration: "long", needDiscovery: true } },
+    internal: { label: "同進程模組",   a: { peerKind: "internalFn", stateOwner: "caller", duration: "sync" } },
+    human:    { label: "人工審批",     a: { peerKind: "agent",      stateOwner: "callee", duration: "long", needHITL: true } }
+  };
+  var TARGET_ORDER = ["tool", "peer", "internal", "human"];
+  var BOUNDS = { "same-process": "同一個 process", "same-org": "同組織、不同服務", "cross-org": "跨組織" };
+  var BOUND_ORDER = ["same-process", "same-org", "cross-org"];
+
+  var DEFAULT_TARGETS = "tool,peer,peer,tool,human,tool";
+  var DEFAULT_BOUNDS = "same-org,cross-org,cross-org,same-org,cross-org,cross-org";
+  var DEFAULT_COUNT = 5;
+
+  /* ================= (2) compute 純函式 ================= */
+
+  /* compute 依賴的 helper，一律宣告在 compute* 之前 */
+
+  function rnd1(x) { return Math.round(x * 10) / 10; }
+
+  function splitList(raw) {
+    var parts = String(raw == null ? "" : raw).split(",");
+    var out = [];
+    for (var i = 0; i < parts.length; i++) { out.push(parts[i].trim()); }
+    return out;
+  }
+
+  /* 只算分與排名，不做結論包裝——主 demo 與次 demo 都走這一支 */
+  function scoreLayer(a) {
+    var scores = { MCP: 0, A2A: 0, ACPC: 0, DIRECT: 0 };
+    var segments = { MCP: [], A2A: [], ACPC: [], DIRECT: [] };
+    var triggered = [];
+    var i, k;
+    for (i = 0; i < RULES.length; i++) {
+      if (!RULES[i].when(a)) { continue; }
+      triggered.push(RULES[i]);
+      for (k in RULES[i].w) {
+        scores[k] += RULES[i].w[k];
+        segments[k].push({ id: RULES[i].id, v: RULES[i].w[k] });
+      }
     }
-  };
-
-  var ANTI_OVERRIDE = {
-    h3: {
-      proto: "反模式",
-      cls: "hop-acp",
-      title: "A2A Message 塞滿 MCP tool schema",
-      body: "把 tools/call 參數原樣塞進委派訊息——兩層黏死，Fraud 一換工具名就弄破契約。",
-      note: "反模式：對等訊息應是業務意圖（『評估 CLM-9912 詐欺風險』），不是對方內部的 MCP payload。"
-    },
-    h4: {
-      proto: "反模式",
-      cls: "hop-acp",
-      title: "為內部函式硬上 A2A",
-      body: "Compliance 若與 Orchestrator 在同一個 process、永不跨團隊，硬包 Task 只是協定稅。",
-      note: "反模式：對等協定用在『真的跨邊界』；同一個 process 內直接呼叫往往更乾淨。"
-    },
-    h7: {
-      note: "若前面兩跳已破壞正交或濫上協定，彙整階段會同時承受契約脆弱與運維噪音——Demo 用來對照標準路徑。"
-    }
-  };
-
-  var NOTES = {
-    happy: [
-      "受理本身是編排入口：先別急著貼協定標籤，搞清誰是 Orchestrator。",
-      "工具層第一跳：保單／案件主檔用 MCP——這是資料存取，不是 Agent 委派。",
-      "對等層：Fraud 跨團隊 → A2A。只傳意圖與摘要，保持與 MCP 正交。",
-      "第二個對等委派：Compliance 同樣 A2A；可與 Fraud 並行，狀態各自追蹤。",
-      "專責內部：Fraud 的 MCP 扇出對委派方不可見——這正是分層的好處。",
-      "專責內部：Compliance 的政策工具也走 MCP；對外仍只暴露 Artifact。",
-      "收束：A2A 交卷 + Orchestrator 決策。整條流＝外 A2A、內 MCP 的共存範本。"
-    ],
-    legacy: [
-      "同樣從受理開始——遷移情境不改變業務，只改變對等層的歷史包袱。",
-      "工具層不變：主檔查詢仍是 MCP。",
-      "這裡出現 ACP 遺產：標成遷移項，用適配器對接，而不是新寫一套 ACP 客戶端邏輯。",
-      "Compliance 若已是 A2A，可與『適配中的 Fraud』並存於過渡期。",
-      "Fraud 內部工具仍是 MCP——遷移的是對等邊界，不是重寫所有工具。",
-      "Compliance 內部 MCP 照舊。",
-      "過渡期結束條件：觀測與客戶端只認 A2A；ACP gateway 可下線。"
-    ],
-    antipattern: [
-      "反模式路徑也從受理開始，方便和標準路徑逐跳對照。",
-      "工具層本身沒錯；後面才開始壞。",
-      "破壞正交：把 MCP schema 塞進 A2A——選型面試的高頻扣分點。",
-      "濫上對等協定：同一個 process 也打 A2A，協定稅大於收益。",
-      "即便內部 MCP 正確，外層契約已脆——換工具就爆。",
-      "內層再正確也救不了外層的錯誤抽象。",
-      "對照結論：標準路徑是分層；反模式是黏層與過度協定化。"
-    ]
-  };
-
-  var root = document.getElementById("demo-acp-interop");
-  if (!root) return;
-
-  var flowEl = document.getElementById("acp-flow");
-  var annoEl = document.getElementById("acp-anno");
-  var whyEl = document.getElementById("acp-anno-why");
-  var statusEl = document.getElementById("acp-status");
-  var captionEl = document.getElementById("acp-caption");
-  var btnNext = document.getElementById("acp-btn-next");
-  var btnReset = document.getElementById("acp-btn-reset");
-  var seg = root.querySelector(".seg");
-  var phaseNodes = root.querySelectorAll(".acp-phase");
-  var actorNodes = root.querySelectorAll(".acp-actor");
-
-  var scenario = "happy";
-  var step = 0; // 0 = idle, 1..N = hop index+1
-
-  function hopView(h) {
-    var o = {
-      id: h.id,
-      phase: h.phase,
-      proto: h.proto,
-      cls: h.cls,
-      title: h.title,
-      body: h.body,
-      actors: h.actors.slice()
+    var ranked = CAND.slice().sort(function (x, y) { return scores[y] - scores[x]; });
+    return {
+      scores: scores, segments: segments, triggered: triggered, ranked: ranked,
+      winner: ranked[0], runnerUp: ranked[1],
+      margin: scores[ranked[0]] - scores[ranked[1]]
     };
-    var ov = null;
-    if (scenario === "legacy" && LEGACY_OVERRIDE[h.id]) ov = LEGACY_OVERRIDE[h.id];
-    if (scenario === "antipattern" && ANTI_OVERRIDE[h.id]) ov = ANTI_OVERRIDE[h.id];
-    if (ov) {
-      if (ov.proto) o.proto = ov.proto;
-      if (ov.cls) o.cls = ov.cls;
-      if (ov.title) o.title = ov.title;
-      if (ov.body) o.body = ov.body;
+  }
+
+  function taxOf(layer, boundary) {
+    return rnd1(BASE_TAX[layer] * (boundary === "cross-org" ? CROSS_ORG_TAX : 1));
+  }
+
+  // @probe fn       computeLayerChoice
+  // @probe baseline {"peerKind":"agent","stateOwner":"callee","duration":"long","orgBoundary":"cross-org","needDiscovery":true,"needStream":true,"needHITL":true,"legacyAcp":false}
+  // @probe sweep    {"peerKind":["tool","internalFn"],"stateOwner":["caller","callee"],"duration":["sync","long"],"orgBoundary":["same-process","cross-org"],"needDiscovery":[false,true],"needStream":[false,true],"needHITL":[false,true],"legacyAcp":[false,true]}
+  function computeLayerChoice(a) {
+    var i, c;
+    var s = scoreLayer(a);
+    var scores = s.scores;
+    var winner = s.winner;
+    var margin = s.margin;
+    var decisiveness = margin >= 3 ? "明確" : (margin >= 1 ? "邊緣" : "平手");
+
+    var tax = taxOf(winner, a.orgBoundary);
+    var netValue = rnd1(scores[winner] - tax);
+
+    var contrib = [];
+    for (i = 0; i < s.triggered.length; i++) {
+      contrib.push({ id: s.triggered[i].id, note: s.triggered[i].note, v: s.triggered[i].w[winner] || 0 });
     }
-    return o;
-  }
+    contrib.sort(function (x, y) { return Math.abs(y.v) - Math.abs(x.v); });
 
-  function renderShell() {
-    flowEl.innerHTML = "";
-    HOPS.forEach(function (h) {
-      var v = hopView(h);
-      var div = document.createElement("div");
-      div.className = "acp-hop " + v.cls;
-      div.setAttribute("data-hop", v.id);
-      div.innerHTML =
-        '<div class="acp-hop-meta">' +
-          '<span class="acp-hop-id">' + v.id.toUpperCase() + "</span>" +
-          '<span class="acp-hop-proto">' + v.proto + "</span>" +
-        "</div>" +
-        '<div class="acp-hop-title">' + v.title + "</div>" +
-        '<div class="acp-hop-body">' + v.body + "</div>";
-      flowEl.appendChild(div);
-    });
-  }
-
-  function setPhases(active) {
-    var seen = false;
-    var reached = {};
-    if (active) reached[active] = true;
-    // mark done for phases before active in order
-    var order = ["ingest", "tools", "delegate", "inner", "merge"];
-    var ai = active ? order.indexOf(active) : -1;
-    phaseNodes.forEach(function (n) {
-      var ph = n.getAttribute("data-ph");
-      n.classList.remove("ph-active", "ph-done");
-      var idx = order.indexOf(ph);
-      if (ai < 0) return;
-      if (idx < ai) n.classList.add("ph-done");
-      else if (idx === ai) n.classList.add("ph-active");
-    });
-  }
-
-  function setActors(list) {
-    var set = {};
-    (list || []).forEach(function (a) { set[a] = true; });
-    actorNodes.forEach(function (n) {
-      var id = n.getAttribute("data-actor");
-      n.classList.toggle("act-on", !!set[id]);
-    });
-  }
-
-  function toneFor(cls) {
-    if (cls.indexOf("hop-mcp") >= 0) return "mcp";
-    if (cls.indexOf("hop-a2a") >= 0) return "a2a";
-    if (cls.indexOf("hop-acp") >= 0) return "acp";
-    return "orch";
-  }
-
-  function paint() {
-    var hops = flowEl.querySelectorAll(".acp-hop");
-    hops.forEach(function (el, i) {
-      el.classList.toggle("hop-on", step > 0 && i === step - 1);
-    });
-
-    if (step === 0) {
-      setPhases(null);
-      setActors([]);
-      annoEl.className = "acp-anno tone-orch";
-      whyEl.innerHTML = "選一個視角，按「下一步」開始標註這條理賠流程的協定邊界。";
-      statusEl.textContent = "選視角後按「下一步」，逐步為每一跳貼上 MCP／A2A／ACP 標籤。";
-      captionEl.textContent = "重點不是訊息 JSON，而是「這一跳為什麼落在這一層」——選型與共存策略。";
-      btnNext.disabled = false;
-      btnNext.textContent = "下一步";
-      return;
+    var conflicts = [];
+    var hardCount = 0;
+    for (i = 0; i < CONFLICTS.length; i++) {
+      c = CONFLICTS[i];
+      if (!c.when(a)) { continue; }
+      conflicts.push({ id: c.id, hard: c.hard, say: c.say });
+      if (c.hard) { hardCount += 1; }
     }
 
-    var base = HOPS[step - 1];
-    var v = hopView(base);
-    setPhases(v.phase);
-    setActors(v.actors);
-    annoEl.className = "acp-anno tone-" + toneFor(v.cls);
-
-    var note = NOTES[scenario][step - 1];
-    var ov = null;
-    if (scenario === "legacy" && LEGACY_OVERRIDE[base.id]) ov = LEGACY_OVERRIDE[base.id];
-    if (scenario === "antipattern" && ANTI_OVERRIDE[base.id]) ov = ANTI_OVERRIDE[base.id];
-    if (ov && ov.note) note = ov.note;
-
-    whyEl.innerHTML = "<b>" + v.proto + "</b> · " + note;
-    statusEl.textContent = "步驟 " + step + "／" + HOPS.length + "：" + v.title;
-    captionEl.textContent = v.body;
-
-    if (step >= HOPS.length) {
-      btnNext.textContent = "已結束";
-      btnNext.disabled = true;
-    } else {
-      btnNext.textContent = "下一步";
-      btnNext.disabled = false;
+    var span = 1;
+    for (i = 0; i < CAND.length; i++) {
+      var abs = Math.abs(scores[CAND[i]]);
+      if (abs > span) { span = abs; }
     }
+
+    var acpNote = "";
+    if (a.legacyAcp) {
+      acpNote = winner === "ACPC"
+        ? "ACP 相容層以 " + scores.ACPC + " 分勝出——但它是遷移目標而非終局：用適配層吞舊流量，中期把對等邊界收斂到 A2A（" + scores.A2A + " 分）。"
+        : "ACP 相容層拿到 " + scores.ACPC + " 分、落後 " + CAND_LABEL[winner] + " " + (scores[winner] - scores.ACPC) +
+          " 分：短期用適配層對接，不要為了遺產在對等層開雙棧。";
+    }
+
+    return {
+      scores: scores, segments: s.segments, span: span, ranked: s.ranked,
+      winner: winner, winnerLabel: CAND_LABEL[winner], winnerHint: CAND_HINT[winner],
+      winnerScore: scores[winner], runnerUp: s.runnerUp, runnerUpLabel: CAND_LABEL[s.runnerUp],
+      margin: margin, decisiveness: decisiveness,
+      tax: tax, netValue: netValue, taxOverruns: netValue <= 0,
+      triggeredCount: s.triggered.length, contrib: contrib,
+      conflicts: conflicts, conflictCount: conflicts.length, hardConflictCount: hardCount,
+      acpNote: acpNote
+    };
   }
 
-  function reset() {
-    step = 0;
-    renderShell();
-    paint();
+  // @probe fn       computeHopChain
+  // @probe baseline {"hopCount":6,"targets":"tool,peer,peer,tool,human,tool","boundaries":"same-org,cross-org,cross-org,same-org,cross-org,cross-org","strictOrtho":true}
+  // @probe sweep    {"hopCount":[3,6],"targets":["tool,tool,tool,tool,tool,tool","peer,internal,peer,human,peer,tool"],"boundaries":["same-process,same-process,same-process,same-process,same-process,same-process","cross-org,cross-org,cross-org,cross-org,cross-org,cross-org"],"strictOrtho":[false,true]}
+  function computeHopChain(p) {
+    var i, k;
+    var tg = splitList(p.targets);
+    var bd = splitList(p.boundaries);
+    var n = Number(p.hopCount);
+    if (isNaN(n)) { n = 5; }
+    n = Math.max(2, Math.min(8, Math.round(n)));
+
+    var hops = [];
+    var totalTax = 0, switches = 0, breaks = 0, reachIns = 0, overProtocol = 0, saveable = 0, fixCost = 0;
+
+    for (i = 0; i < n; i++) {
+      var tk = TARGETS[tg[i]] ? tg[i] : "tool";
+      var bk = BOUNDS[bd[i]] ? bd[i] : "same-org";
+
+      var ans = { peerKind: "tool", stateOwner: "caller", duration: "sync",
+                  orgBoundary: bk, needDiscovery: false, needStream: false,
+                  needHITL: false, legacyAcp: false };
+      var over = TARGETS[tk].a;
+      for (k in over) { ans[k] = over[k]; }
+      ans.orgBoundary = bk;
+
+      var d = scoreLayer(ans);
+      var tax = taxOf(d.winner, bk);
+      totalTax += tax;
+
+      var prev = hops.length ? hops[hops.length - 1] : null;
+      if (prev && prev.layer !== d.winner) { switches += 1; }
+
+      var isBreak = (d.winner === "MCP" && bk === "cross-org");
+      var isReachIn = !!(p.strictOrtho && isBreak && prev && PEER_LAYERS[prev.layer] && prev.boundary === "cross-org");
+      if (isBreak) { breaks += 1; fixCost += taxOf("A2A", "cross-org") - tax; }
+      if (isReachIn) { reachIns += 1; }
+
+      var isOver = !!(PEER_LAYERS[d.winner] && bk === "same-process");
+      if (isOver) { overProtocol += 1; saveable += tax - BASE_TAX.DIRECT; }
+
+      var why;
+      if (isReachIn) {
+        why = "第 " + i + " 跳已把工作委派給跨組織對等方，這一跳又直接伸手進對方的工具——委派的意義就是不碰對方內部；應由對方在它的 Task 內自行完成。";
+      } else if (isBreak) {
+        why = "工具呼叫穿越組織邊界：對方不是你的 MCP server，這一跳應升成 A2A 委派（協定稅 " + tax +
+              " → " + taxOf("A2A", "cross-org") + "，換來發現、狀態與產物契約）。";
+      } else if (isOver) {
+        why = "同一個 process 內卻標成對等層：協定稅 " + tax + " 可降到 " + BASE_TAX.DIRECT + "，直接呼叫即可。";
+      } else {
+        why = TARGETS[tk].label + " × " + BOUNDS[bk] + " → " + d.winner + "（" + d.winner + " " +
+              d.scores[d.winner] + " 分，領先 " + d.runnerUp + " " + d.margin + " 分），協定稅 " + tax + "。";
+      }
+
+      hops.push({ i: i + 1, target: tk, boundary: bk, layer: d.winner, score: d.scores[d.winner],
+                  margin: d.margin, tax: tax, isBreak: isBreak, isReachIn: isReachIn,
+                  isOver: isOver, cut: !!(prev && prev.layer !== d.winner), why: why });
+    }
+
+    var purity = n > 1 ? Math.round((1 - switches / (n - 1)) * 100) : 100;
+
+    return {
+      hopCount: n, hops: hops,
+      totalTax: rnd1(totalTax),
+      avgTax: rnd1(totalTax / n),
+      switches: switches,
+      layerPurity: purity,
+      orthogonalityBreaks: breaks,
+      reachIns: reachIns,
+      overProtocolHops: overProtocol,
+      taxSavedIfDowngraded: rnd1(saveable),
+      taxToFixBreaks: rnd1(fixCost),
+      strict: !!p.strictOrtho
+    };
   }
 
-  function next() {
-    if (step >= HOPS.length) return;
-    step += 1;
-    // re-render shell when scenario overrides titles (already rendered on scenario change)
-    paint();
+  /* ================= (3) DOM 參照 ================= */
+
+  var rootA = document.getElementById("demo-acp-choose");
+  var rootB = document.getElementById("demo-acp-chain");
+
+  /* 主 demo：選層評分引擎 */
+  var segBtns, elPeer, elOwner, elDur, elOrg, elDisc, elStream, elHitl, elLegacy,
+      barsEl, verdictEl, confEl, rulesEl, statusEl, resetBtn;
+  var answers = {
+    peerKind: "agent", stateOwner: "callee", duration: "long", orgBoundary: "cross-org",
+    needDiscovery: true, needStream: true, needHITL: true, legacyAcp: false
+  };
+  var presetKey = "delegate";
+
+  if (rootA) {
+    segBtns = [].slice.call(rootA.querySelectorAll(".seg button"));
+    elPeer = document.getElementById("acpx-peer");
+    elOwner = document.getElementById("acpx-owner");
+    elDur = document.getElementById("acpx-dur");
+    elOrg = document.getElementById("acpx-org");
+    elDisc = document.getElementById("acpx-disc");
+    elStream = document.getElementById("acpx-stream");
+    elHitl = document.getElementById("acpx-hitl");
+    elLegacy = document.getElementById("acpx-legacy");
+    barsEl = document.getElementById("acpx-bars");
+    verdictEl = document.getElementById("acpx-verdict");
+    confEl = document.getElementById("acpx-conf");
+    rulesEl = document.getElementById("acpx-rules");
+    statusEl = document.getElementById("acpx-status");
+    resetBtn = document.getElementById("acpx-reset");
   }
 
-  seg.addEventListener("click", function (e) {
-    var btn = e.target.closest("button[data-sc]");
-    if (!btn) return;
-    scenario = btn.getAttribute("data-sc");
-    seg.querySelectorAll("button[data-sc]").forEach(function (b) {
-      b.setAttribute("aria-pressed", b === btn ? "true" : "false");
+  /* 次 demo：逐 hop 協定標註 */
+  var hnEl, hnVal, strictEl, hopsEl, sumEl, chainStatusEl, chainResetBtn;
+  var chain = { hopCount: DEFAULT_COUNT, targets: DEFAULT_TARGETS,
+                boundaries: DEFAULT_BOUNDS, strictOrtho: true };
+
+  if (rootB) {
+    hnEl = document.getElementById("acpx-hn");
+    hnVal = document.getElementById("acpx-hn-v");
+    strictEl = document.getElementById("acpx-strict");
+    hopsEl = document.getElementById("acpx-hops");
+    sumEl = document.getElementById("acpx-sum");
+    chainStatusEl = document.getElementById("acpx-chain-status");
+    chainResetBtn = document.getElementById("acpx-chain-reset");
+  }
+
+  /* ================= (4) render ================= */
+
+  function renderChoice() {
+    var r = computeLayerChoice(answers);
+    var i, c;
+
+    elPeer.value = answers.peerKind;
+    elOwner.value = answers.stateOwner;
+    elDur.value = answers.duration;
+    elOrg.value = answers.orgBoundary;
+    elDisc.checked = answers.needDiscovery;
+    elStream.checked = answers.needStream;
+    elHitl.checked = answers.needHITL;
+    elLegacy.checked = answers.legacyAcp;
+
+    for (i = 0; i < segBtns.length; i++) {
+      segBtns[i].setAttribute("aria-pressed", segBtns[i].getAttribute("data-preset") === presetKey ? "true" : "false");
+    }
+
+    /* 水平 diverging 堆疊條：零軸置中，正往右、負往左 */
+    var unit = 47 / r.span;   // 每分佔軌道寬的百分比（單側上限 47%）
+    var html = "";
+    for (i = 0; i < CAND.length; i++) {
+      var cd = CAND[i];
+      var segs = r.segments[cd];
+      var posAt = 50, negAt = 50, bar = '<span class="axis" style="left:50%"></span>';
+      for (c = 0; c < segs.length; c++) {
+        var v = segs[c].v;
+        if (v > 0) {
+          bar += '<span class="sgpos" style="left:' + posAt + '%;width:' + (v * unit) + '%" title="' + segs[c].id + ' +' + v + '"></span>';
+          posAt += v * unit;
+        } else if (v < 0) {
+          negAt -= (-v) * unit;
+          bar += '<span class="sgneg" style="left:' + negAt + '%;width:' + ((-v) * unit) + '%" title="' + segs[c].id + ' ' + v + '"></span>';
+        }
+      }
+      html += '<div class="acpx-brow' + (cd === r.winner ? " win" : "") + '">' +
+                '<span class="bl">' + CAND_LABEL[cd] + "</span>" +
+                '<span class="acpx-track">' + bar + "</span>" +
+                '<span class="bs">' + r.scores[cd] + "</span></div>";
+    }
+    html += '<div class="acpx-axislbl"><span>候選做法</span><span>◂ 負向　0　正向 ▸</span><span>總分</span></div>';
+    barsEl.innerHTML = html;
+
+    /* 結論條 */
+    verdictEl.className = "acpx-verdict" + (r.taxOverruns ? " vd-tax" : "");
+    verdictEl.innerHTML =
+      '<span class="vw">' + r.winnerLabel + "</span>" +
+      '<span class="vm">' + r.winnerHint + "。勝出 <b>" + r.winnerScore + " 分</b>，領先「" + r.runnerUpLabel +
+      "」 <b>" + r.margin + " 分</b>（" + r.decisiveness + "）；協定稅 <b>" + r.tax + "</b>" +
+      (answers.orgBoundary === "cross-org" ? "（跨組織 ×" + CROSS_ORG_TAX + "）" : "") +
+      "，淨收益 <b>" + r.netValue + "</b>。" +
+      (r.taxOverruns ? "淨收益 ≤ 0：協定稅大於收益，回頭考慮直接呼叫。" : "") +
+      (r.acpNote ? " " + r.acpNote : "") + "</span>";
+
+    /* 矛盾卡 */
+    var cf = "";
+    for (i = 0; i < r.conflicts.length; i++) {
+      cf += '<div class="cf' + (r.conflicts[i].hard ? "" : " soft") + '"><b>' + r.conflicts[i].id +
+            (r.conflicts[i].hard ? " 矛盾" : " 存疑") + "</b>　" + r.conflicts[i].say + "</div>";
+    }
+    confEl.innerHTML = cf;
+
+    /* 規則貢獻表 */
+    var rows = '<div class="rh">規則</div><div class="rh">命中的答案</div><div class="rh" style="text-align:right">對 ' +
+               r.winnerLabel + "</div>";
+    for (i = 0; i < r.contrib.length; i++) {
+      var ct = r.contrib[i];
+      rows += '<div class="rn">' + ct.id + "</div><div>" + ct.note + "</div>" +
+              '<div class="rv ' + (ct.v > 0 ? "up" : (ct.v < 0 ? "dn" : "")) + '">' +
+              (ct.v > 0 ? "+" : "") + ct.v + "</div>";
+    }
+    rulesEl.innerHTML = rows;
+
+    statusEl.textContent = "命中 " + r.triggeredCount + " / " + RULES.length + " 條規則｜排序 " +
+      r.ranked.map(function (x) { return CAND_LABEL[x] + " " + r.scores[x]; }).join("　>　") +
+      "｜矛盾 " + r.conflictCount + " 條（硬性 " + r.hardConflictCount + "）";
+  }
+
+  function buildRows() {
+    var tg = splitList(chain.targets);
+    var bd = splitList(chain.boundaries);
+    var html = "", i, k;
+    for (i = 0; i < chain.hopCount; i++) {
+      var tsel = "", bsel = "";
+      for (k = 0; k < TARGET_ORDER.length; k++) {
+        tsel += '<option value="' + TARGET_ORDER[k] + '"' +
+                (TARGET_ORDER[k] === tg[i] ? " selected" : "") + ">" + TARGETS[TARGET_ORDER[k]].label + "</option>";
+      }
+      for (k = 0; k < BOUND_ORDER.length; k++) {
+        bsel += '<option value="' + BOUND_ORDER[k] + '"' +
+                (BOUND_ORDER[k] === bd[i] ? " selected" : "") + ">" + BOUNDS[BOUND_ORDER[k]] + "</option>";
+      }
+      html += '<div class="acpx-hop" data-i="' + i + '">' +
+                '<span class="hn">' + (i + 1) + "</span>" +
+                '<select data-kind="t" data-i="' + i + '" aria-label="第 ' + (i + 1) + ' 跳的對端">' + tsel + "</select>" +
+                '<select data-kind="b" data-i="' + i + '" aria-label="第 ' + (i + 1) + ' 跳的邊界">' + bsel + "</select>" +
+                '<span class="hlab"></span><span class="htax"></span>' +
+                '<span class="acpx-why"></span></div>';
+    }
+    hopsEl.innerHTML = html;
+  }
+
+  function paintChain() {
+    var r = computeHopChain(chain);
+    var rows = [].slice.call(hopsEl.querySelectorAll(".acpx-hop"));
+    var i;
+
+    hnVal.textContent = String(r.hopCount);
+    strictEl.checked = r.strict;
+
+    for (i = 0; i < rows.length; i++) {
+      var h = r.hops[i];
+      if (!h) { continue; }
+      rows[i].className = "acpx-hop lay-" + h.layer + (h.cut ? " cut" : "") + (h.isBreak ? " brk" : "");
+      var lab = rows[i].querySelector(".hlab");
+      lab.className = "hlab lv-" + h.layer;
+      lab.textContent = h.layer;
+      rows[i].querySelector(".htax").textContent = "稅 " + h.tax;
+      var why = rows[i].querySelector(".acpx-why");
+      why.className = "acpx-why" + (h.isBreak || h.isOver ? " bad" : "");
+      why.textContent = h.why;
+    }
+
+    sumEl.innerHTML =
+      box("層級純度", r.layerPurity + " %", r.switches + " 次換層 / " + (r.hopCount - 1) + " 個相鄰對", false) +
+      box("協定稅合計", String(r.totalTax), "平均每跳 " + r.avgTax, false) +
+      box("正交破壞點", String(r.orthogonalityBreaks),
+          r.orthogonalityBreaks ? "升成 A2A 需再付 " + r.taxToFixBreaks : "沒有工具呼叫穿越組織邊界", r.orthogonalityBreaks > 0) +
+      box("過度協定化", String(r.overProtocolHops),
+          r.overProtocolHops ? "降為直接呼叫可省 " + r.taxSavedIfDowngraded : "沒有同 process 硬上對等協定", r.overProtocolHops > 0);
+
+    chainStatusEl.textContent = r.hops.map(function (h) { return h.i + "." + h.layer; }).join(" → ") +
+      "｜純度 " + r.layerPurity + "%｜稅 " + r.totalTax +
+      "｜破壞點 " + r.orthogonalityBreaks + (r.strict ? "（其中伸手進對方工具 " + r.reachIns + "）" : "（加強檢查關閉）");
+  }
+
+  function box(k, v, n, bad) {
+    return '<div' + (bad ? ' class="bad"' : "") + '><div class="sk">' + k + '</div><div class="sv">' + v +
+           '</div><div class="sn">' + n + "</div></div>";
+  }
+
+  function redrawChain() { buildRows(); paintChain(); }
+
+  /* ================= (5) 事件綁定 ================= */
+
+  if (rootA) {
+    (function () {
+      function onChange() {
+        answers.peerKind = elPeer.value;
+        answers.stateOwner = elOwner.value;
+        answers.duration = elDur.value;
+        answers.orgBoundary = elOrg.value;
+        answers.needDiscovery = !!elDisc.checked;
+        answers.needStream = !!elStream.checked;
+        answers.needHITL = !!elHitl.checked;
+        answers.legacyAcp = !!elLegacy.checked;
+        presetKey = "";
+        renderChoice();
+      }
+      function applyPreset(key) {
+        var p = PRESETS[key];
+        if (!p) { return; }
+        for (var k in p) { answers[k] = p[k]; }
+        presetKey = key;
+        renderChoice();
+      }
+      var inputs = [elPeer, elOwner, elDur, elOrg, elDisc, elStream, elHitl, elLegacy];
+      for (var q = 0; q < inputs.length; q++) { inputs[q].addEventListener("change", onChange); }
+      for (var b = 0; b < segBtns.length; b++) {
+        segBtns[b].addEventListener("click", function () { applyPreset(this.getAttribute("data-preset")); });
+      }
+      resetBtn.addEventListener("click", function () { applyPreset("delegate"); });
+      renderChoice();
+    })();
+  }
+
+  if (rootB) {
+    hnEl.addEventListener("input", function () {
+      chain.hopCount = Number(hnEl.value);
+      redrawChain();
     });
-    reset();
-  });
-
-  btnNext.addEventListener("click", next);
-  btnReset.addEventListener("click", reset);
-
-  reset();
+    strictEl.addEventListener("change", function () {
+      chain.strictOrtho = !!strictEl.checked;
+      paintChain();
+    });
+    hopsEl.addEventListener("change", function (e) {
+      var t = e.target;
+      if (!t || !t.getAttribute || !t.getAttribute("data-kind")) { return; }
+      var kind = t.getAttribute("data-kind");
+      var idx = Number(t.getAttribute("data-i"));
+      var list = splitList(kind === "t" ? chain.targets : chain.boundaries);
+      while (list.length <= idx) { list.push(kind === "t" ? "tool" : "same-org"); }
+      list[idx] = t.value;
+      if (kind === "t") { chain.targets = list.join(","); }
+      else { chain.boundaries = list.join(","); }
+      paintChain();
+    });
+    chainResetBtn.addEventListener("click", function () {
+      chain.hopCount = DEFAULT_COUNT;
+      chain.targets = DEFAULT_TARGETS;
+      chain.boundaries = DEFAULT_BOUNDS;
+      chain.strictOrtho = true;
+      hnEl.value = String(DEFAULT_COUNT);
+      redrawChain();
+    });
+    redrawChain();
+  }
 })();
 </script>
