@@ -1,4 +1,11 @@
-<!-- demo-archetype: A｜時序推進 — 讀者選一個劇本（伺服器正常關閉／網路靜默中斷後重連／發送緩衝堆積），按「下一步」逐格推進，觀察 readyState 四態的移動、線上往返的 frame、未回應 Ping 數、bufferedAmount 與帶 jitter 的退避時間。選 A 是因為本篇的主角就是「一條連線從 CONNECTING 走到 CLOSED 的固定生命週期」，而 half-open 的教學重點恰恰是「狀態機停在 OPEN 不動好幾格」——那個「不動」只有沿著步驟走才看得見。 -->
+<!-- demo-archetype: E｜決策器（主，第 7 節）＋F｜拆解器（次，第 3 節） — 主 demo 讓讀者描述即時需求
+     （方向、推送／發話頻率、訊息大小、二進位、客戶端型態、企業 proxy、連線規模、續傳、延遲容忍、
+     後端有無 HTTP/2、路徑 idle timeout），逐條套用 12 條加權規則算出 WebSocket／SSE／長輪詢／HTTP/2 串流／
+     WebTransport 的累進分數曲線、勝出者與差距、決定性規則，並換算每則訊息的框架開銷比、每日總流量、
+     建議 ping 間隔與重連風暴削峰倍數；次 demo 讓讀者調 payload、方向、opcode、FIN／分片，真算出長度欄位
+     用 7／16／64 bit、標頭總 bytes、開銷比與標頭 hex。選 E 是因為本篇最貴的決定是「這個需求該不該用
+     WebSocket」，那是判定問題不是流程；選 F 是因為 framing 一節的命題本身就是一個編碼格式，只有把真實
+     長度餵進去，才看得出變長長度前綴省下了什麼。 -->
 <style>
   /* 本篇專屬：wsx-* 命名空間，不覆蓋全站 base 類別 */
   #wsx-root {
@@ -40,51 +47,78 @@
   .wsx-bits .bf.pay { flex: 100%; background: var(--wsx-s-soft); border-color: var(--wsx-s); color: var(--wsx-s); border-style: dashed; }
   .wsx-bits .f1 { flex: 1; } .wsx-bits .f2 { flex: 2; } .wsx-bits .f3 { flex: 3; } .wsx-bits .f4 { flex: 4; }
 
-  /* Demo */
-  .wsx-ctrl { display: flex; flex-wrap: wrap; gap: 10px; margin: 10px 0 8px; align-items: center; }
-  .wsx-states { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin: 10px 0 4px; }
-  @media (max-width: 620px) { .wsx-states { grid-template-columns: 1fr 1fr; } }
-  .wsx-st { border: 1.5px solid var(--border-strong); border-radius: var(--radius-sm); padding: 9px 8px; background: #fff; text-align: center; transition: background .18s, border-color .18s, box-shadow .18s; }
-  .wsx-st .sn { font-weight: 700; font-size: 12.5px; letter-spacing: .03em; }
-  .wsx-st .sv { font-family: var(--mono); font-size: 10.5px; color: var(--text-3); margin-top: 2px; }
-  .wsx-st.on { background: var(--accent-soft); border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
-  .wsx-st.on .sn { color: var(--accent); }
-  .wsx-st.done { background: var(--ok-soft); border-color: var(--ok); }
-  .wsx-st.dead { background: var(--bad-soft); border-color: var(--bad); }
-  .wsx-st.dead .sn { color: var(--bad); }
+  /* ===== 決策器 · 第 7 節 (wsd-) ===== */
+  .wsd-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 9px 20px; margin: 4px 0 10px; }
+  @media (max-width: 680px) { .wsd-grid { grid-template-columns: 1fr; } }
+  .wsd-ctl { display: flex; flex-direction: column; gap: 3px; }
+  .wsd-ctl.muted { opacity: .42; }
+  .wsd-ctl .lb { display: flex; justify-content: space-between; align-items: baseline; gap: 8px;
+                 font-family: var(--mono); font-size: 11.5px; color: var(--text-3); }
+  .wsd-ctl .lb b { color: var(--text); font-weight: 700; }
+  .wsd-ctl input[type="range"] { width: 100%; accent-color: var(--accent); }
+  .wsd-ctl select { font-family: var(--mono); font-size: 12px; padding: 4px 6px; background: #fff;
+                    border: 1px solid var(--border-strong); border-radius: 6px; color: var(--text); }
+  .wsd-flags, .wsf-flags { display: flex; flex-wrap: wrap; gap: 6px; margin: 2px 0 10px; }
+  .wsd-tog, .wsf-tog { font-family: var(--mono); font-size: 11.5px; padding: 5px 11px; cursor: pointer;
+                       border: 1px solid var(--border-strong); border-radius: 999px; background: #fff; color: var(--text-3); }
+  .wsd-tog[aria-pressed="true"], .wsf-tog[aria-pressed="true"] {
+    background: var(--accent-soft); border-color: var(--accent); color: var(--accent); font-weight: 700; }
+  .wsd-chart, .wsf-chart { border: 1px solid var(--border); border-radius: var(--radius-sm);
+                           background: #fff; padding: 6px; margin: 10px 0 4px; }
+  .wsd-call { border: 1px solid var(--accent); border-left-width: 4px; border-radius: var(--radius-sm);
+              background: var(--accent-soft); padding: 10px 12px; margin: 10px 0 4px;
+              font-size: 13px; line-height: 1.6; color: var(--text); }
+  .wsd-call.close { border-color: var(--warn); background: var(--warn-soft); }
+  .wsd-cost, .wsf-facts { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; margin: 10px 0 4px; }
+  @media (max-width: 780px) { .wsd-cost, .wsf-facts { grid-template-columns: 1fr 1fr; } }
+  .wsd-tile, .wsf-tile { border: 1px solid var(--border); border-radius: var(--radius-sm); background: #fff; padding: 10px 11px; }
+  .wsd-tile b, .wsf-tile b { display: block; font-family: var(--mono); font-size: 16px; color: var(--text); }
+  .wsd-tile s, .wsf-tile s { display: block; text-decoration: none; font-size: 11.5px; font-weight: 600;
+                             color: var(--text-2); margin-top: 2px; }
+  .wsd-tile em, .wsf-tile em { display: block; font-style: normal; font-family: var(--mono); font-size: 10.5px;
+                               color: var(--text-3); line-height: 1.55; margin-top: 5px; }
+  .wsd-cf { border-left: 3px solid var(--bad); border-radius: 6px; background: var(--bad-soft);
+            padding: 8px 10px; margin-top: 8px; font-size: 12.5px; line-height: 1.55; color: var(--text); }
+  .wsd-cf .rn { font-family: var(--mono); font-weight: 700; color: var(--bad); margin-right: 8px; }
+  .wsd-table { border: 1px solid var(--border); border-radius: var(--radius-sm); background: #fff; padding: 4px 3px; margin-top: 10px; }
+  .wsd-orow { display: grid; grid-template-columns: 1.5fr 1fr 1fr .8fr; gap: 6px; padding: 5px 8px;
+              font-family: var(--mono); font-size: 11.5px; color: var(--text-2); border-bottom: 1px dashed var(--border); }
+  .wsd-orow:last-child { border-bottom: none; }
+  .wsd-orow.win { background: var(--accent-soft); color: var(--text); font-weight: 700; border-radius: 4px; }
+  .wsd-orow .d { text-align: right; }
+  .wsd-decl { font-family: var(--mono); font-size: 10.5px; color: var(--text-3); line-height: 1.6; margin-top: 8px; }
 
-  .wsx-wire { border: 1px solid var(--border); border-radius: var(--radius-sm); background: #fff; padding: 8px 10px; margin-top: 10px; max-height: 268px; overflow-y: auto; }
-  .wsx-row { display: flex; align-items: baseline; gap: 8px; font-family: var(--mono); font-size: 11.5px; padding: 4px 0; border-bottom: 1px dashed var(--border); }
-  .wsx-row:last-child { border-bottom: none; }
-  .wsx-row .ar { width: 30px; flex: none; text-align: center; color: var(--text-3); font-weight: 700; }
-  .wsx-row .tg { flex: none; border-radius: 4px; padding: 2px 6px; font-size: 10.5px; font-weight: 700; border: 1px solid var(--border-strong); background: var(--bg-soft); color: var(--text-3); }
-  .wsx-row .tx { color: var(--text-2); line-height: 1.5; }
-  .wsx-row.c2s .ar { color: var(--wsx-c); }
-  .wsx-row.c2s .tg { background: var(--wsx-c-soft); border-color: var(--wsx-c); color: var(--wsx-c); }
-  .wsx-row.s2c .ar { color: var(--wsx-s); }
-  .wsx-row.s2c .tg { background: var(--wsx-s-soft); border-color: var(--wsx-s); color: var(--wsx-s); }
-  .wsx-row.ctl .tg { background: var(--wsx-ctl-soft); border-color: var(--wsx-ctl); color: var(--wsx-ctl); }
-  .wsx-row.bad .tg { background: var(--wsx-bad-soft); border-color: var(--wsx-bad); color: var(--wsx-bad); }
-  .wsx-row.bad .tx { color: var(--bad); }
-  .wsx-row.note { background: var(--bg-soft); border-radius: 4px; }
-  .wsx-row.note .tx { color: var(--text-3); font-style: normal; }
-  .wsx-row.last .tx { color: var(--text); font-weight: 600; }
-
-  .wsx-panels { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 12px; }
-  @media (max-width: 640px) { .wsx-panels { grid-template-columns: 1fr; } }
-  .wsx-panel { border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 12px; background: #fff; }
-  .wsx-panel .pt { font-size: 11px; color: var(--text-3); letter-spacing: .06em; text-transform: uppercase; font-family: var(--mono); margin-bottom: 8px; }
-  .wsx-panel .prow { display: flex; justify-content: space-between; gap: 8px; font-family: var(--mono); font-size: 12px; padding: 4px 0; border-bottom: 1px dashed var(--border); }
-  .wsx-panel .prow:last-child { border-bottom: none; }
-  .wsx-panel .pk { color: var(--text-3); white-space: nowrap; }
-  .wsx-panel .pv { color: var(--text); font-weight: 600; text-align: right; }
-  .wsx-panel .pv.good { color: var(--ok); }
-  .wsx-panel .pv.bad { color: var(--bad); }
-  .wsx-panel .pv.warn { color: var(--warn); }
-  .wsx-bar { height: 8px; border-radius: 4px; background: var(--bg-soft); border: 1px solid var(--border); margin-top: 8px; overflow: hidden; }
-  .wsx-bar i { display: block; height: 100%; width: 0; background: var(--accent); transition: width .25s, background .25s; }
-  .wsx-bar i.warn { background: var(--warn); }
-  .wsx-bar i.bad { background: var(--bad); }
+  /* ===== 拆解器 · 第 3 節 (wsf-) ===== */
+  .wsf-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 9px 20px; margin: 4px 0 10px; }
+  @media (max-width: 680px) { .wsf-grid { grid-template-columns: 1fr; } }
+  .wsf-ctl { display: flex; flex-direction: column; gap: 3px; }
+  .wsf-ctl.muted { opacity: .42; }
+  .wsf-ctl .lb { display: flex; justify-content: space-between; align-items: baseline; gap: 8px;
+                 font-family: var(--mono); font-size: 11.5px; color: var(--text-3); }
+  .wsf-ctl .lb b { color: var(--text); font-weight: 700; }
+  .wsf-ctl input[type="range"] { width: 100%; accent-color: var(--accent); }
+  .wsf-ctl textarea, .wsf-ctl input[type="number"] {
+    width: 100%; box-sizing: border-box; font-family: var(--mono); font-size: 12px; padding: 6px 8px;
+    border: 1px solid var(--border-strong); border-radius: 6px; background: #fff; color: var(--text); }
+  .wsf-ctl textarea { min-height: 46px; resize: vertical; line-height: 1.5; }
+  .wsf-hex { overflow-x: auto; white-space: nowrap; border: 1px solid var(--border);
+             border-radius: var(--radius-sm); background: #fff; padding: 12px 12px 8px; margin: 10px 0 4px; }
+  .wsf-hex .sg { display: inline-block; vertical-align: top; margin-right: 14px; }
+  .wsf-hex .sg i { font-style: normal; font-family: var(--mono); font-size: 14px; letter-spacing: .08em;
+                   margin-right: 6px; color: var(--text); }
+  .wsf-hex .sg u { display: block; text-decoration: none; margin-top: 5px; padding-top: 3px;
+                   border-top: 2px solid var(--border-strong); font-family: var(--mono); font-size: 10.5px; color: var(--text-3); }
+  .wsf-hex .f1 u { border-color: var(--wsx-c); color: var(--wsx-c); }
+  .wsf-hex .f2 u { border-color: var(--wsx-s); color: var(--wsx-s); }
+  .wsf-hex .f3 u { border-color: var(--wsx-alt); color: var(--wsx-alt); }
+  .wsf-hex .f4 u { border-color: var(--wsx-ctl); color: var(--wsx-ctl); }
+  .wsf-hex .f5 u { border-color: var(--wsx-bad); color: var(--wsx-bad); }
+  .wsf-lenbox { border: 1px solid var(--border-strong); border-left: 4px solid var(--wsx-ctl);
+                border-radius: var(--radius-sm); background: var(--wsx-ctl-soft); padding: 9px 12px; margin: 10px 0 4px; }
+  .wsf-lenbox b { display: block; font-family: var(--mono); font-size: 13px; color: var(--wsx-ctl); }
+  .wsf-lenbox span { display: block; font-family: var(--mono); font-size: 11.5px; color: var(--text-2);
+                     line-height: 1.65; margin-top: 3px; }
+  .status-line.wsf-bad { color: var(--bad); font-weight: 600; }
 </style>
 
 <div id="wsx-root">
@@ -268,6 +302,72 @@ SETTINGS_ENABLE_CONNECT_PROTOCOL = 1
     <div class="bf pay">Payload Data（若 MASK=1，逐位元組與 Masking-key 做 XOR）</div>
   </div>
   <p class="cap">最小的一個 frame 只有 <strong>2 bytes 標頭</strong>（伺服器→客戶端、payload ≤ 125 bytes）；客戶端送出時加上 4 bytes 的 masking key，最小 6 bytes。對照 HTTP 篇介紹過的 <strong>HTTP/2 固定 9-byte 標頭</strong>——兩者的設計目標不同：HTTP/2 的 frame 要攜帶 Stream ID 做多路復用，長度固定換解析簡單；WebSocket 沒有多路復用要做，於是把每個 byte 都省下來，因為它預期的負載是「每秒好幾十則的小訊息」。</p>
+
+
+  <div class="demo" id="wsf-demo">
+    <div class="demo-bar">
+      <span class="label">互動 · frame 標頭拆解器</span>
+      <span class="label" style="text-transform:none;font-family:var(--sans);font-size:12px;color:var(--text-2)">改訊息、方向、opcode 與分片，看標頭實際長成幾個 byte</span>
+    </div>
+    <div class="demo-body">
+      <div class="seg" id="wsf-seg-dir" role="group" aria-label="方向">
+        <button data-v="c2s" aria-pressed="true">客戶端 → 伺服器</button>
+        <button data-v="s2c" aria-pressed="false">伺服器 → 客戶端</button>
+      </div>
+      <div class="seg" id="wsf-seg-op" role="group" aria-label="opcode">
+        <button data-v="1" aria-pressed="true">TEXT 0x1</button>
+        <button data-v="2" aria-pressed="false">BINARY 0x2</button>
+        <button data-v="9" aria-pressed="false">PING 0x9</button>
+        <button data-v="10" aria-pressed="false">PONG 0xA</button>
+        <button data-v="8" aria-pressed="false">CLOSE 0x8</button>
+      </div>
+
+      <div class="wsf-grid">
+        <div class="wsf-ctl">
+          <div class="lb"><span>訊息內容（CLOSE 時是理由文字）</span><b>UTF-8 逐字算</b></div>
+          <textarea id="wsf-text" rows="2" spellcheck="false"></textarea>
+        </div>
+        <div class="wsf-ctl">
+          <div class="lb"><span>批量倍數：同一則重複幾份</span><b id="wsf-copies-v">× 1</b></div>
+          <input type="range" id="wsf-copies" min="1" max="5000" step="1" value="1">
+        </div>
+        <div class="wsf-ctl">
+          <div class="lb"><span>分片大小（打開「切成分片」才生效）</span><b id="wsf-fragsize-v">1,024 B</b></div>
+          <input type="range" id="wsf-fragsize" min="0" max="5" step="1" value="2">
+        </div>
+        <div class="wsf-ctl" id="wsf-code-wrap">
+          <div class="lb"><span>close code</span><b>1000–4999</b></div>
+          <input type="number" id="wsf-code" min="1000" max="4999" step="1" value="1001">
+        </div>
+      </div>
+
+      <div class="wsf-flags">
+        <button class="wsf-tog" data-k="fin" aria-pressed="true">FIN = 1</button>
+        <button class="wsf-tog" data-k="fragment" aria-pressed="false">切成分片</button>
+        <button class="btn" id="wsf-reset">重置</button>
+      </div>
+
+      <div class="status-line" id="wsf-status"></div>
+      <div class="wsf-lenbox" id="wsf-lenbox"></div>
+
+      <div class="wsf-hex" id="wsf-hex"></div>
+      <p class="cap">這一行是<strong>算出來的標頭位元組</strong>（單一 frame 視角，不含 payload）：每個區段下方的括線標出它是哪個欄位、佔幾個 byte。手機寬度下這一行可以左右捲動——它<em>不會</em>折行，因為位元組順序就是線上順序。masking key 在真實情況每個 frame 都重抽一次密碼學亂數，這裡固定值只是為了讓你看清楚它佔掉的 4 bytes。</p>
+
+      <div class="wsf-facts" id="wsf-facts"></div>
+
+      <div class="wsf-chart" id="wsf-chart"></div>
+      <p class="cap"><strong>兩條直虛線就是 126 與 65536 這兩個門檻</strong>：上半張的階梯在這裡各跳一階（粗線是你目前選的方向，淡線是另一個方向，兩者永遠差 4 bytes 的 masking key），下半張是同一條路徑上的開銷比，縱軸是對數刻度。紅色垂直線是你當下這一則訊息落在哪裡——把批量倍數推過門檻，兩個點會同時跳。</p>
+
+      <div class="legend">
+        <span><i class="dot" style="background:#3f6188"></i>FIN / RSV / opcode</span>
+        <span><i class="dot" style="background:#4d7d68"></i>MASK / 7-bit 長度</span>
+        <span><i class="dot" style="background:#7a5a8e"></i>擴充長度</span>
+        <span><i class="dot" style="background:#a3743e"></i>masking key</span>
+        <span><i class="dot" style="background:#a8554f"></i>close 狀態碼</span>
+      </div>
+    </div>
+  </div>
+  <p class="cap">三個值得自己推一次的地方：<strong>(1)</strong> 把批量倍數從 5 調到 6，payload 從 105 跨到 126 bytes，標頭立刻從 6 跳到 8——「最小 2 bytes」是<em>下限</em>不是常態。<strong>(2)</strong> 切到 CLOSE 再把批量倍數往上推，理由文字超過 123 bytes 就違規，因為 control frame 的 125 bytes 上限要先扣掉 2 bytes 狀態碼。<strong>(3)</strong> 打開分片：payload 沒變，標頭卻被乘上片數——分片是為了不佔死連線，不是為了省位元組。</p>
 
   <p class="wsx-sub">1 · opcode：資料 frame 與 control frame</p>
 
@@ -532,74 +632,99 @@ function send(msg) {                         // send() 不會回 EAGAIN，只會
 </section>
 
 <section id="s7">
-  <div class="sec-head"><span class="sec-num">07</span><h2>互動 · WebSocket 生命週期模擬器</h2></div>
-  <p class="sec-sub">一條連線從 <code>CONNECTING</code> 走到 <code>CLOSED</code> 的三種劇本：乾淨關閉、網路靜默中斷，以及送得比鏈路快。</p>
+  <div class="sec-head"><span class="sec-num">07</span><h2>互動 · 即時傳輸選型決策器</h2></div>
+  <p class="sec-sub">把需求逐條換算成分數與帳單：同一組規則同時回答「該選誰」與「這個選擇每天要付多少位元組」。</p>
 
-  <div class="demo" id="wsx-demo">
+  <p>前面六節談的都是「WebSocket 怎麼運作」。但在真實專案裡，你要先回答的是更前面那一題：<strong>這個需求到底該不該用 WebSocket</strong>。下面這台決策器把第 8 節的對照表拆成 <strong>12 條加權規則</strong>，逐條套在你描述的需求上，算出 WebSocket／SSE／長輪詢／HTTP/2 串流／WebTransport 五個候選的分數走勢；同一組輸入還會被拿去算四筆帳——每則訊息的框架開銷比、全體連線的每日流量、建議的 ping 間隔，以及重連風暴的峰值。其中「需要斷線續傳」那條規則為什麼給 SSE 加分，<strong>SSE 篇談 <code>Last-Event-ID</code> 自動續接的那一節</strong>已經解釋過：那是規範內建的行為，而 WebSocket 這一側要靠第 5 節整節手工重建。</p>
+
+  <div class="demo" id="wsd-demo">
     <div class="demo-bar">
-      <span class="label">互動 · WebSocket 生命週期</span>
-      <span class="label" style="text-transform:none;font-family:var(--sans);font-size:12px;color:var(--text-2)">選一個劇本，按「下一步」逐格推進</span>
+      <span class="label">互動 · 即時傳輸選型</span>
+      <span class="label" style="text-transform:none;font-family:var(--sans);font-size:12px;color:var(--text-2)">描述需求，看 12 條規則把五個候選拉開</span>
     </div>
     <div class="demo-body">
-      <div class="seg" role="group" aria-label="情境切換">
-        <button data-sc="clean" aria-pressed="true">伺服器正常關閉</button>
-        <button data-sc="silent" aria-pressed="false">網路靜默中斷 · 重連</button>
-        <button data-sc="buffer" aria-pressed="false">發送緩衝堆積</button>
+      <div class="seg" id="wsd-seg-dir" role="group" aria-label="方向性">
+        <button data-v="push" aria-pressed="false">伺服器單向推送</button>
+        <button data-v="duplex" aria-pressed="true">全雙工（客戶端也要說話）</button>
+      </div>
+      <div class="seg" id="wsd-seg-client" role="group" aria-label="客戶端型態">
+        <button data-v="browser" aria-pressed="true">瀏覽器</button>
+        <button data-v="mobile" aria-pressed="false">行動 App</button>
+        <button data-v="iot" aria-pressed="false">IoT 裝置</button>
       </div>
 
-      <div class="wsx-ctrl">
-        <button class="btn primary" id="wsx-btn-next">下一步</button>
-        <button class="btn" id="wsx-btn-reset">重置</button>
-        <div class="legend">
-          <span><i class="dot ns-wait"></i>目前狀態</span>
-          <span><i class="dot ns-ok"></i>已走過</span>
-          <span><i class="dot ns-lock"></i>保活探測</span>
-          <span><i class="dot ns-bad"></i>異常 / 關閉</span>
+      <div class="wsd-grid">
+        <div class="wsd-ctl">
+          <div class="lb"><span>伺服器推送頻率</span><b id="wsd-push-v">5 則/s</b></div>
+          <input type="range" id="wsd-push" min="0" max="9" step="1" value="4">
+        </div>
+        <div class="wsd-ctl" id="wsd-talk-wrap">
+          <div class="lb"><span>客戶端發話頻率</span><b id="wsd-talk-v">2 則/s</b></div>
+          <input type="range" id="wsd-talk" min="0" max="30" step="1" value="2">
+        </div>
+        <div class="wsd-ctl">
+          <div class="lb"><span>平均訊息大小</span><b id="wsd-size-v">180 B</b></div>
+          <input type="range" id="wsd-size" min="16" max="4096" step="16" value="180">
+        </div>
+        <div class="wsd-ctl">
+          <div class="lb"><span>同時連線數</span><b id="wsd-conns-v">50,000</b></div>
+          <input type="range" id="wsd-conns" min="0" max="6" step="1" value="3">
+        </div>
+        <div class="wsd-ctl">
+          <div class="lb"><span>路徑上最短的 idle timeout</span><b id="wsd-idle-v">60 s</b></div>
+          <input type="range" id="wsd-idle" min="20" max="300" step="5" value="60">
+        </div>
+        <div class="wsd-ctl">
+          <div class="lb"><span>延遲容忍</span><b>端到端</b></div>
+          <select id="wsd-lat">
+            <option value="realtime">≤ 100 ms</option>
+            <option value="sub1s" selected>≤ 1 s</option>
+            <option value="seconds">數秒可接受</option>
+          </select>
         </div>
       </div>
 
-      <div class="status-line" id="wsx-status">選一個劇本後按「下一步」，觀察 readyState 與線上的 frame。</div>
-
-      <div class="wsx-states" id="wsx-states">
-        <div class="wsx-st" data-st="conn"><div class="sn">CONNECTING</div><div class="sv">readyState 0</div></div>
-        <div class="wsx-st" data-st="open"><div class="sn">OPEN</div><div class="sv">readyState 1</div></div>
-        <div class="wsx-st" data-st="closing"><div class="sn">CLOSING</div><div class="sv">readyState 2</div></div>
-        <div class="wsx-st" data-st="closed"><div class="sn">CLOSED</div><div class="sv">readyState 3</div></div>
+      <div class="wsd-flags">
+        <button class="wsd-tog" data-k="needBinary" aria-pressed="false">需要二進位</button>
+        <button class="wsd-tog" data-k="viaProxy" aria-pressed="false">必經企業 proxy / CDN</button>
+        <button class="wsd-tog" data-k="needResume" aria-pressed="true">需要斷線續傳</button>
+        <button class="wsd-tog" data-k="hasH2" aria-pressed="true">後端已有 HTTP/2</button>
+        <button class="btn" id="wsd-reset">重置</button>
       </div>
-      <p class="cap" style="text-align:center">這四格就是 <code>WebSocket.readyState</code> 的全部取值。注意 <strong>half-open 情境下它會長時間停在 <code>OPEN</code></strong>——狀態機不會自己發現對面已經不在了。</p>
 
-      <div class="wsx-wire" id="wsx-wire"></div>
+      <div class="wsd-call" id="wsd-call"></div>
 
-      <div class="wsx-panels">
-        <div class="wsx-panel">
-          <div class="pt">連線狀態</div>
-          <div class="prow"><span class="pk">readyState</span><span class="pv" id="wsx-p-rs">—</span></div>
-          <div class="prow"><span class="pk">子協定</span><span class="pv" id="wsx-p-proto">—</span></div>
-          <div class="prow"><span class="pk">close code</span><span class="pv" id="wsx-p-code">—</span></div>
-          <div class="prow"><span class="pk">wasClean</span><span class="pv" id="wsx-p-clean">—</span></div>
-        </div>
-        <div class="wsx-panel">
-          <div class="pt">保活 / 緩衝 / 重連</div>
-          <div class="prow"><span class="pk">未回應 Ping</span><span class="pv" id="wsx-p-ping">0</span></div>
-          <div class="prow"><span class="pk">bufferedAmount</span><span class="pv" id="wsx-p-buf">0 B</span></div>
-          <div class="prow"><span class="pk">重連嘗試</span><span class="pv" id="wsx-p-att">—</span></div>
-          <div class="prow"><span class="pk">下次退避</span><span class="pv" id="wsx-p-delay">—</span></div>
-          <div class="wsx-bar"><i id="wsx-bar"></i></div>
-        </div>
+      <div class="wsd-chart" id="wsd-chart"></div>
+      <p class="cap">看的不是終點分數，是<strong>領先權在第幾條規則易手</strong>：五條線從同樣的 50 分起跑，每一欄是一條規則吃進你的參數後給出的加減分。<strong>底色那一欄就是決定性規則</strong>——冠亞軍的差距在那一步變動最大，也就是整個選型真正由它拍板的地方。<strong>x 軸標籤轉紅的欄位</strong>代表那條規則上出現了矛盾或風險，詳情列在圖下方。</p>
+
+      <div id="wsd-conflict"></div>
+      <div class="status-line" id="wsd-status"></div>
+
+      <div class="wsd-cost" id="wsd-cost"></div>
+      <div class="wsd-table" id="wsd-table"></div>
+
+      <div class="legend">
+        <span><i class="dot" style="background:#3f6188"></i>WebSocket</span>
+        <span><i class="dot" style="background:#4d7d68"></i>SSE</span>
+        <span><i class="dot" style="background:#a8554f"></i>長輪詢</span>
+        <span><i class="dot" style="background:#a3743e"></i>HTTP/2 串流</span>
+        <span><i class="dot" style="background:#7a5a8e"></i>WebTransport</span>
       </div>
+
+      <div class="wsd-decl">申報：標頭成本用四個估計常數——長輪詢每則一組完整 HTTP 請求 480 B ＋ 回應 250 B；HTTP/2 串流 9 B frame 標頭 ＋ 25 B HPACK 增量；SSE「data: 」6 B ＋「\n\n」2 B ＋「id: 999999\n」11 B；WebTransport 4 B QUIC STREAM 標頭。WebSocket 的標頭則是真算的（2 ＋ 擴充長度 ＋ 4 bytes masking key）。規則權重是常數，但每條規則是否觸發、乘上多少量值，全部由上面的參數推導。</div>
     </div>
   </div>
 
-  <p class="cap">三個值得停下來比對的地方：<strong>(1)</strong> 「伺服器正常關閉」走完整的 <code>CLOSE</code> 往返，<code>wasClean = true</code>、code 是 <code>1001</code>——客戶端<em>知道</em>發生了什麼。<strong>(2)</strong> 「網路靜默中斷」裡，連線斷掉之後狀態機<strong>還停在 <code>OPEN</code> 好幾格</strong>，直到 Ping 連續逾時才被判死，close code 是本地產生的 <code>1006</code>、<code>wasClean = false</code>——這就是第 4 節說的 half-open。<strong>(3)</strong> 重連的三次退避時間，每次按「重置」都會不一樣：那個亂數就是 jitter，把幾萬個同時斷線的客戶端攤開在時間軸上的唯一手段。</p>
+  <p class="cap">三個值得自己動手翻面的地方：<strong>(1)</strong> 只把方向性切成「伺服器單向推送」，勝出者就從 WebSocket 翻成 SSE——這正是第 8 節那句「客戶端需不需要低延遲地說話」的量化版本。<strong>(2)</strong> 在單向狀態下再打開「需要二進位」，兩個候選會擠到 8 分以內、結論條改口說「兩者都可行」，因為 SSE 只送 UTF-8 文字，二進位得先 base64，膨脹幅度 demo 會直接算給你看。<strong>(3)</strong> 把訊息大小拉到 16 bytes：分數幾乎不動，但長輪詢的開銷比會衝到 97% 以上——<strong>選型的代價常常不在分數，在帳單</strong>。</p>
 
   <div class="callout warn">
-    <div class="c-title"><span class="ic">說明</span>這個模型簡化了什麼，以及它跟前四個 demo 的分工</div>
-    <p>模型只保留「狀態機與生命週期」這一條線：不畫 TCP 交握與 TLS 交握（TCP/UDP 篇與 TLS 篇的主場）、不畫封包遺失與重傳、frame 一律視為一次送達。時間軸也被壓縮了——真實的 Ping 週期是數十秒，這裡一步就是一次。<br>
-    分工也刻意錯開：<strong>TLS 篇的 demo</strong> 是訊息序列圖，主角是<em>交握時的密碼學時序</em>；<strong>本篇</strong>的主角是<em>交握之後那段很長的日子</em>——狀態怎麼變、什麼時候你其實已經斷了卻不知道。所以這裡的交握只用兩格帶過。</p>
+    <div class="c-title"><span class="ic">說明</span>這台決策器簡化了什麼</div>
+    <p>它只算<strong>協定層面的成本與適配度</strong>：不計團隊熟悉度、既有基礎設施、函式庫生態與營運成熟度——而這四項在真實決策裡的權重往往不低於任何一條規則。分數本身沒有絕對意義，<strong>有意義的是差距與它是在哪一條規則上拉開的</strong>；差距小於 8 分時 demo 會拒絕給單一答案，因為那個範圍內的差異已經小於上面那四項未被建模的因素。<br>
+    另外，它假設所有候選都跑在同一條路徑上。實務上「企業 proxy 會不會擋 Upgrade」「CDN 支不支援長連線」得逐家確認，demo 只能把它當成一個開關；打開之後若勝出的仍是 WebSocket，它會提醒你準備 fallback，而不是替你決定。</p>
   </div>
 
   <div class="oneliner">
-    <b>一句話答法</b><code>readyState</code> 只有四個值，而它最危險的行為是「網路已斷卻仍停在 <code>OPEN</code>」；乾淨關閉會走 <code>CLOSE</code> 往返並給出明確 code，靜默中斷只會得到本地產生的 <code>1006</code>，之後的重連必須帶 jitter。
+    <b>一句話答法</b>選型不是「這個功能聽起來即不即時」，而是把方向性、發話頻率、訊息大小、路徑限制與連線規模逐條換算成分數與帳單：只要是伺服器單向推送，SSE 幾乎總是贏在重連內建與 proxy 友善；客戶端也要高頻發話時 WebSocket 才划算，而它的代價是你得自己付心跳、退避與補發這三筆帳。
   </div>
 </section>
 

@@ -1378,7 +1378,7 @@
         <a href="#s4"><span class="n">04</span>保活、斷線偵測與 close code</a>
         <a href="#s5"><span class="n">05</span>Backpressure 與重連：連線撐不住的兩種樣子</a>
         <a href="#s6"><span class="n">06</span>認證與連線狀態：交握是唯一的那個 HTTP 請求</a>
-        <a href="#s7"><span class="n">07</span>互動 · WebSocket 生命週期模擬器</a>
+        <a href="#s7"><span class="n">07</span>互動 · 即時傳輸選型決策器</a>
         <a href="#s8"><span class="n">08</span>面試折衷與實務選型</a>
       </div>
     </nav>
@@ -1394,7 +1394,14 @@
     <!-- ===================== MAIN CONTENT ===================== -->
     <main>
       <div class="inner">
-        <!-- demo-archetype: A｜時序推進 — 讀者選一個劇本（伺服器正常關閉／網路靜默中斷後重連／發送緩衝堆積），按「下一步」逐格推進，觀察 readyState 四態的移動、線上往返的 frame、未回應 Ping 數、bufferedAmount 與帶 jitter 的退避時間。選 A 是因為本篇的主角就是「一條連線從 CONNECTING 走到 CLOSED 的固定生命週期」，而 half-open 的教學重點恰恰是「狀態機停在 OPEN 不動好幾格」——那個「不動」只有沿著步驟走才看得見。 -->
+        <!-- demo-archetype: E｜決策器（主，第 7 節）＋F｜拆解器（次，第 3 節） — 主 demo 讓讀者描述即時需求
+     （方向、推送／發話頻率、訊息大小、二進位、客戶端型態、企業 proxy、連線規模、續傳、延遲容忍、
+     後端有無 HTTP/2、路徑 idle timeout），逐條套用 12 條加權規則算出 WebSocket／SSE／長輪詢／HTTP/2 串流／
+     WebTransport 的累進分數曲線、勝出者與差距、決定性規則，並換算每則訊息的框架開銷比、每日總流量、
+     建議 ping 間隔與重連風暴削峰倍數；次 demo 讓讀者調 payload、方向、opcode、FIN／分片，真算出長度欄位
+     用 7／16／64 bit、標頭總 bytes、開銷比與標頭 hex。選 E 是因為本篇最貴的決定是「這個需求該不該用
+     WebSocket」，那是判定問題不是流程；選 F 是因為 framing 一節的命題本身就是一個編碼格式，只有把真實
+     長度餵進去，才看得出變長長度前綴省下了什麼。 -->
 <style>
   /* 本篇專屬：wsx-* 命名空間，不覆蓋全站 base 類別 */
   #wsx-root {
@@ -1436,51 +1443,78 @@
   .wsx-bits .bf.pay { flex: 100%; background: var(--wsx-s-soft); border-color: var(--wsx-s); color: var(--wsx-s); border-style: dashed; }
   .wsx-bits .f1 { flex: 1; } .wsx-bits .f2 { flex: 2; } .wsx-bits .f3 { flex: 3; } .wsx-bits .f4 { flex: 4; }
 
-  /* Demo */
-  .wsx-ctrl { display: flex; flex-wrap: wrap; gap: 10px; margin: 10px 0 8px; align-items: center; }
-  .wsx-states { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin: 10px 0 4px; }
-  @media (max-width: 620px) { .wsx-states { grid-template-columns: 1fr 1fr; } }
-  .wsx-st { border: 1.5px solid var(--border-strong); border-radius: var(--radius-sm); padding: 9px 8px; background: #fff; text-align: center; transition: background .18s, border-color .18s, box-shadow .18s; }
-  .wsx-st .sn { font-weight: 700; font-size: 12.5px; letter-spacing: .03em; }
-  .wsx-st .sv { font-family: var(--mono); font-size: 10.5px; color: var(--text-3); margin-top: 2px; }
-  .wsx-st.on { background: var(--accent-soft); border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
-  .wsx-st.on .sn { color: var(--accent); }
-  .wsx-st.done { background: var(--ok-soft); border-color: var(--ok); }
-  .wsx-st.dead { background: var(--bad-soft); border-color: var(--bad); }
-  .wsx-st.dead .sn { color: var(--bad); }
+  /* ===== 決策器 · 第 7 節 (wsd-) ===== */
+  .wsd-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 9px 20px; margin: 4px 0 10px; }
+  @media (max-width: 680px) { .wsd-grid { grid-template-columns: 1fr; } }
+  .wsd-ctl { display: flex; flex-direction: column; gap: 3px; }
+  .wsd-ctl.muted { opacity: .42; }
+  .wsd-ctl .lb { display: flex; justify-content: space-between; align-items: baseline; gap: 8px;
+                 font-family: var(--mono); font-size: 11.5px; color: var(--text-3); }
+  .wsd-ctl .lb b { color: var(--text); font-weight: 700; }
+  .wsd-ctl input[type="range"] { width: 100%; accent-color: var(--accent); }
+  .wsd-ctl select { font-family: var(--mono); font-size: 12px; padding: 4px 6px; background: #fff;
+                    border: 1px solid var(--border-strong); border-radius: 6px; color: var(--text); }
+  .wsd-flags, .wsf-flags { display: flex; flex-wrap: wrap; gap: 6px; margin: 2px 0 10px; }
+  .wsd-tog, .wsf-tog { font-family: var(--mono); font-size: 11.5px; padding: 5px 11px; cursor: pointer;
+                       border: 1px solid var(--border-strong); border-radius: 999px; background: #fff; color: var(--text-3); }
+  .wsd-tog[aria-pressed="true"], .wsf-tog[aria-pressed="true"] {
+    background: var(--accent-soft); border-color: var(--accent); color: var(--accent); font-weight: 700; }
+  .wsd-chart, .wsf-chart { border: 1px solid var(--border); border-radius: var(--radius-sm);
+                           background: #fff; padding: 6px; margin: 10px 0 4px; }
+  .wsd-call { border: 1px solid var(--accent); border-left-width: 4px; border-radius: var(--radius-sm);
+              background: var(--accent-soft); padding: 10px 12px; margin: 10px 0 4px;
+              font-size: 13px; line-height: 1.6; color: var(--text); }
+  .wsd-call.close { border-color: var(--warn); background: var(--warn-soft); }
+  .wsd-cost, .wsf-facts { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; margin: 10px 0 4px; }
+  @media (max-width: 780px) { .wsd-cost, .wsf-facts { grid-template-columns: 1fr 1fr; } }
+  .wsd-tile, .wsf-tile { border: 1px solid var(--border); border-radius: var(--radius-sm); background: #fff; padding: 10px 11px; }
+  .wsd-tile b, .wsf-tile b { display: block; font-family: var(--mono); font-size: 16px; color: var(--text); }
+  .wsd-tile s, .wsf-tile s { display: block; text-decoration: none; font-size: 11.5px; font-weight: 600;
+                             color: var(--text-2); margin-top: 2px; }
+  .wsd-tile em, .wsf-tile em { display: block; font-style: normal; font-family: var(--mono); font-size: 10.5px;
+                               color: var(--text-3); line-height: 1.55; margin-top: 5px; }
+  .wsd-cf { border-left: 3px solid var(--bad); border-radius: 6px; background: var(--bad-soft);
+            padding: 8px 10px; margin-top: 8px; font-size: 12.5px; line-height: 1.55; color: var(--text); }
+  .wsd-cf .rn { font-family: var(--mono); font-weight: 700; color: var(--bad); margin-right: 8px; }
+  .wsd-table { border: 1px solid var(--border); border-radius: var(--radius-sm); background: #fff; padding: 4px 3px; margin-top: 10px; }
+  .wsd-orow { display: grid; grid-template-columns: 1.5fr 1fr 1fr .8fr; gap: 6px; padding: 5px 8px;
+              font-family: var(--mono); font-size: 11.5px; color: var(--text-2); border-bottom: 1px dashed var(--border); }
+  .wsd-orow:last-child { border-bottom: none; }
+  .wsd-orow.win { background: var(--accent-soft); color: var(--text); font-weight: 700; border-radius: 4px; }
+  .wsd-orow .d { text-align: right; }
+  .wsd-decl { font-family: var(--mono); font-size: 10.5px; color: var(--text-3); line-height: 1.6; margin-top: 8px; }
 
-  .wsx-wire { border: 1px solid var(--border); border-radius: var(--radius-sm); background: #fff; padding: 8px 10px; margin-top: 10px; max-height: 268px; overflow-y: auto; }
-  .wsx-row { display: flex; align-items: baseline; gap: 8px; font-family: var(--mono); font-size: 11.5px; padding: 4px 0; border-bottom: 1px dashed var(--border); }
-  .wsx-row:last-child { border-bottom: none; }
-  .wsx-row .ar { width: 30px; flex: none; text-align: center; color: var(--text-3); font-weight: 700; }
-  .wsx-row .tg { flex: none; border-radius: 4px; padding: 2px 6px; font-size: 10.5px; font-weight: 700; border: 1px solid var(--border-strong); background: var(--bg-soft); color: var(--text-3); }
-  .wsx-row .tx { color: var(--text-2); line-height: 1.5; }
-  .wsx-row.c2s .ar { color: var(--wsx-c); }
-  .wsx-row.c2s .tg { background: var(--wsx-c-soft); border-color: var(--wsx-c); color: var(--wsx-c); }
-  .wsx-row.s2c .ar { color: var(--wsx-s); }
-  .wsx-row.s2c .tg { background: var(--wsx-s-soft); border-color: var(--wsx-s); color: var(--wsx-s); }
-  .wsx-row.ctl .tg { background: var(--wsx-ctl-soft); border-color: var(--wsx-ctl); color: var(--wsx-ctl); }
-  .wsx-row.bad .tg { background: var(--wsx-bad-soft); border-color: var(--wsx-bad); color: var(--wsx-bad); }
-  .wsx-row.bad .tx { color: var(--bad); }
-  .wsx-row.note { background: var(--bg-soft); border-radius: 4px; }
-  .wsx-row.note .tx { color: var(--text-3); font-style: normal; }
-  .wsx-row.last .tx { color: var(--text); font-weight: 600; }
-
-  .wsx-panels { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 12px; }
-  @media (max-width: 640px) { .wsx-panels { grid-template-columns: 1fr; } }
-  .wsx-panel { border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 12px; background: #fff; }
-  .wsx-panel .pt { font-size: 11px; color: var(--text-3); letter-spacing: .06em; text-transform: uppercase; font-family: var(--mono); margin-bottom: 8px; }
-  .wsx-panel .prow { display: flex; justify-content: space-between; gap: 8px; font-family: var(--mono); font-size: 12px; padding: 4px 0; border-bottom: 1px dashed var(--border); }
-  .wsx-panel .prow:last-child { border-bottom: none; }
-  .wsx-panel .pk { color: var(--text-3); white-space: nowrap; }
-  .wsx-panel .pv { color: var(--text); font-weight: 600; text-align: right; }
-  .wsx-panel .pv.good { color: var(--ok); }
-  .wsx-panel .pv.bad { color: var(--bad); }
-  .wsx-panel .pv.warn { color: var(--warn); }
-  .wsx-bar { height: 8px; border-radius: 4px; background: var(--bg-soft); border: 1px solid var(--border); margin-top: 8px; overflow: hidden; }
-  .wsx-bar i { display: block; height: 100%; width: 0; background: var(--accent); transition: width .25s, background .25s; }
-  .wsx-bar i.warn { background: var(--warn); }
-  .wsx-bar i.bad { background: var(--bad); }
+  /* ===== 拆解器 · 第 3 節 (wsf-) ===== */
+  .wsf-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 9px 20px; margin: 4px 0 10px; }
+  @media (max-width: 680px) { .wsf-grid { grid-template-columns: 1fr; } }
+  .wsf-ctl { display: flex; flex-direction: column; gap: 3px; }
+  .wsf-ctl.muted { opacity: .42; }
+  .wsf-ctl .lb { display: flex; justify-content: space-between; align-items: baseline; gap: 8px;
+                 font-family: var(--mono); font-size: 11.5px; color: var(--text-3); }
+  .wsf-ctl .lb b { color: var(--text); font-weight: 700; }
+  .wsf-ctl input[type="range"] { width: 100%; accent-color: var(--accent); }
+  .wsf-ctl textarea, .wsf-ctl input[type="number"] {
+    width: 100%; box-sizing: border-box; font-family: var(--mono); font-size: 12px; padding: 6px 8px;
+    border: 1px solid var(--border-strong); border-radius: 6px; background: #fff; color: var(--text); }
+  .wsf-ctl textarea { min-height: 46px; resize: vertical; line-height: 1.5; }
+  .wsf-hex { overflow-x: auto; white-space: nowrap; border: 1px solid var(--border);
+             border-radius: var(--radius-sm); background: #fff; padding: 12px 12px 8px; margin: 10px 0 4px; }
+  .wsf-hex .sg { display: inline-block; vertical-align: top; margin-right: 14px; }
+  .wsf-hex .sg i { font-style: normal; font-family: var(--mono); font-size: 14px; letter-spacing: .08em;
+                   margin-right: 6px; color: var(--text); }
+  .wsf-hex .sg u { display: block; text-decoration: none; margin-top: 5px; padding-top: 3px;
+                   border-top: 2px solid var(--border-strong); font-family: var(--mono); font-size: 10.5px; color: var(--text-3); }
+  .wsf-hex .f1 u { border-color: var(--wsx-c); color: var(--wsx-c); }
+  .wsf-hex .f2 u { border-color: var(--wsx-s); color: var(--wsx-s); }
+  .wsf-hex .f3 u { border-color: var(--wsx-alt); color: var(--wsx-alt); }
+  .wsf-hex .f4 u { border-color: var(--wsx-ctl); color: var(--wsx-ctl); }
+  .wsf-hex .f5 u { border-color: var(--wsx-bad); color: var(--wsx-bad); }
+  .wsf-lenbox { border: 1px solid var(--border-strong); border-left: 4px solid var(--wsx-ctl);
+                border-radius: var(--radius-sm); background: var(--wsx-ctl-soft); padding: 9px 12px; margin: 10px 0 4px; }
+  .wsf-lenbox b { display: block; font-family: var(--mono); font-size: 13px; color: var(--wsx-ctl); }
+  .wsf-lenbox span { display: block; font-family: var(--mono); font-size: 11.5px; color: var(--text-2);
+                     line-height: 1.65; margin-top: 3px; }
+  .status-line.wsf-bad { color: var(--bad); font-weight: 600; }
 </style>
 
 <div id="wsx-root">
@@ -1664,6 +1698,72 @@ SETTINGS_ENABLE_CONNECT_PROTOCOL = 1
     <div class="bf pay">Payload Data（若 MASK=1，逐位元組與 Masking-key 做 XOR）</div>
   </div>
   <p class="cap">最小的一個 frame 只有 <strong>2 bytes 標頭</strong>（伺服器→客戶端、payload ≤ 125 bytes）；客戶端送出時加上 4 bytes 的 masking key，最小 6 bytes。對照 HTTP 篇介紹過的 <strong>HTTP/2 固定 9-byte 標頭</strong>——兩者的設計目標不同：HTTP/2 的 frame 要攜帶 Stream ID 做多路復用，長度固定換解析簡單；WebSocket 沒有多路復用要做，於是把每個 byte 都省下來，因為它預期的負載是「每秒好幾十則的小訊息」。</p>
+
+
+  <div class="demo" id="wsf-demo">
+    <div class="demo-bar">
+      <span class="label">互動 · frame 標頭拆解器</span>
+      <span class="label" style="text-transform:none;font-family:var(--sans);font-size:12px;color:var(--text-2)">改訊息、方向、opcode 與分片，看標頭實際長成幾個 byte</span>
+    </div>
+    <div class="demo-body">
+      <div class="seg" id="wsf-seg-dir" role="group" aria-label="方向">
+        <button data-v="c2s" aria-pressed="true">客戶端 → 伺服器</button>
+        <button data-v="s2c" aria-pressed="false">伺服器 → 客戶端</button>
+      </div>
+      <div class="seg" id="wsf-seg-op" role="group" aria-label="opcode">
+        <button data-v="1" aria-pressed="true">TEXT 0x1</button>
+        <button data-v="2" aria-pressed="false">BINARY 0x2</button>
+        <button data-v="9" aria-pressed="false">PING 0x9</button>
+        <button data-v="10" aria-pressed="false">PONG 0xA</button>
+        <button data-v="8" aria-pressed="false">CLOSE 0x8</button>
+      </div>
+
+      <div class="wsf-grid">
+        <div class="wsf-ctl">
+          <div class="lb"><span>訊息內容（CLOSE 時是理由文字）</span><b>UTF-8 逐字算</b></div>
+          <textarea id="wsf-text" rows="2" spellcheck="false"></textarea>
+        </div>
+        <div class="wsf-ctl">
+          <div class="lb"><span>批量倍數：同一則重複幾份</span><b id="wsf-copies-v">× 1</b></div>
+          <input type="range" id="wsf-copies" min="1" max="5000" step="1" value="1">
+        </div>
+        <div class="wsf-ctl">
+          <div class="lb"><span>分片大小（打開「切成分片」才生效）</span><b id="wsf-fragsize-v">1,024 B</b></div>
+          <input type="range" id="wsf-fragsize" min="0" max="5" step="1" value="2">
+        </div>
+        <div class="wsf-ctl" id="wsf-code-wrap">
+          <div class="lb"><span>close code</span><b>1000–4999</b></div>
+          <input type="number" id="wsf-code" min="1000" max="4999" step="1" value="1001">
+        </div>
+      </div>
+
+      <div class="wsf-flags">
+        <button class="wsf-tog" data-k="fin" aria-pressed="true">FIN = 1</button>
+        <button class="wsf-tog" data-k="fragment" aria-pressed="false">切成分片</button>
+        <button class="btn" id="wsf-reset">重置</button>
+      </div>
+
+      <div class="status-line" id="wsf-status"></div>
+      <div class="wsf-lenbox" id="wsf-lenbox"></div>
+
+      <div class="wsf-hex" id="wsf-hex"></div>
+      <p class="cap">這一行是<strong>算出來的標頭位元組</strong>（單一 frame 視角，不含 payload）：每個區段下方的括線標出它是哪個欄位、佔幾個 byte。手機寬度下這一行可以左右捲動——它<em>不會</em>折行，因為位元組順序就是線上順序。masking key 在真實情況每個 frame 都重抽一次密碼學亂數，這裡固定值只是為了讓你看清楚它佔掉的 4 bytes。</p>
+
+      <div class="wsf-facts" id="wsf-facts"></div>
+
+      <div class="wsf-chart" id="wsf-chart"></div>
+      <p class="cap"><strong>兩條直虛線就是 126 與 65536 這兩個門檻</strong>：上半張的階梯在這裡各跳一階（粗線是你目前選的方向，淡線是另一個方向，兩者永遠差 4 bytes 的 masking key），下半張是同一條路徑上的開銷比，縱軸是對數刻度。紅色垂直線是你當下這一則訊息落在哪裡——把批量倍數推過門檻，兩個點會同時跳。</p>
+
+      <div class="legend">
+        <span><i class="dot" style="background:#3f6188"></i>FIN / RSV / opcode</span>
+        <span><i class="dot" style="background:#4d7d68"></i>MASK / 7-bit 長度</span>
+        <span><i class="dot" style="background:#7a5a8e"></i>擴充長度</span>
+        <span><i class="dot" style="background:#a3743e"></i>masking key</span>
+        <span><i class="dot" style="background:#a8554f"></i>close 狀態碼</span>
+      </div>
+    </div>
+  </div>
+  <p class="cap">三個值得自己推一次的地方：<strong>(1)</strong> 把批量倍數從 5 調到 6，payload 從 105 跨到 126 bytes，標頭立刻從 6 跳到 8——「最小 2 bytes」是<em>下限</em>不是常態。<strong>(2)</strong> 切到 CLOSE 再把批量倍數往上推，理由文字超過 123 bytes 就違規，因為 control frame 的 125 bytes 上限要先扣掉 2 bytes 狀態碼。<strong>(3)</strong> 打開分片：payload 沒變，標頭卻被乘上片數——分片是為了不佔死連線，不是為了省位元組。</p>
 
   <p class="wsx-sub">1 · opcode：資料 frame 與 control frame</p>
 
@@ -1928,74 +2028,99 @@ function send(msg) {                         // send() 不會回 EAGAIN，只會
 </section>
 
 <section id="s7">
-  <div class="sec-head"><span class="sec-num">07</span><h2>互動 · WebSocket 生命週期模擬器</h2></div>
-  <p class="sec-sub">一條連線從 <code>CONNECTING</code> 走到 <code>CLOSED</code> 的三種劇本：乾淨關閉、網路靜默中斷，以及送得比鏈路快。</p>
+  <div class="sec-head"><span class="sec-num">07</span><h2>互動 · 即時傳輸選型決策器</h2></div>
+  <p class="sec-sub">把需求逐條換算成分數與帳單：同一組規則同時回答「該選誰」與「這個選擇每天要付多少位元組」。</p>
 
-  <div class="demo" id="wsx-demo">
+  <p>前面六節談的都是「WebSocket 怎麼運作」。但在真實專案裡，你要先回答的是更前面那一題：<strong>這個需求到底該不該用 WebSocket</strong>。下面這台決策器把第 8 節的對照表拆成 <strong>12 條加權規則</strong>，逐條套在你描述的需求上，算出 WebSocket／SSE／長輪詢／HTTP/2 串流／WebTransport 五個候選的分數走勢；同一組輸入還會被拿去算四筆帳——每則訊息的框架開銷比、全體連線的每日流量、建議的 ping 間隔，以及重連風暴的峰值。其中「需要斷線續傳」那條規則為什麼給 SSE 加分，<strong>SSE 篇談 <code>Last-Event-ID</code> 自動續接的那一節</strong>已經解釋過：那是規範內建的行為，而 WebSocket 這一側要靠第 5 節整節手工重建。</p>
+
+  <div class="demo" id="wsd-demo">
     <div class="demo-bar">
-      <span class="label">互動 · WebSocket 生命週期</span>
-      <span class="label" style="text-transform:none;font-family:var(--sans);font-size:12px;color:var(--text-2)">選一個劇本，按「下一步」逐格推進</span>
+      <span class="label">互動 · 即時傳輸選型</span>
+      <span class="label" style="text-transform:none;font-family:var(--sans);font-size:12px;color:var(--text-2)">描述需求，看 12 條規則把五個候選拉開</span>
     </div>
     <div class="demo-body">
-      <div class="seg" role="group" aria-label="情境切換">
-        <button data-sc="clean" aria-pressed="true">伺服器正常關閉</button>
-        <button data-sc="silent" aria-pressed="false">網路靜默中斷 · 重連</button>
-        <button data-sc="buffer" aria-pressed="false">發送緩衝堆積</button>
+      <div class="seg" id="wsd-seg-dir" role="group" aria-label="方向性">
+        <button data-v="push" aria-pressed="false">伺服器單向推送</button>
+        <button data-v="duplex" aria-pressed="true">全雙工（客戶端也要說話）</button>
+      </div>
+      <div class="seg" id="wsd-seg-client" role="group" aria-label="客戶端型態">
+        <button data-v="browser" aria-pressed="true">瀏覽器</button>
+        <button data-v="mobile" aria-pressed="false">行動 App</button>
+        <button data-v="iot" aria-pressed="false">IoT 裝置</button>
       </div>
 
-      <div class="wsx-ctrl">
-        <button class="btn primary" id="wsx-btn-next">下一步</button>
-        <button class="btn" id="wsx-btn-reset">重置</button>
-        <div class="legend">
-          <span><i class="dot ns-wait"></i>目前狀態</span>
-          <span><i class="dot ns-ok"></i>已走過</span>
-          <span><i class="dot ns-lock"></i>保活探測</span>
-          <span><i class="dot ns-bad"></i>異常 / 關閉</span>
+      <div class="wsd-grid">
+        <div class="wsd-ctl">
+          <div class="lb"><span>伺服器推送頻率</span><b id="wsd-push-v">5 則/s</b></div>
+          <input type="range" id="wsd-push" min="0" max="9" step="1" value="4">
+        </div>
+        <div class="wsd-ctl" id="wsd-talk-wrap">
+          <div class="lb"><span>客戶端發話頻率</span><b id="wsd-talk-v">2 則/s</b></div>
+          <input type="range" id="wsd-talk" min="0" max="30" step="1" value="2">
+        </div>
+        <div class="wsd-ctl">
+          <div class="lb"><span>平均訊息大小</span><b id="wsd-size-v">180 B</b></div>
+          <input type="range" id="wsd-size" min="16" max="4096" step="16" value="180">
+        </div>
+        <div class="wsd-ctl">
+          <div class="lb"><span>同時連線數</span><b id="wsd-conns-v">50,000</b></div>
+          <input type="range" id="wsd-conns" min="0" max="6" step="1" value="3">
+        </div>
+        <div class="wsd-ctl">
+          <div class="lb"><span>路徑上最短的 idle timeout</span><b id="wsd-idle-v">60 s</b></div>
+          <input type="range" id="wsd-idle" min="20" max="300" step="5" value="60">
+        </div>
+        <div class="wsd-ctl">
+          <div class="lb"><span>延遲容忍</span><b>端到端</b></div>
+          <select id="wsd-lat">
+            <option value="realtime">≤ 100 ms</option>
+            <option value="sub1s" selected>≤ 1 s</option>
+            <option value="seconds">數秒可接受</option>
+          </select>
         </div>
       </div>
 
-      <div class="status-line" id="wsx-status">選一個劇本後按「下一步」，觀察 readyState 與線上的 frame。</div>
-
-      <div class="wsx-states" id="wsx-states">
-        <div class="wsx-st" data-st="conn"><div class="sn">CONNECTING</div><div class="sv">readyState 0</div></div>
-        <div class="wsx-st" data-st="open"><div class="sn">OPEN</div><div class="sv">readyState 1</div></div>
-        <div class="wsx-st" data-st="closing"><div class="sn">CLOSING</div><div class="sv">readyState 2</div></div>
-        <div class="wsx-st" data-st="closed"><div class="sn">CLOSED</div><div class="sv">readyState 3</div></div>
+      <div class="wsd-flags">
+        <button class="wsd-tog" data-k="needBinary" aria-pressed="false">需要二進位</button>
+        <button class="wsd-tog" data-k="viaProxy" aria-pressed="false">必經企業 proxy / CDN</button>
+        <button class="wsd-tog" data-k="needResume" aria-pressed="true">需要斷線續傳</button>
+        <button class="wsd-tog" data-k="hasH2" aria-pressed="true">後端已有 HTTP/2</button>
+        <button class="btn" id="wsd-reset">重置</button>
       </div>
-      <p class="cap" style="text-align:center">這四格就是 <code>WebSocket.readyState</code> 的全部取值。注意 <strong>half-open 情境下它會長時間停在 <code>OPEN</code></strong>——狀態機不會自己發現對面已經不在了。</p>
 
-      <div class="wsx-wire" id="wsx-wire"></div>
+      <div class="wsd-call" id="wsd-call"></div>
 
-      <div class="wsx-panels">
-        <div class="wsx-panel">
-          <div class="pt">連線狀態</div>
-          <div class="prow"><span class="pk">readyState</span><span class="pv" id="wsx-p-rs">—</span></div>
-          <div class="prow"><span class="pk">子協定</span><span class="pv" id="wsx-p-proto">—</span></div>
-          <div class="prow"><span class="pk">close code</span><span class="pv" id="wsx-p-code">—</span></div>
-          <div class="prow"><span class="pk">wasClean</span><span class="pv" id="wsx-p-clean">—</span></div>
-        </div>
-        <div class="wsx-panel">
-          <div class="pt">保活 / 緩衝 / 重連</div>
-          <div class="prow"><span class="pk">未回應 Ping</span><span class="pv" id="wsx-p-ping">0</span></div>
-          <div class="prow"><span class="pk">bufferedAmount</span><span class="pv" id="wsx-p-buf">0 B</span></div>
-          <div class="prow"><span class="pk">重連嘗試</span><span class="pv" id="wsx-p-att">—</span></div>
-          <div class="prow"><span class="pk">下次退避</span><span class="pv" id="wsx-p-delay">—</span></div>
-          <div class="wsx-bar"><i id="wsx-bar"></i></div>
-        </div>
+      <div class="wsd-chart" id="wsd-chart"></div>
+      <p class="cap">看的不是終點分數，是<strong>領先權在第幾條規則易手</strong>：五條線從同樣的 50 分起跑，每一欄是一條規則吃進你的參數後給出的加減分。<strong>底色那一欄就是決定性規則</strong>——冠亞軍的差距在那一步變動最大，也就是整個選型真正由它拍板的地方。<strong>x 軸標籤轉紅的欄位</strong>代表那條規則上出現了矛盾或風險，詳情列在圖下方。</p>
+
+      <div id="wsd-conflict"></div>
+      <div class="status-line" id="wsd-status"></div>
+
+      <div class="wsd-cost" id="wsd-cost"></div>
+      <div class="wsd-table" id="wsd-table"></div>
+
+      <div class="legend">
+        <span><i class="dot" style="background:#3f6188"></i>WebSocket</span>
+        <span><i class="dot" style="background:#4d7d68"></i>SSE</span>
+        <span><i class="dot" style="background:#a8554f"></i>長輪詢</span>
+        <span><i class="dot" style="background:#a3743e"></i>HTTP/2 串流</span>
+        <span><i class="dot" style="background:#7a5a8e"></i>WebTransport</span>
       </div>
+
+      <div class="wsd-decl">申報：標頭成本用四個估計常數——長輪詢每則一組完整 HTTP 請求 480 B ＋ 回應 250 B；HTTP/2 串流 9 B frame 標頭 ＋ 25 B HPACK 增量；SSE「data: 」6 B ＋「\n\n」2 B ＋「id: 999999\n」11 B；WebTransport 4 B QUIC STREAM 標頭。WebSocket 的標頭則是真算的（2 ＋ 擴充長度 ＋ 4 bytes masking key）。規則權重是常數，但每條規則是否觸發、乘上多少量值，全部由上面的參數推導。</div>
     </div>
   </div>
 
-  <p class="cap">三個值得停下來比對的地方：<strong>(1)</strong> 「伺服器正常關閉」走完整的 <code>CLOSE</code> 往返，<code>wasClean = true</code>、code 是 <code>1001</code>——客戶端<em>知道</em>發生了什麼。<strong>(2)</strong> 「網路靜默中斷」裡，連線斷掉之後狀態機<strong>還停在 <code>OPEN</code> 好幾格</strong>，直到 Ping 連續逾時才被判死，close code 是本地產生的 <code>1006</code>、<code>wasClean = false</code>——這就是第 4 節說的 half-open。<strong>(3)</strong> 重連的三次退避時間，每次按「重置」都會不一樣：那個亂數就是 jitter，把幾萬個同時斷線的客戶端攤開在時間軸上的唯一手段。</p>
+  <p class="cap">三個值得自己動手翻面的地方：<strong>(1)</strong> 只把方向性切成「伺服器單向推送」，勝出者就從 WebSocket 翻成 SSE——這正是第 8 節那句「客戶端需不需要低延遲地說話」的量化版本。<strong>(2)</strong> 在單向狀態下再打開「需要二進位」，兩個候選會擠到 8 分以內、結論條改口說「兩者都可行」，因為 SSE 只送 UTF-8 文字，二進位得先 base64，膨脹幅度 demo 會直接算給你看。<strong>(3)</strong> 把訊息大小拉到 16 bytes：分數幾乎不動，但長輪詢的開銷比會衝到 97% 以上——<strong>選型的代價常常不在分數，在帳單</strong>。</p>
 
   <div class="callout warn">
-    <div class="c-title"><span class="ic">說明</span>這個模型簡化了什麼，以及它跟前四個 demo 的分工</div>
-    <p>模型只保留「狀態機與生命週期」這一條線：不畫 TCP 交握與 TLS 交握（TCP/UDP 篇與 TLS 篇的主場）、不畫封包遺失與重傳、frame 一律視為一次送達。時間軸也被壓縮了——真實的 Ping 週期是數十秒，這裡一步就是一次。<br>
-    分工也刻意錯開：<strong>TLS 篇的 demo</strong> 是訊息序列圖，主角是<em>交握時的密碼學時序</em>；<strong>本篇</strong>的主角是<em>交握之後那段很長的日子</em>——狀態怎麼變、什麼時候你其實已經斷了卻不知道。所以這裡的交握只用兩格帶過。</p>
+    <div class="c-title"><span class="ic">說明</span>這台決策器簡化了什麼</div>
+    <p>它只算<strong>協定層面的成本與適配度</strong>：不計團隊熟悉度、既有基礎設施、函式庫生態與營運成熟度——而這四項在真實決策裡的權重往往不低於任何一條規則。分數本身沒有絕對意義，<strong>有意義的是差距與它是在哪一條規則上拉開的</strong>；差距小於 8 分時 demo 會拒絕給單一答案，因為那個範圍內的差異已經小於上面那四項未被建模的因素。<br>
+    另外，它假設所有候選都跑在同一條路徑上。實務上「企業 proxy 會不會擋 Upgrade」「CDN 支不支援長連線」得逐家確認，demo 只能把它當成一個開關；打開之後若勝出的仍是 WebSocket，它會提醒你準備 fallback，而不是替你決定。</p>
   </div>
 
   <div class="oneliner">
-    <b>一句話答法</b><code>readyState</code> 只有四個值，而它最危險的行為是「網路已斷卻仍停在 <code>OPEN</code>」；乾淨關閉會走 <code>CLOSE</code> 往返並給出明確 code，靜默中斷只會得到本地產生的 <code>1006</code>，之後的重連必須帶 jitter。
+    <b>一句話答法</b>選型不是「這個功能聽起來即不即時」，而是把方向性、發話頻率、訊息大小、路徑限制與連線規模逐條換算成分數與帳單：只要是伺服器單向推送，SSE 幾乎總是贏在重連內建與 proxy 友善；客戶端也要高頻發話時 WebSocket 才划算，而它的代價是你得自己付心跳、退避與補發這三筆帳。
   </div>
 </section>
 
@@ -2158,248 +2283,763 @@ function send(msg) {                         // send() 不會回 EAGAIN，只會
 (function () {
   "use strict";
 
-  /* ---------- 元素 ---------- */
-  var statusEl = document.getElementById("wsx-status");
-  var wireEl   = document.getElementById("wsx-wire");
-  var barEl    = document.getElementById("wsx-bar");
-  var btnNext  = document.getElementById("wsx-btn-next");
-  var btnReset = document.getElementById("wsx-btn-reset");
-  if (!statusEl || !wireEl || !btnNext) return;
+  /* ================= (1) 常數、參數表與純工具 ================= */
 
-  var STATES = ["conn", "open", "closing", "closed"];
-  var ORDER  = { conn: 0, open: 1, closing: 2, closed: 3 };
+  var CAND_KEYS  = ["ws", "sse", "lp", "h2s", "wt"];
+  var CAND_NAME  = { ws: "WebSocket", sse: "SSE", lp: "長輪詢", h2s: "HTTP/2 串流", wt: "WebTransport" };
+  var CAND_COLOR = { ws: "#3f6188", sse: "#4d7d68", lp: "#a8554f", h2s: "#a3743e", wt: "#7a5a8e" };
 
-  var scenario = "clean";
-  var stepIdx = 0;
-  var JIT = [0.75, 0.75, 0.75];   /* reset 時重新抽樣，示範 jitter */
+  /* 標頭估計常數（demo 內向讀者明示申報） */
+  var LP_REQ_HDR = 480, LP_RESP_HDR = 250;      /* 長輪詢：每則一組完整 HTTP 請求 + 回應標頭 */
+  var H2_FRAME_HDR = 9, H2_HPACK_DELTA = 25;    /* HTTP/2：固定 9 bytes frame 標頭 + HPACK 增量 */
+  var SSE_PREFIX = 6, SSE_SUFFIX = 2, SSE_ID_LINE = 11;  /* "data: " + "\n\n" + "id: 999999\n" */
+  var WT_STREAM_HDR = 4;                        /* WebTransport：QUIC STREAM frame 標頭 */
 
-  /* ---------- 步驟資料 ----------
-     每步：st 狀態、add 線上事件、p 面板增量（只寫變動的欄位）、dIdx 退避階數、msg 敘述
-     rows: [kind, tag, text]，kind ∈ c2s | s2c | c2sctl | s2cctl | note | bad          */
+  var BACKOFF_BASE = 500;   /* 第 5 節那段程式碼的退避基底 (ms) */
+  var BUCKET_MS = 100;      /* 統計峰值用的時間桶 */
+  var PING_BYTES = 2, PONG_BYTES = 6;   /* 伺服器 Ping 不 mask；瀏覽器 Pong 必須 mask */
+  var MASK_KEY_DEMO = [0x3a, 0x7b, 0xc1, 0x09];  /* 真實情況每 frame 重抽，這裡固定值示意 */
 
-  var SC = {
-    clean: [
-      { st: "conn", p: { rs: "0 CONNECTING" },
-        add: [["c2s", "HTTP", "GET /ws · Upgrade: websocket · Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ=="]],
-        msg: "交握就是一個普通的 HTTP GET。此刻還沒有 WebSocket——伺服器要是回 200 或 404，故事就在這裡結束。" },
-      { st: "conn", p: { proto: "chat.v2" },
-        add: [["s2c", "HTTP", "101 Switching Protocols · Sec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo="]],
-        msg: "伺服器把 Key 接上固定 GUID、做 SHA-1 再 base64，算出 Accept 並回 101。從這一刻起，這條 TCP 不再說 HTTP。" },
-      { st: "open", p: { rs: "1 OPEN", rsC: "good" },
-        add: [["note", "EVENT", "onopen 觸發 · readyState 0 → 1"]],
-        msg: "OPEN。兩端地位對稱，任一方都可以在任何時候送出一則訊息，不需要對方先問。" },
-      { st: "open", p: {},
-        add: [["c2s", "TEXT", "{\"op\":\"sub\",\"topic\":\"BTCUSD\"} · masked · 標頭 6 bytes"]],
-        msg: "客戶端送出訂閱。客戶端方向的每一個 frame 都必須 masked，所以標頭多了 4 bytes 的 masking key。" },
-      { st: "open", p: {},
-        add: [["s2c", "TEXT", "{\"px\":68120,\"seq\":41} · 未 masked · 標頭 2 bytes"]],
-        msg: "伺服器方向不 mask，標頭只有 2 bytes——這就是變長長度編碼替下行省下來的東西。" },
-      { st: "open", p: { ping: "1", pingC: "warn" },
-        add: [["s2cctl", "PING", "control frame · 伺服器每 25 秒探一次"]],
-        msg: "伺服器送 Ping。瀏覽器端不需要寫任何程式碼——規範要求它自動回 Pong。" },
-      { st: "open", p: { ping: "0", pingC: "" },
-        add: [["c2sctl", "PONG", "瀏覽器自動回應"]],
-        msg: "Pong 回來，未回應計數歸零。這一來一回同時餵飽了路徑上的 NAT 映射與 LB 的 idle timer。" },
-      { st: "closing", p: { rs: "2 CLOSING", rsC: "warn", code: "1001 Going Away", codeC: "warn" },
-        add: [["s2cctl", "CLOSE", "1001 \"server restarting\" · 2 bytes 狀態碼 + UTF-8 理由"]],
-        msg: "伺服器要下線，主動發起關閉交握並帶上明確的 1001。readyState 進入 CLOSING。" },
-      { st: "closed", p: { rs: "3 CLOSED", rsC: "", clean: "true", cleanC: "good" },
-        add: [["c2sctl", "CLOSE", "1001 · 回送 Close frame，之後由伺服器先關閉底層 TCP"]],
-        msg: "雙方都送過 CLOSE，這才叫 clean close。onclose 拿到 code=1001、wasClean=true——客戶端知道發生了什麼。" },
-      { st: "closed", p: { att: "即將第 1 次" }, dIdx: 0,
-        add: [["note", "DECIDE", "1001 = 伺服器只是重啟 → 應重連；若收到的是 1000 就該停手"]],
-        msg: "重連決策看的是 close code，不是「有沒有斷」。把 1000 也拿去重連，就會做出一個永遠關不掉的連線。" }
-    ],
+  var PUSH_STEPS = [0.2, 0.5, 1, 2, 5, 10, 25, 50, 100, 200];
+  var CONN_STEPS = [1000, 5000, 20000, 50000, 200000, 500000, 1000000];
+  var FRAG_STEPS = [64, 256, 1024, 4096, 16384, 65536];
+  var LAT_LABEL  = { realtime: "≤ 100 ms", sub1s: "≤ 1 s", seconds: "數秒可接受" };
+  var CLIENT_LABEL = { browser: "瀏覽器", mobile: "行動 App", iot: "IoT 裝置" };
+  var OPCODE_NAME = { 1: "TEXT 0x1", 2: "BINARY 0x2", 8: "CLOSE 0x8", 9: "PING 0x9", 10: "PONG 0xA" };
 
-    silent: [
-      { st: "conn", p: { rs: "0 CONNECTING" },
-        add: [["c2s", "HTTP", "GET /ws · Upgrade: websocket"]],
-        msg: "同樣的交握起手式。" },
-      { st: "open", p: { rs: "1 OPEN", rsC: "good", proto: "chat.v2" },
-        add: [["s2c", "HTTP", "101 Switching Protocols"], ["note", "EVENT", "onopen · readyState 1"]],
-        msg: "連線建立，開始接收行情推送。" },
-      { st: "open", p: {},
-        add: [["s2c", "TEXT", "{\"px\":68120,\"seq\":41}"], ["s2c", "TEXT", "{\"px\":68135,\"seq\":42}"]],
-        msg: "資料正常往返，客戶端記下 lastSeq = 42。" },
-      { st: "open", p: { rsC: "warn" },
-        add: [["bad", "✕", "使用者進了電梯 · 路徑靜默中斷：沒有 FIN、沒有 RST、沒有任何事件"]],
-        msg: "關鍵的一格：連線實際上已經死了，但兩端都不知道。readyState 仍然是 OPEN，事件迴圈一片安靜。" },
-      { st: "open", p: { ping: "1", pingC: "warn" },
-        add: [["s2cctl", "PING", "第 1 次探測（送出後啟動計時器）"]],
-        msg: "伺服器照常送 Ping——只是它送進的是一條已經不通的路徑。" },
-      { st: "open", p: {},
-        add: [["note", "TIMEOUT", "25 秒內沒有 Pong · 未回應計數 = 1"]],
-        msg: "沒有錯誤、沒有 onclose。唯一的訊號是那個沒有回來的 Pong——這就是為什麼保活必須是「主動探測 + 計時」。" },
-      { st: "open", p: { ping: "2", pingC: "bad" },
-        add: [["s2cctl", "PING", "第 2 次探測"], ["note", "TIMEOUT", "再次逾時 · 未回應計數 = 2"]],
-        msg: "第二次逾時。從斷線到這裡，狀態機已經停在 OPEN 好幾格了——這就是 half-open。" },
-      { st: "closed", p: { rs: "3 CLOSED", rsC: "", code: "1006 Abnormal", codeC: "bad", clean: "false", cleanC: "bad", ping: "—", pingC: "" },
-        add: [["bad", "LOCAL", "判定連線已死 → 本地產生 close code 1006（從未收到 CLOSE frame）"]],
-        msg: "客戶端自行放棄。1006 是保留碼、不可能出現在線上——日誌裡的 1006 佔比，量的就是「關閉交握沒有發生」的次數。" },
-      { st: "closed", p: { att: "1" }, dIdx: 0,
-        add: [["note", "BACKOFF", "退避 #1 = min(30000, 500 × 2^0) × jitter"],
-              ["c2s", "HTTP", "GET /ws → 失敗，網路仍未恢復"]],
-        msg: "第一次退避。基底 500ms，乘上 0.5–1.0 的隨機係數。" },
-      { st: "closed", p: { att: "2" }, dIdx: 1,
-        add: [["note", "BACKOFF", "退避 #2 = min(30000, 500 × 2^1) × jitter"],
-              ["c2s", "HTTP", "GET /ws → 失敗"]],
-        msg: "等待時間加倍。注意每個客戶端抽到的 jitter 都不同——這正是打破相位鎖定、避免重連風暴的地方。" },
-      { st: "open", p: { rs: "1 OPEN", rsC: "good", att: "3", code: "—", codeC: "", clean: "—", cleanC: "", ping: "0" }, dIdx: 2,
-        add: [["note", "BACKOFF", "退避 #3 = min(30000, 500 × 2^2) × jitter"],
-              ["c2s", "HTTP", "GET /ws"], ["s2c", "HTTP", "101 Switching Protocols"]],
-        msg: "第三次成功。管道通了——但這只代表管道通了。" },
-      { st: "open", p: {},
-        add: [["c2s", "TEXT", "{\"type\":\"resume\",\"lastSeq\":42}"],
-              ["s2c", "TEXT", "{\"type\":\"replay\",\"from\":43,\"count\":6}"]],
-        msg: "重連 ≠ 恢復。客戶端宣告 lastSeq，伺服器補發 43 之後的六則；若保留視窗已經過期，回的就必須是「太舊了，請走全量重載」。" }
-    ],
+  function log2(x) { return Math.log(x) / Math.LN2; }
+  function log10(x) { return Math.log(x) / Math.LN10; }
 
-    buffer: [
-      { st: "open", p: { rs: "1 OPEN", rsC: "good", proto: "chat.v2" },
-        add: [["c2s", "HTTP", "GET /ws"], ["s2c", "HTTP", "101 Switching Protocols"], ["note", "EVENT", "onopen"]],
-        msg: "交握快轉，直接看發送側：應用要把每秒 200 筆行情推給這一個客戶端。" },
-      { st: "open", p: { buf: "48 KB", pct: 12 },
-        add: [["c2s", "TEXT", "send() × 40 · 應用層每 5ms 產一筆"]],
-        msg: "send() 立刻回傳：沒有回傳值、不會丟例外、不會回 EAGAIN。資料靜靜進了瀏覽器的內部緩衝。" },
-      { st: "open", p: { buf: "310 KB", pct: 32, bufC: "warn", barC: "warn" },
-        add: [["note", "SLOW", "對端在行動網路上 · 實際寫出速率遠低於產出速率"]],
-        msg: "bufferedAmount 開始持續上升——這是唯一的訊號。TCP 的 rwnd 早就在收縮了，但應用層完全看不到。" },
-      { st: "open", p: { buf: "780 KB", pct: 74 },
-        add: [["c2s", "TEXT", "send() 仍在繼續 · 沒有任何機制會阻止它"]],
-        msg: "程式碼裡若沒有主動檢查，這條曲線只會往上，終點是分頁 OOM——而且是被單一個慢客戶端拖垮。" },
-      { st: "open", p: { buf: "1.02 MB", pct: 100, bufC: "bad", barC: "bad" },
-        add: [["bad", "THRESHOLD", "bufferedAmount > 1 MB · 觸發有界佇列上限"]],
-        msg: "門檻到了。這一刻必須做選擇——而且是設計時就該決定好的選擇，不是當下臨時想。" },
-      { st: "open", p: { buf: "36 KB", pct: 8, bufC: "good", barC: "" },
-        add: [["note", "選項 A", "合併：同一支股票只保留最新一筆報價 → 佇列瞬間收斂"]],
-        msg: "策略一，對應 TCP/UDP 篇的「丟棄與合併」：行情、游標、線上狀態這類資料只有最新值有意義，覆蓋舊值即可。" },
-      { st: "closing", p: { rs: "2 CLOSING", rsC: "warn", code: "1013 Try Again Later", codeC: "warn", buf: "—", pct: 0, bufC: "", barC: "" },
-        add: [["note", "選項 B", "不可丟的資料 → 主動 close(1013)，讓客戶端退避後重連補發"]],
-        msg: "或者，同樣在門檻那一刻——策略二，對應 TCP/UDP 篇的「有界佇列 + 斷線」：犧牲這一條連線，保全整個行程。遺漏的訊息靠第 5 節的序號補發接回來。" },
-      { st: "closed", p: { rs: "3 CLOSED", rsC: "", clean: "true", cleanC: "good" },
-        add: [["note", "RESULT", "一個 slow consumer 的成本，會隨 fan-out 的廣播頻率被放大"]],
-        msg: "fan-out 場景下每一則廣播都要為他複製一份。單機的答案就是犧牲他一個；多節點版本的這個問題留給連線擴充篇。" }
-    ]
-  };
+  /* UTF-8 位元組數：逐 code unit 手算，代理對算 4 bytes */
+  function utf8Bytes(s) {
+    var str = String(s), n = 0, i, c, d;
+    for (i = 0; i < str.length; i++) {
+      c = str.charCodeAt(i);
+      if (c < 0x80) { n += 1; }
+      else if (c < 0x800) { n += 2; }
+      else if (c >= 0xd800 && c <= 0xdbff && i + 1 < str.length) {
+        d = str.charCodeAt(i + 1);
+        if (d >= 0xdc00 && d <= 0xdfff) { n += 4; i += 1; } else { n += 3; }
+      } else { n += 3; }
+    }
+    return n;
+  }
 
-  var BASE = {
-    rs: "—", rsC: "", proto: "—", code: "—", codeC: "", clean: "—", cleanC: "",
-    ping: "0", pingC: "", buf: "0 B", bufC: "", att: "—", delay: "—", pct: 0, barC: ""
-  };
+  function extLenBytes(p) { return p < 126 ? 0 : (p < 65536 ? 2 : 8); }
+  function lenCodeOf(p)   { return p < 126 ? p : (p < 65536 ? 126 : 127); }
+  function wsHeaderBytes(p, masked) { return 2 + extLenBytes(p) + (masked ? 4 : 0); }
+  function b64Bytes(n) { return Math.ceil(n / 3) * 4; }
+  /* 開銷比統一定義：線上實際位元組扣掉有效負載，除以線上實際位元組 */
+  function overheadPct(wire, useful) { return wire <= 0 ? 0 : (wire - useful) / wire * 100; }
 
-  /* ---------- 工具 ---------- */
+  function hex2(v) { var h = Number(v).toString(16).toUpperCase(); return h.length < 2 ? "0" + h : h; }
+  /* 流量用十進位前綴（網路流量的通行慣例，與帳單口徑一致） */
+  function fmtTraffic(n) {
+    if (n < 1000) { return Math.round(n) + " B"; }
+    if (n < 1e6) { return (n / 1e3).toFixed(1) + " KB"; }
+    if (n < 1e9) { return (n / 1e6).toFixed(1) + " MB"; }
+    if (n < 1e12) { return (n / 1e9).toFixed(2) + " GB"; }
+    return (n / 1e12).toFixed(2) + " TB";
+  }
+  function fmtInt(n) {
+    var s = String(Math.round(n)), out = "", i, c = 0;
+    for (i = s.length - 1; i >= 0; i--) { out = s.charAt(i) + out; c += 1; if (c % 3 === 0 && i > 0) { out = "," + out; } }
+    return out;
+  }
   function esc(s) {
     return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
   }
-  function fmtMs(ms) {
-    return ms < 1000 ? Math.round(ms) + " ms" : (ms / 1000).toFixed(2) + " s";
-  }
-  function backoff(i) {
-    return Math.min(30000, 500 * Math.pow(2, i)) * JIT[i];
-  }
-  function setP(id, val, cls) {
-    var el = document.getElementById(id);
-    if (!el) return;
-    el.textContent = val;
-    el.className = "pv" + (cls ? " " + cls : "");
-  }
 
-  var KIND = {
-    c2s:    { cls: "c2s", ar: "→" },
-    s2c:    { cls: "s2c", ar: "←" },
-    c2sctl: { cls: "c2s ctl", ar: "→" },
-    s2cctl: { cls: "s2c ctl", ar: "←" },
-    note:   { cls: "note", ar: "·" },
-    bad:    { cls: "bad", ar: "✕" }
-  };
+  /* ================= (2) compute 純函式 ================= */
 
-  /* ---------- 渲染 ---------- */
-  function render() {
-    var steps = SC[scenario];
-    var state = {};
-    var k;
-    for (k in BASE) { if (Object.prototype.hasOwnProperty.call(BASE, k)) state[k] = BASE[k]; }
+  // @probe fn       computeTransportChoice
+  // @probe baseline {"duplex":1,"pushRate":5,"clientRate":2,"msgBytes":180,"client":"browser","needBinary":0,"viaProxy":0,"conns":50000,"needResume":1,"hasH2":1,"idleTimeout":60,"latency":"sub1s"}
+  // @probe sweep    {"duplex":[0,1],"pushRate":[0.2,200],"clientRate":[0,30],"msgBytes":[16,4096],"client":["browser","iot"],"needBinary":[0,1],"viaProxy":[0,1],"conns":[1000,1000000],"needResume":[0,1],"hasH2":[0,1],"idleTimeout":[20,300],"latency":["realtime","seconds"]}
+  function computeTransportChoice(p) {
+    var mb    = Math.max(1, Number(p.msgBytes));
+    var conns = Math.max(1, Number(p.conns));
+    var push  = Math.max(0, Number(p.pushRate));
+    var idle  = Math.max(5, Number(p.idleTimeout));
+    var talk  = p.duplex ? Math.max(0, Number(p.clientRate)) : 0;
 
-    var rows = [];
-    var cur = "conn";
+    /* --- 12 條加權規則：權重是常數，觸發與量值由參數算出 --- */
+    var score = { ws: 50, sse: 50, lp: 50, h2s: 50, wt: 50 };
+    var rules = [], i, k;
 
-    for (var i = 0; i <= stepIdx && i < steps.length; i++) {
-      var s = steps[i];
-      cur = s.st;
-      if (s.add) { for (var j = 0; j < s.add.length; j++) rows.push(s.add[j]); }
-      if (s.p) { for (k in s.p) { if (Object.prototype.hasOwnProperty.call(s.p, k)) state[k] = s.p[k]; } }
-      if (typeof s.dIdx === "number") state.delay = fmtMs(backoff(s.dIdx));
-      if (i === stepIdx) statusEl.textContent = s.msg;
+    function fire(name, why, d) {
+      var cum = {}, j;
+      for (j = 0; j < CAND_KEYS.length; j++) {
+        k = CAND_KEYS[j];
+        score[k] += (d[k] || 0);
+        cum[k] = score[k];
+      }
+      rules.push({ name: name, why: why, delta: d, cum: cum, flag: false });
     }
 
-    /* 狀態機 */
-    var reached = ORDER[cur];
-    for (var n = 0; n < STATES.length; n++) {
-      var box = document.querySelector('.wsx-st[data-st="' + STATES[n] + '"]');
-      if (!box) continue;
-      box.className = "wsx-st";
-      if (STATES[n] === cur) {
-        box.classList.add(cur === "closed" ? "dead" : "on");
-      } else if (ORDER[STATES[n]] < reached) {
-        box.classList.add("done");
+    fire("R1", "方向性",
+      p.duplex ? { ws: 18, wt: 16, sse: -22, h2s: -22, lp: -6 }
+               : { ws: -4, wt: -6, sse: 16, h2s: 12, lp: 4 });
+
+    var w2 = Math.min(20, 7 * log2(1 + talk));
+    fire("R2", "客戶端發話頻率",
+      { ws: w2, wt: w2 * 0.9, sse: -w2 * 0.5, h2s: -w2 * 0.5, lp: -Math.min(24, 5 * talk) });
+
+    var w3 = Math.min(16, 5 * log2(1 + push));
+    fire("R3", "伺服器推送頻率",
+      { ws: w3, sse: w3 * 0.8, h2s: w3 * 0.7, wt: w3 * 0.8, lp: -Math.min(22, 3 * push) });
+
+    fire("R4", "訊息大小",
+      { lp: -Math.min(18, 1800 / mb), ws: mb < 200 ? 8 : 2, wt: mb > 2048 ? 4 : 0, sse: 0, h2s: 0 });
+
+    fire("R5", "二進位需求",
+      p.needBinary ? { sse: -14, ws: 8, wt: 10, lp: 2, h2s: 4 }
+                   : { sse: 0, ws: 0, wt: 0, lp: 0, h2s: 0 });
+
+    fire("R6", "客戶端型態",
+      p.client === "iot"    ? { ws: -6, wt: -10, sse: -4, lp: -8, h2s: -6 } :
+      p.client === "mobile" ? { ws: -2, wt: -4, sse: 0, lp: -10, h2s: 0 }
+                            : { wt: -8, ws: 0, sse: 0, lp: 0, h2s: 0 });
+
+    fire("R7", "企業 proxy / CDN",
+      p.viaProxy ? { ws: -16, wt: -20, sse: 10, lp: 14, h2s: 8 }
+                 : { ws: 0, wt: 0, sse: 0, lp: 0, h2s: 0 });
+
+    var w8 = Math.min(14, 2.2 * log10(conns));
+    fire("R8", "連線規模",
+      { lp: -w8 * 1.6, ws: w8 * 0.5, sse: w8 * 0.4, h2s: w8 * 0.4, wt: w8 * 0.3 });
+
+    fire("R9", "斷線續傳",
+      p.needResume ? { sse: 12, ws: -6, lp: -2, h2s: -4, wt: -6 }
+                   : { sse: 0, ws: 0, lp: 0, h2s: 0, wt: 0 });
+
+    fire("R10", "後端 HTTP/2",
+      p.hasH2 ? { h2s: 10, sse: 8, ws: -2, lp: 0, wt: 0 }
+              : { h2s: -12, sse: -4, ws: 0, lp: 0, wt: 0 });
+
+    fire("R11", "延遲容忍",
+      p.latency === "realtime" ? { lp: -18, ws: 8, wt: 8, sse: 0, h2s: 0 } :
+      p.latency === "sub1s"    ? { lp: -6, ws: 0, wt: 0, sse: 0, h2s: 0 }
+                               : { lp: 8, sse: 4, ws: -4, wt: -4, h2s: 0 });
+
+    fire("R12", "保活 / idle timeout",
+      (p.duplex && idle < 45) ? { ws: -5, wt: -3, sse: -3, h2s: -2, lp: 4 }
+                              : { ws: 0, wt: 0, sse: 0, lp: 0, h2s: 0 });
+
+    /* --- 排名、差距、決定性規則 --- */
+    var rank = CAND_KEYS.slice().sort(function (a, b) { return score[b] - score[a]; });
+    var winner = rank[0], runner = rank[1];
+    var gap = score[winner] - score[runner];
+    var decisive = 0, best = -1, prevLead = 0, lead, swing;
+    for (i = 0; i < rules.length; i++) {
+      lead = rules[i].cum[winner] - rules[i].cum[runner];
+      swing = Math.abs(lead - prevLead);
+      if (swing > best) { best = swing; decisive = i; }
+      prevLead = lead;
+    }
+
+    /* --- 矛盾與風險旗標（落在對應的規則欄） --- */
+    var conflicts = [];
+    if (!p.duplex && Number(p.clientRate) > 0) {
+      conflicts.push({ at: 1, text: "宣告了單向推送，卻同時要求每秒 " + Number(p.clientRate) + " 則的客戶端發話——發話頻率已被歸零計分，兩者只能留一個。" });
+    }
+    if (!p.duplex && p.needBinary) {
+      conflicts.push({ at: 4, text: "單向推送指向 SSE，但 SSE 只送 UTF-8 文字：" + mb + " B 的二進位經 base64 會膨脹成 " + b64Bytes(mb) + " B（+" + ((b64Bytes(mb) / mb - 1) * 100).toFixed(1) + "%）。" });
+    }
+    if (p.viaProxy && (winner === "ws" || winner === "wt")) {
+      conflicts.push({ at: 6, text: "勝出的是 " + CAND_NAME[winner] + "，但路徑上有企業 proxy／CDN：Upgrade 被擋或 UDP 不通時整條退不回去，要準備 fallback。" });
+    }
+    if (p.client === "iot" && conns > 200000) {
+      conflicts.push({ at: 5, text: fmtInt(conns) + " 顆 IoT 裝置全部掛 TLS + HTTP 堆疊並常時跑心跳，帳單會壓垮電池與頻寬——這正是 MQTT 篇要處理的場景。" });
+    }
+    for (i = 0; i < conflicts.length; i++) { rules[conflicts[i].at].flag = true; }
+
+    /* --- 成本一：每則訊息的框架開銷比 --- */
+    var wsDown = wsHeaderBytes(mb, 0), wsUp = wsHeaderBytes(mb, 1);
+    var ssePayload = p.needBinary ? b64Bytes(mb) : mb;
+    var sseHdr = SSE_PREFIX + SSE_SUFFIX + SSE_ID_LINE;
+    var lpHdr = LP_REQ_HDR + LP_RESP_HDR;
+    var h2Hdr = H2_FRAME_HDR + H2_HPACK_DELTA;
+    var overhead = {
+      ws:  { hdr: wsDown, wire: wsDown + mb,           pct: overheadPct(wsDown + mb, mb) },
+      sse: { hdr: sseHdr, wire: sseHdr + ssePayload,   pct: overheadPct(sseHdr + ssePayload, mb) },
+      lp:  { hdr: lpHdr,  wire: lpHdr + mb,            pct: overheadPct(lpHdr + mb, mb) },
+      h2s: { hdr: h2Hdr,  wire: h2Hdr + mb,            pct: overheadPct(h2Hdr + mb, mb) },
+      wt:  { hdr: WT_STREAM_HDR, wire: WT_STREAM_HDR + mb, pct: overheadPct(WT_STREAM_HDR + mb, mb) }
+    };
+
+    /* --- 成本二：每日總流量（WebSocket vs 長輪詢） --- */
+    var wsPerSec = push * (mb + wsDown) + talk * (mb + wsUp);
+    var lpPerSec = push * (mb + lpHdr) + talk * (mb + lpHdr);
+    var daily = {
+      perConnSec: wsPerSec,
+      ws: wsPerSec * 86400 * conns,
+      lp: lpPerSec * 86400 * conns,
+      ratio: wsPerSec > 0 ? lpPerSec / wsPerSec : 0
+    };
+
+    /* --- 成本三：建議 ping 間隔與保活帳單 --- */
+    var ping = Math.max(5, Math.floor(idle * 0.4));
+    var keepalive = {
+      ping: ping,
+      safe: ping * 2 < idle,
+      margin: idle - ping * 2,
+      daily: conns * (86400 / ping) * (PING_BYTES + PONG_BYTES)
+    };
+
+    /* --- 成本四：重連風暴峰值（第一次退避窗） --- */
+    var storm = {
+      window: BACKOFF_BASE,
+      noJitter:   conns / (BUCKET_MS / 1000),
+      halfJitter: conns / (0.5 * BACKOFF_BASE / 1000),
+      fullJitter: conns / (BACKOFF_BASE / 1000)
+    };
+    storm.cutHalf = storm.noJitter / storm.halfJitter;
+    storm.cutFull = storm.noJitter / storm.fullJitter;
+
+    return {
+      keys: CAND_KEYS, rules: rules, score: score, rank: rank,
+      winner: winner, runner: runner, gap: gap, tooClose: gap < 8,
+      decisive: decisive, decisiveName: rules[decisive].name + " " + rules[decisive].why,
+      conflicts: conflicts, overhead: overhead, daily: daily,
+      keepalive: keepalive, storm: storm, talk: talk,
+      sseInflated: p.needBinary ? b64Bytes(mb) : mb
+    };
+  }
+
+  // @probe fn       computeFrame
+  // @probe baseline {"text":"price 68120 seq 41","copies":200,"opcode":1,"fromClient":1,"fin":1,"fragment":0,"fragBytes":1024,"closeCode":1001}
+  // @probe sweep    {"text":["a","中文訊息內容"],"copies":[1,5000],"opcode":[1,8],"fromClient":[0,1],"fin":[0,1],"fragment":[0,1],"fragBytes":[64,65536],"closeCode":[1000,4001]}
+  function computeFrame(p) {
+    var textBytes = utf8Bytes(p.text);
+    var copies    = Math.max(1, Math.round(Number(p.copies)));
+    var opcode    = Number(p.opcode);
+    var masked    = p.fromClient ? 1 : 0;
+    var fin       = p.fin ? 1 : 0;
+    var fragBytes = Math.max(1, Math.round(Number(p.fragBytes)));
+    var code      = Math.round(Number(p.closeCode));
+
+    var isControl = opcode >= 8;
+    var isClose   = opcode === 8;
+    var bodyBytes = textBytes * copies;
+    var payload   = isClose ? 2 + bodyBytes : bodyBytes;
+
+    var lenCode = lenCodeOf(payload);
+    var extLen  = extLenBytes(payload);
+    var header  = wsHeaderBytes(payload, masked);
+    var ovh     = overheadPct(header + payload, payload);
+
+    /* 下一個長度門檻 */
+    var next = null;
+    if (payload < 126)        { next = { at: 126,   need: 126 - payload,   add: 2 }; }
+    else if (payload < 65536) { next = { at: 65536, need: 65536 - payload, add: 6 }; }
+
+    /* 分片：每一片各自算自己的長度欄位 */
+    var countIfFrag = Math.max(1, Math.ceil(payload / fragBytes));
+    var lastFrag    = payload - (countIfFrag - 1) * fragBytes;
+    var fragTotal   = (countIfFrag - 1) * wsHeaderBytes(Math.min(fragBytes, payload), masked) +
+                      wsHeaderBytes(lastFrag, masked);
+    var effCount    = p.fragment ? countIfFrag : 1;
+    var effHeader   = p.fragment ? fragTotal : header;
+    var amplify     = header > 0 ? effHeader / header : 1;
+    var effOvh      = overheadPct(effHeader + payload, payload);
+
+    /* 標頭實際位元組（單一 frame 視角） */
+    var bytes = [], i, hi, lo;
+    bytes.push({ v: (fin ? 128 : 0) | opcode, f: "FIN/RSV/opcode" });
+    bytes.push({ v: (masked ? 128 : 0) | lenCode, f: "MASK/len(7)" });
+    if (extLen === 2) {
+      bytes.push({ v: (payload >> 8) & 0xff, f: "ext-len(16)" });
+      bytes.push({ v: payload & 0xff, f: "ext-len(16)" });
+    } else if (extLen === 8) {
+      hi = Math.floor(payload / 4294967296);
+      lo = payload - hi * 4294967296;
+      bytes.push({ v: (hi >> 24) & 0xff, f: "ext-len(64)" });
+      bytes.push({ v: (hi >> 16) & 0xff, f: "ext-len(64)" });
+      bytes.push({ v: (hi >> 8) & 0xff, f: "ext-len(64)" });
+      bytes.push({ v: hi & 0xff, f: "ext-len(64)" });
+      bytes.push({ v: (lo / 16777216) & 0xff, f: "ext-len(64)" });
+      bytes.push({ v: (lo / 65536) & 0xff, f: "ext-len(64)" });
+      bytes.push({ v: (lo / 256) & 0xff, f: "ext-len(64)" });
+      bytes.push({ v: lo & 0xff, f: "ext-len(64)" });
+    }
+    if (masked) {
+      for (i = 0; i < 4; i++) { bytes.push({ v: MASK_KEY_DEMO[i], f: "masking-key" }); }
+    }
+    if (isClose) {
+      bytes.push({ v: (code >> 8) & 0xff, f: "close code" });
+      bytes.push({ v: code & 0xff, f: "close code" });
+    }
+
+    /* close code 分類（恆算，與 opcode 無關） */
+    var codeClass = "standard", codeNote = "標準碼，可放進 CLOSE frame";
+    if (code < 1000 || code > 4999) { codeClass = "invalid"; codeNote = "不在 1000–4999 範圍內"; }
+    else if (code === 1005 || code === 1006) { codeClass = "reserved"; codeNote = "保留碼，本地產生，規範禁止放進 CLOSE frame"; }
+    else if (code >= 4000) { codeClass = "custom"; codeNote = "應用自訂區段，語義由你決定"; }
+    else if (code >= 1016 && code < 3000) { codeClass = "invalid"; codeNote = "未指派的保留區段"; }
+
+    /* 合法性判定 */
+    var bad = [];
+    if (isControl && payload > 125) { bad.push("control frame 的 payload 必須 ≤ 125 bytes，目前是 " + payload + " bytes。"); }
+    if (isClose && bodyBytes > 123) { bad.push("CLOSE 的理由文字最多 123 bytes（125 扣掉 2 bytes 狀態碼），目前是 " + bodyBytes + " bytes。"); }
+    if (isControl && !fin) { bad.push("control frame 不可分片，FIN 必須為 1。"); }
+    if (isControl && p.fragment) { bad.push("control frame 不可分片，不能切成 " + countIfFrag + " 片。"); }
+    if (isClose && codeClass !== "standard" && codeClass !== "custom") { bad.push("close code " + code + "：" + codeNote + "。"); }
+
+    return {
+      textBytes: textBytes, copies: copies, bodyBytes: bodyBytes, payload: payload,
+      lenCode: lenCode, extLen: extLen, lenKind: extLen === 0 ? "7 bit 直接編碼" : (extLen === 2 ? "7 bit = 126 ＋ 16 bit 擴充" : "7 bit = 127 ＋ 64 bit 擴充"),
+      header: header, overhead: ovh, next: next,
+      countIfFrag: countIfFrag, lastFrag: lastFrag, fragTotal: fragTotal,
+      effCount: effCount, effHeader: effHeader, effOverhead: effOvh, amplify: amplify,
+      bytes: bytes, isControl: isControl, isClose: isClose,
+      codeClass: codeClass, codeNote: codeNote, violations: bad
+    };
+  }
+
+  /* ================= (3) DOM 參照 ================= */
+
+  var dRoot = document.getElementById("wsd-demo");
+  var fRoot = document.getElementById("wsf-demo");
+  if (!dRoot && !fRoot) { return; }
+
+  var dEl = {}, fEl = {}, dState = null, fState = null;
+
+  function pick(root, ids, bag) {
+    var i;
+    for (i = 0; i < ids.length; i++) { bag[ids[i]] = root.querySelector("#" + ids[i]); }
+  }
+
+  if (dRoot) {
+    pick(dRoot, ["wsd-chart", "wsd-call", "wsd-status", "wsd-cost", "wsd-conflict",
+                 "wsd-push", "wsd-talk", "wsd-size", "wsd-conns", "wsd-idle", "wsd-lat",
+                 "wsd-push-v", "wsd-talk-v", "wsd-size-v", "wsd-conns-v", "wsd-idle-v",
+                 "wsd-talk-wrap", "wsd-table"], dEl);
+    dState = {
+      duplex: 1, pushRate: 5, clientRate: 2, msgBytes: 180, client: "browser",
+      needBinary: 0, viaProxy: 0, conns: 50000, needResume: 1, hasH2: 1,
+      idleTimeout: 60, latency: "sub1s"
+    };
+  }
+  if (fRoot) {
+    pick(fRoot, ["wsf-chart", "wsf-hex", "wsf-status", "wsf-facts", "wsf-text",
+                 "wsf-copies", "wsf-copies-v", "wsf-fragsize", "wsf-fragsize-v",
+                 "wsf-code", "wsf-code-wrap", "wsf-lenbox"], fEl);
+    fState = {
+      text: '{"px":68120,"seq":41}', copies: 1, opcode: 1, fromClient: 1,
+      fin: 1, fragment: 0, fragBytes: 1024, closeCode: 1001
+    };
+  }
+
+  /* ================= (4) render ================= */
+
+  /* --- 決策器：累進分數折線圖 --- */
+  function drawScoreChart(r) {
+    var W = 720, H = 300, L = 38, R = 118, T = 16, B = 34;
+    var n = r.rules.length, i, j, k, v;
+    var lo = 50, hi = 50;
+    for (i = 0; i < n; i++) {
+      for (j = 0; j < CAND_KEYS.length; j++) {
+        v = r.rules[i].cum[CAND_KEYS[j]];
+        if (v < lo) { lo = v; }
+        if (v > hi) { hi = v; }
       }
     }
+    var pad = Math.max(6, (hi - lo) * 0.08);
+    lo -= pad; hi += pad;
+    function X(idx) { return L + (W - L - R) * idx / n; }
+    function Y(val) { return T + (H - T - B) * (hi - val) / (hi - lo); }
 
-    /* 線上事件 */
-    var html = rows.map(function (r, idx) {
-      var kd = KIND[r[0]] || KIND.note;
-      var last = idx === rows.length - 1 ? " last" : "";
-      return '<div class="wsx-row ' + kd.cls + last + '">' +
-             '<span class="ar">' + kd.ar + '</span>' +
-             '<span class="tg">' + esc(r[1]) + '</span>' +
-             '<span class="tx">' + esc(r[2]) + '</span></div>';
-    }).join("");
-    wireEl.innerHTML = html || '<div class="wsx-row note"><span class="ar">·</span><span class="tx">尚無事件</span></div>';
-    wireEl.scrollTop = wireEl.scrollHeight;
+    var s = '<svg viewBox="0 0 ' + W + ' ' + H + '" style="width:100%;height:auto" role="img" ' +
+            'aria-label="五種即時傳輸候選的累進加權分數走勢"><title>累進加權分數：五個候選在 12 條規則上的領先權變化</title>' +
+            '<rect x="0" y="0" width="' + W + '" height="' + H + '" fill="#ffffff"></rect>';
 
-    /* 面板 */
-    setP("wsx-p-rs", state.rs, state.rsC);
-    setP("wsx-p-proto", state.proto, "");
-    setP("wsx-p-code", state.code, state.codeC);
-    setP("wsx-p-clean", state.clean, state.cleanC);
-    setP("wsx-p-ping", state.ping, state.pingC);
-    setP("wsx-p-buf", state.buf, state.bufC);
-    setP("wsx-p-att", state.att, "");
-    setP("wsx-p-delay", state.delay, state.delay === "—" ? "" : "warn");
+    /* 決定性規則欄底色 */
+    s += '<rect x="' + X(r.decisive).toFixed(1) + '" y="' + T + '" width="' + (X(1) - X(0)).toFixed(1) +
+         '" height="' + (H - T - B) + '" fill="#eef2f7"></rect>';
 
-    if (barEl) {
-      barEl.style.width = (state.pct || 0) + "%";
-      barEl.className = state.barC || "";
+    /* 50 分基準線 */
+    s += '<line x1="' + L + '" y1="' + Y(50).toFixed(1) + '" x2="' + (W - R) + '" y2="' + Y(50).toFixed(1) +
+         '" stroke="#d8d5d0" stroke-dasharray="3 3"></line>' +
+         '<text x="' + (L - 6) + '" y="' + (Y(50) + 4).toFixed(1) + '" text-anchor="end" font-family="ui-monospace,monospace" font-size="11" fill="#8b8681">50</text>';
+
+    /* x 軸標籤 */
+    for (i = 0; i < n; i++) {
+      var cx = (X(i) + X(i + 1)) / 2;
+      var flagged = r.rules[i].flag;
+      s += '<text x="' + cx.toFixed(1) + '" y="' + (H - 16) + '" text-anchor="middle" font-family="ui-monospace,monospace" font-size="11" fill="' +
+           (flagged ? "#a8554f" : "#8b8681") + '" font-weight="' + (flagged ? "700" : "400") + '">' + r.rules[i].name + '</text>';
+      s += '<text x="' + cx.toFixed(1) + '" y="' + (H - 4) + '" text-anchor="middle" font-family="ui-monospace,monospace" font-size="11" fill="#b5b0aa">' +
+           (flagged ? "!" : "") + '</text>';
     }
 
-    btnNext.disabled = stepIdx >= steps.length - 1;
+    /* 五條累進線 */
+    for (j = 0; j < CAND_KEYS.length; j++) {
+      k = CAND_KEYS[j];
+      var d = "M " + X(0).toFixed(1) + " " + Y(50).toFixed(1);
+      for (i = 0; i < n; i++) { d += " L " + X(i + 1).toFixed(1) + " " + Y(r.rules[i].cum[k]).toFixed(1); }
+      var win = (k === r.winner);
+      s += '<path d="' + d + '" fill="none" stroke="' + CAND_COLOR[k] + '" stroke-width="' + (win ? 2.6 : 1.4) +
+           '" stroke-linejoin="round" opacity="' + (win ? 1 : 0.68) + '"></path>';
+      s += '<circle cx="' + X(n).toFixed(1) + '" cy="' + Y(r.score[k]).toFixed(1) + '" r="' + (win ? 4 : 2.6) +
+           '" fill="' + CAND_COLOR[k] + '"></circle>';
+      s += '<text x="' + (X(n) + 8) + '" y="' + (Y(r.score[k]) + 4).toFixed(1) + '" font-family="ui-monospace,monospace" font-size="11" fill="' +
+           CAND_COLOR[k] + '" font-weight="' + (win ? "700" : "400") + '">' + CAND_NAME[k] + " " + r.score[k].toFixed(1) + '</text>';
+    }
+
+    s += '<line x1="' + L + '" y1="' + T + '" x2="' + L + '" y2="' + (H - B) + '" stroke="#d8d5d0"></line>';
+    s += "</svg>";
+    return s;
   }
 
-  function reset() {
-    stepIdx = 0;
-    JIT = [0, 1, 2].map(function () { return 0.5 + Math.random() * 0.5; });
-    render();
+  function renderDecision() {
+    var r = computeTransportChoice(dState);
+    dEl["wsd-chart"].innerHTML = drawScoreChart(r);
+
+    /* 結論條：全部由模板 + 算出來的數字拼出 */
+    var call;
+    if (r.tooClose) {
+      call = "差距只有 " + r.gap.toFixed(1) + " 分（< 8）：" + CAND_NAME[r.winner] + " 與 " + CAND_NAME[r.runner] +
+             " 兩者都可行，決定權交回團隊熟悉度與既有基礎設施。";
+    } else {
+      call = "建議 " + CAND_NAME[r.winner] + "（" + r.score[r.winner].toFixed(1) + " 分），領先次位的 " +
+             CAND_NAME[r.runner] + "（" + r.score[r.runner].toFixed(1) + " 分）" + r.gap.toFixed(1) +
+             " 分；勝負在 " + r.decisiveName + " 這一欄拉開。";
+    }
+    dEl["wsd-call"].textContent = call;
+    dEl["wsd-call"].className = "wsd-call" + (r.tooClose ? " close" : "");
+
+    dEl["wsd-status"].textContent =
+      "每則訊息的線上位元組：" + CAND_NAME[r.winner] + " " + Math.round(r.overhead[r.winner].wire) +
+      " B（開銷 " + r.overhead[r.winner].pct.toFixed(2) + "%）、長輪詢 " + Math.round(r.overhead.lp.wire) +
+      " B（開銷 " + r.overhead.lp.pct.toFixed(2) + "%）。";
+
+    /* 四格成本磚 */
+    var ka = r.keepalive, st = r.storm;
+    var tiles = [
+      { n: r.overhead[r.winner].pct.toFixed(2) + " %",
+        l: CAND_NAME[r.winner] + " 的框架開銷比",
+        x: "(" + Math.round(r.overhead[r.winner].wire) + " − " + dState.msgBytes + ") ÷ " + Math.round(r.overhead[r.winner].wire) +
+           "；同一則訊息走長輪詢是 " + r.overhead.lp.pct.toFixed(2) + " %" },
+      { n: fmtTraffic(r.daily.ws),
+        l: "每日總流量（全體連線）",
+        x: fmtInt(dState.conns) + " 連線 × 86400 s × " + Math.round(r.daily.perConnSec) + " B/s；改走長輪詢是 " +
+           fmtTraffic(r.daily.lp) + "（" + r.daily.ratio.toFixed(2) + " 倍）" },
+      { n: ka.ping + " s",
+        l: "建議 ping 間隔" + (ka.safe ? "（安全）" : "（危險）"),
+        x: "floor(" + dState.idleTimeout + " × 0.4)；連兩次落空需 " + (ka.ping * 2) + " s，離 idle timeout 還有 " +
+           ka.margin + " s；保活帳單 " + fmtTraffic(ka.daily) + " / 日" },
+      { n: fmtInt(st.noJitter) + " /s",
+        l: "重連風暴峰值（無 jitter）",
+        x: "全體連線擠進 " + BUCKET_MS + " ms；rand(0.5,1.0) 攤成 " + fmtInt(st.halfJitter) + " /s（削 " +
+           st.cutHalf.toFixed(1) + " 倍），full jitter 再降到 " + fmtInt(st.fullJitter) + " /s（削 " + st.cutFull.toFixed(1) + " 倍）" }
+    ];
+    var html = "", i;
+    for (i = 0; i < tiles.length; i++) {
+      html += '<div class="wsd-tile"><b>' + esc(tiles[i].n) + '</b><s>' + esc(tiles[i].l) + '</s><em>' + esc(tiles[i].x) + '</em></div>';
+    }
+    dEl["wsd-cost"].innerHTML = html;
+
+    /* 矛盾／風險：落在規則欄，不另開卡片 */
+    if (r.conflicts.length === 0) {
+      dEl["wsd-conflict"].innerHTML = "";
+      dEl["wsd-conflict"].style.display = "none";
+    } else {
+      var c = "", j;
+      for (j = 0; j < r.conflicts.length; j++) {
+        c += '<div class="wsd-cf"><span class="rn">' + esc(r.rules[r.conflicts[j].at].name) + '</span>' + esc(r.conflicts[j].text) + '</div>';
+      }
+      dEl["wsd-conflict"].innerHTML = c;
+      dEl["wsd-conflict"].style.display = "";
+    }
+
+    /* 四協定開銷對照（同一則訊息） */
+    var rows = "", key;
+    for (i = 0; i < CAND_KEYS.length; i++) {
+      key = CAND_KEYS[i];
+      rows += '<div class="wsd-orow' + (key === r.winner ? " win" : "") + '">' +
+              '<span class="a">' + CAND_NAME[key] + '</span>' +
+              '<span class="b">標頭 ' + Math.round(r.overhead[key].hdr) + ' B</span>' +
+              '<span class="c">線上 ' + Math.round(r.overhead[key].wire) + ' B</span>' +
+              '<span class="d">' + r.overhead[key].pct.toFixed(2) + ' %</span></div>';
+    }
+    dEl["wsd-table"].innerHTML = rows;
+
+    /* 讀數同步 */
+    dEl["wsd-push-v"].textContent = dState.pushRate + " 則/s";
+    dEl["wsd-talk-v"].textContent = dState.duplex ? dState.clientRate + " 則/s" : "單向，計為 0";
+    dEl["wsd-size-v"].textContent = dState.msgBytes + " B";
+    dEl["wsd-conns-v"].textContent = fmtInt(dState.conns);
+    dEl["wsd-idle-v"].textContent = dState.idleTimeout + " s";
+    dEl["wsd-talk-wrap"].className = "wsd-ctl" + (dState.duplex ? "" : " muted");
   }
 
-  function next() {
-    if (stepIdx < SC[scenario].length - 1) { stepIdx += 1; render(); }
+  /* --- 拆解器：標頭長度階梯 ＋ 開銷比衰減 --- */
+  function drawFrameChart(r, masked) {
+    var W = 720, H = 268, L = 46, R = 14, T = 14, MID = 150, B = 30;
+    var minX = 1, maxX = 1000000;
+    function X(v) { return L + (W - L - R) * (log10(Math.max(minX, v)) / log10(maxX)); }
+    function Yh(v) { return T + (MID - T - 18) * (16 - v) / 15; }                 /* 標頭 bytes 0..16 */
+    function Yo(v) { return MID + 12 + (H - B - MID - 12) * (2 - log10(Math.max(0.001, v))) / 5; } /* 100% .. 0.001% */
+
+    function stair(m) {
+      var pts = [[1, wsHeaderBytes(1, m)], [125, wsHeaderBytes(125, m)], [126, wsHeaderBytes(126, m)],
+                 [65535, wsHeaderBytes(65535, m)], [65536, wsHeaderBytes(65536, m)], [maxX, wsHeaderBytes(maxX, m)]];
+      var d = "M " + X(pts[0][0]).toFixed(1) + " " + Yh(pts[0][1]).toFixed(1), i;
+      for (i = 1; i < pts.length; i++) {
+        d += " L " + X(pts[i][0]).toFixed(1) + " " + Yh(pts[i - 1][1]).toFixed(1) +
+             " L " + X(pts[i][0]).toFixed(1) + " " + Yh(pts[i][1]).toFixed(1);
+      }
+      return d;
+    }
+
+    var s = '<svg viewBox="0 0 ' + W + ' ' + H + '" style="width:100%;height:auto" role="img" ' +
+            'aria-label="WebSocket 標頭位元組數與開銷比隨 payload 長度的變化"><title>上：標頭 bytes 的階梯；下：開銷比的衰減</title>' +
+            '<rect x="0" y="0" width="' + W + '" height="' + H + '" fill="#ffffff"></rect>';
+
+    /* 兩條門檻虛線 */
+    var th = [126, 65536], i, t;
+    for (i = 0; i < th.length; i++) {
+      t = X(th[i]);
+      s += '<line x1="' + t.toFixed(1) + '" y1="' + T + '" x2="' + t.toFixed(1) + '" y2="' + (H - B) +
+           '" stroke="#a3743e" stroke-dasharray="4 3" stroke-width="1"></line>' +
+           '<text x="' + (t + 4).toFixed(1) + '" y="' + (T + 11) + '" font-family="ui-monospace,monospace" font-size="11" fill="#a3743e">' + th[i] + '</text>';
+    }
+
+    /* 上：標頭階梯（另一方向以淡線對照） */
+    s += '<path d="' + stair(masked ? 0 : 1) + '" fill="none" stroke="#c9c5c0" stroke-width="1.4"></path>';
+    s += '<path d="' + stair(masked ? 1 : 0) + '" fill="none" stroke="#3f6188" stroke-width="2.4"></path>';
+    var hb = [2, 6, 10, 14];
+    for (i = 0; i < hb.length; i++) {
+      s += '<text x="' + (L - 6) + '" y="' + (Yh(hb[i]) + 4).toFixed(1) + '" text-anchor="end" font-family="ui-monospace,monospace" font-size="11" fill="#8b8681">' + hb[i] + '</text>';
+    }
+    s += '<text x="' + L + '" y="' + (T + 11) + '" font-family="ui-monospace,monospace" font-size="11" fill="#5f5b57">標頭 bytes</text>';
+
+    /* 下：開銷比衰減 */
+    var d2 = "", first = true, x, p, pct;
+    for (i = 0; i <= 120; i++) {
+      p = Math.round(Math.pow(10, 6 * i / 120));
+      pct = overheadPct(wsHeaderBytes(p, masked) + p, p);
+      x = X(p);
+      d2 += (first ? "M " : " L ") + x.toFixed(1) + " " + Yo(pct).toFixed(1);
+      first = false;
+    }
+    s += '<path d="' + d2 + '" fill="none" stroke="#4d7d68" stroke-width="2"></path>';
+    var ot = [100, 10, 1, 0.1, 0.01];
+    for (i = 0; i < ot.length; i++) {
+      s += '<text x="' + (L - 6) + '" y="' + (Yo(ot[i]) + 4).toFixed(1) + '" text-anchor="end" font-family="ui-monospace,monospace" font-size="11" fill="#8b8681">' + ot[i] + '%</text>';
+    }
+    s += '<text x="' + L + '" y="' + (MID + 22) + '" font-family="ui-monospace,monospace" font-size="11" fill="#5f5b57">開銷比</text>';
+
+    /* 讀者當下的 frame */
+    var px = X(Math.max(1, r.payload));
+    s += '<circle cx="' + px.toFixed(1) + '" cy="' + Yh(r.header).toFixed(1) + '" r="4.5" fill="#a8554f"></circle>';
+    s += '<circle cx="' + px.toFixed(1) + '" cy="' + Yo(Math.max(0.001, r.overhead)).toFixed(1) + '" r="4.5" fill="#a8554f"></circle>';
+    s += '<line x1="' + px.toFixed(1) + '" y1="' + T + '" x2="' + px.toFixed(1) + '" y2="' + (H - B) + '" stroke="#a8554f" stroke-width="1" opacity="0.35"></line>';
+
+    /* x 軸刻度 */
+    var xt = [1, 10, 126, 1000, 65536, 1000000], lbl = ["1", "10", "126", "1 K", "65536", "1 M"];
+    for (i = 0; i < xt.length; i++) {
+      s += '<text x="' + X(xt[i]).toFixed(1) + '" y="' + (H - 8) + '" text-anchor="middle" font-family="ui-monospace,monospace" font-size="11" fill="#8b8681">' + lbl[i] + '</text>';
+    }
+    s += '<line x1="' + L + '" y1="' + (H - B) + '" x2="' + (W - R) + '" y2="' + (H - B) + '" stroke="#d8d5d0"></line>';
+    s += "</svg>";
+    return s;
   }
 
-  /* ---------- 事件 ---------- */
-  var segBtns = document.querySelectorAll("#wsx-demo .seg button");
-  segBtns.forEach(function (btn) {
-    btn.addEventListener("click", function () {
-      segBtns.forEach(function (b) { b.setAttribute("aria-pressed", "false"); });
-      btn.setAttribute("aria-pressed", "true");
-      scenario = btn.getAttribute("data-sc");
-      reset();
+  var FIELD_CLASS = {
+    "FIN/RSV/opcode": "f1", "MASK/len(7)": "f2", "ext-len(16)": "f3",
+    "ext-len(64)": "f3", "masking-key": "f4", "close code": "f5"
+  };
+
+  function renderFrame() {
+    var r = computeFrame(fState);
+    fEl["wsf-chart"].innerHTML = drawFrameChart(r, fState.fromClient);
+
+    /* hex 行 + 欄位括線：同一欄位的連續位元組合成一個區段 */
+    var segs = [], i, cur = null;
+    for (i = 0; i < r.bytes.length; i++) {
+      if (!cur || cur.f !== r.bytes[i].f) { cur = { f: r.bytes[i].f, v: [] }; segs.push(cur); }
+      cur.v.push(r.bytes[i].v);
+    }
+    var hx = "", j;
+    for (i = 0; i < segs.length; i++) {
+      var cells = "";
+      for (j = 0; j < segs[i].v.length; j++) { cells += "<i>" + hex2(segs[i].v[j]) + "</i>"; }
+      hx += '<span class="sg ' + (FIELD_CLASS[segs[i].f] || "f1") + '">' + cells +
+            '<u>' + esc(segs[i].f) + ' · ' + segs[i].v.length + ' B</u></span>';
+    }
+    fEl["wsf-hex"].innerHTML = hx;
+
+    /* 長度欄位判定 */
+    fEl["wsf-lenbox"].innerHTML =
+      '<b>' + esc(r.lenKind) + '</b><span>7 bit 欄位的值 = ' + r.lenCode +
+      '；擴充長度 ' + r.extLen + ' bytes' +
+      (r.next ? '；再加 ' + fmtInt(r.next.need) + ' bytes 就會跨過 ' + r.next.at + ' 門檻，標頭 +' + r.next.add + ' bytes' : '；已在最後一段，不會再增長') +
+      '</span>';
+
+    /* 事實磚 */
+    var facts = [
+      { n: fmtInt(r.payload) + " B", l: "payload 實際位元組", x: r.isClose ? "2 B 狀態碼 + 文字 " + fmtInt(r.bodyBytes) + " B" : "文字 " + r.textBytes + " B × " + r.copies + " 份" },
+      { n: r.header + " B", l: "單一 frame 標頭", x: "2 + " + r.extLen + "（擴充長度） + " + (fState.fromClient ? "4（masking key）" : "0（伺服器方向不 mask）") },
+      { n: r.overhead.toFixed(2) + " %", l: "單一 frame 開銷比", x: r.header + " ÷ (" + r.header + " + " + fmtInt(r.payload) + ")" },
+      { n: fState.fragment ? fmtInt(r.effCount) + " 片" : "1 片",
+        l: fState.fragment ? "分片後的總標頭 " + fmtInt(r.fragTotal) + " B" : "未分片",
+        x: fState.fragment
+            ? "ceil(" + fmtInt(r.payload) + " ÷ " + fmtInt(fState.fragBytes) + ")，末片 " + fmtInt(r.lastFrag) +
+              " B；標頭放大 " + r.amplify.toFixed(1) + " 倍，開銷比 " + r.effOverhead.toFixed(2) + " %"
+            : "打開分片後會切成 " + fmtInt(r.countIfFrag) + " 片（片大小 " + fmtInt(fState.fragBytes) + " B）" }
+    ];
+    var html = "";
+    for (i = 0; i < facts.length; i++) {
+      html += '<div class="wsf-tile"><b>' + esc(facts[i].n) + '</b><s>' + esc(facts[i].l) + '</s><em>' + esc(facts[i].x) + '</em></div>';
+    }
+    fEl["wsf-facts"].innerHTML = html;
+
+    /* 合法性 */
+    if (r.violations.length) {
+      fEl["wsf-status"].textContent = "違反 RFC 6455：" + r.violations.join("　");
+      fEl["wsf-status"].className = "status-line wsf-bad";
+    } else {
+      fEl["wsf-status"].textContent =
+        "合法的 " + (OPCODE_NAME[fState.opcode] || "?") + " frame" +
+        (fState.fromClient ? "（客戶端→伺服器，必須 mask）" : "（伺服器→客戶端，不 mask）") +
+        "；close code " + fState.closeCode + "：" + r.codeNote + "。";
+      fEl["wsf-status"].className = "status-line";
+    }
+
+    fEl["wsf-copies-v"].textContent = "× " + fmtInt(fState.copies);
+    fEl["wsf-fragsize-v"].textContent = fmtInt(fState.fragBytes) + " B";
+    fEl["wsf-code-wrap"].className = "wsf-ctl" + (fState.opcode === 8 ? "" : " muted");
+  }
+
+  /* ================= (5) 事件綁定 ================= */
+
+  function wireSeg(root, sel, fn) {
+    var btns = root.querySelectorAll(sel + " button"), i;
+    function bind(btn) {
+      btn.addEventListener("click", function () {
+        var j;
+        for (j = 0; j < btns.length; j++) { btns[j].setAttribute("aria-pressed", "false"); }
+        btn.setAttribute("aria-pressed", "true");
+        fn(btn.getAttribute("data-v"));
+      });
+    }
+    for (i = 0; i < btns.length; i++) { bind(btns[i]); }
+  }
+
+  function wireToggles(root, sel, fn) {
+    var btns = root.querySelectorAll(sel), i;
+    function bind(btn) {
+      btn.addEventListener("click", function () {
+        var on = btn.getAttribute("aria-pressed") !== "true";
+        btn.setAttribute("aria-pressed", on ? "true" : "false");
+        fn(btn.getAttribute("data-k"), on ? 1 : 0);
+      });
+    }
+    for (i = 0; i < btns.length; i++) { bind(btns[i]); }
+  }
+
+  if (dRoot) {
+    wireSeg(dRoot, "#wsd-seg-dir", function (v) { dState.duplex = v === "duplex" ? 1 : 0; renderDecision(); });
+    wireSeg(dRoot, "#wsd-seg-client", function (v) { dState.client = v; renderDecision(); });
+    wireToggles(dRoot, ".wsd-tog", function (k, on) { dState[k] = on; renderDecision(); });
+
+    dEl["wsd-push"].addEventListener("input", function () {
+      dState.pushRate = PUSH_STEPS[parseInt(this.value, 10)]; renderDecision();
     });
-  });
+    dEl["wsd-talk"].addEventListener("input", function () {
+      dState.clientRate = parseInt(this.value, 10); renderDecision();
+    });
+    dEl["wsd-size"].addEventListener("input", function () {
+      dState.msgBytes = parseInt(this.value, 10); renderDecision();
+    });
+    dEl["wsd-conns"].addEventListener("input", function () {
+      dState.conns = CONN_STEPS[parseInt(this.value, 10)]; renderDecision();
+    });
+    dEl["wsd-idle"].addEventListener("input", function () {
+      dState.idleTimeout = parseInt(this.value, 10); renderDecision();
+    });
+    dEl["wsd-lat"].addEventListener("change", function () {
+      dState.latency = this.value; renderDecision();
+    });
 
-  btnNext.addEventListener("click", next);
-  if (btnReset) btnReset.addEventListener("click", reset);
+    dRoot.querySelector("#wsd-reset").addEventListener("click", function () {
+      dState.duplex = 1; dState.pushRate = 5; dState.clientRate = 2; dState.msgBytes = 180;
+      dState.client = "browser"; dState.needBinary = 0; dState.viaProxy = 0; dState.conns = 50000;
+      dState.needResume = 1; dState.hasH2 = 1; dState.idleTimeout = 60; dState.latency = "sub1s";
+      syncDecisionInputs(); renderDecision();
+    });
 
-  reset();
+    var syncDecisionInputs = function () {
+      var i, btns = dRoot.querySelectorAll("#wsd-seg-dir button");
+      for (i = 0; i < btns.length; i++) {
+        btns[i].setAttribute("aria-pressed", btns[i].getAttribute("data-v") === (dState.duplex ? "duplex" : "push") ? "true" : "false");
+      }
+      btns = dRoot.querySelectorAll("#wsd-seg-client button");
+      for (i = 0; i < btns.length; i++) {
+        btns[i].setAttribute("aria-pressed", btns[i].getAttribute("data-v") === dState.client ? "true" : "false");
+      }
+      btns = dRoot.querySelectorAll(".wsd-tog");
+      for (i = 0; i < btns.length; i++) {
+        btns[i].setAttribute("aria-pressed", dState[btns[i].getAttribute("data-k")] ? "true" : "false");
+      }
+      dEl["wsd-push"].value = String(PUSH_STEPS.indexOf(dState.pushRate));
+      dEl["wsd-talk"].value = String(dState.clientRate);
+      dEl["wsd-size"].value = String(dState.msgBytes);
+      dEl["wsd-conns"].value = String(CONN_STEPS.indexOf(dState.conns));
+      dEl["wsd-idle"].value = String(dState.idleTimeout);
+      dEl["wsd-lat"].value = dState.latency;
+    };
+    syncDecisionInputs();
+    renderDecision();
+  }
+
+  if (fRoot) {
+    wireSeg(fRoot, "#wsf-seg-dir", function (v) { fState.fromClient = v === "c2s" ? 1 : 0; renderFrame(); });
+    wireSeg(fRoot, "#wsf-seg-op", function (v) { fState.opcode = parseInt(v, 10); renderFrame(); });
+    wireToggles(fRoot, ".wsf-tog", function (k, on) { fState[k] = on; renderFrame(); });
+
+    fEl["wsf-text"].addEventListener("input", function () { fState.text = this.value; renderFrame(); });
+    fEl["wsf-copies"].addEventListener("input", function () {
+      fState.copies = parseInt(this.value, 10); renderFrame();
+    });
+    fEl["wsf-fragsize"].addEventListener("input", function () {
+      fState.fragBytes = FRAG_STEPS[parseInt(this.value, 10)]; renderFrame();
+    });
+    fEl["wsf-code"].addEventListener("input", function () {
+      var v = parseInt(this.value, 10);
+      fState.closeCode = isNaN(v) ? 1000 : v;
+      renderFrame();
+    });
+
+    var syncFrameInputs = function () {
+      var i, btns = fRoot.querySelectorAll("#wsf-seg-dir button");
+      for (i = 0; i < btns.length; i++) {
+        btns[i].setAttribute("aria-pressed", btns[i].getAttribute("data-v") === (fState.fromClient ? "c2s" : "s2c") ? "true" : "false");
+      }
+      btns = fRoot.querySelectorAll("#wsf-seg-op button");
+      for (i = 0; i < btns.length; i++) {
+        btns[i].setAttribute("aria-pressed", parseInt(btns[i].getAttribute("data-v"), 10) === fState.opcode ? "true" : "false");
+      }
+      btns = fRoot.querySelectorAll(".wsf-tog");
+      for (i = 0; i < btns.length; i++) {
+        btns[i].setAttribute("aria-pressed", fState[btns[i].getAttribute("data-k")] ? "true" : "false");
+      }
+      fEl["wsf-text"].value = fState.text;
+      fEl["wsf-copies"].value = String(fState.copies);
+      fEl["wsf-fragsize"].value = String(FRAG_STEPS.indexOf(fState.fragBytes));
+      fEl["wsf-code"].value = String(fState.closeCode);
+    };
+
+    fRoot.querySelector("#wsf-reset").addEventListener("click", function () {
+      fState.text = '{"px":68120,"seq":41}'; fState.copies = 1; fState.opcode = 1;
+      fState.fromClient = 1; fState.fin = 1; fState.fragment = 0; fState.fragBytes = 1024; fState.closeCode = 1001;
+      syncFrameInputs(); renderFrame();
+    });
+
+    syncFrameInputs();
+    renderFrame();
+  }
 })();
 </script>
 
