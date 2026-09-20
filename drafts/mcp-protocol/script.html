@@ -2,399 +2,565 @@
 (function () {
   "use strict";
 
-  // frame 欄位：
-  //   ph(當前階段 init/discovery/invoke，null=尚未開始) active(要高亮的角色) tone(wait/ok/bad)
-  //   dir(訊息方向文字) kind(request/response/notification/result/error/host，null=無徽章)
-  //   json(訊息內容文字) status(狀態列) caption(圖說)
+  /* ============================================================
+     (1) 常數與參數表
+     ============================================================ */
 
-  // ── 交握 + 探索，三情境共用（frame 0〜5）──
-  var F_IDLE = {
-    ph: null, active: [], tone: "wait",
-    dir: "尚未開始", kind: null,
-    json: "// 選一個情境，按「下一步」送出第一則訊息。",
-    status: "這條 session 的 Host 內含一個連到 weather-server 的 Client。按「下一步」開始交握。",
-    caption: "三階段：交握 → 探索 → 呼叫回寫。全程都是 Client↔Server 的 JSON-RPC 往返。"
+  // Server 執行期自我描述出來的工具（等同 tools/list 的回傳），是給定資料、不是判定結果
+  var TOOL_CATALOG = {
+    get_weather: {
+      required: ["location"],
+      props: {
+        location: { type: "string" },
+        units: { type: "string", enum: ["c", "f"] }
+      }
+    },
+    create_issue: {
+      required: ["title"],
+      props: {
+        title: { type: "string" },
+        body: { type: "string" },
+        labels: { type: "array" }
+      }
+    }
   };
 
-  var COMMON = [
-    F_IDLE,
-    {
-      ph: "init", active: ["client", "server"], tone: "wait",
-      dir: "Client → Server", kind: "request",
-      json: [
-        "{",
-        '  "jsonrpc": "2.0",',
-        '  "id": 1,',
-        '  "method": "initialize",',
-        '  "params": {',
-        '    "protocolVersion": "2025-11-25",',
-        '    "capabilities": { "sampling": {}, "roots": { "listChanged": true } },',
-        '    "clientInfo": { "name": "chat-host", "version": "1.0.0" }',
-        "  }",
-        "}"
-      ].join("\n"),
-      status: "① 交握開始：Client 送出 initialize，宣告自己支援的協定版本、能力與 clientInfo。",
-      caption: "initialize 是每條 session 的第一則訊息——先談協定版本與能力，再談別的。"
-    },
-    {
-      ph: "init", active: ["server", "client"], tone: "wait",
-      dir: "Server → Client", kind: "response",
-      json: [
-        "{",
-        '  "jsonrpc": "2.0",',
-        '  "id": 1,',
-        '  "result": {',
-        '    "protocolVersion": "2025-11-25",',
-        '    "capabilities": { "tools": { "listChanged": true } },',
-        '    "serverInfo": { "name": "weather-server", "version": "2.3.1" }',
-        "  }",
-        "}"
-      ].join("\n"),
-      status: "② Server 回應：確認採用 2025-11-25，並宣告支援 tools 能力（listChanged=true 表示工具清單變動時會通知）。",
-      caption: "版本與能力是「協商」出來的——這正是協定能向前相容演進的關鍵。"
-    },
-    {
-      ph: "init", active: ["client", "server"], tone: "wait",
-      dir: "Client → Server", kind: "notification",
-      json: [
-        "{",
-        '  "jsonrpc": "2.0",',
-        '  "method": "notifications/initialized"',
-        "}"
-      ].join("\n"),
-      status: "③ Client 送出 initialized 通知（notification 無 id、不需回應）。交握完成，session 正式開始。",
-      caption: "無 id 就是 notification：單向、不等回應。交握到此為止。"
-    },
-    {
-      ph: "discovery", active: ["client", "server"], tone: "wait",
-      dir: "Client → Server", kind: "request",
-      json: [
-        "{",
-        '  "jsonrpc": "2.0",',
-        '  "id": 2,',
-        '  "method": "tools/list",',
-        '  "params": {}',
-        "}"
-      ].join("\n"),
-      status: "④ 探索：Client 送出 tools/list，問 Server「你有哪些工具？」（可帶分頁 cursor）。",
-      caption: "Client 事前並不知道 Server 有什麼——接下來才會知道。"
-    },
-    {
-      ph: "discovery", active: ["server", "client"], tone: "wait",
-      dir: "Server → Client", kind: "response",
-      json: [
-        "{",
-        '  "jsonrpc": "2.0",',
-        '  "id": 2,',
-        '  "result": {',
-        '    "tools": [',
-        "      {",
-        '        "name": "get_weather",',
-        '        "description": "查詢指定城市的目前天氣",',
-        '        "inputSchema": {',
-        '          "type": "object",',
-        '          "properties": { "location": { "type": "string" } },',
-        '          "required": ["location"]',
-        "        }",
-        "      }",
-        "    ]",
-        "  }",
-        "}"
-      ].join("\n"),
-      status: "⑤ Server 自我描述：回傳工具清單。這裡只有一個 get_weather，含 name、description 與 inputSchema。",
-      caption: "這一步就是 discovery 的靈魂：工具的 schema 由 Server 執行期給出，不必寫死在應用裡。"
-    }
+  // method → 需要哪個 capability（null = 核心，永遠可用）、是否必須帶 id
+  var METHOD_TABLE = [
+    { name: "initialize", cap: null, needsId: true },
+    { name: "notifications/initialized", cap: null, needsId: false },
+    { name: "ping", cap: null, needsId: true },
+    { name: "tools/list", cap: "tools", needsId: true },
+    { name: "tools/call", cap: "tools", needsId: true },
+    { name: "notifications/tools/list_changed", cap: "tools", needsId: false },
+    { name: "resources/list", cap: "resources", needsId: true },
+    { name: "resources/read", cap: "resources", needsId: true },
+    { name: "prompts/list", cap: "prompts", needsId: true },
+    { name: "prompts/get", cap: "prompts", needsId: true },
+    { name: "sampling/createMessage", cap: "sampling", needsId: true },
+    { name: "roots/list", cap: "roots", needsId: true },
+    { name: "elicitation/create", cap: "elicitation", needsId: true }
   ];
 
-  // ── 各情境的呼叫階段（frame 6 起）──
-  var TAILS = {
-    normal: [
-      {
-        ph: "invoke", active: ["client", "host"], tone: "wait",
-        dir: "Client → Host（內部）", kind: "host",
-        json: [
-          "// Host 內部（非 MCP 協定訊息）：",
-          "// LLM 讀到 get_weather 的 description 與 inputSchema，",
-          '// 依使用者問題「台北現在天氣？」決定呼叫它，並填入 arguments：',
-          '//   { location: "Taipei" }'
-        ].join("\n"),
-        status: "⑥ 工具選擇發生在 Host 內部：LLM 看著剛發現的 get_weather，決定呼叫它並填好參數。",
-        caption: "注意：選哪個工具、填什麼參數是「模型控制」、發生在 Host 內，不是 MCP 線上的訊息。"
-      },
-      {
-        ph: "invoke", active: ["client", "server"], tone: "wait",
-        dir: "Client → Server", kind: "request",
-        json: [
-          "{",
-          '  "jsonrpc": "2.0",',
-          '  "id": 3,',
-          '  "method": "tools/call",',
-          '  "params": {',
-          '    "name": "get_weather",',
-          '    "arguments": { "location": "Taipei" }',
-          "  }",
-          "}"
-        ].join("\n"),
-        status: "⑦ 呼叫：Client 送出 tools/call，帶上工具名與參數。真正去查天氣的是 Server，不是模型。",
-        caption: "tools/call 就是把模型的「意圖」變成 Server 上一次真實執行——決策與執行分離。"
-      },
-      {
-        ph: "invoke", active: ["server", "client"], tone: "ok",
-        dir: "Server → Client", kind: "result",
-        json: [
-          "{",
-          '  "jsonrpc": "2.0",',
-          '  "id": 3,',
-          '  "result": {',
-          '    "content": [',
-          '      { "type": "text", "text": "台北目前 31°C，多雲。" }',
-          "    ],",
-          '    "isError": false',
-          "  }",
-          "}"
-        ].join("\n"),
-        status: "⑧ 回寫：Server 把結果放在 result.content[]，isError=false。Client 交回 Host，餵給 LLM 生成最終回答。",
-        caption: "一次完整的 discovery → invoke → result 就此收尾——正好接上第二篇狀態機的 tool_calls → running 回寫。"
-      }
-    ],
-    toolerr: [
-      {
-        ph: "invoke", active: ["client", "host"], tone: "wait",
-        dir: "Client → Host（內部）", kind: "host",
-        json: [
-          "// Host 內部：LLM 決定呼叫 get_weather，",
-          "// 但把城市參數誤填成 'Taipeh'（拼寫錯誤）：",
-          '//   { location: "Taipeh" }'
-        ].join("\n"),
-        status: "⑥ LLM 選了 get_weather，但參數填錯——把 Taipei 拼成了 Taipeh。看 Server 怎麼回。",
-        caption: "模型不是永遠可靠：這次它填了一個查不到的城市名。"
-      },
-      {
-        ph: "invoke", active: ["client", "server"], tone: "wait",
-        dir: "Client → Server", kind: "request",
-        json: [
-          "{",
-          '  "jsonrpc": "2.0",',
-          '  "id": 3,',
-          '  "method": "tools/call",',
-          '  "params": {',
-          '    "name": "get_weather",',
-          '    "arguments": { "location": "Taipeh" }',
-          "  }",
-          "}"
-        ].join("\n"),
-        status: "⑦ 呼叫：tools/call 送出，但 arguments 帶著拼錯的城市名。工具名合法、參數值有問題。",
-        caption: "注意：工具本身是存在的（合法呼叫），問題出在參數值——這決定了它會是哪一種錯誤。"
-      },
-      {
-        ph: "invoke", active: ["server", "client"], tone: "bad",
-        dir: "Server → Client", kind: "result",
-        json: [
-          "{",
-          '  "jsonrpc": "2.0",',
-          '  "id": 3,',
-          '  "result": {',
-          '    "content": [',
-          '      { "type": "text", "text": "查無此城市：\'Taipeh\'。請確認拼寫。" }',
-          "    ],",
-          '    "isError": true',
-          "  }",
-          "}"
-        ].join("\n"),
-        status: "⑧ 工具執行錯誤：這仍是一個 result（不是 JSON-RPC error），只是 isError=true，並帶回一句「可行動」的訊息。",
-        caption: "tool execution error：工具跑了、但業務上失敗。關鍵是它回的是「模型讀得懂、能據以修正」的訊息。"
-      },
-      {
-        ph: "invoke", active: ["client", "server"], tone: "wait",
-        dir: "Client → Server", kind: "request",
-        json: [
-          "{",
-          '  "jsonrpc": "2.0",',
-          '  "id": 4,',
-          '  "method": "tools/call",',
-          '  "params": {',
-          '    "name": "get_weather",',
-          '    "arguments": { "location": "Taipei" }',
-          "  }",
-          "}"
-        ].join("\n"),
-        status: "⑨ 自我修正：LLM 讀到「請確認拼寫」，把參數改成正確的 Taipei，重送一次 tools/call（新 id=4）。",
-        caption: "這就是 tool execution error 的價值——錯誤訊息餵回模型，模型自己改參數重試（呼應第二篇的錯誤回餵）。"
-      },
-      {
-        ph: "invoke", active: ["server", "client"], tone: "ok",
-        dir: "Server → Client", kind: "result",
-        json: [
-          "{",
-          '  "jsonrpc": "2.0",',
-          '  "id": 4,',
-          '  "result": {',
-          '    "content": [',
-          '      { "type": "text", "text": "台北目前 31°C，多雲。" }',
-          "    ],",
-          '    "isError": false',
-          "  }",
-          "}"
-        ].join("\n"),
-        status: "⑩ 修正後成功：isError=false，回傳天氣結果。工具執行錯誤被模型自己吸收、繞過了。",
-        caption: "對照「協定錯誤」情境：同樣是失敗，但這種能自我修正、那種不能。"
-      }
-    ],
-    protoerr: [
-      {
-        ph: "invoke", active: ["client", "host"], tone: "wait",
-        dir: "Client → Host（內部）", kind: "host",
-        json: [
-          "// Host 內部：LLM 卻決定呼叫 get_forecast，",
-          "// 但回顧 ⑤ 的 tools/list——清單裡只有 get_weather，",
-          "// 根本沒有 get_forecast。這是一個「幻覺」出來的工具名。"
-        ].join("\n"),
-        status: "⑥ LLM 決定呼叫 get_forecast——但這個工具不在剛剛發現的清單裡（清單只有 get_weather）。",
-        caption: "模型有時會「幻覺」出一個不存在的工具名。看協定層怎麼回應這種不合法請求。"
-      },
-      {
-        ph: "invoke", active: ["client", "server"], tone: "wait",
-        dir: "Client → Server", kind: "request",
-        json: [
-          "{",
-          '  "jsonrpc": "2.0",',
-          '  "id": 3,',
-          '  "method": "tools/call",',
-          '  "params": {',
-          '    "name": "get_forecast",',
-          '    "arguments": { "location": "Taipei" }',
-          "  }",
-          "}"
-        ].join("\n"),
-        status: "⑦ 呼叫：tools/call 送出 name=get_forecast——一個 Server 根本沒註冊的工具。",
-        caption: "工具名不存在：這不是「參數錯」，是「請求本身不合法」。"
-      },
-      {
-        ph: "invoke", active: ["server", "client"], tone: "bad",
-        dir: "Server → Client", kind: "error",
-        json: [
-          "{",
-          '  "jsonrpc": "2.0",',
-          '  "id": 3,',
-          '  "error": {',
-          '    "code": -32602,',
-          '    "message": "Unknown tool: get_forecast"',
-          "  }",
-          "}"
-        ].join("\n"),
-        status: "⑧ 協定錯誤：Server 回的是 JSON-RPC error 物件（不是 result），code -32602（JSON-RPC 的 Invalid params）——問題出在請求本身、而非工具的執行結果。",
-        caption: "protocol error vs tool execution error：前者「請求不合法」（模型較難自我修正）、後者「工具跑了但出錯」（可修正）。「幻覺工具該被擋下」屬第三篇 allowlist 的安全政策；這裡呈現的是協定層的錯誤回報機制。"
-      }
-    ]
+  var CAP_ROWS = [
+    { key: "tools", side: "Server", note: "模型控制" },
+    { key: "resources", side: "Server", note: "應用控制" },
+    { key: "prompts", side: "Server", note: "使用者控制" },
+    { key: "sampling", side: "Client", note: "代做推論" },
+    { key: "roots", side: "Client", note: "檔案邊界" },
+    { key: "elicitation", side: "Client", note: "反向索取" }
+  ];
+
+  var SERVER_CAPS = ["tools", "resources", "prompts"];
+
+  // Streamable HTTP 的最小標頭集（真實實作還會更多，僅供量級對照）
+  var HTTP_LINES = [
+    "POST /mcp HTTP/1.1",
+    "Host: mcp.example.com",
+    "Content-Type: application/json",
+    "Accept: application/json, text/event-stream",
+    "Mcp-Session-Id: 019a7c3e-5b2f-7a10-9d44-6c1e8f0b2a55"
+  ];
+  var CRLF = 2;
+  var SSE_FRAME = 23;   // "event: message\n" (15) + "data: " (6) + "\n\n" (2)
+
+  var ERROR_NAME = {
+    "-32700": "Parse error",
+    "-32600": "Invalid Request",
+    "-32601": "Method not found",
+    "-32602": "Invalid params"
   };
 
-  var SCENARIOS = {
-    normal: COMMON.concat(TAILS.normal),
-    toolerr: COMMON.concat(TAILS.toolerr),
-    protoerr: COMMON.concat(TAILS.protoerr)
-  };
+  // textarea 的初值，讀者可整段改寫
+  var SAMPLES = [
+    ['{', '  "jsonrpc": "2.0",', '  "id": 1,', '  "method": "initialize",', '  "params": {',
+     '    "protocolVersion": "2025-11-25",',
+     '    "capabilities": { "sampling": {}, "roots": { "listChanged": true } },',
+     '    "clientInfo": { "name": "chat-host", "version": "1.0.0" }', '  }', '}'].join("\n"),
+    ['{', '  "jsonrpc": "2.0",', '  "id": 2,', '  "method": "tools/list",', '  "params": {}', '}'].join("\n"),
+    ['{', '  "jsonrpc": "2.0",', '  "id": 3,', '  "method": "tools/call",', '  "params": {',
+     '    "name": "get_weather",', '    "arguments": { "location": "台北", "units": "c" }', '  }', '}'].join("\n"),
+    ['{', '  "jsonrpc": "2.0",', '  "id": 4,', '  "method": "tools/call",', '  "params": {',
+     '    "name": "get_weather",', '    "arguments": { "units": "k", "verbose": true }', '  }', '}'].join("\n"),
+    ['{', '  "jsonrpc": "2.0",', '  "method": "notifications/initialized"', '}'].join("\n")
+  ];
 
-  var KIND_LABEL = {
-    request: "REQUEST", response: "RESPONSE", notification: "NOTIFICATION",
-    result: "RESULT", error: "ERROR", host: "HOST 內部"
-  };
-  var PH_ORDER = ["init", "discovery", "invoke"];
+  var DEFAULT_SAMPLE = 2;
 
-  var scenario = "normal";
-  var stepIdx = 0;
+  /* ============================================================
+     (2) compute* 純函式（不得碰 DOM）
+     ============================================================ */
 
-  var root = document.getElementById("demo-mcp-flow");
-  var laneEls = root.querySelectorAll(".mcp-lane");
-  var phaseEls = root.querySelectorAll(".mcp-phase");
-  var wireEl = document.getElementById("mcp-wire");
-  var dirEl = document.getElementById("mcp-wire-dir");
-  var kindEl = document.getElementById("mcp-wire-kind");
-  var jsonEl = document.getElementById("mcp-json");
-  var statusEl = document.getElementById("mcp-status");
-  var captionEl = document.getElementById("mcp-caption");
-  var btnNext = document.getElementById("mcp-btn-next");
-  var btnReset = document.getElementById("mcp-btn-reset");
-
-  function setText(el, text) { if (el) el.textContent = text; }
-
-  function renderPhases(frame) {
-    var curIdx = frame.ph ? PH_ORDER.indexOf(frame.ph) : -1;
-    phaseEls.forEach(function (el) {
-      var idx = PH_ORDER.indexOf(el.getAttribute("data-ph"));
-      el.classList.remove("ph-done", "ph-active", "ph-bad");
-      if (curIdx === -1) return;
-      if (idx < curIdx) {
-        el.classList.add("ph-done");
-      } else if (idx === curIdx) {
-        el.classList.add("ph-active");
-        if (frame.tone === "bad") el.classList.add("ph-bad");
-      }
-    });
+  // 手算 UTF-8 位元組：沙箱沒有 TextEncoder / encodeURIComponent
+  function utf8Bytes(s) {
+    var n = 0, i, c;
+    for (i = 0; i < s.length; i++) {
+      c = s.charCodeAt(i);
+      if (c < 0x80) n += 1;
+      else if (c < 0x800) n += 2;
+      else if (c >= 0xD800 && c <= 0xDBFF && i + 1 < s.length) { n += 4; i++; }
+      else n += 3;
+    }
+    return n;
   }
 
-  function renderLanes(frame) {
-    laneEls.forEach(function (el) {
-      var role = el.getAttribute("data-role");
-      el.classList.remove("mcp-on", "mcp-on-wait", "mcp-on-ok", "mcp-on-bad");
-      if (frame.active.indexOf(role) !== -1) {
-        el.classList.add("mcp-on", "mcp-on-" + frame.tone);
-      }
-    });
+  function typeName(v) {
+    if (v === null) return "null";
+    if (Array.isArray(v)) return "array";
+    return typeof v;
   }
 
-  function renderWire(frame) {
-    wireEl.classList.remove("tone-wait", "tone-ok", "tone-bad");
-    wireEl.classList.add("tone-" + frame.tone);
-    setText(dirEl, frame.dir);
-    if (frame.kind) {
-      kindEl.style.display = "";
-      kindEl.className = "mcp-wire-kind k-" + frame.kind;
-      setText(kindEl, KIND_LABEL[frame.kind] || frame.kind);
+  function has(o, k) { return Object.prototype.hasOwnProperty.call(o, k); }
+
+  // @probe fn       computeMcpMessage
+  // @probe baseline {"text":"{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/call\",\"params\":{\"name\":\"get_weather\",\"arguments\":{\"location\":\"Taipei\",\"units\":\"c\"}}}","capTools":1,"capResources":1,"capPrompts":1,"capSampling":1,"capRoots":1,"capElicitation":1,"transport":0}
+  // @probe sweep    {"text":["{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/call\",\"params\":{\"name\":\"get_weather\",\"arguments\":{\"location\":\"Taipei\"}}}","{\"jsonrpc\":\"1.0\",\"method\":\"tools/call\",\"params\":{\"name\":\"get_forecast\",\"arguments\":{}}}"],"capTools":[0,1],"capResources":[0,1],"capPrompts":[0,1],"capSampling":[0,1],"capRoots":[0,1],"capElicitation":[0,1],"transport":[0,1]}
+  function computeMcpMessage(p) {
+    var text = typeof p.text === "string" ? p.text : "";
+    var caps = {
+      tools: !!Number(p.capTools),
+      resources: !!Number(p.capResources),
+      prompts: !!Number(p.capPrompts),
+      sampling: !!Number(p.capSampling),
+      roots: !!Number(p.capRoots),
+      elicitation: !!Number(p.capElicitation)
+    };
+    var transport = Number(p.transport) === 1 ? 1 : 0;
+    var i, k;
+
+    /* --- 由能力推導本 session 可用的 method --- */
+    var availableMethods = [];
+    var methodInfo = {};
+    for (i = 0; i < METHOD_TABLE.length; i++) {
+      methodInfo[METHOD_TABLE[i].name] = METHOD_TABLE[i];
+      if (METHOD_TABLE[i].cap === null || caps[METHOD_TABLE[i].cap]) {
+        availableMethods.push(METHOD_TABLE[i].name);
+      }
+    }
+    var serverPrimCount = 0;
+    for (i = 0; i < SERVER_CAPS.length; i++) { if (caps[SERVER_CAPS[i]]) serverPrimCount++; }
+    // initialize 往返 2 ＋ initialized 通知 1 ＋ 每個 server primitive 一次 list 往返 ＋ 一次 tools/call 往返
+    var handshakeMsgCount = 2 + 1 + serverPrimCount * 2 + (caps.tools ? 2 : 0);
+
+    /* --- 關卡 1：JSON 可解析 --- */
+    var parsed = null, parseError = "";
+    try { parsed = JSON.parse(text); } catch (e) { parseError = String(e && e.message ? e.message : e); }
+    var g1ok = parseError === "" && parsed !== null && typeof parsed === "object" && !Array.isArray(parsed);
+    var g1evi;
+    if (parseError !== "") {
+      g1evi = "JSON.parse 失敗：" + parseError;
+    } else if (!g1ok) {
+      g1evi = "解析成功但頂層是 " + typeName(parsed) + "，JSON-RPC 單則訊息必須是物件";
     } else {
-      kindEl.style.display = "none";
+      var topKeys = Object.keys(parsed);
+      g1evi = "解析成功：頂層 " + topKeys.length + " 個欄位（" + topKeys.join("、") + "）";
     }
-    setText(jsonEl, frame.json);
+
+    /* --- 關卡 2/3：信封與分類 --- */
+    var issues = [];
+    var kind = "invalid", kindLabel = "無法分類", method = "", idText = "—";
+
+    if (g1ok) {
+      var hasMethod = has(parsed, "method");
+      var hasId = has(parsed, "id");
+      var hasResult = has(parsed, "result");
+      var hasError = has(parsed, "error");
+
+      if (!has(parsed, "jsonrpc")) {
+        issues.push("缺少 jsonrpc 欄位（必須是字串 \"2.0\"）");
+      } else if (parsed.jsonrpc !== "2.0") {
+        issues.push("jsonrpc 期望 \"2.0\"，實際 " + JSON.stringify(parsed.jsonrpc));
+      }
+
+      if (hasMethod && typeof parsed.method !== "string") {
+        issues.push("method 期望 string，實際 " + typeName(parsed.method));
+      }
+      if (hasMethod && typeof parsed.method === "string") method = parsed.method;
+
+      if (hasId) {
+        if (parsed.id === null) {
+          issues.push("id 為 null：JSON-RPC 2.0 不允許用 null 當請求 id");
+        } else if (typeof parsed.id !== "string" && typeof parsed.id !== "number") {
+          issues.push("id 期望 string 或 number，實際 " + typeName(parsed.id));
+        } else {
+          idText = JSON.stringify(parsed.id);
+        }
+      }
+
+      if (has(parsed, "params")) {
+        var pt = typeName(parsed.params);
+        if (pt !== "object" && pt !== "array") issues.push("params 期望 object 或 array，實際 " + pt);
+      }
+
+      if (hasResult && hasError) issues.push("result 與 error 同時存在：兩者互斥");
+
+      if (hasError) {
+        if (typeName(parsed.error) !== "object") {
+          issues.push("error 期望 object，實際 " + typeName(parsed.error));
+        } else {
+          if (typeof parsed.error.code !== "number" || parsed.error.code !== Math.round(parsed.error.code)) {
+            issues.push("error.code 期望整數，實際 " + typeName(parsed.error.code));
+          }
+          if (typeof parsed.error.message !== "string") {
+            issues.push("error.message 期望 string，實際 " + typeName(parsed.error.message));
+          }
+        }
+      }
+
+      // 分類
+      if (hasMethod && hasId) { kind = "request"; kindLabel = "Request（有 method、有 id → 要一則同 id 的回應）"; }
+      else if (hasMethod && !hasId) { kind = "notification"; kindLabel = "Notification（有 method、無 id → 單向、不等回應）"; }
+      else if (!hasMethod && hasResult && !hasError) { kind = "result"; kindLabel = "Response · result（無 method、帶 result）"; }
+      else if (!hasMethod && hasError && !hasResult) { kind = "error"; kindLabel = "Response · error（無 method、帶 error）"; }
+      else { kind = "invalid"; kindLabel = "無法分類：既沒有 method，也沒有 result 或 error"; }
+
+      if (kind === "invalid") issues.push("四種型態都對不上：request／notification 要有 method，response 要有 result 或 error");
+      if (kind === "notification" && methodInfo[method] && methodInfo[method].needsId) {
+        issues.push(method + " 需要回應，不能當 notification 送（缺 id）");
+      }
+      if (kind === "request" && methodInfo[method] && !methodInfo[method].needsId) {
+        issues.push(method + " 是通知型 method，不該帶 id");
+      }
+    }
+    var g2ok = g1ok && issues.length === 0;
+    var g2evi = !g1ok
+      ? "上一關未通過，信封無從檢查"
+      : (g2ok
+        ? "jsonrpc、id、method、params、result／error 五類檢查全過"
+        : issues.join("；"));
+
+    /* --- 關卡 4：method 是否在本 session 可用 --- */
+    var g4state = "skip", g4evi = "回應類訊息不帶 method，本關不適用";
+    if (g2ok && (kind === "request" || kind === "notification")) {
+      var info = methodInfo[method];
+      if (!info) {
+        g4state = "bad";
+        g4evi = "「" + method + "」不是 MCP 已定義的 method（本 session 可用 " + availableMethods.length + " 個）";
+      } else if (info.cap !== null && !caps[info.cap]) {
+        g4state = "bad";
+        g4evi = method + " 需要對方宣告 " + info.cap + " 能力，但交握時沒談出來 → 本 session 沒有這個 method";
+      } else {
+        g4state = "ok";
+        g4evi = method + "（" + (info.cap === null ? "核心 method" : "由 " + info.cap + " 能力解鎖") +
+          "）在本 session 的 " + availableMethods.length + " 個可用 method 之列";
+      }
+    } else if (!g2ok) {
+      g4evi = "上一關未通過，method 尚未進到查表階段";
+    }
+
+    /* --- 關卡 5：arguments 對 inputSchema --- */
+    var schemaIssues = [];
+    var g5state = "skip", g5evi = "只有 tools/call 會帶 arguments，本關不適用";
+    var toolName = "";
+    if (g4state === "ok" && method === "tools/call") {
+      var params = (parsed && typeName(parsed.params) === "object") ? parsed.params : null;
+      if (!params) {
+        schemaIssues.push("tools/call 缺少 params 物件");
+      } else {
+        toolName = typeof params.name === "string" ? params.name : "";
+        var tool = TOOL_CATALOG[toolName];
+        if (!tool) {
+          schemaIssues.push("工具「" + (toolName || "(未填 name)") + "」不在 server 宣告的清單內（可用：" +
+            Object.keys(TOOL_CATALOG).join("、") + "）");
+        } else {
+          var args = typeName(params.arguments) === "object" ? params.arguments : null;
+          if (!args) {
+            schemaIssues.push("arguments 期望 object，實際 " + typeName(params.arguments));
+          } else {
+            for (i = 0; i < tool.required.length; i++) {
+              if (!has(args, tool.required[i])) {
+                schemaIssues.push("required 缺少 " + tool.required[i]);
+              }
+            }
+            var argKeys = Object.keys(args);
+            for (i = 0; i < argKeys.length; i++) {
+              k = argKeys[i];
+              var spec = tool.props[k];
+              if (!spec) {
+                schemaIssues.push(k + " 不在 inputSchema 的 properties 內");
+                continue;
+              }
+              var actual = typeName(args[k]);
+              if (spec.type === "array" ? actual !== "array" : actual !== spec.type) {
+                schemaIssues.push(k + " 期望 " + spec.type + "，實際 " + actual);
+              } else if (spec.enum && spec.enum.indexOf(args[k]) === -1) {
+                schemaIssues.push(k + " 期望 enum [" + spec.enum.join(", ") + "]，實際 " + JSON.stringify(args[k]));
+              }
+            }
+          }
+        }
+      }
+      g5state = schemaIssues.length === 0 ? "ok" : "bad";
+      g5evi = schemaIssues.length === 0
+        ? (toolName + " 需要 [" + TOOL_CATALOG[toolName].required.join(", ") + "]；實際帶了 [" +
+           Object.keys(parsed.params.arguments).join(", ") + "]，必填齊全、型別與 enum 皆符合")
+        : schemaIssues.join("；");
+    } else if (g4state === "bad") {
+      g5evi = "上一關未通過，還沒走到參數檢查";
+    }
+
+    /* --- 由第一個失敗的關卡導出 error code --- */
+    var errorCode = null, failedGate = 0;
+    if (!g1ok) { errorCode = -32700; failedGate = 1; }
+    else if (!g2ok) { errorCode = -32600; failedGate = 2; }
+    else if (g4state === "bad") { errorCode = -32601; failedGate = 4; }
+    else if (g5state === "bad") { errorCode = -32602; failedGate = 5; }
+
+    var gates = [
+      { id: 1, name: "JSON 可解析", state: g1ok ? "ok" : "bad", evidence: g1evi, exit: "-32700 Parse error" },
+      { id: 2, name: "JSON-RPC 2.0 信封", state: !g1ok ? "skip" : (g2ok ? "ok" : "bad"), evidence: g2evi, exit: "-32600 Invalid Request" },
+      { id: 3, name: "型態分類", state: g2ok ? "ok" : "skip", evidence: g2ok ? kindLabel : "信封不合法，分類不具意義", exit: "（分類本身不回錯誤）" },
+      { id: 4, name: "method 在本 session 可用", state: g4state, evidence: g4evi, exit: "-32601 Method not found" },
+      { id: 5, name: "arguments 對 inputSchema", state: g5state, evidence: g5evi, exit: "-32602 Invalid params" }
+    ];
+
+    /* --- 線路框架 bytes --- */
+    var rawBytes = utf8Bytes(text);
+    var payloadBytes = g1ok ? utf8Bytes(JSON.stringify(parsed)) : rawBytes;
+    var httpFrameBytes = 0;
+    for (i = 0; i < HTTP_LINES.length; i++) httpFrameBytes += HTTP_LINES[i].length + CRLF;
+    httpFrameBytes += ("Content-Length: " + payloadBytes).length + CRLF;  // 位數隨 payload 變
+    httpFrameBytes += CRLF;                                               // 標頭結束空行
+    var stdioFrameBytes = 1;                                              // "\n"
+    var frameBytes = transport === 1 ? httpFrameBytes : stdioFrameBytes;
+
+    return {
+      kind: kind,
+      kindLabel: kindLabel,
+      method: method,
+      idText: idText,
+      toolName: toolName,
+      envelopeIssues: issues,
+      schemaIssues: schemaIssues,
+      gates: gates,
+      failedGate: failedGate,
+      errorCode: errorCode,
+      errorName: errorCode === null ? "" : (ERROR_NAME[String(errorCode)] || ""),
+      caps: caps,
+      availableMethods: availableMethods,
+      availableCount: availableMethods.length,
+      serverPrimCount: serverPrimCount,
+      handshakeMsgCount: handshakeMsgCount,
+      rawBytes: rawBytes,
+      payloadBytes: payloadBytes,
+      stdioFrameBytes: stdioFrameBytes,
+      httpFrameBytes: httpFrameBytes,
+      sseFrameBytes: SSE_FRAME,
+      frameBytes: frameBytes,
+      totalBytes: payloadBytes + frameBytes,
+      overheadPct: frameBytes / (payloadBytes + frameBytes) * 100,
+      sessionFrameBytes: frameBytes * handshakeMsgCount,
+      transport: transport
+    };
   }
 
-  function renderStep() {
-    var frames = SCENARIOS[scenario];
-    var frame = frames[stepIdx];
-    if (!frame) return;
-    renderPhases(frame);
-    renderLanes(frame);
-    renderWire(frame);
-    setText(statusEl, frame.status);
-    setText(captionEl, frame.caption);
-    btnNext.disabled = stepIdx >= frames.length - 1;
+  // 某個能力解鎖了哪些 method（純查表，供矩陣右欄顯示）
+  function methodsOfCap(capKey) {
+    var out = [];
+    for (var i = 0; i < METHOD_TABLE.length; i++) {
+      if (METHOD_TABLE[i].cap === capKey) out.push(METHOD_TABLE[i].name);
+    }
+    return out;
   }
 
-  function reset() {
-    stepIdx = 0;
-    renderStep();
+  /* ============================================================
+     (3) DOM 參照
+     ============================================================ */
+  var root = document.getElementById("demo-mrpc-decode");
+  if (!root) return;
+
+  var textEl = document.getElementById("mrpc-text");
+  var matrixEl = document.getElementById("mrpc-matrix");
+  var gatesEl = document.getElementById("mrpc-gates");
+  var framesEl = document.getElementById("mrpc-frames");
+  var statusEl = document.getElementById("mrpc-status");
+  var btnReset = document.getElementById("mrpc-btn-reset");
+  var sampleBtns = root.querySelectorAll(".seg button[data-sample]");
+  var tpBtns = root.querySelectorAll(".seg button[data-tp]");
+
+  var state = {
+    text: SAMPLES[DEFAULT_SAMPLE],
+    sample: DEFAULT_SAMPLE,
+    capTools: 1, capResources: 1, capPrompts: 1,
+    capSampling: 1, capRoots: 1, capElicitation: 1,
+    transport: 0
+  };
+
+  var CAP_STATE_KEY = {
+    tools: "capTools", resources: "capResources", prompts: "capPrompts",
+    sampling: "capSampling", roots: "capRoots", elicitation: "capElicitation"
+  };
+
+  /* ============================================================
+     (4) render —— 只讀 state / 結果畫出來
+     ============================================================ */
+
+  function esc(s) {
+    return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
   }
 
-  function next() {
-    var frames = SCENARIOS[scenario];
-    if (stepIdx < frames.length - 1) {
-      stepIdx += 1;
-      renderStep();
+  function renderMatrix(r) {
+    var html = ['<div class="mh">capability</div><div class="mh">宣告方</div>',
+                '<div class="mh">狀態（可點）</div><div class="mh">解鎖的 method</div>'];
+    for (var i = 0; i < CAP_ROWS.length; i++) {
+      var rowSpec = CAP_ROWS[i];
+      var on = r.caps[rowSpec.key];
+      var ms = methodsOfCap(rowSpec.key);
+      html.push('<div class="mn">' + rowSpec.key + '</div>');
+      html.push('<div class="md">' + rowSpec.side + '<br>' + rowSpec.note + '</div>');
+      html.push('<div class="mrpc-cell ' + (on ? "on" : "off") + '" data-cap="' + rowSpec.key +
+        '" role="button" tabindex="0" aria-pressed="' + (on ? "true" : "false") + '">' +
+        (on ? "已宣告" : "未宣告") + '</div>');
+      html.push('<div class="mm' + (on ? "" : " dim") + '">' + esc(ms.join("  ")) + '</div>');
+    }
+    matrixEl.innerHTML = html.join("");
+  }
+
+  function renderGates(r) {
+    var html = [];
+    for (var i = 0; i < r.gates.length; i++) {
+      var g = r.gates[i];
+      html.push('<div class="mrpc-gate g-' + g.state + '">' +
+        '<span class="gi">' + g.id + '</span>' +
+        '<span class="gn">' + esc(g.name) + '</span>' +
+        '<span class="ge">' + esc(g.evidence) + '</span>' +
+        '<span class="gx">' + (g.state === "bad" ? "→ " + esc(g.exit) : esc(g.exit)) + '</span>' +
+        '</div>');
+    }
+    gatesEl.innerHTML = html.join("");
+  }
+
+  function fr(label, value) {
+    return '<div class="fr"><span>' + label + '</span><b>' + value + '</b></div>';
+  }
+
+  function renderFrames(r) {
+    var stdioTotal = r.payloadBytes + r.stdioFrameBytes;
+    var httpTotal = r.payloadBytes + r.httpFrameBytes;
+    var html = [];
+
+    html.push('<div class="mrpc-frame' + (r.transport === 0 ? " sel" : "") + '">' +
+      '<div class="fn">stdio</div>' +
+      '<div class="fd">子行程的 stdin／stdout，newline-delimited</div>' +
+      fr("payload（minify 後）", r.payloadBytes + " B") +
+      fr("框架（\\n）", r.stdioFrameBytes + " B") +
+      fr("合計", stdioTotal + " B") +
+      fr("框架佔比", (r.stdioFrameBytes / stdioTotal * 100).toFixed(2) + "%") +
+      '<div class="ft">你在框裡打的原文有 ' + r.rawBytes + ' B，縮排與換行 ' +
+      (r.rawBytes - r.payloadBytes) + ' B 上線前會被 minify 掉。</div></div>');
+
+    html.push('<div class="mrpc-frame' + (r.transport === 1 ? " sel" : "") + '">' +
+      '<div class="fn">Streamable HTTP</div>' +
+      '<div class="fd">單一 endpoint，POST 送出、SSE 回串流</div>' +
+      fr("payload（minify 後）", r.payloadBytes + " B") +
+      fr("POST 最小標頭", r.httpFrameBytes + " B") +
+      fr("合計", httpTotal + " B") +
+      fr("框架佔比", (r.httpFrameBytes / httpTotal * 100).toFixed(2) + "%") +
+      '<div class="ft">回程再包一層 SSE（event: message ＋ data: ＋ 空行）另加 ' + r.sseFrameBytes +
+      ' B；Content-Length 目前是 ' + r.payloadBytes + '，位數一變標頭也跟著變。</div></div>');
+
+    framesEl.innerHTML = html.join("");
+  }
+
+  function renderSeg() {
+    var i;
+    for (i = 0; i < sampleBtns.length; i++) {
+      sampleBtns[i].setAttribute("aria-pressed",
+        Number(sampleBtns[i].getAttribute("data-sample")) === state.sample ? "true" : "false");
+    }
+    for (i = 0; i < tpBtns.length; i++) {
+      tpBtns[i].setAttribute("aria-pressed",
+        Number(tpBtns[i].getAttribute("data-tp")) === state.transport ? "true" : "false");
     }
   }
 
-  root.querySelectorAll(".seg button").forEach(function (btn) {
-    btn.addEventListener("click", function () {
-      root.querySelectorAll(".seg button").forEach(function (b) {
-        b.setAttribute("aria-pressed", "false");
-      });
-      btn.setAttribute("aria-pressed", "true");
-      scenario = btn.getAttribute("data-sc");
-      reset();
+  function renderStatus(r) {
+    var verdict = r.errorCode === null
+      ? "五道關卡全過：這則訊息在本 session 合法，Server 會照常處理。"
+      : "在第 " + r.failedGate + " 關被擋下 → 應回 " + r.errorCode + "（" + r.errorName + "）。";
+    statusEl.textContent =
+      "分類：" + r.kindLabel + "｜id = " + r.idText + "。" + verdict +
+      " 本 session 可用 " + r.availableCount + " 個 method、最少 " + r.handshakeMsgCount +
+      " 則訊息才用得到第一個工具；這則訊息在 " + (r.transport === 1 ? "Streamable HTTP" : "stdio") +
+      " 上是 " + r.totalBytes + " B（框架佔 " + r.overheadPct.toFixed(2) + "%），整條 session 光框架就 " +
+      r.sessionFrameBytes + " B。";
+  }
+
+  function render() {
+    var r = computeMcpMessage({
+      text: state.text,
+      capTools: state.capTools, capResources: state.capResources, capPrompts: state.capPrompts,
+      capSampling: state.capSampling, capRoots: state.capRoots, capElicitation: state.capElicitation,
+      transport: state.transport
     });
+    renderSeg();
+    renderMatrix(r);
+    renderGates(r);
+    renderFrames(r);
+    renderStatus(r);
+  }
+
+  /* ============================================================
+     (5) 事件綁定
+     ============================================================ */
+  textEl.value = state.text;
+
+  textEl.addEventListener("input", function () {
+    state.text = textEl.value;
+    state.sample = -1;
+    render();
   });
 
-  btnNext.addEventListener("click", next);
-  btnReset.addEventListener("click", reset);
+  for (var i = 0; i < sampleBtns.length; i++) {
+    (function (btn) {
+      btn.addEventListener("click", function () {
+        state.sample = Number(btn.getAttribute("data-sample"));
+        state.text = SAMPLES[state.sample];
+        textEl.value = state.text;
+        render();
+      });
+    })(sampleBtns[i]);
+  }
 
-  reset();
+  for (var t = 0; t < tpBtns.length; t++) {
+    (function (btn) {
+      btn.addEventListener("click", function () {
+        state.transport = Number(btn.getAttribute("data-tp"));
+        render();
+      });
+    })(tpBtns[t]);
+  }
+
+  matrixEl.addEventListener("click", function (ev) {
+    var cell = ev.target.closest ? ev.target.closest(".mrpc-cell") : null;
+    if (!cell) return;
+    var key = CAP_STATE_KEY[cell.getAttribute("data-cap")];
+    if (!key) return;
+    state[key] = state[key] ? 0 : 1;
+    render();
+  });
+
+  matrixEl.addEventListener("keydown", function (ev) {
+    if (ev.key !== "Enter" && ev.key !== " ") return;
+    var cell = ev.target.closest ? ev.target.closest(".mrpc-cell") : null;
+    if (!cell) return;
+    ev.preventDefault();
+    var key = CAP_STATE_KEY[cell.getAttribute("data-cap")];
+    if (!key) return;
+    state[key] = state[key] ? 0 : 1;
+    render();
+  });
+
+  btnReset.addEventListener("click", function () {
+    state.sample = DEFAULT_SAMPLE;
+    state.text = SAMPLES[DEFAULT_SAMPLE];
+    state.capTools = 1; state.capResources = 1; state.capPrompts = 1;
+    state.capSampling = 1; state.capRoots = 1; state.capElicitation = 1;
+    state.transport = 0;
+    textEl.value = state.text;
+    render();
+  });
+
+  render();
 })();
 </script>
