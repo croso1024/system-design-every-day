@@ -1377,7 +1377,7 @@
         <a href="#s3"><span class="n">03</span>伺服器階層：Root、TLD、Authority</a>
         <a href="#s4"><span class="n">04</span>常見記錄類型</a>
         <a href="#s5"><span class="n">05</span>TTL 與各層快取</a>
-        <a href="#s6"><span class="n">06</span>互動 · 遞迴解析查詢鏈路</a>
+        <a href="#s6"><span class="n">06</span>互動 · TTL 決定這一次要問幾層</a>
         <a href="#s7"><span class="n">07</span>面試折衷與實務選型</a>
       </div>
     </nav>
@@ -1393,13 +1393,14 @@
     <!-- ===================== MAIN CONTENT ===================== -->
     <main>
       <div class="inner">
-        <style>
+        <!-- demo-archetype: A｜時序推進（主，第 6 節） — 讀者調 A 紀錄／example.com NS／.com NS／OS stub 四個 TTL 與「時間流逝」，切換查同一個名稱或同 zone 的另一個名稱、Resolver 是否剛重啟，再按「下一問」逐步推進；每一步要問哪一層完全由各層快取的剩餘 TTL 算出，並即時得到 hop 數、總往返延遲、省下多少毫秒與下一個到期的是誰。
+     選 A 是因為一次解析本質就是一串有序問答；但這串有多長不是劇本而是 TTL 殘量的函式——步數本身就是本篇最該被讀者操作出來的輸出，所以沒有任何 frames 陣列。 -->
+<style>
   /* 本篇專屬：dns-* 命名空間，不覆蓋全站 base 類別 */
   #dns-root {
     --dns-client: #6b6f9a; --dns-client-soft: #eef0f6;
     --dns-resolver: #3f6188; --dns-resolver-soft: #eef2f7;
     --dns-root: #a3743e; --dns-root-soft: #f6f0e7;
-    --dns-tld: #4d7d68; --dns-tld-soft: #eef4f1;
     --dns-auth: #7a5a8e; --dns-auth-soft: #f3eef6;
   }
   .dns-roles {
@@ -1422,20 +1423,6 @@
     margin-bottom: 6px; letter-spacing: .04em;
   }
   .dns-role .rs { font-size: 12.5px; color: var(--text-2); line-height: 1.55; }
-  .dns-flow {
-    display: flex; flex-wrap: wrap; gap: 6px; align-items: center;
-    margin: 10px 0; font-family: var(--mono); font-size: 12px;
-  }
-  .dns-chip {
-    border: 1px solid var(--border-strong); border-radius: 6px;
-    padding: 6px 10px; background: #fff; color: var(--text); font-weight: 600;
-  }
-  .dns-chip.client { background: var(--dns-client-soft); border-color: var(--dns-client); color: var(--dns-client); }
-  .dns-chip.resolver { background: var(--dns-resolver-soft); border-color: var(--dns-resolver); color: var(--dns-resolver); }
-  .dns-chip.root { background: var(--dns-root-soft); border-color: var(--dns-root); color: var(--dns-root); }
-  .dns-chip.tld { background: var(--dns-tld-soft); border-color: var(--dns-tld); color: var(--dns-tld); }
-  .dns-chip.auth { background: var(--dns-auth-soft); border-color: var(--dns-auth); color: var(--dns-auth); }
-  .dns-chip.op { background: var(--bg-soft); color: var(--text-3); border-style: dashed; font-weight: 500; }
   .dns-mode-row {
     display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin: 10px 0;
   }
@@ -1465,82 +1452,74 @@
     font-family: var(--mono); font-size: 11px; color: var(--text-3); margin-top: 8px;
   }
 
-  /* Demo */
-  .dns-demo-controls {
-    display: flex; flex-wrap: wrap; gap: 8px; margin: 10px 0 8px; align-items: center;
+  /* TTL 殘量／延遲預算雙尺（dttl-*，本 demo 專用，全新撰寫） */
+  .dttl-ctl {
+    display: grid; grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 6px 18px; margin: 10px 0 8px;
   }
-  .dns-chain {
-    display: flex; flex-wrap: wrap; justify-content: center; align-items: center;
-    gap: 8px; margin: 10px 0;
+  @media (max-width: 640px) { .dttl-ctl { grid-template-columns: 1fr; } }
+  .dttl-ctl label {
+    display: grid; grid-template-columns: 116px 1fr 62px; gap: 8px; align-items: center;
+    font-family: var(--mono); font-size: 11.5px; color: var(--text-2);
   }
-  .dns-tiers { display: flex; flex-direction: column; gap: 8px; }
-  .dns-tier-row { display: flex; align-items: center; gap: 8px; }
-  .dns-tier-row .dns-node { flex: 1; }
-  .dns-node {
-    border: 1.5px solid var(--border-strong); border-radius: var(--radius-sm);
-    padding: 10px 12px; background: #fff; min-width: 96px; text-align: center;
-    transition: box-shadow .2s, border-color .2s, background .2s, opacity .2s;
+  .dttl-ctl input[type="range"] { width: 100%; }
+  .dttl-ctl output { text-align: right; color: var(--text); font-weight: 700; }
+  .dttl-btns { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 8px 0; }
+  .dttl-bars { margin: 10px 0 2px; }
+  .dttl-brow {
+    display: grid; grid-template-columns: 178px 1fr 86px; gap: 10px;
+    align-items: center; padding: 4px 0;
   }
-  .dns-node .nn { font-weight: 700; font-size: 13px; }
-  .dns-node .nk {
-    font-family: var(--mono); font-size: 10.5px; color: var(--text-3); margin-top: 2px;
+  @media (max-width: 640px) { .dttl-brow { grid-template-columns: 124px 1fr 66px; } }
+  .dttl-brow .bl { font-family: var(--mono); font-size: 11px; color: var(--text-2); }
+  .dttl-brow .br { font-family: var(--mono); font-size: 11px; text-align: right; color: var(--text-2); }
+  .dttl-brow .br.s-expired { color: var(--bad); }
+  .dttl-brow .br.s-hit { color: var(--ok); }
+  .dttl-brow .br.s-never, .dttl-brow .br.s-off, .dttl-brow .br.s-static { color: var(--text-3); }
+  .dttl-track {
+    position: relative; display: block; height: 16px;
+    background: var(--bg-soft); border: 1px solid var(--border); border-radius: 4px;
   }
-  .dns-node .ni {
-    font-family: var(--mono); font-size: 11px; color: var(--text-2); margin-top: 4px;
+  .dttl-track i { position: absolute; top: 0; bottom: 0; display: block; }
+  .dttl-span { left: 0; background: var(--border); border-radius: 3px 0 0 3px; }
+  .dttl-track-fill { border-radius: 3px; }
+  .dttl-track-fill.s-hit { background: var(--ok-soft); border: 1px solid var(--ok); }
+  .dttl-track-fill.s-hit.near { background: var(--warn-soft); border-color: var(--warn); }
+  .dttl-track-fill.s-expired, .dttl-track-fill.s-never, .dttl-track-fill.s-off { background: transparent; }
+  .dttl-track-fill.s-static {
+    background: repeating-linear-gradient(135deg, var(--bg-soft) 0 5px, #fff 5px 10px);
+    border: 1px dashed var(--border-strong);
   }
-  .dns-node.client { border-color: var(--dns-client); }
-  .dns-node.resolver { border-color: var(--dns-resolver); }
-  .dns-node.root { border-color: var(--dns-root); }
-  .dns-node.tld { border-color: var(--dns-tld); }
-  .dns-node.auth { border-color: var(--dns-auth); }
-  .dns-node.hot {
-    box-shadow: 0 0 0 3px var(--accent-soft);
-    border-color: var(--accent);
-    background: var(--accent-soft);
+  .dttl-now { width: 2px; background: var(--accent); top: -3px; bottom: -3px; }
+  .dttl-ruler { display: flex; gap: 4px; margin: 12px 0 2px; align-items: stretch; }
+  .dttl-cell {
+    border: 1px solid var(--border); border-radius: 5px; background: #fff;
+    padding: 7px 4px; text-align: center; min-width: 0;
+    font-family: var(--mono); overflow: hidden;
   }
-  .dns-node.done { background: var(--ok-soft); border-color: var(--ok); }
-  .dns-node.cached { background: var(--warn-soft); border-color: var(--warn); }
-  .dns-node.skip { opacity: .38; }
-  .dns-arrow {
-    align-self: center; font-family: var(--mono); font-size: 12px;
-    color: var(--text-3); padding: 0 2px;
+  .dttl-cell .cl { font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .dttl-cell .cm { font-size: 11px; margin-top: 3px; color: var(--text-3); }
+  .dttl-cell.done { background: var(--accent-soft); border-color: var(--accent); }
+  .dttl-cell.done .cl, .dttl-cell.done .cm { color: var(--accent); font-weight: 700; }
+  .dttl-cell.pending { color: var(--text-2); }
+  .dttl-cell.skipped {
+    background: var(--bg-soft); border-style: dashed; border-color: var(--border-strong);
   }
-  .dns-arrow.live { color: var(--accent); font-weight: 700; }
-  .dns-panels {
-    display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 10px;
-  }
-  @media (max-width: 640px) { .dns-panels { grid-template-columns: 1fr; } }
-  .dns-panel {
+  .dttl-cell.skipped .cl, .dttl-cell.skipped .cm { color: var(--text-3); }
+  .dttl-card {
     border: 1px solid var(--border); border-radius: var(--radius-sm);
-    padding: 12px; background: #fff; min-height: 140px;
+    padding: 12px; background: #fff; margin-top: 10px;
   }
-  .dns-panel .pt {
-    font-size: 11px; color: var(--text-3); letter-spacing: .06em;
-    text-transform: uppercase; font-family: var(--mono); margin-bottom: 8px;
+  .dttl-frow {
+    display: grid; grid-template-columns: 84px 1fr; gap: 10px;
+    padding: 5px 0; border-bottom: 1px dashed var(--border);
   }
-  .dns-panel .row {
-    display: flex; justify-content: space-between; gap: 8px;
-    font-family: var(--mono); font-size: 12.5px; padding: 3px 0;
-    border-bottom: 1px dashed var(--border);
+  .dttl-frow:last-child { border-bottom: none; }
+  .dttl-frow .fk { font-family: var(--mono); font-size: 11px; color: var(--text-3); }
+  .dttl-frow .fv {
+    font-family: var(--mono); font-size: 11.5px; color: var(--text);
+    line-height: 1.5; word-break: break-word;
   }
-  .dns-panel .row:last-child { border-bottom: none; }
-  .dns-panel .k { color: var(--text-3); }
-  .dns-panel .v { color: var(--text); font-weight: 600; }
-  .dns-panel .v.chg { color: var(--ok); }
-  .dns-cache-wrap { overflow-x: auto; margin: 8px 0 4px; }
-  .dns-cache-tbl {
-    width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: 12px;
-  }
-  .dns-cache-tbl th, .dns-cache-tbl td {
-    border: 1px solid var(--border); padding: 7px 9px; text-align: left; white-space: nowrap;
-  }
-  .dns-cache-tbl th {
-    background: var(--bg-soft); color: var(--text-2); font-weight: 600;
-    letter-spacing: .04em; font-size: 11px; text-transform: uppercase;
-  }
-  .dns-cache-tbl tr.hit td { background: var(--ok-soft); }
-  .dns-cache-tbl tr.new td { background: var(--accent-soft); }
-  .dns-cache-tbl tr.exp td { background: var(--bad-soft); color: var(--bad); }
 </style>
 
 <div id="dns-root">
@@ -1616,18 +1595,23 @@
     </div>
   </div>
 
-  <div class="dns-flow">
-    <span class="dns-chip client">Client</span>
-    <span class="dns-chip op">遞迴問</span>
-    <span class="dns-chip resolver">Resolver</span>
-    <span class="dns-chip op">迭代問</span>
-    <span class="dns-chip root">Root</span>
-    <span class="dns-chip op">→</span>
-    <span class="dns-chip tld">TLD</span>
-    <span class="dns-chip op">→</span>
-    <span class="dns-chip auth">Authority</span>
-    <span class="dns-chip op">A 紀錄</span>
-  </div>
+  <pre class="mermaid">
+sequenceDiagram
+    participant C as Client
+    participant R as Resolver
+    participant Ro as Root
+    participant T as TLD
+    participant A as 權威
+    C->>R: 遞迴查詢 RD=1
+    R->>Ro: 迭代查詢
+    Ro-->>R: .com NS referral
+    R->>T: 迭代查詢
+    T-->>R: example.com NS
+    R->>A: 迭代查詢
+    A-->>R: A 紀錄
+    R-->>C: A 紀錄
+</pre>
+  <p class="cap">看 Resolver 那條生命線：它上面有三組往返，客戶端卻只有一組——「誰在做迭代、誰只發一次遞迴」的分工全寫在這個不對稱裡。三個 referral（虛線）都不是最終答案，只是「下一步去哪問」。</p>
 
   <p>想在真機看這條迭代鏈路，用 <code>dig +trace</code>——它會<strong>自己扮演 Resolver</strong>，從 Root 開始一層層問下去，把每個 referral 印出來：</p>
 
@@ -1843,111 +1827,60 @@ www.example.com. A 93.184.216.34                  # 4) 問權威 → 拿到最�
 </section>
 
 <section id="s6">
-  <div class="sec-head"><span class="sec-num">06</span><h2>互動 · 遞迴解析查詢鏈路</h2></div>
-  <p class="sec-sub">逐步模擬一次 <code>www.example.com</code> 的冷查詢、快取命中，以及 TTL 過期後重查。</p>
+  <div class="sec-head"><span class="sec-num">06</span><h2>互動 · TTL 決定這一次要問幾層</h2></div>
+  <p class="sec-sub">調 TTL、推時間，再按「下一問」——每一步要問誰，全由各層快取的剩餘 TTL 算出來。</p>
 
   <div class="demo" id="demo-dns-resolve">
     <div class="demo-bar">
-      <span class="label">互動 · DNS 遞迴解析鏈</span>
-      <span class="label" style="text-transform:none;font-family:var(--sans);font-size:12px;color:var(--text-2)">選情境後按「下一步」</span>
+      <span class="label">互動 · DNS 解析步數模擬器</span>
+      <span class="label" style="text-transform:none;font-family:var(--sans);font-size:12px;color:var(--text-2)">左尺是還剩多少時間，右尺是花了多少毫秒</span>
     </div>
     <div class="demo-body">
-      <div class="seg" role="group" aria-label="情境切換">
-        <button data-sc="cold" aria-pressed="true">冷快取全鏈路</button>
-        <button data-sc="warm" aria-pressed="false">Resolver 快取命中</button>
-        <button data-sc="expire" aria-pressed="false">TTL 過期重查</button>
+      <div class="seg" role="group" aria-label="查詢名稱">
+        <button data-name="same" aria-pressed="true">再查 www.example.com</button>
+        <button data-name="other" aria-pressed="false">改查 img.example.com</button>
       </div>
 
-      <div class="dns-demo-controls">
-        <button class="btn primary" id="dns-btn-next">下一步</button>
-        <button class="btn" id="dns-btn-reset">重置</button>
-        <div class="legend">
-          <span><i class="dot ns-wait"></i>作用中</span>
-          <span><i class="dot ns-ok"></i>已完成</span>
-          <span><i class="dot ns-lock"></i>快取命中</span>
-          <span><i class="dot ns-idle"></i>未參與</span>
-        </div>
+      <div class="dttl-ctl">
+        <label for="dttl-a">A 紀錄 TTL
+          <input type="range" id="dttl-a" min="30" max="3600" step="30" value="300">
+          <output id="dttl-a-out">5 min</output></label>
+        <label for="dttl-z">example.com NS
+          <input type="range" id="dttl-z" min="300" max="86400" step="300" value="3600">
+          <output id="dttl-z-out">1 h</output></label>
+        <label for="dttl-t">.com NS
+          <input type="range" id="dttl-t" min="3600" max="172800" step="3600" value="86400">
+          <output id="dttl-t-out">24 h</output></label>
+        <label for="dttl-o">OS stub 上限
+          <input type="range" id="dttl-o" min="0" max="300" step="15" value="120">
+          <output id="dttl-o-out">2 min</output></label>
+        <label for="dttl-e">時間流逝
+          <input type="range" id="dttl-e" min="0" max="9" step="1" value="0">
+          <output id="dttl-e-out">0 s</output></label>
       </div>
 
-      <div class="status-line" id="dns-status">選擇情境後按「下一步」，觀看遞迴解析鏈路。</div>
-
-      <div class="dns-chain" id="dns-chain">
-        <div class="dns-node client" data-node="client">
-          <div class="nn">Client</div>
-          <div class="nk">Stub</div>
-          <div class="ni" id="dns-ni-client">待命</div>
-        </div>
-        <div class="dns-arrow" data-link="l1">⇄</div>
-        <div class="dns-node resolver" data-node="resolver">
-          <div class="nn">Resolver</div>
-          <div class="nk">Recursive · hub</div>
-          <div class="ni" id="dns-ni-resolver">待命</div>
-        </div>
-        <div class="dns-tiers">
-          <div class="dns-tier-row">
-            <span class="dns-arrow" data-link="l2">⇄</span>
-            <div class="dns-node root" data-node="root">
-              <div class="nn">Root</div>
-              <div class="nk">.</div>
-              <div class="ni" id="dns-ni-root">待命</div>
-            </div>
-          </div>
-          <div class="dns-tier-row">
-            <span class="dns-arrow" data-link="l3">⇄</span>
-            <div class="dns-node tld" data-node="tld">
-              <div class="nn">TLD</div>
-              <div class="nk">.com</div>
-              <div class="ni" id="dns-ni-tld">待命</div>
-            </div>
-          </div>
-          <div class="dns-tier-row">
-            <span class="dns-arrow" data-link="l4">⇄</span>
-            <div class="dns-node auth" data-node="auth">
-              <div class="nn">Authority</div>
-              <div class="nk">example.com</div>
-              <div class="ni" id="dns-ni-auth">待命</div>
-            </div>
-          </div>
-        </div>
-      </div>
-      <p class="cap" style="text-align:center">佈局刻意以 <strong>Resolver 為中心</strong>：每條輻條都是「Resolver ⇄ 某一層」的<strong>獨立往返</strong>，Resolver 每問完一層都回到自己再決定下一跳——不是 Root→TLD→Auth 之間接力轉交。</p>
-
-      <div class="dns-panels">
-        <div class="dns-panel" id="dns-q-panel">
-          <div class="pt">查詢 / 回應</div>
-          <div class="row"><span class="k">QNAME</span><span class="v" id="dns-qname">—</span></div>
-          <div class="row"><span class="k">QTYPE</span><span class="v" id="dns-qtype">—</span></div>
-          <div class="row"><span class="k">從</span><span class="v" id="dns-from">—</span></div>
-          <div class="row"><span class="k">到</span><span class="v" id="dns-to">—</span></div>
-          <div class="row"><span class="k">答案</span><span class="v" id="dns-answer">—</span></div>
-        </div>
-        <div class="dns-panel" id="dns-r-panel">
-          <div class="pt">最終結果</div>
-          <div class="row"><span class="k">主機</span><span class="v" id="dns-host">www.example.com</span></div>
-          <div class="row"><span class="k">A 紀錄</span><span class="v" id="dns-ip">—</span></div>
-          <div class="row"><span class="k">TTL</span><span class="v" id="dns-ttl">—</span></div>
-          <div class="row"><span class="k">來源</span><span class="v" id="dns-source">—</span></div>
-          <div class="row"><span class="k">延遲感</span><span class="v" id="dns-latency">—</span></div>
-        </div>
+      <div class="dttl-btns">
+        <button class="btn primary" id="dttl-next">下一問</button>
+        <button class="btn" id="dttl-cold" aria-pressed="false">Resolver 剛重啟</button>
+        <button class="btn" id="dttl-reset">重置</button>
       </div>
 
-      <div class="dns-cache-wrap">
-        <table class="dns-cache-tbl">
-          <thead>
-            <tr>
-              <th>快取鍵</th>
-              <th>類型</th>
-              <th>值</th>
-              <th>剩餘 TTL</th>
-              <th>狀態</th>
-            </tr>
-          </thead>
-          <tbody id="dns-cache-tbody">
-            <tr><td colspan="5" style="color:var(--text-3)">尚無快取條目</td></tr>
-          </tbody>
-        </table>
+      <div class="legend">
+        <span><i class="dot ns-ok"></i>快取命中</span>
+        <span><i class="dot ns-lock"></i>即將過期</span>
+        <span><i class="dot ns-bad"></i>已過期</span>
+        <span><i class="dot ns-idle"></i>從未快取 / 不過期</span>
       </div>
-      <p class="cap">Resolver 快取表：命中時跳過 Root／TLD／Authority；TTL 歸零後必須重走迭代。</p>
+
+      <div class="dttl-bars" id="dttl-bars"></div>
+      <p class="cap">左尺「還剩多少時間」：五列共用同一條時間橫軸（平方根壓縮，才能同時容納 30 s 與 48 h），藍色細線是你拖到的「時間流逝」位置。線掃過哪一列，那一列就熄滅。Root hints 是設定檔不是快取，<strong>永遠不過期</strong>，所以畫成常駐斜紋；「即將過期」是殘量低於該層 TTL 10% 的呈現用分箱，不是協定規則。</p>
+
+      <div class="dttl-ruler" id="dttl-ruler"></div>
+      <p class="cap">右尺「花了多少毫秒」：實線格是這次真的發生的問答（寬度正比於該段 RTT），虛線格是被快取省掉的層與它省下的毫秒。一次問答算一個 hop，最後把答案回覆 Stub 不另計 RTT。</p>
+
+      <div class="status-line" id="dttl-status" aria-live="polite">拖動任一個滑桿，或直接按「下一問」。</div>
+
+      <div class="dttl-card" id="dttl-facts"></div>
     </div>
   </div>
 
@@ -2118,317 +2051,462 @@ www.example.com. A 93.184.216.34                  # 4) 問權威 → 拿到最�
 (function () {
   "use strict";
 
-  var scenario = "cold";
-  var stepIdx = 0;
+  /* (1) 常數與參數表 */
 
-  var HOST = "www.example.com";
-  var IP = "93.184.216.34";
-  var TTL_FULL = "300s";
+  /* 各段網路距離（ms）。哪一段真的發生由快取殘量決定，總延遲是實際發生的段落加總。 */
+  var RTT = { os: 0.1, stub: 2, root: 28, tld: 22, auth: 45 };
+  var COLD_MS = RTT.stub + RTT.root + RTT.tld + RTT.auth; /* 97 ms：全部落空的基準 */
 
-  var statusEl = document.getElementById("dns-status");
-  var tbody = document.getElementById("dns-cache-tbody");
-  var btnNext = document.getElementById("dns-btn-next");
-  var btnReset = document.getElementById("dns-btn-reset");
+  var NAME_SAME = "www.example.com";
+  var NAME_OTHER = "img.example.com";
+  var IP_SAME = "93.184.216.34";
+  var IP_OTHER = "93.184.216.51";
+  var ZONE = "example.com";
 
-  var nodes = ["client", "resolver", "root", "tld", "auth"];
-  var links = ["l1", "l2", "l3", "l4"];
-
-  var SCENARIOS = {
-    cold: {
-      label: "冷快取全鏈路",
-      steps: [
-        {
-          hot: ["client"],
-          done: [],
-          cached: [],
-          skip: [],
-          links: ["l1"],
-          status: "Client Stub 要解析 www.example.com。本機快取未命中 → 對 Recursive Resolver 發出遞迴查詢（RD=1）。",
-          q: { qname: HOST, qtype: "A", from: "Client", to: "Resolver", answer: "（等待）" },
-          result: { ip: "—", ttl: "—", source: "—", latency: "查詢中" },
-          cache: [],
-          labels: { client: "發出查詢", resolver: "待命", root: "待命", tld: "待命", auth: "待命" }
-        },
-        {
-          hot: ["resolver"],
-          done: ["client"],
-          cached: [],
-          skip: [],
-          links: [],
-          status: "Resolver 收到遞迴請求。自身快取沒有 www.example.com → 開始迭代：先問 Root。",
-          q: { qname: HOST, qtype: "A", from: "Resolver", to: "Root", answer: "（等待 referral）" },
-          result: { ip: "—", ttl: "—", source: "迭代中", latency: "冷啟動" },
-          cache: [],
-          labels: { client: "等待", resolver: "快取未命中", root: "待命", tld: "待命", auth: "待命" }
-        },
-        {
-          hot: ["root"],
-          done: ["client", "resolver"],
-          cached: [],
-          skip: [],
-          links: ["l2"],
-          status: "Resolver ⇄ Root：Root 不持有業務紀錄，回傳 .com 的 NS＋glue。這是 referral，不是最終 A，Resolver 收下後回到自己決定下一跳。",
-          q: { qname: HOST, qtype: "A", from: "Root", to: "Resolver", answer: "NS → .com TLD" },
-          result: { ip: "—", ttl: "—", source: "Root referral", latency: "冷啟動" },
-          cache: [{ key: ".com NS", type: "NS", value: "a.gtld-servers.net", ttl: "48h", note: "可快取", cls: "new" }],
-          labels: { client: "等待", resolver: "收 referral", root: "回 .com NS", tld: "待命", auth: "待命" }
-        },
-        {
-          hot: ["tld"],
-          done: ["client", "resolver", "root"],
-          cached: [],
-          skip: [],
-          links: ["l3"],
-          status: "Resolver ⇄ TLD：Resolver 拿 Root 給的 .com NS 直接問 TLD——example.com 的權威 NS 在哪？TLD 回傳委派。",
-          q: { qname: HOST, qtype: "A", from: "TLD .com", to: "Resolver", answer: "NS → ns.example.com" },
-          result: { ip: "—", ttl: "—", source: "TLD referral", latency: "冷啟動" },
-          cache: [
-            { key: ".com NS", type: "NS", value: "a.gtld-servers.net", ttl: "48h", note: "命中可用", cls: "" },
-            { key: "example.com NS", type: "NS", value: "ns.example.com", ttl: "2h", note: "新委派", cls: "new" }
-          ],
-          labels: { client: "等待", resolver: "收委派", root: "已完成", tld: "回 NS", auth: "待命" }
-        },
-        {
-          hot: ["auth"],
-          done: ["client", "resolver", "root", "tld"],
-          cached: [],
-          skip: [],
-          links: ["l4"],
-          status: "Resolver ⇄ Authority：拿 TLD 給的 example.com NS 直接問權威，取得最終答案 www.example.com A 93.184.216.34，TTL=300。",
-          q: { qname: HOST, qtype: "A", from: "Authority", to: "Resolver", answer: "A " + IP },
-          result: { ip: IP, ttl: TTL_FULL, source: "Authoritative", latency: "冷啟動（完整鏈）" },
-          cache: [
-            { key: ".com NS", type: "NS", value: "a.gtld-servers.net", ttl: "48h", note: "—", cls: "" },
-            { key: "example.com NS", type: "NS", value: "ns.example.com", ttl: "2h", note: "—", cls: "" },
-            { key: HOST, type: "A", value: IP, ttl: TTL_FULL, note: "寫入快取", cls: "new" }
-          ],
-          labels: { client: "等待", resolver: "收 A", root: "已完成", tld: "已完成", auth: "回 A 紀錄" }
-        },
-        {
-          hot: ["client"],
-          done: ["client", "resolver", "root", "tld", "auth"],
-          cached: [],
-          skip: [],
-          links: ["l1"],
-          status: "Resolver 把最終答案回給 Client。後續相同查詢可直接打 Resolver 快取，不必再訪 Root／TLD／Authority。",
-          q: { qname: HOST, qtype: "A", from: "Resolver", to: "Client", answer: "A " + IP },
-          result: { ip: IP, ttl: TTL_FULL, source: "Resolver → Client", latency: "完成" },
-          cache: [
-            { key: ".com NS", type: "NS", value: "a.gtld-servers.net", ttl: "48h", note: "—", cls: "" },
-            { key: "example.com NS", type: "NS", value: "ns.example.com", ttl: "2h", note: "—", cls: "" },
-            { key: HOST, type: "A", value: IP, ttl: TTL_FULL, note: "可服務下一次", cls: "hit" }
-          ],
-          labels: { client: "取得 IP", resolver: "已快取", root: "已完成", tld: "已完成", auth: "已完成" }
-        }
-      ]
-    },
-    warm: {
-      label: "Resolver 快取命中",
-      steps: [
-        {
-          hot: ["client"],
-          done: [],
-          cached: [],
-          skip: ["root", "tld", "auth"],
-          links: ["l1"],
-          status: "Client 再次查詢 www.example.com。Stub 仍轉給 Resolver（本機也可能命中，此情境聚焦 Resolver）。",
-          q: { qname: HOST, qtype: "A", from: "Client", to: "Resolver", answer: "（等待）" },
-          result: { ip: "—", ttl: "—", source: "—", latency: "查詢中" },
-          cache: [
-            { key: HOST, type: "A", value: IP, ttl: "240s", note: "既有快取", cls: "" }
-          ],
-          labels: { client: "發出查詢", resolver: "待命", root: "略過", tld: "略過", auth: "略過" }
-        },
-        {
-          hot: ["resolver"],
-          done: ["client"],
-          cached: ["resolver"],
-          skip: ["root", "tld", "auth"],
-          links: ["l1"],
-          status: "Resolver 快取命中！剩餘 TTL=240s → 直接回 A，不接觸 Root／TLD／Authority。",
-          q: { qname: HOST, qtype: "A", from: "Resolver cache", to: "Client", answer: "A " + IP },
-          result: { ip: IP, ttl: "240s（剩餘）", source: "Resolver 快取", latency: "極低（熱路徑）" },
-          cache: [
-            { key: HOST, type: "A", value: IP, ttl: "240s", note: "HIT", cls: "hit" }
-          ],
-          labels: { client: "等待", resolver: "CACHE HIT", root: "略過", tld: "略過", auth: "略過" }
-        },
-        {
-          hot: ["client"],
-          done: ["client", "resolver"],
-          cached: ["resolver"],
-          skip: ["root", "tld", "auth"],
-          links: ["l1"],
-          status: "完成：熱路徑 = Client → Resolver 快取 → Client。這就是為什麼「改了 DNS 卻暫時看不到」——舊 TTL 仍被命中。",
-          q: { qname: HOST, qtype: "A", from: "Resolver", to: "Client", answer: "A " + IP },
-          result: { ip: IP, ttl: "240s（剩餘）", source: "快取命中", latency: "完成（無迭代）" },
-          cache: [
-            { key: HOST, type: "A", value: IP, ttl: "240s", note: "仍有效", cls: "hit" }
-          ],
-          labels: { client: "取得 IP", resolver: "已命中", root: "略過", tld: "略過", auth: "略過" }
-        }
-      ]
-    },
-    expire: {
-      label: "TTL 過期重查",
-      steps: [
-        {
-          hot: ["resolver"],
-          done: [],
-          cached: [],
-          skip: [],
-          links: [],
-          status: "時間過去，Resolver 上 www.example.com 的剩餘 TTL 歸零。下一筆查詢不能再當 HIT。",
-          q: { qname: HOST, qtype: "A", from: "—", to: "—", answer: "快取條目過期" },
-          result: { ip: "—", ttl: "0", source: "快取失效", latency: "—" },
-          cache: [
-            { key: HOST, type: "A", value: IP, ttl: "0", note: "EXPIRED", cls: "exp" }
-          ],
-          labels: { client: "待命", resolver: "TTL=0", root: "待命", tld: "待命", auth: "待命" }
-        },
-        {
-          hot: ["client", "resolver"],
-          done: [],
-          cached: [],
-          skip: [],
-          links: ["l1"],
-          status: "Client 再查。Resolver 發現過期 → 丟棄舊條目，重新迭代（可略過仍有效的 NS 快取）。",
-          q: { qname: HOST, qtype: "A", from: "Client", to: "Resolver", answer: "MISS（過期）" },
-          result: { ip: "—", ttl: "—", source: "重查中", latency: "需再訪 Authority" },
-          cache: [
-            { key: "example.com NS", type: "NS", value: "ns.example.com", ttl: "90m", note: "NS 仍有效", cls: "hit" }
-          ],
-          labels: { client: "再查詢", resolver: "MISS", root: "可略", tld: "可略", auth: "待命" }
-        },
-        {
-          hot: ["auth"],
-          done: ["client", "resolver"],
-          cached: [],
-          skip: ["root", "tld"],
-          links: ["l4"],
-          status: "NS 快取仍在，Resolver 跳過 Root／TLD，直接 ⇄ Authority，取得新 A（可能已換成新 IP）與新 TTL。",
-          q: { qname: HOST, qtype: "A", from: "Authority", to: "Resolver", answer: "A 93.184.216.99（新）" },
-          result: { ip: "93.184.216.99", ttl: TTL_FULL, source: "Authoritative（重查）", latency: "中（跳過 Root/TLD）" },
-          cache: [
-            { key: "example.com NS", type: "NS", value: "ns.example.com", ttl: "90m", note: "—", cls: "" },
-            { key: HOST, type: "A", value: "93.184.216.99", ttl: TTL_FULL, note: "新值寫入", cls: "new" }
-          ],
-          labels: { client: "等待", resolver: "更新快取", root: "略過", tld: "略過", auth: "回新 A" }
-        },
-        {
-          hot: ["client"],
-          done: ["client", "resolver", "auth"],
-          cached: [],
-          skip: ["root", "tld"],
-          links: ["l1"],
-          status: "完成：TTL 過期後必須重問權威。這也解釋「提前降 TTL」——縮短舊答案殘留窗口，讓切換更快收斂。",
-          q: { qname: HOST, qtype: "A", from: "Resolver", to: "Client", answer: "A 93.184.216.99" },
-          result: { ip: "93.184.216.99", ttl: TTL_FULL, source: "重查後回傳", latency: "完成" },
-          cache: [
-            { key: HOST, type: "A", value: "93.184.216.99", ttl: TTL_FULL, note: "新快取", cls: "hit" }
-          ],
-          labels: { client: "取得新 IP", resolver: "已更新", root: "略過", tld: "略過", auth: "已完成" }
-        }
-      ]
-    }
+  var LAYER_LABEL = {
+    os: "本機 stub 快取",
+    a: "Resolver：A 紀錄",
+    zone: "Resolver：example.com NS",
+    tld: "Resolver：.com NS",
+    root: "Root hints（設定檔，不過期）"
   };
 
-  function setText(id, text) {
-    var el = document.getElementById(id);
-    if (el) el.textContent = text;
+  /* 呈現用分箱：殘量低於整段 TTL 的 10% 就標成「即將過期」，純視覺提示，非協定規則 */
+  var NEAR_EXPIRY_RATIO = 0.1;
+
+  /* (2) compute* 純函式 —— 不得出現 document / getElementById / innerHTML / classList / addEventListener */
+
+  function round1(x) {
+    return Math.round(x * 10) / 10;
   }
 
-  function renderCache(rows) {
-    if (!tbody) return;
-    if (!rows || !rows.length) {
-      tbody.innerHTML = '<tr><td colspan="5" style="color:var(--text-3)">尚無快取條目</td></tr>';
-      return;
-    }
-    tbody.innerHTML = rows.map(function (r) {
-      var cls = r.cls ? ' class="' + r.cls + '"' : "";
-      return "<tr" + cls + "><td>" + r.key + "</td><td>" + r.type + "</td><td>" + r.value +
-        "</td><td>" + r.ttl + "</td><td>" + r.note + "</td></tr>";
-    }).join("");
+  /* 共用的時間橫軸採平方根壓縮，才能同時容納 30 s 與 48 h 兩種尺度 */
+  function axisPos(t, axisMax) {
+    if (axisMax <= 0) return 0;
+    var v = Math.sqrt(Math.max(0, t)) / Math.sqrt(axisMax);
+    return Math.round(v * 1000) / 10;
   }
 
-  function renderStep() {
-    var sc = SCENARIOS[scenario];
-    var step = sc.steps[stepIdx];
-    if (!step) return;
-
-    statusEl.textContent = step.status;
-
-    nodes.forEach(function (id) {
-      var el = document.querySelector('.dns-node[data-node="' + id + '"]');
-      if (!el) return;
-      el.classList.remove("hot", "done", "cached", "skip");
-      if (step.skip.indexOf(id) !== -1) el.classList.add("skip");
-      if (step.done.indexOf(id) !== -1) el.classList.add("done");
-      if (step.cached.indexOf(id) !== -1) el.classList.add("cached");
-      if (step.hot.indexOf(id) !== -1) {
-        el.classList.remove("done", "skip");
-        el.classList.add("hot");
-      }
-      var lab = step.labels && step.labels[id];
-      if (lab) setText("dns-ni-" + id, lab);
-    });
-
-    links.forEach(function (id) {
-      var el = document.querySelector('.dns-arrow[data-link="' + id + '"]');
-      if (!el) return;
-      el.classList.toggle("live", step.links.indexOf(id) !== -1);
-    });
-
-    setText("dns-qname", step.q.qname);
-    setText("dns-qtype", step.q.qtype);
-    setText("dns-from", step.q.from);
-    setText("dns-to", step.q.to);
-    setText("dns-answer", step.q.answer);
-
-    setText("dns-host", HOST);
-    setText("dns-ip", step.result.ip);
-    setText("dns-ttl", step.result.ttl);
-    setText("dns-source", step.result.source);
-    setText("dns-latency", step.result.latency);
-
-    var ipEl = document.getElementById("dns-ip");
-    if (ipEl) {
-      ipEl.classList.toggle("chg", step.result.ip !== "—" && step.result.ip !== IP);
-    }
-
-    renderCache(step.cache);
-
-    btnNext.disabled = stepIdx >= sc.steps.length - 1;
+  function makeBar(key, ttl, remain, state, elapsed, axisMax) {
+    var span = axisPos(ttl, axisMax);
+    var used = axisPos(Math.min(elapsed, ttl), axisMax);
+    return {
+      key: key,
+      label: LAYER_LABEL[key],
+      ttl: ttl,
+      remain: remain,
+      state: state,
+      spanPct: span,
+      usedPct: used,
+      remainPct: Math.round((span - used) * 10) / 10,
+      nowPct: axisPos(elapsed, axisMax),
+      near: ttl > 0 && remain > 0 && remain / ttl < NEAR_EXPIRY_RATIO
+    };
   }
 
-  function reset() {
-    stepIdx = 0;
-    renderStep();
-  }
+  // @probe fn       computeResolve
+  // @probe baseline {"aTtl":300,"zoneNsTtl":3600,"tldNsTtl":86400,"osTtl":120,"elapsedSec":7200,"coldStart":0,"sameName":1,"step":1}
+  // @probe sweep    {"aTtl":[30,3600],"zoneNsTtl":[300,86400],"tldNsTtl":[3600,172800],"osTtl":[0,300],"elapsedSec":[0,172800],"coldStart":[0,1],"sameName":[0,1],"step":[0,3]}
+  function computeResolve(p) {
+    var aTtl = p.aTtl;
+    var zTtl = p.zoneNsTtl;
+    var tTtl = p.tldNsTtl;
+    var oTtl = p.osTtl;
+    var el = p.elapsedSec;
+    var cold = p.coldStart ? 1 : 0;
+    var same = p.sameName ? 1 : 0;
 
-  function next() {
-    var sc = SCENARIOS[scenario];
-    if (stepIdx < sc.steps.length - 1) {
-      stepIdx += 1;
-      renderStep();
-    }
-  }
+    var qname = same ? NAME_SAME : NAME_OTHER;
+    var ansIp = same ? IP_SAME : IP_OTHER;
 
-  document.querySelectorAll("#demo-dns-resolve .seg button").forEach(function (btn) {
-    btn.addEventListener("click", function () {
-      document.querySelectorAll("#demo-dns-resolve .seg button").forEach(function (b) {
-        b.setAttribute("aria-pressed", "false");
+    /* 本機 stub 快取能擋多久，被紀錄自身的 TTL 夾住：設 300 s 也擋不住 TTL=60 的紀錄 */
+    var osCoverSec = same ? Math.min(oTtl, aTtl) : 0;
+    var osRemain = Math.max(0, osCoverSec - el);
+    var aRemain = cold ? 0 : Math.max(0, aTtl - el);
+    var zRemain = cold ? 0 : Math.max(0, zTtl - el);
+    var tRemain = cold ? 0 : Math.max(0, tTtl - el);
+
+    var osUsable = same === 1 && osRemain > 0;
+    var aUsable = same === 1 && aRemain > 0 && cold === 0;
+    var zUsable = zRemain > 0;
+    var tUsable = tRemain > 0;
+
+    var state = {
+      os: oTtl === 0 ? "off" : (same === 0 ? "never" : (osRemain > 0 ? "hit" : "expired")),
+      a: cold || same === 0 ? "never" : (aRemain > 0 ? "hit" : "expired"),
+      zone: cold ? "never" : (zRemain > 0 ? "hit" : "expired"),
+      tld: cold ? "never" : (tRemain > 0 ? "hit" : "expired"),
+      root: "static"
+    };
+
+    /* 一次問答＝一個 hop；最後回覆 Stub 不另計，也不計 RTT */
+    var hops = [];
+    if (osUsable) {
+      hops.push({
+        layer: "os",
+        from: "Stub",
+        to: "本機 stub 快取",
+        kind: "local",
+        rtt: RTT.os,
+        answer: "A " + ansIp,
+        why: "本機 stub 快取對 " + qname + " 還有 " + osRemain + " s → 直接回答，這次查詢完全沒有離開這台機器。"
       });
-      btn.setAttribute("aria-pressed", "true");
-      scenario = btn.getAttribute("data-sc");
-      reset();
+    } else {
+      var osWhy = oTtl === 0
+        ? "本機 stub 快取已關閉"
+        : (same === 0
+          ? "本機從未快取過 " + qname + "（不同名稱就是不同的快取鍵）"
+          : "本機 stub 快取已過期（只能擋 " + osCoverSec + " s）");
+      hops.push({
+        layer: "stub",
+        from: "Stub",
+        to: "Recursive Resolver",
+        kind: "recursive",
+        rtt: RTT.stub,
+        answer: aUsable ? "A " + ansIp + "（Resolver 快取）" : "（交給 Resolver 代跑）",
+        why: osWhy + " → Stub 對 Resolver 發出本次唯一的一筆遞迴查詢（RD=1）。" +
+          (aUsable
+            ? "Resolver 的 A 紀錄還有 " + aRemain + " s，直接回答，一次迭代都不必跑。"
+            : "Resolver 手上沒有可用的 A 紀錄，接下來換它對上游做迭代查詢。")
+      });
+      if (!aUsable) {
+        if (!zUsable) {
+          if (!tUsable) {
+            hops.push({
+              layer: "root",
+              from: "Resolver",
+              to: "Root",
+              kind: "iterative",
+              rtt: RTT.root,
+              answer: ".com NS referral",
+              why: ".com NS " + (cold ? "因 Resolver 重啟而清空" : "已過期（剩 0 s）") +
+                " → 只好從 Root hints 起步，向 Root 取 .com 的 NS referral。"
+            });
+          }
+          hops.push({
+            layer: "tld",
+            from: "Resolver",
+            to: "TLD (.com)",
+            kind: "iterative",
+            rtt: RTT.tld,
+            answer: ZONE + " NS referral",
+            why: ZONE + " NS " + (cold ? "因 Resolver 重啟而清空" : "已過期（剩 0 s）") +
+              " → 拿 .com NS（" + (tUsable ? "快取還有 " + tRemain + " s" : "剛從 Root 取得") +
+              "）問 TLD，取得 " + ZONE + " 的權威 NS 委派。"
+          });
+        }
+        hops.push({
+          layer: "auth",
+          from: "Resolver",
+          to: "Authoritative",
+          kind: "iterative",
+          rtt: RTT.auth,
+          answer: "A " + ansIp,
+          why: (zUsable
+            ? ZONE + " NS 還有 " + zRemain + " s → 跳過 Root 與 TLD，直接問權威。"
+            : "拿到剛取得的權威 NS 後問權威。") +
+            "取得 " + qname + " A " + ansIp + "，TTL " + aTtl + " s 寫回快取。"
+        });
+      }
+    }
+
+    var totalRttMs = 0;
+    var recursiveCount = 0;
+    var iterativeCount = 0;
+    var visited = {};
+    var i;
+    for (i = 0; i < hops.length; i++) {
+      totalRttMs += hops[i].rtt;
+      visited[hops[i].layer] = i;
+      if (hops[i].kind === "recursive") recursiveCount += 1;
+      if (hops[i].kind === "iterative") iterativeCount += 1;
+    }
+    totalRttMs = round1(totalRttMs);
+    var savedMs = round1(COLD_MS - totalRttMs);
+    var savedPct = Math.round(((COLD_MS - totalRttMs) / COLD_MS) * 1000) / 10;
+
+    /* 延遲預算尺：四個固定欄位（＋本機命中時的 os 欄），沒走到的層畫成灰色缺口 */
+    var slots = [];
+    if (visited.os !== undefined) slots.push({ key: "os", label: "本機快取", rtt: RTT.os });
+    slots.push({ key: "stub", label: "Stub ⇄ Resolver", rtt: RTT.stub });
+    slots.push({ key: "root", label: "⇄ Root", rtt: RTT.root });
+    slots.push({ key: "tld", label: "⇄ TLD", rtt: RTT.tld });
+    slots.push({ key: "auth", label: "⇄ Authority", rtt: RTT.auth });
+
+    var stepIdx = Math.max(0, Math.min(p.step, hops.length - 1));
+    var cells = [];
+    for (i = 0; i < slots.length; i++) {
+      var hit = visited[slots[i].key];
+      cells.push({
+        key: slots[i].key,
+        label: slots[i].label,
+        ms: slots[i].rtt,
+        widthPct: Math.max(6, Math.round((slots[i].rtt / COLD_MS) * 1000) / 10),
+        state: hit === undefined ? "skipped" : (hit <= stepIdx ? "done" : "pending"),
+        savedMs: hit === undefined ? slots[i].rtt : 0
+      });
+    }
+
+    var cumMs = 0;
+    for (i = 0; i <= stepIdx; i++) cumMs += hops[i].rtt;
+    cumMs = round1(cumMs);
+
+    var axisMax = Math.max(aTtl, zTtl, tTtl, osCoverSec, el, 1);
+    var bars = [
+      makeBar("os", osCoverSec, osRemain, state.os, el, axisMax),
+      makeBar("a", cold ? 0 : aTtl, aRemain, state.a, el, axisMax),
+      makeBar("zone", cold ? 0 : zTtl, zRemain, state.zone, el, axisMax),
+      makeBar("tld", cold ? 0 : tTtl, tRemain, state.tld, el, axisMax),
+      makeBar("root", axisMax, axisMax, "static", 0, axisMax)
+    ];
+
+    var cands = [
+      { who: LAYER_LABEL.os, s: osRemain },
+      { who: LAYER_LABEL.a, s: aRemain },
+      { who: LAYER_LABEL.zone, s: zRemain },
+      { who: LAYER_LABEL.tld, s: tRemain }
+    ];
+    var nextExpiry = { who: "—", inSec: 0 };
+    for (i = 0; i < cands.length; i++) {
+      if (cands[i].s > 0 && (nextExpiry.inSec === 0 || cands[i].s < nextExpiry.inSec)) {
+        nextExpiry = { who: cands[i].who, inSec: cands[i].s };
+      }
+    }
+
+    var skipped = [];
+    for (i = 0; i < cells.length; i++) {
+      if (cells[i].state === "skipped") skipped.push(cells[i].label + " 省下 " + cells[i].ms + " ms");
+    }
+
+    var cur = hops[stepIdx];
+    var summary = "第 " + (stepIdx + 1) + "／" + hops.length + " 問 · " + cur.why +
+      "　累計 " + cumMs + " ms。";
+
+    return {
+      qname: qname,
+      answerIp: ansIp,
+      hops: hops,
+      hopCount: hops.length,
+      recursiveCount: recursiveCount,
+      iterativeCount: iterativeCount,
+      totalRttMs: totalRttMs,
+      coldRttMs: COLD_MS,
+      savedMs: savedMs,
+      savedPct: savedPct,
+      remain: { os: osRemain, a: aRemain, zone: zRemain, tld: tRemain },
+      state: state,
+      osCoverSec: osCoverSec,
+      nextExpiry: nextExpiry,
+      bars: bars,
+      cells: cells,
+      skipped: skipped,
+      stepIdx: stepIdx,
+      cumMs: cumMs,
+      cur: {
+        from: cur.from,
+        to: cur.to,
+        kind: cur.kind,
+        rtt: cur.rtt,
+        answer: cur.answer,
+        why: cur.why
+      },
+      summary: summary
+    };
+  }
+
+  /* (3) DOM 參照 */
+
+  var demo = document.getElementById("demo-dns-resolve");
+  if (!demo) return;
+
+  var barsEl = document.getElementById("dttl-bars");
+  var rulerEl = document.getElementById("dttl-ruler");
+  var statusEl = document.getElementById("dttl-status");
+  var factsEl = document.getElementById("dttl-facts");
+  var btnNext = document.getElementById("dttl-next");
+  var btnReset = document.getElementById("dttl-reset");
+  var btnCold = document.getElementById("dttl-cold");
+  var segBtns = demo.querySelectorAll(".seg button");
+  var sliders = {
+    aTtl: document.getElementById("dttl-a"),
+    zoneNsTtl: document.getElementById("dttl-z"),
+    tldNsTtl: document.getElementById("dttl-t"),
+    osTtl: document.getElementById("dttl-o"),
+    elapsed: document.getElementById("dttl-e")
+  };
+  var outs = {
+    aTtl: document.getElementById("dttl-a-out"),
+    zoneNsTtl: document.getElementById("dttl-z-out"),
+    tldNsTtl: document.getElementById("dttl-t-out"),
+    osTtl: document.getElementById("dttl-o-out"),
+    elapsed: document.getElementById("dttl-e-out")
+  };
+
+  var ELAPSED_STEPS = [0, 30, 60, 300, 900, 3600, 7200, 21600, 86400, 172800];
+
+  var state = {
+    aTtl: 300,
+    zoneNsTtl: 3600,
+    tldNsTtl: 86400,
+    osTtl: 120,
+    elapsedSec: 0,
+    coldStart: 0,
+    sameName: 1,
+    step: 0
+  };
+
+  /* (4) render(state) —— 只讀 state 畫出來，不做任何判斷 */
+
+  function fmtDur(s) {
+    if (s <= 0) return "0 s";
+    if (s < 120) return s + " s";
+    if (s < 7200) return Math.round(s / 60) + " min";
+    if (s < 172800) return Math.round(s / 360) / 10 + " h";
+    return Math.round(s / 8640) / 10 + " d";
+  }
+
+  function stateWord(w) {
+    if (w === "hit") return "命中";
+    if (w === "expired") return "已過期";
+    if (w === "never") return "從未快取";
+    if (w === "off") return "已關閉";
+    return "不過期";
+  }
+
+  function render(r) {
+    var i;
+
+    barsEl.innerHTML = r.bars
+      .map(function (b) {
+        var cls = "dttl-track-fill s-" + b.state + (b.near ? " near" : "");
+        var right = b.state === "static"
+          ? "常駐"
+          : (b.remain > 0 ? "剩 " + fmtDur(b.remain) : stateWord(b.state));
+        return (
+          '<div class="dttl-brow">' +
+          '<span class="bl">' + b.label + "</span>" +
+          '<span class="dttl-track">' +
+          '<i class="dttl-span" style="width:' + b.spanPct + '%"></i>' +
+          '<i class="' + cls + '" style="left:' + b.usedPct + "%;width:" + b.remainPct + '%"></i>' +
+          '<i class="dttl-now" style="left:' + b.nowPct + '%"></i>' +
+          "</span>" +
+          '<span class="br s-' + b.state + '">' + right + "</span>" +
+          "</div>"
+        );
+      })
+      .join("");
+
+    rulerEl.innerHTML = r.cells
+      .map(function (c) {
+        return (
+          '<div class="dttl-cell ' + c.state + '" style="flex:' + c.widthPct + ' 1 0">' +
+          '<div class="cl">' + c.label + "</div>" +
+          '<div class="cm">' + (c.state === "skipped" ? "跳過 −" + c.ms : c.ms) + " ms</div>" +
+          "</div>"
+        );
+      })
+      .join("");
+
+    statusEl.textContent = r.summary;
+
+    var facts = [
+      ["本次 hop", r.hopCount + " 問（遞迴 " + r.recursiveCount + "、迭代 " + r.iterativeCount + "；回覆 Stub 不另計）"],
+      ["這一問", r.cur.from + " → " + r.cur.to + "　" + r.cur.answer + "　" + r.cur.rtt + " ms（累計 " + r.cumMs + " ms）"],
+      ["總延遲", r.totalRttMs + " ms　冷查詢基準 " + r.coldRttMs + " ms　省下 " + r.savedMs + " ms（" + r.savedPct + "%）"],
+      ["省在哪", r.skipped.length ? r.skipped.join("、") : "沒有任何一層被跳過"],
+      ["本機可擋", r.osCoverSec + " s（= min(OS 快取上限, A 紀錄 TTL)）"],
+      ["下一個過期", r.nextExpiry.inSec > 0 ? r.nextExpiry.who + "，" + fmtDur(r.nextExpiry.inSec) + " 後" : "四層都已無可用快取"],
+      ["查詢名稱", r.qname + " → A " + r.answerIp]
+    ];
+    factsEl.innerHTML = facts
+      .map(function (f) {
+        return '<div class="dttl-frow"><span class="fk">' + f[0] + '</span><span class="fv">' + f[1] + "</span></div>";
+      })
+      .join("");
+
+    btnNext.disabled = r.stepIdx >= r.hopCount - 1;
+  }
+
+  function run() {
+    render(computeResolve(state));
+  }
+
+  function syncOuts() {
+    outs.aTtl.textContent = fmtDur(state.aTtl);
+    outs.zoneNsTtl.textContent = fmtDur(state.zoneNsTtl);
+    outs.tldNsTtl.textContent = fmtDur(state.tldNsTtl);
+    outs.osTtl.textContent = state.osTtl === 0 ? "關閉" : fmtDur(state.osTtl);
+    outs.elapsed.textContent = fmtDur(state.elapsedSec);
+  }
+
+  /* (5) 事件綁定 */
+
+  function bindSlider(el, key, mapper) {
+    el.addEventListener("input", function () {
+      var v = parseInt(el.value, 10);
+      state[key] = mapper ? mapper(v) : v;
+      state.step = 0;
+      syncOuts();
+      run();
     });
+  }
+
+  bindSlider(sliders.aTtl, "aTtl", null);
+  bindSlider(sliders.zoneNsTtl, "zoneNsTtl", null);
+  bindSlider(sliders.tldNsTtl, "tldNsTtl", null);
+  bindSlider(sliders.osTtl, "osTtl", null);
+  bindSlider(sliders.elapsed, "elapsedSec", function (v) {
+    return ELAPSED_STEPS[Math.max(0, Math.min(v, ELAPSED_STEPS.length - 1))];
   });
 
-  btnNext.addEventListener("click", next);
-  btnReset.addEventListener("click", reset);
+  btnCold.addEventListener("click", function () {
+    state.coldStart = state.coldStart ? 0 : 1;
+    state.step = 0;
+    btnCold.setAttribute("aria-pressed", state.coldStart ? "true" : "false");
+    run();
+  });
 
-  reset();
+  for (var s = 0; s < segBtns.length; s++) {
+    (function (btn) {
+      btn.addEventListener("click", function () {
+        for (var q = 0; q < segBtns.length; q++) segBtns[q].setAttribute("aria-pressed", "false");
+        btn.setAttribute("aria-pressed", "true");
+        state.sameName = btn.getAttribute("data-name") === "same" ? 1 : 0;
+        state.step = 0;
+        run();
+      });
+    })(segBtns[s]);
+  }
+
+  btnNext.addEventListener("click", function () {
+    state.step += 1;
+    run();
+  });
+
+  btnReset.addEventListener("click", function () {
+    state.aTtl = 300;
+    state.zoneNsTtl = 3600;
+    state.tldNsTtl = 86400;
+    state.osTtl = 120;
+    state.elapsedSec = 0;
+    state.coldStart = 0;
+    state.sameName = 1;
+    state.step = 0;
+    sliders.aTtl.value = "300";
+    sliders.zoneNsTtl.value = "3600";
+    sliders.tldNsTtl.value = "86400";
+    sliders.osTtl.value = "120";
+    sliders.elapsed.value = "0";
+    btnCold.setAttribute("aria-pressed", "false");
+    for (var q = 0; q < segBtns.length; q++) {
+      segBtns[q].setAttribute("aria-pressed", segBtns[q].getAttribute("data-name") === "same" ? "true" : "false");
+    }
+    syncOuts();
+    run();
+  });
+
+  syncOuts();
+  run();
 })();
 </script>
 
