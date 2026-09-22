@@ -1380,7 +1380,7 @@
         <a href="#s6"><span class="n">06</span>Redlock，以及鎖丟失後必須停手</a>
         <a href="#s7"><span class="n">07</span>羊群效應與 Watch 設計</a>
         <a href="#s8"><span class="n">08</span>什麼情況根本不該用分散式鎖</a>
-        <a href="#s9"><span class="n">09</span>互動 · 凍結持有者與羊群通知</a>
+        <a href="#s9"><span class="n">09</span>互動 · 把上一張時間軸跑起來</a>
         <a href="#s10"><span class="n">10</span>面試折衷與邊界</a>
       </div>
     </nav>
@@ -1396,7 +1396,12 @@
     <!-- ===================== MAIN CONTENT ===================== -->
     <main>
       <div class="inner">
-        <style>
+        <!-- demo-archetype: A｜時序推進（主，第 9 節）＋B｜參數掃描（次，第 7 節） — 主 demo 讓讀者設定 lease TTL、
+     keepalive 間隔、GC pause 起訖與單程網路延遲，再逐秒拖動時間游標，由規則算出最後一次續約時刻、租約到期時刻、
+     B 取得鎖的時刻、危險窗長度與資源端的 fencing 判定；次 demo 讓讀者拖等待者人數與喚醒扇出度，算出一次故障
+     切換的總通知數、無效喚醒、寫入放大與整條隊伍的排空時間。主 demo 選 A 是因為「凍結持有者寫壞資料」本質上
+     是兩條時間區間的錯位，先後順序本身就是教學內容；次 demo 選 B 是因為羊群的教學點是通知量對人數的敏感度。 -->
+<style>
   #cs-root {
     --cs-c: #3f6188; --cs-c-soft: #eef2f7;
     --cs-s: #4d7d68; --cs-s-soft: #eef4f1;
@@ -1507,27 +1512,11 @@
   .cs-lease b { display: block; font-size: 11.5px; margin-bottom: 3px; }
   .cs-mnote { font-size: 12px; color: var(--text-2); line-height: 1.55; margin-top: 10px; }
 
-  /* ── Demo：控制列與時間軸 ─────────────────────────── */
-  .cs-mode-hint { font-size: 12.5px; color: var(--text-2); margin: 10px 0 4px; line-height: 1.6; }
-  .cs-view[hidden] { display: none !important; }
-
-  .cs-decide {
-    border: 1px solid var(--border-strong); border-left: 3px solid var(--accent);
-    border-radius: var(--radius-sm); background: var(--bg-soft);
-    padding: 10px 12px; margin: 10px 0;
-  }
-  .cs-decide .dt { font-size: 12.5px; font-weight: 700; color: var(--text); margin-bottom: 7px; }
-  .cs-decide .dt .tag {
-    font-family: var(--mono); font-size: 9.5px; letter-spacing: .08em; text-transform: uppercase;
-    color: var(--accent); border: 1px solid var(--accent); border-radius: 4px;
-    padding: 1px 5px; margin-right: 7px; vertical-align: 1px;
-  }
-  .cs-decide .dh { font-size: 12px; color: var(--text-2); line-height: 1.55; margin-top: 7px; }
-
-  .cs-scrub { display: flex; align-items: center; gap: 10px; margin: 14px 0 0; flex-wrap: wrap; }
+  /* ── 兩個 demo 共用的 slider 外觀 ─────────────────── */
+  .cs-scrub { display: flex; align-items: center; gap: 10px; margin: 12px 0 0; flex-wrap: wrap; }
   .cs-scrub .btn { flex: none; }
   .cs-range {
-    flex: 1 1 180px; min-width: 150px; -webkit-appearance: none; appearance: none;
+    flex: 1 1 140px; min-width: 110px; -webkit-appearance: none; appearance: none;
     height: 4px; border-radius: 2px; background: var(--border-strong); outline: none; cursor: pointer;
   }
   .cs-range::-webkit-slider-thumb {
@@ -1540,143 +1529,98 @@
   }
   .cs-range:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
 
-  .cs-phases { display: flex; gap: 3px; margin: 9px 0 2px; }
-  .cs-phase {
-    flex: 1; text-align: center; font-family: var(--mono); font-size: 10px;
-    color: var(--text-3); border-top: 2px solid var(--border-strong); padding-top: 5px;
-    transition: color .15s, border-color .15s;
-  }
-  .cs-phase.on { color: var(--accent); border-top-color: var(--accent); font-weight: 700; }
-  .cs-phase.done { border-top-color: var(--cs-s); color: var(--text-2); }
+  .cs-knobs { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 7px 18px; margin: 12px 0 2px; }
+  @media (max-width: 680px) { .cs-knobs { grid-template-columns: 1fr; } }
+  .cs-knob { display: flex; align-items: center; gap: 8px; }
+  .cs-knob > .kl { flex: none; width: 104px; font-family: var(--mono); font-size: 10.5px; color: var(--text-3); letter-spacing: .03em; }
+  .cs-knob > .kv { flex: none; min-width: 52px; text-align: right; font-family: var(--mono); font-size: 12px; font-weight: 700; color: var(--text); }
+  .cs-fixed-note { font-family: var(--mono); font-size: 10.5px; color: var(--text-3); margin: 8px 0 0; line-height: 1.6; }
 
-  .cs-metric { display: flex; flex-wrap: wrap; gap: 14px; margin: 12px 0 2px; font-size: 13px; color: var(--text-2); }
-  .cs-metric strong { color: var(--text); font-family: var(--mono); font-size: 12.5px; }
-
-  /* ── Demo：鎖競態時間軸 ───────────────────────────── */
-  .cs-lanes {
+  /* ── 主 demo（第 9 節）：鎖競態四泳道時間軸 ───────── */
+  .csl-lanes {
     margin-top: 12px; border: 1px solid var(--border); border-radius: var(--radius-sm);
     background: #fff; padding: 12px 10px 6px; overflow-x: auto;
   }
-  .cs-lanes svg { display: block; width: 100%; min-width: 640px; height: auto; overflow: visible; }
-  .cs-lanes .lane { fill: var(--bg-soft); }
-  .cs-lanes .lane-div { stroke: var(--border); stroke-width: 1; }
-  .cs-lanes .lnm { font-family: var(--sans); font-size: 11.5px; font-weight: 700; fill: var(--text); }
-  .cs-lanes .lsb { font-family: var(--mono); font-size: 9px; fill: var(--text-3); }
-  .cs-lanes .bar-ok { fill: var(--cs-s-soft); stroke: var(--cs-s); stroke-width: 1.4; }
-  .cs-lanes .bar-warn { fill: var(--cs-w-soft); stroke: var(--cs-w); stroke-width: 1.4; }
-  .cs-lanes .bar-bad { fill: var(--cs-bad-soft); stroke: var(--cs-bad); stroke-width: 1.4; }
-  .cs-lanes .bar-ghost { fill: none; stroke: var(--cs-bad); stroke-width: 1.3; stroke-dasharray: 4 3; }
-  .cs-lanes .bar-t { font-family: var(--mono); font-size: 9.5px; fill: var(--text); }
-  .cs-lanes .bar-t.on-ok { fill: var(--cs-s); }
-  .cs-lanes .bar-t.on-warn { fill: var(--cs-w); }
-  .cs-lanes .bar-t.on-bad { fill: var(--cs-bad); }
-  .cs-lanes .now { stroke: var(--accent); stroke-width: 1.6; }
-  .cs-lanes .now-t { font-family: var(--mono); font-size: 9.5px; fill: var(--accent); font-weight: 700; }
-  .cs-lanes .tick { stroke: var(--border); stroke-width: 1; stroke-dasharray: 2 3; }
-  .cs-lanes .tick-lbl { font-family: var(--mono); font-size: 9px; fill: var(--text-3); }
-  .cs-lanes .danger { fill: none; stroke: var(--cs-bad); stroke-width: 1.4; stroke-dasharray: 5 4; }
-  .cs-lanes .danger-t { font-family: var(--sans); font-size: 10.5px; font-weight: 700; fill: var(--cs-bad); }
-  .cs-lanes .wr { stroke-width: 1.5; fill: none; }
-  .cs-lanes .wr-ok { stroke: var(--cs-s); }
-  .cs-lanes .wr-bad { stroke: var(--cs-bad); }
-  .cs-lanes .wr-lbl { font-family: var(--mono); font-size: 9px; }
+  .csl-lanes svg { display: block; width: 100%; min-width: 660px; height: auto; overflow: visible; }
+  .csl-lanes .lane { fill: var(--bg-soft); }
+  .csl-lanes .lnm { font-family: var(--sans); font-size: 11.5px; font-weight: 700; fill: var(--text); }
+  .csl-lanes .lsb { font-family: var(--mono); font-size: 9px; fill: var(--text-3); }
+  .csl-lanes .b-ok { fill: var(--cs-s-soft); stroke: var(--cs-s); stroke-width: 1.4; }
+  .csl-lanes .b-warn { fill: var(--cs-w-soft); stroke: var(--cs-w); stroke-width: 1.4; }
+  .csl-lanes .b-bad { fill: var(--cs-bad-soft); stroke: var(--cs-bad); stroke-width: 1.4; }
+  .csl-lanes .b-idle { fill: #fff; stroke: var(--border-strong); stroke-width: 1.1; stroke-dasharray: 3 3; }
+  .csl-lanes .b-ghost { fill: none; stroke: var(--cs-bad); stroke-width: 1.3; stroke-dasharray: 4 3; }
+  .csl-lanes .bt { font-family: var(--mono); font-size: 9.5px; fill: var(--text); }
+  .csl-lanes .lease-bg { fill: #fff; stroke: var(--cs-c); stroke-width: 1; }
+  .csl-lanes .lease-fill { fill: var(--cs-c-soft); }
+  .csl-lanes .lease-t { font-family: var(--mono); font-size: 9px; fill: var(--cs-c); }
+  .csl-lanes .now { stroke: var(--accent); stroke-width: 1.6; }
+  .csl-lanes .now-t { font-family: var(--mono); font-size: 10px; fill: var(--accent); font-weight: 700; }
+  .csl-lanes .grid { stroke: var(--border); stroke-width: 1; stroke-dasharray: 2 3; }
+  .csl-lanes .grid-lbl { font-family: var(--mono); font-size: 9px; fill: var(--text-3); }
+  .csl-lanes .evt { stroke: var(--cs-bad); stroke-width: 1; stroke-dasharray: 3 2; }
+  .csl-lanes .evt-lbl { font-family: var(--mono); font-size: 9px; fill: var(--cs-bad); }
+  .csl-lanes .hatch-box { fill: none; stroke: var(--cs-bad); stroke-width: 1.3; stroke-dasharray: 5 4; }
+  .csl-lanes .hatch-t { font-family: var(--sans); font-size: 10.5px; font-weight: 700; fill: var(--cs-bad); }
+  .csl-lanes .wr { stroke-width: 1.5; fill: none; }
+  .csl-lanes .wr-lbl { font-family: var(--mono); font-size: 9px; }
 
-  /* ── Demo：羊群 vs 排隊並排對比 ───────────────────── */
-  .cs-vs { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 12px; }
-  @media (max-width: 700px) { .cs-vs { grid-template-columns: 1fr; } }
-  .cs-vscol { border: 1px solid var(--border); border-top-width: 3px; border-radius: var(--radius-sm); background: #fff; padding: 11px 12px 12px; }
-  .cs-vscol.herd { border-top-color: var(--cs-bad); }
-  .cs-vscol.queue { border-top-color: var(--cs-s); }
-  .cs-vscol > .vt { font-weight: 700; font-size: 13px; }
-  .cs-vscol > .vs2 { font-family: var(--mono); font-size: 10px; color: var(--text-3); margin: 2px 0 9px; letter-spacing: .03em; }
-  .cs-qlist { display: flex; flex-wrap: wrap; gap: 5px; }
-  .cs-qnode {
-    flex: 1 1 60px; min-width: 56px; max-width: 96px;
-    border: 1.5px solid var(--border-strong); border-radius: var(--radius-sm);
-    padding: 7px 4px 6px; background: #fff; text-align: center;
+  .csl-clock { display: flex; flex-wrap: wrap; gap: 7px; margin: 12px 0 0; }
+  .csl-cell {
+    flex: 1 1 128px; border: 1px solid var(--border); border-radius: var(--radius-sm);
+    background: var(--bg-soft); padding: 7px 9px;
   }
-  .cs-qnode .an { font-weight: 700; font-size: 12px; }
-  .cs-qnode .al { font-family: var(--mono); font-size: 9px; color: var(--text-3); margin-top: 1px; }
-  .cs-qnode .ah { font-size: 10px; color: var(--text-2); margin-top: 4px; line-height: 1.35; min-height: 2.7em; }
-  .cs-qnode.hold { background: var(--cs-s-soft); border-color: var(--cs-s); }
-  .cs-qnode.hold .an { color: var(--cs-s); }
-  .cs-qnode.gone { background: var(--cs-bad-soft); border-color: var(--cs-bad); opacity: .75; }
-  .cs-qnode.gone .an { color: var(--cs-bad); }
-  .cs-qnode.notify { background: var(--cs-w-soft); border-color: var(--cs-w); box-shadow: 0 0 0 2px var(--cs-w-soft); }
-  .cs-qnode.notify .an { color: var(--cs-w); }
-  .cs-qnode.wait { background: var(--cs-c-soft); border-color: var(--cs-c); }
-  .cs-qnode.wait .an { color: var(--cs-c); }
-  .cs-qnode.clash { background: var(--cs-bad-soft); border-color: var(--cs-bad); }
-  .cs-qnode.clash .an { color: var(--cs-bad); }
-  .cs-qmore {
-    flex: 1 1 60px; min-width: 56px; max-width: 96px;
-    border: 1.5px dashed var(--border-strong); border-radius: var(--radius-sm);
-    padding: 7px 4px; background: var(--bg-soft); text-align: center;
-    font-family: var(--mono); font-size: 10px; color: var(--text-3);
-    display: flex; flex-direction: column; align-items: center; justify-content: center;
-  }
-  .cs-count { display: flex; gap: 8px; margin-top: 10px; }
-  .cs-cbox {
-    flex: 1; border: 1px solid var(--border); border-radius: var(--radius-sm);
-    background: var(--bg-soft); padding: 7px 9px; text-align: center;
-  }
-  .cs-cbox .cn { font-family: var(--mono); font-size: 18px; font-weight: 700; color: var(--text); line-height: 1.2; }
-  .cs-cbox .cl2 { font-family: var(--mono); font-size: 9.5px; color: var(--text-3); letter-spacing: .04em; margin-top: 2px; }
-  .cs-vscol.herd .cs-cbox.hot { background: var(--cs-bad-soft); border-color: var(--cs-bad); }
-  .cs-vscol.herd .cs-cbox.hot .cn { color: var(--cs-bad); }
-  .cs-vscol.queue .cs-cbox.cool { background: var(--cs-s-soft); border-color: var(--cs-s); }
-  .cs-vscol.queue .cs-cbox.cool .cn { color: var(--cs-s); }
-  .cs-vsnote { font-size: 11.5px; color: var(--text-2); line-height: 1.5; margin-top: 9px; min-height: 3em; }
+  .csl-cell .cv { font-family: var(--mono); font-size: 15px; font-weight: 700; color: var(--text); line-height: 1.25; }
+  .csl-cell .ck { font-family: var(--mono); font-size: 9.5px; color: var(--text-3); letter-spacing: .03em; margin-top: 2px; }
+  .csl-cell.hot { background: var(--cs-bad-soft); border-color: var(--cs-bad); }
+  .csl-cell.hot .cv { color: var(--cs-bad); }
+  .csl-cell.cool { background: var(--cs-s-soft); border-color: var(--cs-s); }
+  .csl-cell.cool .cv { color: var(--cs-s); }
 
-  /* ── Demo：外部資源 / 說明面板 ────────────────────── */
-  .cs-res {
-    margin-top: 12px; padding: 12px 14px; border: 1.5px solid var(--border-strong);
+  .csl-res {
+    margin-top: 12px; padding: 11px 13px; border: 1.5px solid var(--border-strong);
     border-radius: var(--radius-sm); background: #fff;
   }
-  .cs-res .rt { font-weight: 700; font-size: 13px; margin-bottom: 3px; }
-  .cs-res .rs { font-family: var(--mono); font-size: 11px; color: var(--text-3); margin-bottom: 9px; }
-  .cs-res.ok { border-color: var(--ok); background: var(--ok-soft); }
-  .cs-res.bad { border-color: var(--bad); background: var(--bad-soft); }
-  .cs-res.warn { border-color: var(--warn); background: var(--warn-soft); }
+  .csl-res .rt { font-weight: 700; font-size: 13px; margin-bottom: 2px; }
+  .csl-res .rs { font-family: var(--mono); font-size: 10.5px; color: var(--text-3); margin-bottom: 8px; }
+  .csl-res .rk { display: flex; flex-wrap: wrap; gap: 8px; font-family: var(--mono); font-size: 12px; color: var(--text-2); }
+  .csl-res .rk span { border: 1px solid var(--border); border-radius: 6px; padding: 3px 8px; background: var(--bg-soft); }
+  .csl-res .rk strong { color: var(--text); }
+  .csl-res.ok { border-color: var(--ok); background: var(--ok-soft); }
+  .csl-res.warn { border-color: var(--warn); background: var(--warn-soft); }
+  .csl-res.bad { border-color: var(--bad); background: var(--bad-soft); }
 
-  .cs-why {
-    display: grid; grid-template-columns: 86px 1fr; gap: 4px 12px;
-    border: 1px solid var(--border); border-radius: var(--radius-sm);
-    background: #fff; padding: 11px 13px; margin-top: 12px;
+  /* ── 次 demo（第 7 節）：每輪一條喚醒帶的三角形 ───── */
+  .csw-tri {
+    margin-top: 12px; border: 1px solid var(--border); border-radius: var(--radius-sm);
+    background: #fff; padding: 11px 12px 9px;
   }
-  .cs-why dt { font-family: var(--mono); font-size: 10.5px; color: var(--text-3); padding-top: 2px; }
-  .cs-why dd { margin: 0; font-size: 12.5px; color: var(--text); line-height: 1.5; }
-
-  .cs-wire {
-    border: 1px solid var(--border); border-radius: var(--radius-sm);
-    background: #fff; padding: 8px 10px; margin-top: 12px; max-height: 220px; overflow-y: auto;
+  .csw-row { display: flex; align-items: center; gap: 8px; margin-bottom: 2px; }
+  .csw-row:last-child { margin-bottom: 0; }
+  .csw-row > .rl {
+    flex: none; width: 78px; text-align: right;
+    font-family: var(--mono); font-size: 9.5px; color: var(--text-3);
   }
-  .cs-row {
-    display: flex; align-items: baseline; gap: 8px;
-    font-family: var(--mono); font-size: 11.5px; padding: 4px 0;
-    border-bottom: 1px dashed var(--border);
+  .csw-row > .rb { flex: 1 1 auto; height: 11px; position: relative; }
+  .csw-band { position: absolute; left: 0; top: 0; bottom: 0; display: flex; border-radius: 2px; overflow: hidden; }
+  .csw-band > .win { flex: none; background: var(--cs-s); min-width: 2px; }
+  .csw-band > .waste { flex: 1 1 auto; background: var(--cs-bad-soft); border-right: 1px solid var(--cs-bad); }
+  .csw-row > .rn { flex: none; width: 62px; font-family: var(--mono); font-size: 9.5px; color: var(--text-2); }
+  .csw-area {
+    margin-top: 9px; padding-top: 8px; border-top: 1px dashed var(--border);
+    font-family: var(--mono); font-size: 11px; color: var(--text-2); line-height: 1.6;
   }
-  .cs-row:last-child { border-bottom: none; }
-  .cs-row.cur { background: var(--accent-soft); border-radius: 4px; padding-left: 4px; padding-right: 4px; }
-  .cs-row .ar { width: 34px; flex: none; text-align: center; color: var(--text-3); font-weight: 700; }
-  .cs-row .tg {
-    flex: none; border-radius: 4px; padding: 2px 6px; font-size: 10.5px; font-weight: 700;
-    border: 1px solid var(--border-strong); background: var(--bg-soft); color: var(--text-3);
+  .csw-out { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 12px; }
+  .csw-cell {
+    flex: 1 1 118px; border: 1px solid var(--border); border-radius: var(--radius-sm);
+    background: var(--bg-soft); padding: 7px 9px; text-align: center;
   }
-  .cs-row .tx { color: var(--text-2); line-height: 1.5; }
-  .cs-row.read .tg { background: var(--cs-c-soft); border-color: var(--cs-c); color: var(--cs-c); }
-  .cs-row.ok .tg { background: var(--cs-s-soft); border-color: var(--cs-s); color: var(--cs-s); }
-  .cs-row.warn .tg { background: var(--cs-w-soft); border-color: var(--cs-w); color: var(--cs-w); }
-  .cs-row.bad .tg { background: var(--cs-bad-soft); border-color: var(--cs-bad); color: var(--cs-bad); }
-
-  .cs-verdict {
-    margin-top: 12px; padding: 10px 12px; border-radius: var(--radius-sm);
-    border: 1px solid var(--border); background: var(--bg-soft);
-    font-size: 13px; color: var(--text-2); line-height: 1.55;
-  }
-  .cs-verdict.tone-ok { border-left: 3px solid var(--ok); background: var(--ok-soft); color: var(--text); }
-  .cs-verdict.tone-lock { border-left: 3px solid var(--warn); background: var(--warn-soft); color: var(--text); }
-  .cs-verdict.tone-bad { border-left: 3px solid var(--bad); background: var(--bad-soft); color: var(--text); }
+  .csw-cell .cv { font-family: var(--mono); font-size: 17px; font-weight: 700; color: var(--text); line-height: 1.2; }
+  .csw-cell .ck { font-family: var(--mono); font-size: 9.5px; color: var(--text-3); letter-spacing: .03em; margin-top: 2px; }
+  .csw-cell.hot { background: var(--cs-bad-soft); border-color: var(--cs-bad); }
+  .csw-cell.hot .cv { color: var(--cs-bad); }
+  .csw-cell.cool { background: var(--cs-s-soft); border-color: var(--cs-s); }
+  .csw-cell.cool .cv { color: var(--cs-s); }
 </style>
 
 <div id="cs-root">
@@ -1688,7 +1632,7 @@
   </div>
   <p class="sec-sub">共識被產品化之後，對外提供什麼原語，以及應用端要怎麼正確使用它們——這是本篇唯一的主軸。</p>
 
-  <p>ZooKeeper、etcd、Consul 這類協調服務，底層就是上一篇講的 replicated log：寫入要付多數派往返的代價，集群通常只有三到五台。產品化之後，應用端看到的不是 term 與 AppendEntries，而是一組<strong>小而強一致</strong>的原語：階層或扁平的 KV、Watch、Session / Lease、以及用這些積木拼出來的成員探活、設定下發、Leader 選舉與分散式鎖。</p>
+  <p>ZooKeeper、etcd、Consul 這類協調服務，底層就是 <em>Leader Election 與 Raft</em> 那篇講的 replicated log：寫入要付多數派往返的代價，集群通常只有三到五台。產品化之後，應用端看到的不是 term 與 AppendEntries，而是一組<strong>小而強一致</strong>的原語：階層或扁平的 KV、Watch、Session / Lease、以及用這些積木拼出來的成員探活、設定下發、Leader 選舉與分散式鎖。</p>
 
   <p><em>Leader Election 與 Raft 共識</em>負責協定本身（誰編號、何時可提交、fencing token 為什麼必須是單調世代號）。本篇站在協定上面一層：<strong>原語的語意、以及用錯原語時會壞在哪</strong>。Redis 的複寫、持久化與 Cluster slot 是 <em>Redis 架構與運維</em> 的事，這裡只借 Redlock 對照鎖語意。2PC / TCC / Saga 的補償理論交給 <em>分散式交易</em>；長連線叢集的 Connection Registry 交給 <em>即時連線擴展</em>；DNS 解析與快取交給 <em>DNS 深入</em>；分片路由表本身交給 <em>資料分片實務</em>。</p>
 
@@ -2031,7 +1975,7 @@
   <p class="cap">整張圖只講一件事：<strong>A 自認持有的區間（上排）比集群認定的 lease 區間（第二排）長</strong>，那段差額就是 GC pause。鎖服務在 <code>t4</code> 已經把鎖交給別人，它沒有任何辦法通知一個凍結中的行程。到了 <code>t7</code> 還能對 A 說「不」的，只剩被保護資源自己手上的 <code>lastSeenToken</code>。</p>
 
   <p class="cs-sub">2 · Fencing Token 必須由資源檢查</p>
-  <p>集群在授予鎖時發給一個單調遞增的 token：etcd 用鎖 key 的 <var>mod_revision</var>，ZooKeeper 用該 znode 的 <strong>zxid</strong>，Raft 當選時用 term（上一篇已說明來源，這裡不重講投票）。ZooKeeper 的 sequential 後綴也常被拿來當 token，但它的計數器存在父節點的 <code>cversion</code> 上，父節點一旦被刪除重建就會歸零——要絕對的單調性，用 zxid 才安全。持有者每次對<strong>被保護資源</strong>寫入都帶上這個 token。資源記住見過的最大值，拒絕較小者：</p>
+  <p>集群在授予鎖時發給一個單調遞增的 token：etcd 用鎖 key 的 <var>mod_revision</var>，ZooKeeper 用該 znode 的 <strong>zxid</strong>，Raft 當選時用 term（來源在 <em>Leader Election 與 Raft</em> 篇已說明，這裡不重講投票）。ZooKeeper 的 sequential 後綴也常被拿來當 token，但它的計數器存在父節點的 <code>cversion</code> 上，父節點一旦被刪除重建就會歸零——要絕對的單調性，用 zxid 才安全。持有者每次對<strong>被保護資源</strong>寫入都帶上這個 token。資源記住見過的最大值，拒絕較小者：</p>
 
   <div class="formula">accept(write, token) ⟺ token ≥ lastSeenToken；然後 lastSeenToken ← token</div>
 
@@ -2059,6 +2003,7 @@
       </ul>
     </div>
   </div>
+  <p class="cap">看兩欄的最後一列：左邊的損壞是<strong>靜默</strong>的（沒有任何一方收到錯誤），右邊的拒絕則發生在資源端而不是鎖服務——差別只有「寫入請求裡有沒有一個可比大小的單調號」。</p>
 
   <div class="callout accent">
     <div class="c-title"><span class="ic">關鍵</span>鎖服務無法替資源做 fencing</div>
@@ -2120,6 +2065,7 @@
       </ul>
     </div>
   </div>
+  <p class="cap">看兩欄的第一列就分勝負：左邊把失效事件當成「等一下就好」，右邊把它當成<strong>操作終止</strong>。右欄最後一列是保險，不是許可證——停手與 fencing 是兩道各自獨立的防線。</p>
 
   <div class="oneliner">
     <b>一句話答法</b>Redlock 的多數派是獨立 TTL，沒有共識 log 也沒有 fencing token，不能當正確性互斥。Session 失效必須停掉副作用，不可假設自己仍持有鎖。
@@ -2156,6 +2102,7 @@
       </ul>
     </div>
   </div>
+  <p class="cap">先看兩欄的最後一列：差別不在穩定狀態，而在<strong>通知數對等待人數 N 的關係</strong>——左邊是 O(N)（一次切換叫醒所有人），右邊是 O(1)（只叫醒下一位）。</p>
 
   <p>排隊不是免費的。每個競爭者都要建一個 znode / key，成員數很大時仍有建立與刪除成本；但那是 <var>O(1)</var> 每客戶端的固定開銷，不是故障瞬間的 <var>O(N)</var> 驚群。etcd 沒有 Sequential 後綴時，用 <code>create_revision</code> 排序前綴下的 key，只 Watch 前一個 revision，效果相同。</p>
 
@@ -2164,10 +2111,58 @@
     <p>Watch 是一次性的。前一位消失，你被叫醒，此時可能已經有人插隊、或你的 Session 自己也過期。標準迴圈是：列出目前兄弟 → 自己是最小的才進入臨界區，否則重新掛 Watch 到新的前一位。事件說「child deleted」只代表有人走了，不代表你現在是 Leader。</p>
   </div>
 
+  <div class="demo" id="demo-csw-herd">
+    <div class="demo-bar">
+      <span class="label">互動 · 一次故障切換要付多少通知</span>
+      <span class="label" style="text-transform:none;font-family:var(--sans);font-size:12px;color:var(--text-2)">扇出度 1 是排隊、等於人數是羊群，中間是分層 fan-out</span>
+    </div>
+    <div class="demo-body">
+      <div class="cs-knobs">
+        <div class="cs-knob">
+          <span class="kl">等待者 N</span>
+          <input class="cs-range" type="range" id="csw-n" min="0" max="200" step="1" value="50" aria-label="等待者人數">
+          <span class="kv" id="csw-n-v">50 人</span>
+        </div>
+        <div class="cs-knob">
+          <span class="kl">喚醒扇出度 k</span>
+          <input class="cs-range" type="range" id="csw-k" min="1" max="200" step="1" value="50" aria-label="每次釋放喚醒幾人">
+          <span class="kv" id="csw-k-v">k = 50</span>
+        </div>
+        <div class="cs-knob">
+          <span class="kl">每次搶鎖成本</span>
+          <input class="cs-range" type="range" id="csw-c" min="5" max="200" step="5" value="20" aria-label="集群處理一次 create 的成本，單位 0.1 毫秒">
+          <span class="kv" id="csw-c-v">2.0 ms</span>
+        </div>
+        <div class="cs-knob">
+          <span class="kl">臨界區持有</span>
+          <input class="cs-range" type="range" id="csw-h" min="10" max="500" step="10" value="100" aria-label="每位持有者的臨界區時間">
+          <span class="kv" id="csw-h-v">100 ms</span>
+        </div>
+      </div>
+
+      <div class="cs-scrub">
+        <button class="btn" id="csw-q">k = 1（sequential 排隊）</button>
+        <button class="btn" id="csw-hd">k = N（全體 Watch）</button>
+        <button class="btn" id="csw-reset">重置</button>
+      </div>
+
+      <div class="legend">
+        <span><i class="dot ns-ok"></i>該輪搶到鎖的人（實心左端）</span>
+        <span><i class="dot ns-bad"></i>被白叫醒、create 失敗的人</span>
+        <span><i class="dot ns-idle"></i>還沒被通知到的人</span>
+      </div>
+
+      <div class="csw-tri" id="csw-tri"></div>
+      <div class="csw-out" id="csw-out"></div>
+      <div class="status-line" id="csw-status"></div>
+      <p class="cap" style="text-align:center">一列 = 一次鎖釋放，列寬 = 那一輪被叫醒的人數。<strong>整片色塊的面積就是這場切換的總通知數</strong>：k = N 時它是一個直角三角形（N(N+1)/2），k = 1 時塌成一條細直柱（N）。羊群的代價不在穩定狀態，而在這張圖的面積。</p>
+    </div>
+  </div>
+
   <p>同一原則用在設定下發：不要讓一萬個實例 Watch 同一個會被頻繁改寫的 key。能接受秒級延遲就改成輪詢或分層 fan-out（中間層 Watch 一次，再對下游做有界推送）。Watch 是為「變更稀少、一致性要求高」準備的，不是通用 pub/sub。</p>
 
   <div class="oneliner">
-    <b>一句話答法</b>不要讓所有等待者 Watch 同一個節點。Sequential 排隊、每人只 Watch 前一位，切換時通知量是 1。被叫醒仍須重讀狀態。
+    <b>一句話答法</b>不要讓所有等待者 Watch 同一個節點。全體 Watch 的總通知量是 N(N+1)/2，sequential 排隊是 N；每人只 Watch 前一位，單次切換的通知量就是 1。被叫醒仍須重讀狀態。
   </div>
 </section>
 
@@ -2238,6 +2233,7 @@
       </ul>
     </div>
   </div>
+  <p class="cap">先問自己落在哪一欄：判準是「雙執行會怎樣」——左邊只是多做一次工，右邊是資料損壞。落在右邊而給不出 fencing token，就該換 CAS 或唯一鍵，不是換一把更快的鎖。</p>
 
   <div class="callout warn">
     <div class="c-title"><span class="ic">陷阱</span>用鎖補一個沒有唯一約束的資料模型</div>
@@ -2252,83 +2248,92 @@
 <section id="s9">
   <div class="sec-head">
     <span class="sec-num">09</span>
-    <h2>互動 · 凍結持有者與羊群通知</h2>
+    <h2>互動 · 把上一張時間軸跑起來</h2>
   </div>
-  <p class="sec-sub">第一條劇本把上面那張時間軸跑起來，由你決定資源要不要檢查 token；第二條把兩種 Watch 策略並排跑，由你決定隊伍有多長。</p>
+  <p class="sec-sub">第 5 節那張圖是靜態的；這裡把它的每一個時刻交給你的參數去算——租約什麼時候到期、B 什麼時候接手、A 醒來那一筆寫得進去嗎。</p>
 
-  <div class="demo" id="demo-cs">
+  <div class="demo" id="demo-csl-race">
     <div class="demo-bar">
-      <span class="label">互動 · 協調原語</span>
-      <span class="label" style="text-transform:none;font-family:var(--sans);font-size:12px;color:var(--text-2)">藍框內是你的決定；時間軸可前後拖曳</span>
+      <span class="label">互動 · 凍結持有者與 fencing</span>
+      <span class="label" style="text-transform:none;font-family:var(--sans);font-size:12px;color:var(--text-2)">設好參數後拖時間游標；每一刻的狀態都由規則算出</span>
     </div>
     <div class="demo-body">
-      <div class="seg" role="group" aria-label="情境切換" id="cs-seg-mode">
-        <button data-mode="lock" aria-pressed="true">鎖競態 · fencing</button>
-        <button data-mode="herd" aria-pressed="false">Watch · 羊群 vs 排隊</button>
+      <div class="cs-knobs">
+        <div class="cs-knob">
+          <span class="kl">lease TTL</span>
+          <input class="cs-range" type="range" id="csl-ttl" min="2" max="20" step="1" value="10" aria-label="租約 TTL 秒數">
+          <span class="kv" id="csl-ttl-v">10 s</span>
+        </div>
+        <div class="cs-knob">
+          <span class="kl">keepalive 間隔</span>
+          <input class="cs-range" type="range" id="csl-ka" min="1" max="8" step="1" value="3" aria-label="keepalive 間隔秒數">
+          <span class="kv" id="csl-ka-v">3 s</span>
+        </div>
+        <div class="cs-knob">
+          <span class="kl">GC pause 起點</span>
+          <input class="cs-range" type="range" id="csl-gs" min="1" max="30" step="1" value="12" aria-label="GC pause 起點">
+          <span class="kv" id="csl-gs-v">t = 12 s</span>
+        </div>
+        <div class="cs-knob">
+          <span class="kl">GC pause 長度</span>
+          <input class="cs-range" type="range" id="csl-gl" min="0" max="24" step="1" value="14" aria-label="GC pause 長度，0 表示不凍結">
+          <span class="kv" id="csl-gl-v">14 s</span>
+        </div>
+        <div class="cs-knob">
+          <span class="kl">單程網路延遲</span>
+          <input class="cs-range" type="range" id="csl-nd" min="0" max="3" step="1" value="0" aria-label="單程網路延遲">
+          <span class="kv" id="csl-nd-v">0 s</span>
+        </div>
+        <div class="cs-knob">
+          <span class="kl">時間游標</span>
+          <input class="cs-range" type="range" id="csl-tick" min="0" max="40" step="1" value="0" aria-label="時間游標，秒">
+          <span class="kv" id="csl-tick-v">t = 0 s</span>
+        </div>
       </div>
 
-      <p class="cs-mode-hint" id="cs-hint"></p>
-
-      <div class="cs-decide cs-view" id="cs-dec-fence">
-        <div class="dt"><span class="tag">你的決定</span>被保護資源要不要檢查 fencing token？</div>
-        <div class="seg" role="group" aria-label="fencing 開關" id="cs-seg-fence">
-          <button data-fence="on" aria-pressed="true">fencing ON</button>
-          <button data-fence="off" aria-pressed="false">fencing OFF</button>
-        </div>
-        <div class="dh">切換<strong>不會重置進度</strong>——走到最後一步再來回切，直接對照同一個時刻的兩種結局。</div>
-      </div>
-
-      <div class="cs-decide cs-view" id="cs-dec-n" hidden>
-        <div class="dt"><span class="tag">你的決定</span>有多少個等待者在排隊？</div>
-        <div class="seg" role="group" aria-label="等待者人數" id="cs-seg-n">
-          <button data-n="5" aria-pressed="true">5 人</button>
-          <button data-n="12" aria-pressed="false">12 人</button>
-          <button data-n="50" aria-pressed="false">50 人</button>
-        </div>
-        <div class="dh">把人數拉大，看左邊的通知量與搶鎖次數跟著線性成長，而右邊<strong>永遠是 1</strong>。</div>
+      <div class="seg" role="group" aria-label="資源端是否檢查 fencing token" id="csl-seg-fence">
+        <button data-fence="on" aria-pressed="true">資源檢查 fencing token</button>
+        <button data-fence="off" aria-pressed="false">資源不檢查</button>
       </div>
 
       <div class="cs-scrub">
-        <button class="btn" id="cs-btn-prev">&lsaquo; 上一步</button>
-        <input class="cs-range" type="range" id="cs-range" min="0" max="8" step="1" value="0" aria-label="時間軸：拖曳可前後檢視任何一步">
-        <button class="btn primary" id="cs-btn-next">下一步 &rsaquo;</button>
-        <button class="btn" id="cs-btn-reset">重置</button>
+        <button class="btn" id="csl-prev">&lsaquo; 前一秒</button>
+        <button class="btn primary" id="csl-next">後一秒 &rsaquo;</button>
+        <button class="btn" id="csl-end">跳到判定</button>
+        <button class="btn" id="csl-reset">重置</button>
       </div>
-      <div class="cs-phases" id="cs-phases"></div>
 
-      <div class="cs-metric" id="cs-metric"></div>
+      <p class="cs-fixed-note">固定前提：A 的臨界區工作需時 24 s；B 每秒重試一次；B 取得鎖後 2 s 送出寫入；模擬總長 40 s。fencing 開關只改資源端規則，<strong>不會改動任何時刻</strong>——走到最後一秒再來回切，就是同一個時間線的兩種結局。</p>
 
-      <div class="cs-lanes cs-view" id="cs-lanes"></div>
-      <div class="cs-vs cs-view" id="cs-vs" hidden></div>
+      <div class="legend">
+        <span><i class="dot ns-ok"></i>持有中 / 租約有效 / 寫入被接受</span>
+        <span><i class="dot ns-lock"></i>凍結中（本地仍認為自己持有）</span>
+        <span><i class="dot ns-bad"></i>租約已過期 / 過期寫入</span>
+        <span><i class="dot ns-idle"></i>游標尚未到達的區間</span>
+      </div>
 
-      <div class="legend" id="cs-legend"></div>
+      <div class="csl-lanes" id="csl-lanes"></div>
+      <div class="csl-clock" id="csl-clock"></div>
 
-      <div class="cs-res cs-view" id="cs-res">
+      <div class="csl-res" id="csl-res">
         <div class="rt">被保護資源（不是協調服務上的那個 key）</div>
         <div class="rs">副作用通道 · fencing token 在這裡檢查</div>
-        <div class="cs-metric" style="margin:0">
-          <span>value <strong id="cs-res-val">—</strong></span>
-          <span>lastSeenToken <strong id="cs-res-tok">0</strong></span>
-          <span>last writer <strong id="cs-res-who">—</strong></span>
-          <span>判定 <strong id="cs-res-judge">尚未寫入</strong></span>
+        <div class="rk">
+          <span>value <strong id="csl-r-val">—</strong></span>
+          <span>lastSeenToken <strong id="csl-r-tok">0</strong></span>
+          <span>最後寫入者 <strong id="csl-r-who">—</strong></span>
+          <span>判定 <strong id="csl-r-judge">尚未寫入</strong></span>
         </div>
       </div>
 
-      <dl class="cs-why">
-        <dt>本步事件</dt><dd id="cs-w-op">—</dd>
-        <dt>規則</dt><dd id="cs-w-rule">—</dd>
-        <dt>客戶端</dt><dd id="cs-w-cli">—</dd>
-      </dl>
-
-      <div class="status-line" id="cs-status"></div>
-      <div class="cs-verdict" id="cs-verdict"></div>
-      <div class="cs-wire" id="cs-wire" aria-label="事件日誌"></div>
+      <div class="status-line" id="csl-status"></div>
+      <p class="cap" style="text-align:center">兩條公式決定整張圖：<strong>危險窗 = max(0, A 的寫入抵達時刻 − 租約到期時刻)</strong>、<strong>交接延遲 = B 取得鎖的時刻 − 租約到期時刻</strong>。斜線框標的就是危險窗——A 自認持有、集群卻已改判的那一段。拒絕過期 token 請看成保護成功，紅色只留給「資源沒檢查、過期寫入真的蓋掉新值」那種損壞。</p>
     </div>
   </div>
-  <p class="cap">拒絕過期 token 請看成<strong>保護成功</strong>（綠色），不是系統故障。紅色只留給「fencing 關掉、過期寫入真的寫進去」那種資料損壞。</p>
+
 
   <div class="oneliner">
-    <b>一句話答法</b>凍結持有者醒來後的寫入，只有資源側的 token 檢查擋得住。全體 Watch 會在切換瞬間放大成 N 次通知；排隊則只叫醒下一個人。
+    <b>一句話答法</b>凍結持有者醒來後的寫入，只有資源側的 token 檢查擋得住；而 token 檢查保證的是單調，不保證「過期持有者一定被擋」——它在無鎖狀態下寫出去的副作用，早一步到就進得去。
   </div>
 </section>
 
@@ -2482,614 +2487,675 @@
 (function () {
   "use strict";
 
-  var demo = document.getElementById("demo-cs");
-  if (!demo) return;
+  /* (1) 常數與參數表 */
 
-  var TOTAL = { lock: 8, herd: 4 };
+  /* 主 demo：模擬前提（固定，非輸出） */
+  var HORIZON = 40;        /* 模擬總長，秒 */
+  var WORK_SEC = 24;       /* A 的臨界區工作需時 */
+  var B_WRITE_LAG = 2;     /* B 取得鎖之後幾秒送出寫入 */
+  var RETRY_EVERY = 1;     /* B 每幾秒重試一次搶鎖 */
 
-  var HINTS = {
-    lock: "這就是上一節那張時間軸，只是現在由你推動。A 拿到鎖後被注入 GC pause，租約在集群側過期、B 以 token=2 接手；A 醒來仍帶著 token=1 去寫外部資源。fencing 開關決定那一筆進不進得去。",
-    herd: "一個持有者、N 個等待者。左右兩欄同時跑同一次故障切換，差別只有 Watch 掛在哪裡——左邊全部盯著同一個節點，右邊每人只盯前一位。"
-  };
-
-  var PHASES = {
-    lock: [
-      { name: "A 取得鎖", end: 2 },
-      { name: "凍結與過期", end: 4 },
-      { name: "B 接手並寫入", end: 6 },
-      { name: "幽靈寫入判定", end: 8 }
-    ],
-    herd: [
-      { name: "等待中", end: 0 },
-      { name: "持有者消失", end: 1 },
-      { name: "通知擴散", end: 3 },
-      { name: "隊伍穩定", end: 4 }
-    ]
-  };
-
-  var LEGEND = {
-    lock: [
-      ["ns-ok", "持有中 / 租約有效 / 寫入被接受"],
-      ["ns-lock", "凍結（本地仍認為持有）"],
-      ["ns-bad", "租約已過期 / 過期寫入"],
-      ["ns-idle", "尚未進入的時間區間"]
-    ],
-    herd: [
-      ["ns-ok", "持有者 / 接任者"],
-      ["ns-bad", "Session 逾時消失 / 搶鎖衝突"],
-      ["ns-lock", "被 Watch 叫醒"],
-      ["ns-wait", "等待中（Watch 已掛好）"]
-    ]
-  };
-
-  /* ── 使用者的決定 ───────────────────────────────── */
-  var mode = "lock";
-  var fencing = true;
-  var waiters = 5;
-  var step = 0;
-
-  var el = function (id) { return document.getElementById(id); };
-  var hintEl = el("cs-hint");
-  var decFence = el("cs-dec-fence");
-  var decN = el("cs-dec-n");
-  var segMode = el("cs-seg-mode");
-  var segFence = el("cs-seg-fence");
-  var segN = el("cs-seg-n");
-  var rangeEl = el("cs-range");
-  var phasesEl = el("cs-phases");
-  var metricEl = el("cs-metric");
-  var lanesEl = el("cs-lanes");
-  var vsEl = el("cs-vs");
-  var legendEl = el("cs-legend");
-  var resEl = el("cs-res");
-  var statusEl = el("cs-status");
-  var verdictEl = el("cs-verdict");
-  var wireEl = el("cs-wire");
-  var btnPrev = el("cs-btn-prev");
-  var btnNext = el("cs-btn-next");
-  var btnReset = el("cs-btn-reset");
-  var wOp = el("cs-w-op");
-  var wRule = el("cs-w-rule");
-  var wCli = el("cs-w-cli");
-  var resVal = el("cs-res-val");
-  var resTok = el("cs-res-tok");
-  var resWho = el("cs-res-who");
-  var resJudge = el("cs-res-judge");
-
-  function esc(s) {
-    return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-  }
-
-  /* ── 劇本一：凍結持有者與 fencing ──────────────── */
-  var LOCK_SCRIPT = [
-    {
-      op: "A 向協調服務搶下 /lock，取得 token = 1",
-      rule: "ephemeral / lease 綁住 Session：只要 keepalive 不斷，鎖就是 A 的",
-      cli: "A 進入臨界區",
-      status: "token 不是 A 自己產生的，是集群分配的單調號——ZooKeeper 用 zxid 或 sequential 後綴，etcd 用鎖 key 的 mod_revision。客戶端偽造不出一個「比較新」的號。",
-      wire: ["ok", "GRANT", "A 建立 ephemeral sequential（或搶下 etcd key），token=1。"]
-    },
-    {
-      op: "A 定期 keepalive，Session 維持有效",
-      rule: "存活是集群側的契約：在超時窗口內收到心跳才算活著",
-      cli: "A 仍在臨界區",
-      status: "這一步看起來最無聊，卻是後面所有問題的根源：A 的程式碼把「我最近送出過心跳」當成「我現在持有鎖」。這兩件事在凍結發生的瞬間就會分家。",
-      wire: ["read", "KEEP", "A 送出 keepalive。本地變數仍記著「我持有鎖」。"]
-    },
-    {
-      op: "A 被凍結：GC pause / 長 IO / SIGSTOP / VM live migration",
-      rule: "凍結比崩潰危險——行程還在，只是暫時不會執行任何程式碼",
-      cli: "A 停止送出 keepalive，但它自己不知道",
-      status: "崩潰是友善的：行程沒了，心跳停，租約過期，舊行程再也不會寫入。凍結不是——它會在未知的時間之後醒來，帶著凍結前組好的請求繼續送出去。",
-      wire: ["warn", "PAUSE", "A 進入 GC pause，執行緒凍結，keepalive 送不出去。"]
-    },
-    {
-      op: "Session 在集群側逾時，/lock 上的 key 被刪除",
-      rule: "超時由集群判定，不是客戶端的本地計時器說了算",
-      cli: "A 毫不知情，它的變數裡還寫著 token=1",
-      status: "注意時間軸第一排與第二排從這一刻起分家：A 自認持有的區間繼續延伸，集群認定的持有區間已經結束。虛線框標出的就是這段差額。",
-      wire: ["bad", "EXPIRE", "Session / lease 過期，ephemeral key 被刪。鎖已經不屬於 A 了。"]
-    },
-    {
-      op: "B 搶下同一把鎖，取得 token = 2",
-      rule: "集群保證此刻只有一個 Session 持有這個 key——但「此刻」只涵蓋協調服務自己",
-      cli: "B 進入臨界區",
-      status: "從協調服務的角度，互斥是成立的：同一時間只有一個 Session 持有 /lock。問題在於這個保證的邊界只到協調服務為止，管不到 A 手上那些即將送出的請求。",
-      wire: ["ok", "GRANT", "B 取得 /lock，token=2（集群分配的下一個單調號）。"]
-    },
-    {
-      op: "B 帶著 token = 2 寫入被保護資源",
-      rule: "資源把 lastSeenToken 從 0 抬到 2 — 這一步決定了稍後誰會被拒",
-      cli: "B 寫入成功",
-      status: "資源現在記住了「我看過的最大 token 是 2」。這個數字就是它唯一需要保存的防線——不需要知道鎖服務在哪、也不需要知道發生過 GC。",
-      wire: ["ok", "WRITE", "B 以 token=2 寫入 value=B-payload，資源 lastSeenToken=2。"]
-    },
-    {
-      op: "A 醒來，把凍結前組好的寫入送出去（帶著舊 token = 1）",
-      rule: "A 沒有任何本地資訊能告訴它「我已經不是持有者了」",
-      cli: "A 以為自己還在臨界區",
-      status: "請注意：A 在這一刻沒有做錯任何事。它檢查過自己持有鎖、送出了寫入。錯的是「以為本地狀態能代表全域真相」這個假設——而這個假設在任何有 GC 的執行環境裡都站不住。",
-      wire: ["bad", "STALE", "A 醒來，送出 write token=1。它完全不知道鎖早就換人。"]
-    }
-  ];
-
-  function buildLock(target) {
-    var st = {
-      res: { value: "—", token: 0, writer: "—", judge: "尚未寫入", tone: "" },
-      op: "—", rule: "—", cli: "—",
-      status: "起點：沒有人持有鎖，資源也還沒被寫過。按「下一步」開始。",
-      verdict: null, wire: [], tokenA: "—", tokenB: "—"
-    };
-
-    function write(token, value, writer) {
-      var r = st.res;
-      if (fencing && token < r.token) {
-        r.judge = "REJECT · token " + token + " < " + r.token;
-        r.tone = "ok";
-        return false;
-      }
-      r.value = value;
-      r.writer = writer;
-      if (token > r.token) { r.token = token; }
-      r.judge = fencing ? "ACCEPT · token " + token : "NO CHECK · 直接套用 token " + token;
-      r.tone = fencing ? "ok" : (value.indexOf("STALE") !== -1 ? "bad" : "warn");
-      return true;
-    }
-
-    st.res.judge = fencing ? "fencing ON · 等待第一筆帶 token 的寫入" : "fencing OFF · 不做任何檢查";
-
-    for (var s = 1; s <= target; s += 1) {
-      if (s === 1) { st.tokenA = "1"; }
-      if (s === 5) { st.tokenB = "2"; }
-      if (s === 6) { write(2, "B-payload", "B"); }
-
-      if (s <= 7) {
-        var d = LOCK_SCRIPT[s - 1];
-        st.op = d.op; st.rule = d.rule; st.cli = d.cli; st.status = d.status;
-        st.wire.push({ kind: d.wire[0], tag: d.wire[1], text: d.wire[2], step: s });
-      } else {
-        var accepted = write(1, "A-STALE", "A");
-        st.op = "被保護資源收到 A 的寫入，開始檢查 token";
-        st.rule = fencing
-          ? "token 1 < lastSeenToken 2 → REJECT"
-          : "資源沒有任何 token 檢查 → 過期寫入照單全收";
-        st.cli = accepted ? "A 的過期寫入生效了" : "A 的過期寫入被拒，B 的資料完好";
-        st.status = accepted
-          ? "A-STALE 覆蓋了 B-payload。雙持有在資源上成真——而且沒有任何一方會收到錯誤：A 以為自己寫成功了，B 以為自己的資料還在。這種損壞通常要等到對帳才會被發現。"
-          : "拒絕發生在資源這一端，不在鎖服務。這很重要：鎖服務在 t4 就已經把鎖交給 B，它看不見 A 送往 S3 / MySQL / HDFS 的請求，也就無從攔截。token 必須是那些系統上的一等欄位。";
-        st.wire.push({
-          kind: accepted ? "bad" : "ok",
-          tag: accepted ? "CORRUPT" : "REJECT",
-          text: accepted
-            ? "fencing OFF：資源接受 token=1，A-STALE 覆蓋了 B-payload。"
-            : "fencing ON：資源拒絕 token=1，value 仍是 B-payload。拒絕是保護成功。",
-          step: s
-        });
-        st.verdict = accepted
-          ? {
-            text: "判定：只有租約、沒有 token 時，一次 GC pause 就足以讓過期持有者寫壞資料。注意整條路徑上沒有任何一個元件「故障」——協調服務的互斥是對的、B 的寫入是對的、A 也自認遵守了規則。少掉的那一道資源側檢查，是唯一的破口。",
-            tone: "bad"
-          }
-          : {
-            text: "判定：鎖服務保證的是「同一時間只有一個 Session 持有 key」，它管不到臨界區裡發出的副作用。真正完成互斥的是被保護資源上那個單調遞增的 token 檢查。這個世代號由共識集群分配（這裡是鎖 key 的 revision／zxid，在 Raft 裡則是 term），客戶端偽造不出一個「比較新」的號——同一條正確性論證的兩種外衣。",
-            tone: "ok"
-          };
-      }
-    }
-    return st;
-  }
-
-  /* ── 劇本二：羊群 vs 排隊（並排對比）───────────── */
-  var HERD_SCRIPT = [
-    {
-      op: "N 個等待者各自掛上 Watch，持有者 H 正常續約",
-      rule: "左邊全部 Watch 同一個父節點；右邊每人只 Watch 序號比自己小一號的那個",
-      cli: "兩邊此刻看起來一模一樣",
-      status: "差別還沒顯現——Watch 掛在哪裡，在穩定狀態下完全看不出來。故障切換的那一瞬間才會分出高下，而那正是集群最不該被放大負載的時候。",
-      wire: ["read", "WAIT", "N 個等待者掛好 Watch，H 持有 seq-001 並持續心跳。"]
-    },
-    {
-      op: "H 的 Session 逾時，seq-001 被刪除",
-      rule: "ephemeral 節點隨 Session 消失——這就是探活原語的全部",
-      cli: "等待者還沒收到任何事件",
-      status: "同一個事件，接下來會在兩種設計下產生完全不同的通知量。",
-      wire: ["bad", "EXPIRE", "持有者 H 的 Session 過期，seq-001 消失。"]
-    },
-    {
-      op: "Watch 觸發",
-      rule: "通知量 = 有多少人把 Watch 掛在這個節點上",
-      cli: "左邊全員醒來，右邊只有隊首的下一位醒來",
-      status: "這就是羊群效應的本體：通知量與等待人數成正比。把上面的人數調大，左邊的數字會跟著線性成長，右邊永遠是 1。",
-      wire: ["warn", "FIRE", "Watch 觸發：全體 Watch 推送 N 則事件，排隊只推送 1 則。"]
-    },
-    {
-      op: "被叫醒的人嘗試進入臨界區",
-      rule: "左邊 N 人同時 create，一人成功、N−1 人衝突後重掛 Watch；右邊只有一次重讀確認",
-      cli: "兩邊都選出一個接任者，但成本與公平性天差地別",
-      status: "兩件事值得注意。一，右邊那位仍然「重讀了兄弟清單」才接任——Watch 事件只代表有人走了，不代表輪到你。二，左邊的贏家是誰的 create 先送達 Leader，跟排隊順序無關；右邊則保證隊首得標。排隊除了把通知量壓到 1，還順便換到 FIFO 公平性。",
-      wire: ["warn", "RACE", "全體 Watch：N 次 create、N−1 次衝突；排隊：1 次重讀後接任。"]
-    },
-    {
-      op: "隊伍回到穩定狀態，準備迎接下一次切換",
-      rule: "羊群的成本會在每一次切換重複發生；排隊的成本與隊伍長度無關",
-      cli: "接任者已進入臨界區，其餘人繼續等待",
-      status: "左邊的 N−1 人回去擠同一個 Watch 點——下一次持有者消失，仍然是 N 則通知。右邊的隊伍整體前進一位，每個人的 Watch 依然只盯著自己的前一位。這個差別不會隨時間自己消失，只能靠改設計。",
-      wire: ["read", "SETTLE", "左：N−1 人重新擠回同一個 Watch 點。右：隊伍前進一位，通知量維持 1。"]
-    }
-  ];
-
-  function buildHerd(target) {
-    var st = {
-      op: "—", rule: "—", cli: "—",
-      status: "",
-      verdict: null, wire: [],
-      left: { notify: 0, tries: 0, note: "" },
-      right: { notify: 0, tries: 0, note: "" }
-    };
-
-    for (var s = 0; s <= target && s < HERD_SCRIPT.length; s += 1) {
-      var d = HERD_SCRIPT[s];
-      st.op = d.op; st.rule = d.rule; st.cli = d.cli; st.status = d.status;
-      st.wire.push({ kind: d.wire[0], tag: d.wire[1], text: d.wire[2], step: s });
-    }
-
-    if (target >= 2) {
-      st.left.notify = waiters;
-      st.right.notify = 1;
-    }
-    if (target >= 3) {
-      st.left.tries = waiters;
-      st.right.tries = 1;
-    }
-    st.left.note = target >= 3
-      ? (waiters - 1) + " 人白醒一趟：create 失敗後重新掛回同一個節點，下一次切換仍是 " + waiters + " 則通知。"
-      : (target >= 2 ? waiters + " 個 Watch 同時觸發，協調服務在故障切換當下推送 O(N) 事件。" : "全員把 Watch 掛在 /lock 這個父節點上。");
-    st.right.note = target >= 3
-      ? "只有 W1 被叫醒並接任；W2 的 Watch 接著指向 W1，隊伍整體前進一位。"
-      : (target >= 2 ? "只有 Watch 在 seq-001 上的 W1 被叫醒，其餘人的 Watch 仍指向活著的前一位。" : "每人只把 Watch 掛在序號小一號的鄰居上。");
-
-    if (target >= 4) {
-      st.verdict = {
-        text: "判定：一次成員變更，左邊是 " + waiters + " 則通知 + " + waiters + " 次搶鎖 + " +
-          (waiters - 1) + " 次衝突，右邊固定是 1 則通知 + 1 次接任。差距不在穩定狀態的效能，而在故障切換的那一秒——集群最脆弱的時候，羊群設計剛好給它最大的一次尖峰。",
-        tone: waiters >= 12 ? "lock" : "ok"
-      };
-    }
-    return st;
-  }
-
-  function build(target) {
-    return mode === "lock" ? buildLock(target) : buildHerd(target);
-  }
-
-  /* ── 渲染：鎖競態時間軸 ─────────────────────────── */
-  var X0 = 110, LW = 630, NT = 8;
-  function xa(t) { return X0 + t * (LW / NT); }
-
+  /* 主 demo：SVG 版面（x 座標在 compute 內就算好，render 不再換算） */
+  var SVG_W = 780, SVG_H = 252;
+  var X0 = 118, LW = 640, LH = 30;
   var LANES = [
-    { y: 28, name: "Client A", sub: "鎖持有者" },
-    { y: 76, name: "協調服務", sub: "etcd / ZK" },
-    { y: 124, name: "Client B", sub: "接任者" },
-    { y: 172, name: "被保護資源", sub: "外部副作用" }
-  ];
-  var LH = 30;
-
-  var BARS = [
-    { t1: 1, t2: 3, lane: 0, cls: "bar-ok", text: "臨界區 · keepalive 中" },
-    { t1: 3, t2: 7, lane: 0, cls: "bar-warn", text: "GC pause — 凍結，本地仍寫著「我持有鎖」" },
-    { t1: 7, t2: 8, lane: 0, cls: "bar-bad", text: "醒來寫入" },
-    { t1: 1, t2: 4, lane: 1, cls: "bar-ok", text: "/lock = A · lease 有效" },
-    { t1: 4, t2: 5, lane: 1, cls: "bar-ghost", text: "∅" },
-    { t1: 5, t2: 8, lane: 1, cls: "bar-ok", text: "/lock = B · lease 有效" },
-    { t1: 5, t2: 8, lane: 2, cls: "bar-ok", text: "臨界區 · token=2" },
-    { t1: 0, t2: 6, lane: 3, cls: "bar-ghost", text: "lastSeenToken = 0" },
-    { t1: 6, t2: 8, lane: 3, cls: "bar-ok", text: "lastSeenToken = 2" }
+    { y: 26, name: "Client A", sub: "鎖持有者" },
+    { y: 74, name: "協調服務", sub: "etcd / ZK" },
+    { y: 122, name: "Client B", sub: "接任者" },
+    { y: 170, name: "被保護資源", sub: "外部副作用" }
   ];
 
-  var TICKS = ["", "A 取得鎖", "keepalive", "GC pause", "lease 過期", "B 取得鎖", "B 寫入", "A 醒來", "判定"];
+  /* 次 demo：三角形最多畫幾列，超過就合併成帶區 */
+  var MAX_BANDS = 60;
+
+  /* (2) compute* 純函式 */
+
+  function xAt(t) {
+    var v = t;
+    if (v < 0) { v = 0; }
+    if (v > HORIZON) { v = HORIZON; }
+    return Math.round((X0 + v * LW / HORIZON) * 10) / 10;
+  }
 
   function textWidth(str) {
     var w = 0;
     for (var i = 0; i < str.length; i += 1) {
-      w += str.charCodeAt(i) > 127 ? 9.5 : 5.5;
+      w += str.charCodeAt(i) > 127 ? 9.2 : 5.4;
     }
     return w;
   }
 
-  function renderLanes(st, cur) {
-    var o = [];
-    var i;
-    o.push('<svg viewBox="0 0 760 244" role="img" aria-label="鎖競態時間軸">');
-    o.push('<defs>');
-    o.push('<marker id="cs-d-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="5" markerHeight="5" orient="auto"><path d="M 0 0 L 10 5 L 0 10 z" fill="#a8554f"></path></marker>');
-    o.push('<marker id="cs-d-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="5" markerHeight="5" orient="auto"><path d="M 0 0 L 10 5 L 0 10 z" fill="#4d7d68"></path></marker>');
-    o.push('<marker id="cs-d-idle" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="5" markerHeight="5" orient="auto"><path d="M 0 0 L 10 5 L 0 10 z" fill="#9aa0a8"></path></marker>');
-    o.push('</defs>');
+  function oneDec(x) { return Math.round(x * 10) / 10; }
 
-    for (i = 0; i < LANES.length; i += 1) {
-      o.push('<rect class="lane" x="' + X0 + '" y="' + LANES[i].y + '" width="' + LW + '" height="' + LH + '" rx="3"></rect>');
-      o.push('<text class="lnm" x="0" y="' + (LANES[i].y + 13) + '">' + LANES[i].name + "</text>");
-      o.push('<text class="lsb" x="0" y="' + (LANES[i].y + 25) + '">' + LANES[i].sub + "</text>");
-    }
-
-    for (i = 0; i <= NT; i += 1) {
-      o.push('<line class="tick" x1="' + xa(i) + '" y1="22" x2="' + xa(i) + '" y2="206"></line>');
-      if (TICKS[i]) {
-        o.push('<text class="tick-lbl" x="' + xa(i) + '" y="220" text-anchor="middle">t' + i + " " + TICKS[i] + "</text>");
-      }
-    }
-
-    for (i = 0; i < BARS.length; i += 1) {
-      var b = BARS[i];
-      if (b.t1 > cur) { continue; }
-      var right = Math.min(b.t2, cur);
-      var w = xa(right) - xa(b.t1);
-      /* 剛開始的區間給一截可見寬度，讓「這一步發生了什麼」在畫面上立刻有回饋 */
-      if (w < 14) { w = 14; }
-      var y = LANES[b.lane].y;
-      o.push('<rect class="' + b.cls + '" x="' + xa(b.t1) + '" y="' + (y + 4) + '" width="' + w + '" height="' + (LH - 8) + '" rx="4"></rect>');
-      if (w >= textWidth(b.text) + 10) {
-        o.push('<text class="bar-t" x="' + (xa(b.t1) + w / 2) + '" y="' + (y + LH / 2 + 3.5) + '" text-anchor="middle">' + b.text + "</text>");
-      }
-    }
-
-    if (cur >= 4) {
-      var dRight = Math.min(8, cur);
-      o.push('<rect class="danger" x="' + xa(4) + '" y="20" width="' + (xa(dRight) - xa(4)) + '" height="44" rx="5"></rect>');
-      if (cur >= 6) {
-        o.push('<text class="danger-t" x="' + ((xa(4) + xa(dRight)) / 2) + '" y="14" text-anchor="middle">A 已經失去鎖，而且沒有任何辦法知道</text>');
-      }
-    }
-
-    if (cur >= 8 && !fencing) {
-      /* 沒有 token 檢查時，資源在 t8 被過期寫入污染——主畫布必須跟面板說同一件事 */
-      o.push('<rect class="bar-bad" x="' + xa(6) + '" y="' + (LANES[3].y + 4) + '" width="' + (xa(8) - xa(6)) + '" height="' + (LH - 8) + '" rx="4"></rect>');
-      o.push('<text class="bar-t on-bad" x="' + ((xa(6) + xa(8)) / 2) + '" y="' + (LANES[3].y + LH / 2 + 3.5) + '" text-anchor="middle">value = A-STALE · 已被過期寫入污染</text>');
-    }
-
-    if (cur >= 6) {
-      o.push('<path class="wr wr-ok" d="M ' + xa(6) + ' 154 L ' + xa(6) + ' 169" marker-end="url(#cs-d-ok)"></path>');
-      o.push('<text class="wr-lbl" x="' + (xa(6) + 6) + '" y="166" fill="#4d7d68">token=2 ACCEPT</text>');
-    }
-    if (cur >= 7) {
-      var settled = cur >= 8;
-      var okNow = settled && fencing;
-      var cls = !settled ? "wr" : (okNow ? "wr wr-ok" : "wr wr-bad");
-      var mk = !settled ? "cs-d-idle" : (okNow ? "cs-d-ok" : "cs-d-bad");
-      var col = !settled ? "#9aa0a8" : (okNow ? "#4d7d68" : "#a8554f");
-      var lbl = !settled ? "token=1 傳送中" : (okNow ? "token=1 REJECT" : "token=1 竟被接受");
-      o.push('<path class="' + cls + '" style="stroke-dasharray:4 3;stroke:' + col + '" d="M ' + xa(7.6) + ' 58 L ' + xa(7.6) + ' 169" marker-end="url(#' + mk + ')"></path>');
-      o.push('<text class="wr-lbl" x="' + (xa(7.6) - 5) + '" y="116" text-anchor="end" fill="' + col + '">' + lbl + "</text>");
-    }
-
-    o.push('<line class="now" x1="' + xa(cur) + '" y1="18" x2="' + xa(cur) + '" y2="208"></line>');
-    o.push('<text class="now-t" x="' + xa(cur) + '" y="238" text-anchor="middle">現在 · t' + cur + "</text>");
-    o.push("</svg>");
-    lanesEl.innerHTML = o.join("");
+  /* 把一段 [t1,t2) 裁到游標之前，並算好 px；不可見就回 null。 */
+  function bar(lane, t1, t2, cls, text, cur) {
+    if (t1 > cur) { return null; }
+    var right = t2 < cur ? t2 : cur;
+    if (right < t1) { return null; }
+    var x1 = xAt(t1), x2 = xAt(right);
+    var w = x2 - x1;
+    if (w < 13) { w = 13; }
+    return {
+      x: x1, y: LANES[lane].y + 4, w: w, h: LH - 8, cls: cls,
+      text: text, showText: w >= textWidth(text) + 10,
+      tx: x1 + w / 2, ty: LANES[lane].y + LH / 2 + 3.5
+    };
   }
 
-  /* ── 渲染：羊群 vs 排隊並排對比 ─────────────────── */
-  function queueNodes(kind, cur) {
-    var out = [];
-    function seq(n) { return "seq-" + (n < 10 ? "00" : (n < 100 ? "0" : "")) + n; }
-    var h = { label: "H", sub: seq(1) + " · 持有", klass: "hold", hint: "心跳中" };
-    if (cur >= 1) { h.klass = "gone"; h.sub = seq(1) + " · 已刪除"; h.hint = "Session 逾時"; }
-    out.push(h);
+  // @probe fn       computeLockRace
+  // @probe baseline {"ttlSec":10,"keepaliveSec":3,"gcStartSec":12,"gcLenSec":14,"netDelaySec":0,"fencing":1,"tick":26}
+  // @probe sweep    {"ttlSec":[2,20],"keepaliveSec":[1,8],"gcStartSec":[1,30],"gcLenSec":[0,24],"netDelaySec":[0,3],"fencing":[0,1],"tick":[0,40]}
+  function computeLockRace(p) {
+    var ttl = Number(p.ttlSec) || 10;
+    var ka = Number(p.keepaliveSec) || 3;
+    var gs = Number(p.gcStartSec) || 0;
+    var gl = Number(p.gcLenSec);
+    if (isNaN(gl) || gl < 0) { gl = 0; }
+    var nd = Number(p.netDelaySec);
+    if (isNaN(nd) || nd < 0) { nd = 0; }
+    var fencing = !(p.fencing === 0 || p.fencing === false || p.fencing === "off");
+    var cur = Number(p.tick);
+    if (isNaN(cur) || cur < 0) { cur = 0; }
+    if (cur > HORIZON) { cur = HORIZON; }
 
-    var shown = waiters <= 5 ? waiters : 4;
-    for (var i = 1; i <= shown; i += 1) {
-      var w = {
-        label: "W" + i,
-        sub: seq(i + 1),
-        klass: "wait",
-        hint: kind === "queue" ? "Watch " + seq(i) : "Watch /lock"
+    /* 真的會凍結嗎：長度 > 0，而且發生在 A 做完之前 */
+    var frozen = gl > 0 && gs < WORK_SEC;
+    var freezeStart = frozen ? gs : HORIZON + 1;
+    var aResume = frozen ? gs + gl : WORK_SEC;   /* A 醒來 / 完工的時刻 */
+
+    /* 逐次 keepalive：送達時租約還在才續得成，否則 Session 早就被集群判死 */
+    var leaseExpiry = ttl;          /* t=0 授予，token = 1 */
+    var lastKA = 0;
+    var kaDelivered = 0;
+    var renewals = [{ at: 0, until: ttl }];
+    var expiredAt = -1;
+    var send = ka;
+    while (send < freezeStart && send <= WORK_SEC) {
+      var arrive = send + nd;
+      if (arrive <= leaseExpiry) {
+        leaseExpiry = arrive + ttl;
+        lastKA = arrive;
+        kaDelivered += 1;
+        renewals.push({ at: arrive, until: leaseExpiry });
+      } else if (expiredAt < 0) {
+        expiredAt = leaseExpiry;    /* 續約來不及：租約在兩次心跳之間就斷了 */
+      }
+      send += ka;
+    }
+
+    /* A 凍結前就組好的那筆寫入，在它醒來後才送出 */
+    var aResumeWrite = aResume + nd;
+
+    /* A 的持有在集群端何時結束：租約先到期，或 A 自己做完釋放
+       （醒來時租約還在的話，A 會恢復續約、寫完就釋放——那是合法的無事故路徑） */
+    var lockEnd, endKind;
+    if (expiredAt >= 0) { lockEnd = expiredAt; endKind = "expire"; }
+    else if (frozen) {
+      if (aResumeWrite <= leaseExpiry) { lockEnd = aResumeWrite; endKind = "release"; }
+      else if (leaseExpiry <= HORIZON) { lockEnd = leaseExpiry; endKind = "expire"; }
+      else { lockEnd = -1; endKind = "none"; }
+    } else if (leaseExpiry < WORK_SEC) { lockEnd = leaseExpiry; endKind = "expire"; }
+    else { lockEnd = WORK_SEC; endKind = "release"; }
+
+    /* B 每秒重試，第一個不早於 lockEnd 的重試才搶得到；請求再走一段網路 */
+    var bLockAt = -1, bWriteAt = -1, tokenB = -1;
+    if (lockEnd >= 0) {
+      var tryAt = Math.ceil(lockEnd / RETRY_EVERY) * RETRY_EVERY;
+      bLockAt = tryAt + nd;
+      if (bLockAt <= HORIZON) {
+        tokenB = 2;                 /* 集群的 revision 計數器：第二次授予 */
+        bWriteAt = bLockAt + B_WRITE_LAG;
+        if (bWriteAt > HORIZON) { bWriteAt = -1; }
+      } else { bLockAt = -1; }
+    }
+
+    var aWriteSend = aResume;
+    var aWriteArrive = aResumeWrite;
+    var aWriteVisible = aWriteArrive <= HORIZON;
+
+    /* 資源端：依抵達時間套用規則；同一秒到達時 A 的過期寫入先被處理 */
+    var events = [];
+    if (aWriteVisible) { events.push({ t: aWriteArrive, who: "A", token: 1, order: 0 }); }
+    if (bWriteAt >= 0) { events.push({ t: bWriteAt, who: "B", token: tokenB, order: 1 }); }
+    events.sort(function (x, y) {
+      if (x.t !== y.t) { return x.t - y.t; }
+      return x.order - y.order;
+    });
+
+    var res = { value: "—", token: 0, writer: "—", judge: fencing ? "fencing ON · 等待第一筆帶 token 的寫入" : "fencing OFF · 不做任何檢查", tone: "" };
+    var aAccepted = null, corrupted = false;
+    /* A 的寫入抵達時，資源手上的 lastSeenToken 是多少（整條時間線，與游標無關） */
+    var seenBeforeA = 0, walk = 0;
+    for (var w = 0; w < events.length; w += 1) {
+      if (events[w].who === "A") { seenBeforeA = walk; break; }
+      if (!fencing || events[w].token >= walk) {
+        if (events[w].token > walk) { walk = events[w].token; }
+      }
+    }
+    for (var i = 0; i < events.length; i += 1) {
+      var ev = events[i];
+      if (ev.t > cur) { continue; }
+      var ok = !fencing || ev.token >= res.token;
+      if (ok) {
+        var overwroteNewer = fencing === false && ev.token < res.token;
+        res.value = ev.who + "-payload";
+        res.writer = ev.who;
+        if (ev.token > res.token) { res.token = ev.token; }
+        res.judge = fencing
+          ? "ACCEPT · token " + ev.token + " ≥ lastSeen"
+          : "NO CHECK · 直接套用 token " + ev.token;
+        res.tone = overwroteNewer ? "bad" : (fencing ? "ok" : "warn");
+        if (overwroteNewer) { corrupted = true; }
+      } else {
+        res.judge = "REJECT · token " + ev.token + " < lastSeen " + res.token;
+        res.tone = "ok";
+      }
+      if (ev.who === "A") { aAccepted = ok; }
+    }
+
+    /* 結局分類（全部由時刻比較推導） */
+    var verdictCode;
+    if (!frozen && endKind !== "expire") { verdictCode = "NO_FREEZE"; }
+    else if (endKind === "expire" && !frozen) { verdictCode = "KA_TOO_SLOW"; }
+    else if (lockEnd < 0) { verdictCode = "NO_EXPIRE"; }
+    else if (aWriteArrive <= lockEnd) { verdictCode = "SAFE_EARLY"; }
+    else if (bWriteAt < 0 || aWriteArrive <= bWriteAt) { verdictCode = "STALE_BEFORE_B"; }
+    else if (fencing) { verdictCode = "REJECT"; }
+    else { verdictCode = "CORRUPT"; }
+
+    var dangerWindow = (lockEnd >= 0 && aWriteArrive > lockEnd) ? oneDec(aWriteArrive - lockEnd) : 0;
+    var handover = (lockEnd >= 0 && bLockAt >= 0) ? oneDec(bLockAt - lockEnd) : -1;
+
+    /* 游標當下：租約剩餘、階段 */
+    var activeUntil = 0;
+    for (i = 0; i < renewals.length; i += 1) {
+      if (renewals[i].at <= cur) { activeUntil = renewals[i].until; }
+    }
+    var remainingLease = 0;
+    if (lockEnd < 0 || cur < lockEnd) {
+      remainingLease = activeUntil > cur ? oneDec(activeUntil - cur) : 0;
+    }
+    var leasePct = Math.round((remainingLease / ttl) * 100);
+    if (leasePct > 100) { leasePct = 100; }
+    if (leasePct < 0) { leasePct = 0; }
+
+    var phaseCode;
+    if (lockEnd >= 0 && cur >= lockEnd) {
+      if (bLockAt >= 0 && cur >= bLockAt) { phaseCode = "HOLD_B"; }
+      else { phaseCode = "ORPHAN"; }
+    } else if (frozen && cur >= gs) { phaseCode = "FROZEN"; }
+    else { phaseCode = "HOLD_A"; }
+    if (aWriteVisible && cur >= aWriteArrive) { phaseCode = "SETTLED"; }
+
+    /* 說明句：模板 + 算出來的數字 */
+    var sentence = "t = " + cur + "s：";
+    if (phaseCode === "HOLD_A") {
+      sentence += "A 持有鎖（token=1），已成功續約 " + kaDelivered + " 次，最後一次在 t=" + lastKA
+        + "s；照目前的續約情況，租約會撐到 t=" + oneDec(activeUntil) + "s，還剩 " + remainingLease + "s。";
+    } else if (phaseCode === "FROZEN") {
+      sentence += "A 已經凍結 " + oneDec(cur - gs) + "s，送不出 keepalive。它的變數裡還寫著「我持有鎖」，"
+        + "但集群端的租約" + (lockEnd >= 0 && cur >= lockEnd ? "已在 t=" + oneDec(lockEnd) + "s 到期" : "只剩 " + remainingLease + "s")
+        + "。A 沒有任何本地資訊能得知這件事。";
+    } else if (phaseCode === "ORPHAN") {
+      sentence += "租約已在 t=" + oneDec(lockEnd) + "s 到期、key 被刪，鎖現在沒有主人；"
+        + (bLockAt >= 0 ? "B 的下一次重試會在 t=" + oneDec(bLockAt) + "s 拿到它（交接延遲 " + handover + "s）。" : "B 在模擬結束前沒能取得它。")
+        + (frozen ? " A 仍在凍結中，還要 " + oneDec(aResume - cur) + "s 才會醒來。" : "");
+    } else if (phaseCode === "HOLD_B") {
+      sentence += "B 以 token=" + tokenB + " 持有鎖"
+        + (bWriteAt >= 0 && cur >= bWriteAt ? "，並已在 t=" + oneDec(bWriteAt) + "s 把資源的 lastSeenToken 抬到 " + tokenB : "，寫入還沒送出")
+        + "；A" + (frozen ? "的那筆寫入會在 t=" + oneDec(aWriteArrive) + "s 抵達" : "已正常結束") + "。";
+    } else {
+      if (verdictCode === "REJECT") {
+        sentence += "A 帶著 token=1 的寫入在 t=" + oneDec(aWriteArrive) + "s 抵達，資源手上的 lastSeenToken 是 "
+          + res.token + "，直接拒絕。危險窗 " + dangerWindow + "s 就這樣被資源端擋下來——拒絕發生在資源，不在鎖服務。";
+      } else if (verdictCode === "CORRUPT") {
+        sentence += "資源沒有檢查 token，A 在 t=" + oneDec(aWriteArrive) + "s 抵達的過期寫入蓋掉了 B 的資料。"
+          + "整條路徑上沒有任何元件「故障」：互斥是對的、B 的寫入是對的、A 也自認遵守規則，少掉的只有資源端那一道檢查。";
+      } else if (verdictCode === "STALE_BEFORE_B") {
+        sentence += "A 的過期寫入在 t=" + oneDec(aWriteArrive) + "s 抵達，比 B 的寫入早（或 B 根本還沒寫），"
+          + "抵達當下資源手上的 lastSeenToken 還是 " + seenBeforeA + "，所以 token=1 被接受了。"
+          + "資源的最終值之後仍會被 B 覆寫，但「A 在已經失去鎖的狀態下寫出去」這件事已經發生——"
+          + "若那是寄信、扣款這類不可逆的副作用，就已經出事了。fencing 保證的是單調，不是「過期持有者一定被擋」。";
+      } else if (verdictCode === "SAFE_EARLY") {
+        sentence += "A 在 t=" + oneDec(aResume) + "s 醒來時，租約要到 t=" + oneDec(leaseExpiry)
+          + "s 才到期（凍結了 " + gl + "s，還沒吃掉剩下的 " + oneDec(leaseExpiry - aWriteArrive)
+          + "s），它根本沒失去鎖：寫入以 token=1 正常送達，然後 A 自己釋放，B 接手。凍結短於剩餘租約時不會有事故——這也是一種合法結局。";
+      } else if (verdictCode === "KA_TOO_SLOW") {
+        sentence += "沒有 GC，但 keepalive 間隔加上網路延遲已經超過 TTL，租約在兩次心跳之間就斷在 t="
+          + oneDec(lockEnd) + "s。心跳間隔必須遠短於 Session timeout，說的就是這件事。";
+      } else {
+        sentence += "A 在 t=" + WORK_SEC + "s 正常做完並釋放鎖，全程續約 " + kaDelivered + " 次，沒有任何過期寫入。";
+      }
+    }
+
+    /* 畫面資料：bars / ticks / 事件線 / 租約條，全部帶好 px */
+    var bars = [];
+    function push(b) { if (b) { bars.push(b); } }
+    var aSafeEnd = frozen ? gs : (lockEnd >= 0 && endKind === "expire" ? lockEnd : WORK_SEC);
+    push(bar(0, 0, aSafeEnd, "b-ok", "臨界區 · keepalive 中", cur));
+    if (frozen) {
+      push(bar(0, gs, aResume, "b-warn", "GC pause " + gl + "s — 凍結，本地仍寫著「我持有鎖」", cur));
+      push(bar(0, aWriteSend, aWriteArrive + 0.4, "b-bad", "送出 token=1", cur));
+    }
+    if (lockEnd >= 0) {
+      push(bar(1, 0, lockEnd, "b-ok", "/lock = A · lease 有效", cur));
+      push(bar(1, lockEnd, bLockAt >= 0 ? bLockAt : HORIZON, "b-ghost", "∅ 無人持有", cur));
+      if (bLockAt >= 0) { push(bar(1, bLockAt, HORIZON, "b-ok", "/lock = B · lease 有效", cur)); }
+    } else {
+      push(bar(1, 0, HORIZON, "b-ok", "/lock = A · lease 一路有效", cur));
+    }
+    if (bLockAt >= 0) {
+      push(bar(2, 0, bLockAt, "b-idle", "每 " + RETRY_EVERY + "s 重試一次", cur));
+      push(bar(2, bLockAt, HORIZON, "b-ok", "臨界區 · token=" + tokenB, cur));
+    } else {
+      push(bar(2, 0, HORIZON, "b-idle", "重試中，始終搶不到", cur));
+    }
+    var firstWrite = events.length > 0 ? events[0].t : -1;
+    if (firstWrite >= 0) {
+      push(bar(3, 0, firstWrite, "b-ghost", "lastSeenToken = 0", cur));
+      var finalTok = 0, tone = "b-ok", label = "";
+      var simTok = 0, simWho = "—", bad = false;
+      for (i = 0; i < events.length; i += 1) {
+        if (events[i].t > cur) { continue; }
+        var okk = !fencing || events[i].token >= simTok;
+        if (okk) {
+          if (!fencing && events[i].token < simTok) { bad = true; }
+          if (events[i].token > simTok) { simTok = events[i].token; }
+          simWho = events[i].who;
+        }
+      }
+      finalTok = simTok;
+      tone = bad ? "b-bad" : "b-ok";
+      label = bad
+        ? "value = A-payload · 已被過期寫入覆蓋"
+        : "lastSeenToken = " + finalTok + " · value = " + (simWho === "—" ? "—" : simWho + "-payload");
+      push(bar(3, firstWrite, HORIZON, tone, label, cur));
+    } else {
+      push(bar(3, 0, HORIZON, "b-ghost", "lastSeenToken = 0 · 尚未被寫過", cur));
+    }
+
+    var grid = [];
+    for (var g = 0; g <= HORIZON; g += 5) { grid.push({ x: xAt(g), label: g + "s" }); }
+
+    var events2 = [];
+    if (lockEnd >= 0 && cur >= lockEnd) { events2.push({ x: xAt(lockEnd), label: "租約到期 " + oneDec(lockEnd) + "s" }); }
+    if (bLockAt >= 0 && cur >= bLockAt) { events2.push({ x: xAt(bLockAt), label: "B 取鎖 " + oneDec(bLockAt) + "s" }); }
+    if (aWriteVisible && cur >= aWriteArrive) { events2.push({ x: xAt(aWriteArrive), label: "A 寫入抵達 " + oneDec(aWriteArrive) + "s" }); }
+
+    var hatch = null;
+    if (dangerWindow > 0 && cur > lockEnd) {
+      var hx2 = xAt(aWriteArrive < cur ? aWriteArrive : cur);
+      hatch = {
+        x: xAt(lockEnd), y: LANES[0].y - 8, w: hx2 - xAt(lockEnd), h: LANES[3].y + LH - LANES[0].y + 14,
+        label: "危險窗 " + dangerWindow + "s：A 自認持有、集群已改判",
+        tx: (xAt(lockEnd) + hx2) / 2, ty: LANES[0].y - 12
       };
-      if (cur >= 2) {
-        if (kind === "herd" || i === 1) { w.klass = "notify"; w.hint = "被叫醒"; }
-      }
-      if (cur >= 3) {
-        if (i === 1) { w.klass = "hold"; w.hint = kind === "herd" ? "create 先到 · 搶到" : "重讀後接任"; }
-        else if (kind === "herd") { w.klass = "clash"; w.hint = "create 衝突"; }
-        else { w.hint = "Watch " + seq(i); }
-      }
-      if (cur >= 4 && i > 1) {
-        if (kind === "herd") { w.klass = "wait"; w.hint = "重掛 Watch /lock"; }
-        else { w.klass = "wait"; w.hint = i === 2 ? "Watch " + seq(2) + "（W1）" : "Watch " + seq(i); }
-      }
-      out.push(w);
     }
-    return { nodes: out, hidden: waiters - shown };
+
+    var lease = {
+      x: X0, y: LANES[1].y + LH + 3, w: LW, h: 6,
+      fillW: Math.round(LW * leasePct / 100),
+      label: "租約剩餘 " + remainingLease + "s（" + leasePct + "%）"
+    };
+
+    return {
+      /* 教學數字 */
+      lastKeepaliveAt: lastKA,
+      keepalivesDelivered: kaDelivered,
+      leaseExpiryAt: lockEnd >= 0 ? oneDec(lockEnd) : -1,
+      leaseWouldExpireAt: oneDec(leaseExpiry),
+      endKind: endKind,
+      bLockAt: bLockAt >= 0 ? oneDec(bLockAt) : -1,
+      bWriteAt: bWriteAt >= 0 ? oneDec(bWriteAt) : -1,
+      aResumeAt: oneDec(aResume),
+      aWriteArriveAt: aWriteVisible ? oneDec(aWriteArrive) : -1,
+      dangerWindowSec: dangerWindow,
+      handoverDelaySec: handover,
+      remainingLeaseSec: remainingLease,
+      leasePct: leasePct,
+      phaseCode: phaseCode,
+      verdictCode: verdictCode,
+      aWriteAccepted: aAccepted,
+      corrupted: corrupted,
+      resource: res,
+      tokenLabel: fencing ? String(res.token) : "未檢查",
+      sentence: sentence,
+      /* 畫面資料 */
+      bars: bars, grid: grid, marks: events2, hatch: hatch, leaseBar: lease, cursorX: xAt(cur), cursor: cur
+    };
   }
 
-  function renderVs(st, cur) {
-    var cols = [
-      { kind: "herd", cls: "herd", title: "全體 Watch 同一個節點", sub: "notify = O(N)", data: st.left },
-      { kind: "queue", cls: "queue", title: "Sequential 排隊，只 Watch 前一位", sub: "notify = O(1)", data: st.right }
-    ];
-    var html = "";
-    for (var c = 0; c < cols.length; c += 1) {
-      var col = cols[c];
-      var q = queueNodes(col.kind, cur);
-      html += '<div class="cs-vscol ' + col.cls + '">';
-      html += '<div class="vt">' + col.title + "</div>";
-      html += '<div class="vs2">' + col.sub + "</div>";
-      html += '<div class="cs-qlist">';
-      for (var i = 0; i < q.nodes.length; i += 1) {
-        var n = q.nodes[i];
-        html += '<div class="cs-qnode ' + n.klass + '"><div class="an">' + n.label + "</div>" +
-          '<div class="al">' + esc(n.sub) + "</div>" +
-          '<div class="ah">' + esc(n.hint) + "</div></div>";
-      }
-      if (q.hidden > 0) {
-        html += '<div class="cs-qmore"><div>&hellip;</div><div>+' + q.hidden + " 人</div></div>";
-      }
-      html += "</div>";
-      html += '<div class="cs-count">';
-      html += '<div class="cs-cbox' + (col.kind === "herd" ? " hot" : " cool") + '"><div class="cn">' +
-        col.data.notify + '</div><div class="cl2">則通知</div></div>';
-      html += '<div class="cs-cbox' + (col.kind === "herd" ? " hot" : " cool") + '"><div class="cn">' +
-        col.data.tries + '</div><div class="cl2">次搶鎖</div></div>';
-      html += "</div>";
-      html += '<div class="cs-vsnote">' + esc(col.data.note) + "</div>";
-      html += "</div>";
-    }
-    vsEl.innerHTML = html;
-  }
+  // @probe fn       computeHerd
+  // @probe baseline {"waiters":50,"fanout":50,"createCostMs":2,"holdMs":100}
+  // @probe sweep    {"waiters":[0,200],"fanout":[1,50],"createCostMs":[0.5,20],"holdMs":[10,500]}
+  function computeHerd(p) {
+    var n = Number(p.waiters);
+    if (isNaN(n) || n < 0) { n = 0; }
+    var k = Number(p.fanout) || 1;
+    if (k < 1) { k = 1; }
+    var cost = Number(p.createCostMs);
+    if (isNaN(cost) || cost < 0) { cost = 0; }
+    var hold = Number(p.holdMs);
+    if (isNaN(hold) || hold < 0) { hold = 0; }
 
-  /* ── 共用渲染 ───────────────────────────────────── */
-  function renderPhases(cur) {
-    var list = PHASES[mode];
-    var active = list.length - 1;
-    var i;
-    for (i = 0; i < list.length; i += 1) {
-      if (cur <= list[i].end) { active = i; break; }
+    var rounds = [];
+    var remaining = n;
+    var notify = 0, wasted = 0, drain = 0, peak = 0, handoverSum = 0;
+    while (remaining > 0) {
+      var woken = k < remaining ? k : remaining;
+      var handover = woken * cost;
+      notify += woken;
+      wasted += woken - 1;
+      handoverSum += handover;
+      drain += hold + handover;
+      if (woken > peak) { peak = woken; }
+      rounds.push({ r: rounds.length + 1, woken: woken, wasted: woken - 1, handoverMs: Math.round(handover * 10) / 10 });
+      remaining -= 1;
     }
-    var html = "";
-    for (i = 0; i < list.length; i += 1) {
-      var cls = "cs-phase";
-      if (i === active) { cls += " on"; }
-      else if (i < active) { cls += " done"; }
-      html += '<div class="' + cls + '">' + esc(list[i].name) + "</div>";
-    }
-    phasesEl.innerHTML = html;
-  }
 
-  function renderMetric(st, cur, total) {
-    var html = '<span>步 <strong>' + cur + "</strong> / <strong>" + total + "</strong></span>";
-    if (mode === "lock") {
-      html += "<span>A 的 token <strong>" + esc(st.tokenA) + "</strong></span>";
-      html += "<span>B 的 token <strong>" + esc(st.tokenB) + "</strong></span>";
-      html += "<span>資源 lastSeenToken <strong>" + st.res.token + "</strong></span>";
+    var writeAmp = n > 0 ? Math.round(notify * 100 / n) / 100 : 0;
+    var firstHandover = rounds.length > 0 ? rounds[0].handoverMs : 0;
+    var avgHandover = rounds.length > 0 ? Math.round(handoverSum * 10 / rounds.length) / 10 : 0;
+
+    /* 三角形：一列一輪；超過上限就把相鄰輪合併成帶區 */
+    var bands = [];
+    if (rounds.length > 0) {
+      var group = Math.ceil(rounds.length / MAX_BANDS);
+      for (var i = 0; i < rounds.length; i += group) {
+        var to = i + group <= rounds.length ? i + group : rounds.length;
+        var sum = 0;
+        for (var j = i; j < to; j += 1) { sum += rounds[j].woken; }
+        var avg = sum / (to - i);
+        bands.push({
+          from: rounds[i].r,
+          to: rounds[to - 1].r,
+          merged: group > 1,
+          avgWoken: Math.round(avg * 10) / 10,
+          sumWoken: sum,
+          widthPct: peak > 0 ? Math.round(avg * 1000 / peak) / 10 : 0,
+          winPct: avg > 0 ? Math.round(1000 / avg) / 10 : 0
+        });
+      }
+    }
+
+    var shape;
+    if (n === 0) { shape = "空"; }
+    else if (k >= n) { shape = "直角三角形"; }
+    else if (k === 1) { shape = "細直柱"; }
+    else { shape = "階梯（前段齊寬、尾段收斂）"; }
+
+    var areaNote;
+    if (n === 0) {
+      areaNote = "沒有等待者，兩種設計沒有差別。";
+    } else if (k >= n) {
+      areaNote = "k ≥ N：每一輪都叫醒所有還在等的人，色塊是一個直角三角形，面積 = N(N+1)/2 = "
+        + notify + " 則通知（排隊只要 " + n + " 則）。";
+    } else if (k === 1) {
+      areaNote = "k = 1：每輪只叫醒隊首的下一位，色塊塌成寬度 1 的直柱，總通知 = N = " + notify
+        + " 則，而且完全沒有白喚醒。";
     } else {
-      html += "<span>等待者 <strong>" + waiters + "</strong></span>";
-      html += "<span>羊群通知 <strong>" + st.left.notify + "</strong></span>";
-      html += "<span>排隊通知 <strong>" + st.right.notify + "</strong></span>";
+      areaNote = "k = " + k + "：前 " + (n - k + 1) + " 輪維持 " + k + " 人齊寬，之後隊伍短於扇出度才開始收斂；"
+        + "總通知 " + notify + " 則，是排隊的 " + writeAmp + " 倍。";
     }
-    metricEl.innerHTML = html;
-  }
 
-  function renderLegend() {
-    var list = LEGEND[mode];
-    var html = "";
-    for (var i = 0; i < list.length; i += 1) {
-      html += '<span><i class="dot ' + list[i][0] + '"></i>' + list[i][1] + "</span>";
-    }
-    legendEl.innerHTML = html;
-  }
-
-  function renderWire(st) {
-    var html = "";
-    for (var i = 0; i < st.wire.length; i += 1) {
-      var row = st.wire[i];
-      var cls = "cs-row " + row.kind + (i === st.wire.length - 1 ? " cur" : "");
-      html += '<div class="' + cls + '"><span class="ar">#' + row.step + '</span>' +
-        '<span class="tg">' + esc(row.tag) + '</span>' +
-        '<span class="tx">' + esc(row.text) + "</span></div>";
-    }
-    wireEl.innerHTML = html || '<div class="cs-row"><span class="tx">尚無事件。按「下一步」開始。</span></div>';
-    wireEl.scrollTop = wireEl.scrollHeight;
-  }
-
-  function setPressed(container, attr, value) {
-    var btns = container.querySelectorAll("button");
-    for (var i = 0; i < btns.length; i += 1) {
-      btns[i].setAttribute("aria-pressed", btns[i].getAttribute(attr) === String(value) ? "true" : "false");
-    }
-  }
-
-  function render() {
-    var total = TOTAL[mode];
-    if (step > total) { step = total; }
-    if (step < 0) { step = 0; }
-    var st = build(step);
-
-    hintEl.textContent = HINTS[mode];
-    decFence.hidden = mode !== "lock";
-    decN.hidden = mode !== "herd";
-    lanesEl.hidden = mode !== "lock";
-    vsEl.hidden = mode !== "herd";
-    resEl.hidden = mode !== "lock";
-
-    rangeEl.max = String(total);
-    rangeEl.value = String(step);
-    btnPrev.disabled = step <= 0;
-    btnNext.disabled = step >= total;
-
-    renderPhases(step);
-    renderMetric(st, step, total);
-    renderLegend();
-
-    if (mode === "lock") {
-      renderLanes(st, step);
-      resEl.className = "cs-res cs-view" + (st.res.tone ? " " + st.res.tone : "");
-      resVal.textContent = st.res.value;
-      resTok.textContent = String(st.res.token);
-      resWho.textContent = st.res.writer;
-      resJudge.textContent = st.res.judge;
+    var status;
+    if (n === 0) {
+      status = "N = 0：沒有人在等，總通知 0 則。把人數拉上來再看兩端的差距。";
     } else {
-      renderVs(st, step);
+      status = "N = " + n + "、扇出度 k = " + k + "：整場切換共 " + notify + " 則通知、" + wasted
+        + " 次白喚醒（" + (notify > 0 ? Math.round(wasted * 100 / notify) : 0) + "%）、集群寫入放大 " + writeAmp
+        + " 倍；首輪交接延遲 " + firstHandover + " ms，整條隊伍排空 " + Math.round(drain) + " ms。"
+        + "把 k 拖到 1，通知會掉到 " + n + " 則。";
     }
 
-    wOp.textContent = st.op;
-    wRule.textContent = st.rule;
-    wCli.textContent = st.cli;
-    statusEl.textContent = st.status;
-    renderWire(st);
-
-    if (st.verdict) {
-      verdictEl.textContent = st.verdict.text;
-      verdictEl.className = "cs-verdict tone-" + st.verdict.tone;
-    } else {
-      verdictEl.textContent = "判定尚未產生——走完一輪後，這裡會摘要資源是否被過期寫入寫壞，或兩種 Watch 策略的通知量差距。";
-      verdictEl.className = "cs-verdict";
-    }
+    return {
+      rounds: rounds,
+      bands: bands,
+      roundCount: rounds.length,
+      totalNotify: notify,
+      wastedWakeups: wasted,
+      peakNotify: peak,
+      writeAmp: writeAmp,
+      firstHandoverMs: firstHandover,
+      avgHandoverMs: avgHandover,
+      drainMs: Math.round(drain),
+      shape: shape,
+      areaNote: areaNote,
+      status: status
+    };
   }
 
-  /* ── 事件 ───────────────────────────────────────── */
-  segMode.addEventListener("click", function (ev) {
-    var btn = ev.target.closest("button[data-mode]");
-    if (!btn) { return; }
-    mode = btn.getAttribute("data-mode");
-    setPressed(segMode, "data-mode", mode);
-    step = 0;
-    render();
-  });
+  /* (3) DOM 參照 */
 
-  segFence.addEventListener("click", function (ev) {
-    var btn = ev.target.closest("button[data-fence]");
-    if (!btn) { return; }
-    fencing = btn.getAttribute("data-fence") === "on";
-    setPressed(segFence, "data-fence", fencing ? "on" : "off");
-    render();
-  });
+  var demoL = document.getElementById("demo-csl-race");
+  var demoW = document.getElementById("demo-csw-herd");
 
-  segN.addEventListener("click", function (ev) {
-    var btn = ev.target.closest("button[data-n]");
-    if (!btn) { return; }
-    waiters = Number(btn.getAttribute("data-n"));
-    setPressed(segN, "data-n", waiters);
-    render();
-  });
+  function el(id) { return document.getElementById(id); }
+  function esc(s) {
+    return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  }
 
-  rangeEl.addEventListener("input", function () {
-    step = Number(rangeEl.value);
-    render();
-  });
+  /* (4) render(state) —— 只讀 compute 的輸出畫出來，不做任何判定 */
 
-  btnPrev.addEventListener("click", function () {
-    if (step > 0) { step -= 1; render(); }
-  });
+  if (demoL) {
+    var lockState = { ttlSec: 10, keepaliveSec: 3, gcStartSec: 12, gcLenSec: 14, netDelaySec: 0, fencing: 1, tick: 0 };
 
-  btnNext.addEventListener("click", function () {
-    if (step < TOTAL[mode]) { step += 1; render(); }
-  });
+    var lTtl = el("csl-ttl"), lKa = el("csl-ka"), lGs = el("csl-gs"), lGl = el("csl-gl"),
+      lNd = el("csl-nd"), lTick = el("csl-tick");
+    var lTtlV = el("csl-ttl-v"), lKaV = el("csl-ka-v"), lGsV = el("csl-gs-v"), lGlV = el("csl-gl-v"),
+      lNdV = el("csl-nd-v"), lTickV = el("csl-tick-v");
+    var lSegFence = el("csl-seg-fence");
+    var lLanes = el("csl-lanes"), lClock = el("csl-clock"), lRes = el("csl-res"), lStatus = el("csl-status");
+    var rVal = el("csl-r-val"), rTok = el("csl-r-tok"), rWho = el("csl-r-who"), rJudge = el("csl-r-judge");
 
-  btnReset.addEventListener("click", function () {
-    step = 0;
-    render();
-  });
+    var renderLanes = function (r) {
+      var o = [];
+      var i;
+      o.push('<svg viewBox="0 0 ' + SVG_W + " " + SVG_H + '" role="img" aria-label="鎖競態時間軸：四條泳道與危險窗">');
+      o.push('<title>鎖競態時間軸</title>');
+      o.push('<defs><marker id="csl-ar-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="5" markerHeight="5" orient="auto"><path d="M 0 0 L 10 5 L 0 10 z" fill="#4d7d68"></path></marker>');
+      o.push('<marker id="csl-ar-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="5" markerHeight="5" orient="auto"><path d="M 0 0 L 10 5 L 0 10 z" fill="#a8554f"></path></marker></defs>');
 
-  render();
+      for (i = 0; i < LANES.length; i += 1) {
+        o.push('<rect class="lane" x="' + X0 + '" y="' + LANES[i].y + '" width="' + LW + '" height="' + LH + '" rx="3"></rect>');
+        o.push('<text class="lnm" x="0" y="' + (LANES[i].y + 13) + '">' + LANES[i].name + "</text>");
+        o.push('<text class="lsb" x="0" y="' + (LANES[i].y + 25) + '">' + LANES[i].sub + "</text>");
+      }
+      for (i = 0; i < r.grid.length; i += 1) {
+        o.push('<line class="grid" x1="' + r.grid[i].x + '" y1="20" x2="' + r.grid[i].x + '" y2="' + (LANES[3].y + LH + 2) + '"></line>');
+        o.push('<text class="grid-lbl" x="' + r.grid[i].x + '" y="' + (LANES[3].y + LH + 15) + '" text-anchor="middle">' + r.grid[i].label + "</text>");
+      }
+      for (i = 0; i < r.bars.length; i += 1) {
+        var b = r.bars[i];
+        o.push('<rect class="' + b.cls + '" x="' + b.x + '" y="' + b.y + '" width="' + b.w + '" height="' + b.h + '" rx="4"></rect>');
+        if (b.showText) {
+          o.push('<text class="bt" x="' + b.tx + '" y="' + b.ty + '" text-anchor="middle">' + esc(b.text) + "</text>");
+        }
+      }
+      o.push('<rect class="lease-bg" x="' + r.leaseBar.x + '" y="' + r.leaseBar.y + '" width="' + r.leaseBar.w + '" height="' + r.leaseBar.h + '" rx="3"></rect>');
+      o.push('<rect class="lease-fill" x="' + r.leaseBar.x + '" y="' + r.leaseBar.y + '" width="' + r.leaseBar.fillW + '" height="' + r.leaseBar.h + '" rx="3"></rect>');
+      o.push('<text class="lease-t" x="' + (r.leaseBar.x + r.leaseBar.w) + '" y="' + (r.leaseBar.y + r.leaseBar.h + 10) + '" text-anchor="end">' + esc(r.leaseBar.label) + "</text>");
+
+      if (r.hatch) {
+        o.push('<rect class="hatch-box" x="' + r.hatch.x + '" y="' + r.hatch.y + '" width="' + r.hatch.w + '" height="' + r.hatch.h + '" rx="5"></rect>');
+        o.push('<text class="hatch-t" x="' + r.hatch.tx + '" y="' + r.hatch.ty + '" text-anchor="middle">' + esc(r.hatch.label) + "</text>");
+      }
+      for (i = 0; i < r.marks.length; i += 1) {
+        o.push('<line class="evt" x1="' + r.marks[i].x + '" y1="' + (LANES[3].y + LH + 18) + '" x2="' + r.marks[i].x + '" y2="' + (LANES[3].y + LH + 26) + '"></line>');
+        o.push('<text class="evt-lbl" x="' + r.marks[i].x + '" y="' + (LANES[3].y + LH + 38) + '" text-anchor="middle">' + esc(r.marks[i].label) + "</text>");
+      }
+      o.push('<line class="now" x1="' + r.cursorX + '" y1="16" x2="' + r.cursorX + '" y2="' + (LANES[3].y + LH + 4) + '"></line>');
+      o.push('<text class="now-t" x="' + r.cursorX + '" y="12" text-anchor="middle">t = ' + r.cursor + "s</text>");
+      o.push("</svg>");
+      lLanes.innerHTML = o.join("");
+    };
+
+    var PHASE_TEXT = {
+      HOLD_A: "A 持有中", FROZEN: "A 凍結中", ORPHAN: "鎖無人持有", HOLD_B: "B 持有中", SETTLED: "判定已產生"
+    };
+    var VERDICT_TEXT = {
+      NO_FREEZE: "無事故 · A 正常釋放", KA_TOO_SLOW: "續約來不及 · 租約自己斷了",
+      NO_EXPIRE: "租約撐過整場模擬", SAFE_EARLY: "無事故 · 醒得夠早",
+      STALE_BEFORE_B: "過期寫入搶先進入", REJECT: "過期寫入被拒 · 保護成功", CORRUPT: "資料被過期寫入覆蓋"
+    };
+
+    var renderClock = function (r) {
+      var cells = [
+        { v: r.leaseExpiryAt < 0 ? "未過期" : r.leaseExpiryAt + " s", k: "LEASE EXPIRY", c: "" },
+        { v: r.bLockAt < 0 ? "未取得" : r.bLockAt + " s", k: "B 取得鎖", c: "" },
+        { v: r.handoverDelaySec < 0 ? "—" : r.handoverDelaySec + " s", k: "交接延遲", c: "" },
+        { v: r.dangerWindowSec + " s", k: "危險窗", c: r.dangerWindowSec > 0 ? "hot" : "cool" },
+        { v: r.remainingLeaseSec + " s", k: "游標處租約剩餘", c: "" },
+        { v: PHASE_TEXT[r.phaseCode], k: "游標處階段", c: "" },
+        { v: VERDICT_TEXT[r.verdictCode], k: "結局", c: (r.verdictCode === "CORRUPT" || r.verdictCode === "STALE_BEFORE_B") ? "hot" : (r.verdictCode === "REJECT" ? "cool" : "") }
+      ];
+      var h = "";
+      for (var i = 0; i < cells.length; i += 1) {
+        h += '<div class="csl-cell ' + cells[i].c + '"><div class="cv">' + esc(cells[i].v) +
+          '</div><div class="ck">' + cells[i].k + "</div></div>";
+      }
+      lClock.innerHTML = h;
+    };
+
+    var renderLock = function () {
+      var r = computeLockRace(lockState);
+      lTtlV.textContent = lockState.ttlSec + " s";
+      lKaV.textContent = lockState.keepaliveSec + " s";
+      lGsV.textContent = "t = " + lockState.gcStartSec + " s";
+      lGlV.textContent = lockState.gcLenSec === 0 ? "不凍結" : lockState.gcLenSec + " s";
+      lNdV.textContent = lockState.netDelaySec + " s";
+      lTickV.textContent = "t = " + lockState.tick + " s";
+      lTick.value = String(lockState.tick);
+
+      renderLanes(r);
+      renderClock(r);
+      rVal.textContent = r.resource.value;
+      rTok.textContent = r.tokenLabel;
+      rWho.textContent = r.resource.writer;
+      rJudge.textContent = r.resource.judge;
+      lRes.className = "csl-res" + (r.resource.tone ? " " + r.resource.tone : "");
+      lStatus.textContent = r.sentence;
+    };
+
+    /* (5) 事件綁定 */
+
+    var bindRange = function (node, key) {
+      node.addEventListener("input", function () {
+        lockState[key] = Number(node.value);
+        renderLock();
+      });
+    };
+    bindRange(lTtl, "ttlSec");
+    bindRange(lKa, "keepaliveSec");
+    bindRange(lGs, "gcStartSec");
+    bindRange(lGl, "gcLenSec");
+    bindRange(lNd, "netDelaySec");
+    bindRange(lTick, "tick");
+
+    lSegFence.addEventListener("click", function (ev) {
+      var btn = ev.target.closest("button[data-fence]");
+      if (!btn) { return; }
+      lockState.fencing = btn.getAttribute("data-fence") === "on" ? 1 : 0;
+      var btns = lSegFence.querySelectorAll("button[data-fence]");
+      for (var i = 0; i < btns.length; i += 1) {
+        btns[i].setAttribute("aria-pressed", btns[i] === btn ? "true" : "false");
+      }
+      renderLock();
+    });
+
+    el("csl-prev").addEventListener("click", function () {
+      if (lockState.tick > 0) { lockState.tick -= 1; renderLock(); }
+    });
+    el("csl-next").addEventListener("click", function () {
+      if (lockState.tick < HORIZON) { lockState.tick += 1; renderLock(); }
+    });
+    el("csl-end").addEventListener("click", function () {
+      lockState.tick = HORIZON; renderLock();
+    });
+    el("csl-reset").addEventListener("click", function () {
+      lockState = { ttlSec: 10, keepaliveSec: 3, gcStartSec: 12, gcLenSec: 14, netDelaySec: 0, fencing: 1, tick: 0 };
+      lTtl.value = "10"; lKa.value = "3"; lGs.value = "12"; lGl.value = "14"; lNd.value = "0"; lTick.value = "0";
+      var btns = lSegFence.querySelectorAll("button[data-fence]");
+      for (var i = 0; i < btns.length; i += 1) {
+        btns[i].setAttribute("aria-pressed", btns[i].getAttribute("data-fence") === "on" ? "true" : "false");
+      }
+      renderLock();
+    });
+
+    renderLock();
+  }
+
+  if (demoW) {
+    var herdState = { waiters: 50, fanout: 50, createCostMs: 2, holdMs: 100 };
+
+    var wN = el("csw-n"), wK = el("csw-k"), wC = el("csw-c"), wH = el("csw-h");
+    var wNV = el("csw-n-v"), wKV = el("csw-k-v"), wCV = el("csw-c-v"), wHV = el("csw-h-v");
+    var wTri = el("csw-tri"), wOut = el("csw-out"), wStatus = el("csw-status");
+
+    var renderHerd = function () {
+      var r = computeHerd(herdState);
+      wNV.textContent = herdState.waiters + " 人";
+      wKV.textContent = "k = " + herdState.fanout;
+      wCV.textContent = herdState.createCostMs.toFixed(1) + " ms";
+      wHV.textContent = herdState.holdMs + " ms";
+
+      var h = "";
+      for (var i = 0; i < r.bands.length; i += 1) {
+        var b = r.bands[i];
+        var label = b.merged ? "第 " + b.from + "–" + b.to + " 輪" : "第 " + b.from + " 輪";
+        h += '<div class="csw-row"><span class="rl">' + label + "</span>";
+        h += '<span class="rb"><span class="csw-band" style="width:' + b.widthPct + '%">';
+        h += '<span class="win" style="width:' + b.winPct + '%"></span><span class="waste"></span>';
+        h += "</span></span>";
+        h += '<span class="rn">' + (b.merged ? "均 " + b.avgWoken : b.avgWoken) + " 人</span></div>";
+      }
+      if (r.bands.length === 0) {
+        h = '<div class="csw-row"><span class="rl">—</span><span class="rb"></span><span class="rn">0 人</span></div>';
+      }
+      h += '<div class="csw-area">形狀：' + esc(r.shape) + "　·　" + esc(r.areaNote) + "</div>";
+      wTri.innerHTML = h;
+
+      var cells = [
+        { v: r.totalNotify, k: "總通知數", c: r.writeAmp > 2 ? "hot" : "cool" },
+        { v: r.wastedWakeups, k: "無效喚醒", c: r.wastedWakeups > 0 ? "hot" : "cool" },
+        { v: r.writeAmp + "×", k: "集群寫入放大", c: "" },
+        { v: r.peakNotify, k: "尖峰瞬時通知", c: "" },
+        { v: r.firstHandoverMs + " ms", k: "首輪交接延遲", c: "" },
+        { v: r.drainMs + " ms", k: "隊伍排空總時間", c: "" }
+      ];
+      var oh = "";
+      for (var j = 0; j < cells.length; j += 1) {
+        oh += '<div class="csw-cell ' + cells[j].c + '"><div class="cv">' + esc(String(cells[j].v)) +
+          '</div><div class="ck">' + cells[j].k + "</div></div>";
+      }
+      wOut.innerHTML = oh;
+      wStatus.textContent = r.status;
+    };
+
+    wN.addEventListener("input", function () {
+      herdState.waiters = Number(wN.value);
+      renderHerd();
+    });
+    wK.addEventListener("input", function () { herdState.fanout = Number(wK.value); renderHerd(); });
+    wC.addEventListener("input", function () { herdState.createCostMs = Number(wC.value) / 10; renderHerd(); });
+    wH.addEventListener("input", function () { herdState.holdMs = Number(wH.value); renderHerd(); });
+
+    el("csw-q").addEventListener("click", function () {
+      herdState.fanout = 1; wK.value = "1"; renderHerd();
+    });
+    el("csw-hd").addEventListener("click", function () {
+      herdState.fanout = herdState.waiters > 1 ? herdState.waiters : 1;
+      wK.value = String(herdState.fanout);
+      renderHerd();
+    });
+    el("csw-reset").addEventListener("click", function () {
+      herdState = { waiters: 50, fanout: 50, createCostMs: 2, holdMs: 100 };
+      wN.value = "50"; wK.value = "50"; wC.value = "20"; wH.value = "100";
+      renderHerd();
+    });
+
+    renderHerd();
+  }
 })();
 </script>
 
