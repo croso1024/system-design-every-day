@@ -2,211 +2,503 @@
 (function () {
   "use strict";
 
-  var scenario = "fixed";
-  var ran = false;
+  /* (1) 常數與參數表 */
 
-  var statusEl = document.getElementById("rch-status");
-  var chunksEl = document.getElementById("rch-chunks");
-  var verdictEl = document.getElementById("rch-verdict");
-  var btnRun = document.getElementById("rch-btn-run");
-  var btnReset = document.getElementById("rch-btn-reset");
-  var mStrat = document.getElementById("rch-m-strat");
-  var mScore = document.getElementById("rch-m-score");
-  var mAns = document.getElementById("rch-m-ans");
-  var segRoot = document.querySelector("#demo-rch-chunk .seg");
-
-  var STRATEGIES = {
-    fixed: {
-      label: "固定 · 無 overlap",
-      chunks: [
-        {
-          id: "A",
-          meta: "fixed#0–48 · no overlap",
-          body: "顧客可於到貨後 14 日內申請退貨。商品須保持原包",
-          score: 0.62,
-          tone: "bad"
-        },
-        {
-          id: "B",
-          meta: "fixed#48–96 · no overlap",
-          body: "裝與完整配件，且未經使用痕跡。電子票券與客製化商品不適用本條款。",
-          score: 0.71,
-          tone: "lock"
-        },
-        {
-          id: "C",
-          meta: "fixed#96–128 · no overlap",
-          body: "運費規則另見配送專章。",
-          score: 0.18,
-          tone: "idle"
-        }
-      ],
-      topId: "B",
-      topScore: "0.71",
-      answerability: "部分／易漏",
-      verdictTone: "tone-bad",
-      status: "無 overlap：切點落在「原包裝」中間。Top-1 只拿到後半句條件，卻缺「14 日」前提；例外商品在同塊但分數被稀釋敘事打斷。",
-      verdict: "判定：切斷失敗。命中塊缺完整條件句，模型容易漏答「要原包裝」或捏造期限。Overlap 或語意邊界可止血。"
+  /* 三份 preset 原文。它們是「輸入」不是輸出——讀者可在 textarea 裡直接改寫。 */
+  var DOCS = [
+    {
+      name: "退貨政策",
+      q: "退貨 原包裝 例外",
+      text: "顧客可於到貨後十四日內申請退貨，無須說明理由。商品須保持原包裝與完整配件，且未經使用痕跡，否則客服有權拒絕受理。電子票券、已啟用的序號與客製化印製商品不適用本條款。退貨運費由提出方負擔，瑕疵品則由本公司吸收。退款會在收到退件並完成檢驗後的七個工作日內原路退回。若原付款方式已失效，改以銀行轉帳退款，需另外提供帳戶資料。同一筆訂單的退貨申請以一次為限，部分退貨須整組退回不得拆賣。促銷期間的滿額贈品未一併退回者，將自退款金額中扣除贈品原價。"
     },
-    overlap: {
-      label: "固定 · 有 overlap",
-      chunks: [
-        {
-          id: "A",
-          meta: "fixed#0–56 · overlap→B",
-          body: "顧客可於到貨後 14 日內申請退貨。商品須保持原包裝與完整配件，",
-          score: 0.84,
-          tone: "ok"
-        },
-        {
-          id: "B",
-          meta: "fixed#40–104 · overlap←A",
-          body: "商品須保持原包裝與完整配件，且未經使用痕跡。電子票券與客製化商品不適用本條款。",
-          score: 0.88,
-          tone: "ok"
-        },
-        {
-          id: "C",
-          meta: "fixed#88–128 · overlap←B",
-          body: "電子票券與客製化商品不適用本條款。運費規則另見配送專章。",
-          score: 0.55,
-          tone: "lock"
-        }
-      ],
-      topId: "B",
-      topScore: "0.88",
-      answerability: "可答（條件完整）",
-      verdictTone: "tone-lock",
-      status: "有 overlap：「原包裝＋未使用」完整落在至少一塊。Top-1 可答條件；例外條款在 Top-2／重疊區，通常再取 k=2 即可。",
-      verdict: "判定：邊界止血成功。條件句不再被切開；仍可能要 Top-k≥2 才能同時帶上「電子票券／客製化」例外。索引體積略增。"
+    {
+      name: "API 錯誤碼手冊",
+      q: "429 重試 退避",
+      text: "伺服器回傳 400 時代表請求格式不合法，請檢查必填欄位與型別後再送出。401 表示憑證缺失或已過期，應重新取得存取權杖，不要直接重試。429 代表你已超過速率限制，回應標頭的 Retry-After 會告訴你還要等幾秒，客戶端必須採用指數退避加抖動重試。5xx 一律視為可重試，但重試必須帶上相同的冪等鍵，避免同一筆訂單被建立兩次。503 另外代表服務正在維護，維護窗口會在狀態頁公告，建議把重試上限設為五次。所有錯誤回應都帶有 trace_id，回報問題時請一併附上，否則無法定位到那一次請求。客戶端不得把 4xx 當成暫時性錯誤無限重送，那會讓你更快被封鎖。"
     },
-    parent: {
-      label: "語意 · Parent-Child",
-      chunks: [
-        {
-          id: "c1",
-          meta: "child · 退貨期限句 → parent§退貨",
-          body: "（小塊）到貨後 14 日內可申請退貨",
-          score: 0.79,
-          tone: "lock"
-        },
-        {
-          id: "c2",
-          meta: "child · 原包裝條件 → parent§退貨",
-          body: "（小塊）須保持原包裝與完整配件，且未經使用",
-          score: 0.93,
-          tone: "ok"
-        },
-        {
-          id: "c3",
-          meta: "child · 例外商品 → parent§退貨",
-          body: "（小塊）電子票券與客製化商品不適用",
-          score: 0.90,
-          tone: "ok"
-        },
-        {
-          id: "P",
-          meta: "parent§退貨（回填，去重後只送一次）",
-          body: "顧客可於到貨後 14 日內申請退貨。商品須保持原包裝與完整配件，且未經使用痕跡。電子票券與客製化商品不適用本條款。",
-          score: null,
-          tone: "ok"
-        }
-      ],
-      topId: "c2",
-      topScore: "0.93 → parent",
-      answerability: "可答且完整",
-      verdictTone: "tone-ok",
-      status: "Parent-Child：小塊精準命中「原包裝」與「例外」；回填同一 parent 去重後送進 Context，期限／條件／例外齊全。",
-      verdict: "判定：定位準、上下文夠。Child 負責分數，Parent 負責生成；比單純加大固定窗更不容易語義稀釋。"
+    {
+      name: "保固條款",
+      q: "保固 期限 人為損壞",
+      text: "本產品自出貨日起提供十二個月有限保固，電池與耗材部分為六個月。保固期內因材料或製程瑕疵導致的故障，本公司提供免費維修或更換同級品。人為損壞、進水、自行拆機、以及非原廠配件造成的損害不在保固範圍內。申請維修時請提供訂單編號與序號；序號遭刮除或無法辨識者，保固自動失效。延長保固需於出貨後三十日內加購，逾期不予受理。寄修的來回運費在保固期內由本公司負擔，逾保則由使用者自付單程。維修期間不提供代用機，但可另行租借，費用依機型計價。更換下來的零件所有權歸本公司，恕不退還。"
     }
-  };
+  ];
 
-  function setMetrics(empty) {
-    if (empty) {
-      mStrat.textContent = "—";
-      mScore.textContent = "—";
-      mAns.textContent = "—";
-      return;
+  /* 句界字元：中文標點 + 換行。textarea 的換行同樣視為句界，與 preset 一致。 */
+  var SENT_END = "。！？；\n";
+  /* 查詢詞的分隔字元（不使用 RegExp，探針沙箱只保證 Math/JSON/Number/String/Array/Object）。 */
+  var TERM_SEP = " 　,，、\n";
+  var SCORE_GAIN = 10;       /* 只為讓分數落在好讀的 0–20 區間 */
+  var MAX_CHARS = 800;       /* textarea 上限 */
+  var STRATS = ["fixed", "overlap", "semantic"];
+
+  /* (2) compute* 純函式 */
+
+  function round2(x) { return Math.round(x * 100) / 100; }
+
+  function indexOfAny(str, chars, from) {
+    for (var i = from; i < str.length; i += 1) {
+      if (chars.indexOf(str.charAt(i)) >= 0) { return i; }
     }
-    var s = STRATEGIES[scenario];
-    mStrat.textContent = s.label;
-    mScore.textContent = s.topScore;
-    mAns.textContent = s.answerability;
+    return -1;
   }
 
-  function renderChunks(mode) {
-    var s = STRATEGIES[scenario];
-    chunksEl.innerHTML = "";
-    s.chunks.forEach(function (c) {
-      var div = document.createElement("div");
-      div.className = "rch-chunk ns-idle";
-      div.setAttribute("data-cid", c.id);
-      var scoreTxt = c.score == null ? "回填" : String(c.score);
-      if (mode === "idle") scoreTxt = "—";
-      div.innerHTML =
-        '<div class="ck">chunk ' + c.id + " · " + c.meta + " · score " + scoreTxt + "</div>" +
-        "<span>" + c.body + "</span>";
-      if (mode === "waiting") {
-        div.className = "rch-chunk ns-wait";
-      } else if (mode === "result") {
-        div.className = "rch-chunk ns-" + c.tone;
-        if (c.score == null) {
-          div.querySelector(".ck").textContent =
-            "chunk " + c.id + " · " + c.meta + " · score 回填";
-        } else {
-          div.querySelector(".ck").textContent =
-            "chunk " + c.id + " · " + c.meta + " · score " + c.score.toFixed(2);
+  /* 依句界標點切句；句子區間連續覆蓋整份原文（Σ 句長 = 原文長），末段無標點也算一句。 */
+  function splitSentences(src) {
+    var out = [];
+    var start = 0;
+    while (start < src.length) {
+      var hit = indexOfAny(src, SENT_END, start);
+      if (hit < 0) { out.push({ s: start, e: src.length }); break; }
+      out.push({ s: start, e: hit + 1 });
+      start = hit + 1;
+    }
+    return out;
+  }
+
+  function splitTerms(q) {
+    var out = [];
+    var cur = "";
+    for (var i = 0; i < q.length; i += 1) {
+      var ch = q.charAt(i);
+      if (TERM_SEP.indexOf(ch) >= 0) {
+        if (cur.length > 0) { out.push(cur); cur = ""; }
+      } else { cur += ch; }
+    }
+    if (cur.length > 0) { out.push(cur); }
+    return out;
+  }
+
+  /* 固定窗：無 overlap 時 stride = size。 */
+  function cutFixed(len, size, stride) {
+    var out = [];
+    var s = 0;
+    while (s < len) {
+      var e = s + size;
+      if (e > len) { e = len; }
+      out.push({ s: s, e: e });
+      if (e >= len) { break; }
+      s += stride;
+    }
+    if (out.length === 0 && len > 0) { out.push({ s: 0, e: len }); }
+    return out;
+  }
+
+  /* 句界切塊：貪婪合併句子直到超過上限；單句超長則硬切（硬切點一定落在句中）。 */
+  function cutSemantic(sentences, size) {
+    var out = [];
+    var cur = null;
+    for (var i = 0; i < sentences.length; i += 1) {
+      var sn = sentences[i];
+      if (sn.e - sn.s > size) {
+        if (cur) { out.push(cur); cur = null; }
+        var p = sn.s;
+        while (p < sn.e) {
+          var q = p + size;
+          if (q > sn.e) { q = sn.e; }
+          out.push({ s: p, e: q });
+          p = q;
+        }
+        continue;
+      }
+      if (!cur) { cur = { s: sn.s, e: sn.e }; continue; }
+      if (sn.e - cur.s <= size) { cur.e = sn.e; }
+      else { out.push(cur); cur = { s: sn.s, e: sn.e }; }
+    }
+    if (cur) { out.push(cur); }
+    return out;
+  }
+
+  /* 某區間是否被「單一塊」完整包含——這是被切斷 / 可答性的唯一判準。 */
+  function containedBy(chunks, s, e) {
+    for (var i = 0; i < chunks.length; i += 1) {
+      if (chunks[i].s <= s && chunks[i].e >= e) { return i; }
+    }
+    return -1;
+  }
+
+  function scoreChunk(src, c, terms) {
+    var len = c.e - c.s;
+    if (len <= 0 || terms.length === 0) { return 0; }
+    var body = src.substring(c.s, c.e);
+    var hit = 0;
+    for (var i = 0; i < terms.length; i += 1) {
+      if (body.indexOf(terms[i]) >= 0) { hit += terms[i].length; }
+    }
+    return round2(hit * SCORE_GAIN / Math.sqrt(len));
+  }
+
+  /* 把塊區間攤成互不重疊的可視片段：cover>=2 的片段就是 overlap 重疊區。 */
+  function buildSegments(chunks, len, topIdx) {
+    var cuts = [0, len];
+    var i, j;
+    for (i = 0; i < chunks.length; i += 1) {
+      cuts.push(chunks[i].s);
+      cuts.push(chunks[i].e);
+    }
+    cuts.sort(function (a, b) { return a - b; });
+    var uniq = [];
+    for (i = 0; i < cuts.length; i += 1) {
+      if (cuts[i] < 0 || cuts[i] > len) { continue; }
+      if (uniq.length === 0 || uniq[uniq.length - 1] !== cuts[i]) { uniq.push(cuts[i]); }
+    }
+    var segs = [];
+    for (i = 0; i + 1 < uniq.length; i += 1) {
+      var s = uniq[i], e = uniq[i + 1];
+      if (e <= s) { continue; }
+      var cover = 0, first = -1, isTop = false;
+      for (j = 0; j < chunks.length; j += 1) {
+        if (chunks[j].s <= s && chunks[j].e >= e) {
+          cover += 1;
+          if (first < 0) { first = j; }
+          if (topIdx.indexOf(j) >= 0) { isTop = true; }
         }
       }
-      chunksEl.appendChild(div);
+      segs.push({ s: s, e: e, cover: cover, tint: first % 2, top: isTop });
+    }
+    return segs;
+  }
+
+  function analyse(src, chunks, sentences, terms, topK) {
+    var i, idx;
+    var len = src.length;
+    var totalChars = 0, maxLen = 0;
+    for (i = 0; i < chunks.length; i += 1) {
+      var w = chunks[i].e - chunks[i].s;
+      totalChars += w;
+      if (w > maxLen) { maxLen = w; }
+    }
+
+    /* 被切斷的句子：不存在任一塊完整包含它 */
+    var cutSent = 0;
+    for (i = 0; i < sentences.length; i += 1) {
+      if (containedBy(chunks, sentences[i].s, sentences[i].e) < 0) { cutSent += 1; }
+    }
+
+    /* 答案句 = 含有任一 query term 的句子（由 query 算出，不是標註） */
+    var answers = [];
+    for (i = 0; i < sentences.length; i += 1) {
+      var body = src.substring(sentences[i].s, sentences[i].e);
+      for (var t = 0; t < terms.length; t += 1) {
+        if (body.indexOf(terms[t]) >= 0) { answers.push(sentences[i]); break; }
+      }
+    }
+
+    /* 排名：分數降冪，同分取靠前的塊 */
+    var scored = [];
+    for (i = 0; i < chunks.length; i += 1) {
+      scored.push({ i: i, score: scoreChunk(src, chunks[i], terms) });
+    }
+    scored.sort(function (a, b) {
+      if (b.score !== a.score) { return b.score - a.score; }
+      return a.i - b.i;
     });
+    var k = topK < chunks.length ? topK : chunks.length;
+    var topIdx = [], ctxChars = 0;
+    for (i = 0; i < k; i += 1) {
+      topIdx.push(scored[i].i);
+      ctxChars += chunks[scored[i].i].e - chunks[scored[i].i].s;
+    }
+    var topChunks = [];
+    for (i = 0; i < topIdx.length; i += 1) { topChunks.push(chunks[topIdx[i]]); }
+
+    /* 覆蓋率：答案句被 Top-k 中「某一塊完整包含」才算數 */
+    var covered = 0, crossed = 0;
+    for (i = 0; i < answers.length; i += 1) {
+      if (containedBy(topChunks, answers[i].s, answers[i].e) >= 0) { covered += 1; }
+      if (containedBy(chunks, answers[i].s, answers[i].e) < 0) { crossed += 1; }
+    }
+
+    return {
+      count: chunks.length,
+      cutSentences: cutSent,
+      answerTotal: answers.length,
+      covered: covered,
+      coverPct: answers.length > 0 ? Math.round(covered * 100 / answers.length) : 0,
+      crossChunk: crossed,
+      topScore: scored.length > 0 ? scored[0].score : 0,
+      ctxChars: ctxChars,
+      maxLen: maxLen,
+      avgLen: chunks.length > 0 ? round2(totalChars / chunks.length) : 0,
+      inflation: len > 0 ? round2(totalChars / len) : 0,
+      chunks: chunks,
+      topIdx: topIdx,
+      segments: buildSegments(chunks, len, topIdx),
+      answers: answers
+    };
   }
 
-  function resetView() {
-    ran = false;
-    statusEl.textContent =
-      "選擇切塊策略後按「執行檢索」，觀察同一查詢下各 chunk 的分數與可答性。";
-    verdictEl.className = "rch-verdict";
-    verdictEl.textContent =
-      "尚未執行。三種切法共用同一段原文與同一問題；差異只在「答案有沒有完整落在被命中的塊裡」。";
-    setMetrics(true);
-    renderChunks("idle");
+  // @probe fn       computeChunking
+  // @probe baseline {"docIdx":0,"text":"","chunkSize":48,"overlapPct":20,"query":"退貨 原包裝 例外","topK":2}
+  // @probe sweep    {"docIdx":[0,2],"chunkSize":[24,160],"overlapPct":[0,50],"query":["原包裝","票券 客製化 例外"],"topK":[1,3]}
+  function computeChunking(p) {
+    var docIdx = Number(p.docIdx) || 0;
+    if (docIdx < 0) { docIdx = 0; }
+    if (docIdx > DOCS.length - 1) { docIdx = DOCS.length - 1; }
+    var src = (typeof p.text === "string" && p.text.length > 0) ? p.text : DOCS[docIdx].text;
+    if (src.length > MAX_CHARS) { src = src.substring(0, MAX_CHARS); }
+
+    var size = Number(p.chunkSize) || 48;
+    if (size < 8) { size = 8; }
+    var pct = Number(p.overlapPct);
+    if (isNaN(pct) || pct < 0) { pct = 0; }
+    if (pct > 90) { pct = 90; }
+    var topK = Number(p.topK) || 1;
+    if (topK < 1) { topK = 1; }
+
+    var len = src.length;
+    var sentences = splitSentences(src);
+    var terms = splitTerms(typeof p.query === "string" ? p.query : "");
+    var stride = size - Math.round(size * pct / 100);
+    if (stride < 1) { stride = 1; }
+
+    var res = {
+      docName: DOCS[docIdx].name,
+      srcLen: len,
+      sentenceCount: sentences.length,
+      termCount: terms.length,
+      stride: stride,
+      sentences: sentences,
+      src: src
+    };
+    res.fixed = analyse(src, cutFixed(len, size, size), sentences, terms, topK);
+    res.overlap = analyse(src, cutFixed(len, size, stride), sentences, terms, topK);
+    res.semantic = analyse(src, cutSemantic(sentences, size), sentences, terms, topK);
+
+    /* 勝出：覆蓋率高者 → 被切斷句少者 → 索引膨脹低者 */
+    var best = "fixed";
+    for (var i = 1; i < STRATS.length; i += 1) {
+      var a = res[STRATS[i]], b = res[best];
+      var better = false;
+      if (a.coverPct !== b.coverPct) { better = a.coverPct > b.coverPct; }
+      else if (a.cutSentences !== b.cutSentences) { better = a.cutSentences < b.cutSentences; }
+      else { better = a.inflation < b.inflation; }
+      if (better) { best = STRATS[i]; }
+    }
+    res.winner = best;
+
+    var w = res[best];
+    var labels = { fixed: "固定 · 無 overlap", overlap: "固定 · overlap " + pct + "%", semantic: "句界語意切塊" };
+    if (terms.length === 0) {
+      res.verdict = "查詢是空的，所以沒有答案句、分數全部是 0——但左邊三條尺仍然照你設的 chunk 大小切完了："
+        + "無 overlap 切斷 " + res.fixed.cutSentences + " 句、overlap 切斷 " + res.overlap.cutSentences
+        + " 句、句界切塊切斷 " + res.semantic.cutSentences + " 句。切塊是離線就決定的事，與當下問了什麼無關。";
+    } else if (res.fixed.coverPct === res.overlap.coverPct && res.overlap.coverPct === res.semantic.coverPct) {
+      res.verdict = "三種切法在 chunk=" + size + "、Top-" + topK + " 下的答案句覆蓋率相同（"
+        + res.fixed.coverPct + "%），差別只剩成本：overlap 的索引膨脹到 " + res.overlap.inflation
+        + "×、句界切塊維持 " + res.semantic.inflation + "×。覆蓋率打平時，別為了「比較保險」白付膨脹。";
+    } else {
+      res.verdict = "這組參數下勝出的是「" + labels[best] + "」：答案句覆蓋 " + w.covered + "/" + w.answerTotal
+        + "（" + w.coverPct + "%）、被切斷 " + w.cutSentences + " 句、索引膨脹 " + w.inflation + "×。"
+        + "無 overlap 的覆蓋是 " + res.fixed.coverPct + "%、overlap 是 " + res.overlap.coverPct
+        + "%、句界是 " + res.semantic.coverPct + "%。";
+    }
+
+    res.status = "原文 " + len + " 字、" + sentences.length + " 句；chunk=" + size + " 字、overlap="
+      + pct + "%（stride=" + stride + "）、Top-" + topK + "。答案句 " + res.fixed.answerTotal
+      + " 句（含查詢詞的句子）。三欄塊數：" + res.fixed.count + " / " + res.overlap.count + " / " + res.semantic.count + "。";
+    return res;
   }
 
-  function runRetrieve() {
-    ran = true;
-    var s = STRATEGIES[scenario];
-    renderChunks("waiting");
-    statusEl.textContent = "檢索中：依「" + s.label + "」策略嵌入 query 並取 Top-k…";
-    verdictEl.className = "rch-verdict";
-    verdictEl.textContent = "比對向量相似度、標記命中塊…";
-    setMetrics(true);
+  /* (3) DOM 參照 */
 
-    window.setTimeout(function () {
-      if (!ran) return;
-      renderChunks("result");
-      setMetrics(false);
-      statusEl.textContent = s.status;
-      verdictEl.className = "rch-verdict " + s.verdictTone;
-      verdictEl.textContent = s.verdict;
-    }, 280);
+  var demo = document.getElementById("demo-rcx-split");
+  if (!demo) { return; }
+
+  var segDoc = document.getElementById("rcx-seg-doc");
+  var taEl = document.getElementById("rcx-ta");
+  var sizeEl = document.getElementById("rcx-size");
+  var ovEl = document.getElementById("rcx-ov");
+  var kEl = document.getElementById("rcx-k");
+  var qEl = document.getElementById("rcx-q");
+  var resetEl = document.getElementById("rcx-reset");
+  var sizeV = document.getElementById("rcx-size-v");
+  var ovV = document.getElementById("rcx-ov-v");
+  var kV = document.getElementById("rcx-k-v");
+  var tracksEl = document.getElementById("rcx-tracks");
+  var tblEl = document.getElementById("rcx-tbl");
+  var statusEl = document.getElementById("rcx-status");
+  var verdictEl = document.getElementById("rcx-verdict");
+
+  var state = { docIdx: 0, text: "", chunkSize: 48, overlapPct: 20, query: DOCS[0].q, topK: 2 };
+
+  /* (4) render(state) —— 只讀 state 畫出來，不做判斷 */
+
+  function esc(s) {
+    return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
   }
 
-  if (segRoot) {
-    segRoot.addEventListener("click", function (e) {
-      var btn = e.target.closest("button[data-sc]");
-      if (!btn) return;
-      scenario = btn.getAttribute("data-sc");
-      Array.prototype.forEach.call(segRoot.querySelectorAll("button[data-sc]"), function (b) {
-        b.setAttribute("aria-pressed", b === btn ? "true" : "false");
-      });
-      resetView();
-    });
+  var TRACK_META = [
+    { key: "fixed", cls: "f", title: "固定長度 · 無 overlap", tag: "STRIDE = SIZE" },
+    { key: "overlap", cls: "o", title: "固定長度 · 有 overlap", tag: "STRIDE < SIZE" },
+    { key: "semantic", cls: "s", title: "句界語意切塊", tag: "MERGE ≤ SIZE" }
+  ];
+
+  function renderTrack(r, meta) {
+    var d = r[meta.key];
+    var len = r.srcLen || 1;
+    var i;
+    var h = '<div class="rcx-track ' + meta.cls + '">';
+    h += '<div class="tt"><span>' + meta.title + "</span>";
+    h += '<span class="tg">' + meta.tag + "</span>";
+    h += '<span class="tg">' + d.count + " 塊 · 最長 " + d.maxLen + " 字 · 膨脹 " + d.inflation + "×</span>";
+    if (r.winner === meta.key) { h += '<span class="win">本組參數勝出</span>'; }
+    h += "</div>";
+
+    /* 尺：互不重疊的片段 + 切線 + 句界刻度 + 答案句底線 */
+    h += '<div class="rcx-ruler">';
+    for (i = 0; i < d.segments.length; i += 1) {
+      var g = d.segments[i];
+      var cls = g.cover >= 2 ? "ov" : (g.tint === 0 ? "a" : "b");
+      if (g.top) { cls += " top"; }
+      h += '<div class="rcx-seg ' + cls + '" style="left:' + (g.s * 100 / len) + "%;width:" +
+        ((g.e - g.s) * 100 / len) + '%"></div>';
+    }
+    for (i = 0; i < r.sentences.length; i += 1) {
+      h += '<div class="rcx-sent" style="left:' + (r.sentences[i].e * 100 / len) + '%"></div>';
+    }
+    for (i = 0; i < d.answers.length; i += 1) {
+      h += '<div class="rcx-ansbar" style="left:' + (d.answers[i].s * 100 / len) + "%;width:" +
+        ((d.answers[i].e - d.answers[i].s) * 100 / len) + '%"></div>';
+    }
+    for (i = 1; i < d.chunks.length; i += 1) {
+      var cut = d.chunks[i].s;
+      var broke = true;
+      for (var j = 0; j < r.sentences.length; j += 1) {
+        if (r.sentences[j].e === cut || r.sentences[j].s === cut) { broke = false; break; }
+      }
+      h += '<div class="rcx-cutline' + (broke ? " broke" : "") + '" style="left:' + (cut * 100 / len) + '%"></div>';
+    }
+    h += "</div>";
+
+    h += '<div class="rcx-scale"><span style="left:0">0</span><span style="left:50%">' +
+      Math.round(len / 2) + '</span><span style="left:100%">' + len + " 字</span></div>";
+
+    /* 原文逐片段上色：斜紋 = overlap 重疊區，藍底線 = Top-k 命中 */
+    h += '<div class="rcx-body">';
+    for (i = 0; i < d.segments.length; i += 1) {
+      var sg = d.segments[i];
+      var sc = sg.cover >= 2 ? "px ov" : (sg.tint === 0 ? "px a" : "px");
+      if (sg.top) { sc += " top"; }
+      if (i > 0) {
+        var at = sg.s;
+        var bk = true;
+        for (var m = 0; m < r.sentences.length; m += 1) {
+          if (r.sentences[m].e === at || r.sentences[m].s === at) { bk = false; break; }
+        }
+        h += '<span class="cut' + (bk ? " broke" : "") + '">' + (bk ? "✂" : "|") + "</span>";
+      }
+      h += '<span class="' + sc + '">' + esc(r.src.substring(sg.s, sg.e)) + "</span>";
+    }
+    h += "</div></div>";
+    return h;
   }
 
-  if (btnRun) btnRun.addEventListener("click", runRetrieve);
-  if (btnReset) btnReset.addEventListener("click", resetView);
+  var ROWS = [
+    { label: "塊數", key: "count", low: true },
+    { label: "被切斷的句子數", key: "cutSentences", low: true },
+    { label: "Top-1 分數", key: "topScore", low: false },
+    { label: "答案句完整覆蓋", key: "coverPct", low: false, suffix: "%" },
+    { label: "跨塊的答案句", key: "crossChunk", low: true },
+    { label: "索引膨脹", key: "inflation", low: true, suffix: "×" },
+    { label: "Top-k Context 字元", key: "ctxChars", low: true },
+    { label: "最長塊 / 平均塊", key: "_len", low: false }
+  ];
 
-  resetView();
+  function renderTable(r) {
+    var h = "<thead><tr><th>指標</th><th>固定 · 無 overlap</th><th>固定 · overlap</th><th>句界語意</th></tr></thead><tbody>";
+    for (var i = 0; i < ROWS.length; i += 1) {
+      var row = ROWS[i];
+      h += "<tr><td>" + row.label + "</td>";
+      var vals = [];
+      var k;
+      for (k = 0; k < STRATS.length; k += 1) {
+        vals.push(row.key === "_len" ? null : r[STRATS[k]][row.key]);
+      }
+      var best = null, worst = null;
+      if (row.key !== "_len") {
+        best = vals[0]; worst = vals[0];
+        for (k = 1; k < vals.length; k += 1) {
+          if (row.low ? vals[k] < best : vals[k] > best) { best = vals[k]; }
+          if (row.low ? vals[k] > worst : vals[k] < worst) { worst = vals[k]; }
+        }
+      }
+      for (k = 0; k < STRATS.length; k += 1) {
+        var d = r[STRATS[k]];
+        if (row.key === "_len") {
+          h += "<td>" + d.maxLen + " / " + d.avgLen + "</td>";
+          continue;
+        }
+        var cls = "";
+        if (best !== worst) {
+          if (vals[k] === best) { cls = ' class="best"'; }
+          else if (vals[k] === worst) { cls = ' class="worst"'; }
+        }
+        var txt = vals[k] + (row.suffix || "");
+        if (row.key === "coverPct") { txt = d.covered + "/" + d.answerTotal + "（" + d.coverPct + "%）"; }
+        if (row.key === "inflation") { txt = d.inflation.toFixed(2) + "×"; }
+        if (row.key === "topScore") { txt = d.topScore.toFixed(2); }
+        h += "<td" + cls + ">" + txt + "</td>";
+      }
+      h += "</tr>";
+    }
+    return h + "</tbody>";
+  }
+
+  function render() {
+    var r = computeChunking(state);
+    sizeV.textContent = state.chunkSize + " 字";
+    ovV.textContent = state.overlapPct + " %";
+    kV.textContent = "k = " + state.topK;
+
+    var h = "";
+    for (var i = 0; i < TRACK_META.length; i += 1) { h += renderTrack(r, TRACK_META[i]); }
+    tracksEl.innerHTML = h;
+    tblEl.innerHTML = renderTable(r);
+    statusEl.textContent = r.status;
+    verdictEl.textContent = r.verdict;
+    verdictEl.className = "rcx-verdict w-" + (r.winner === "fixed" ? "f" : (r.winner === "overlap" ? "o" : "s"));
+  }
+
+  /* (5) 事件綁定 */
+
+  function loadDoc(idx) {
+    state.docIdx = idx;
+    state.text = "";
+    taEl.value = DOCS[idx].text;
+    state.query = DOCS[idx].q;
+    qEl.value = DOCS[idx].q;
+    var btns = segDoc.querySelectorAll("button[data-doc]");
+    for (var i = 0; i < btns.length; i += 1) {
+      btns[i].setAttribute("aria-pressed", Number(btns[i].getAttribute("data-doc")) === idx ? "true" : "false");
+    }
+  }
+
+  segDoc.addEventListener("click", function (ev) {
+    var btn = ev.target.closest("button[data-doc]");
+    if (!btn) { return; }
+    loadDoc(Number(btn.getAttribute("data-doc")));
+    render();
+  });
+
+  taEl.addEventListener("input", function () {
+    if (taEl.value.length > MAX_CHARS) { taEl.value = taEl.value.substring(0, MAX_CHARS); }
+    state.text = taEl.value;
+    render();
+  });
+
+  qEl.addEventListener("input", function () { state.query = qEl.value; render(); });
+  sizeEl.addEventListener("input", function () { state.chunkSize = Number(sizeEl.value); render(); });
+  ovEl.addEventListener("input", function () { state.overlapPct = Number(ovEl.value); render(); });
+  kEl.addEventListener("input", function () { state.topK = Number(kEl.value); render(); });
+
+  resetEl.addEventListener("click", function () {
+    state.chunkSize = 48; state.overlapPct = 20; state.topK = 2;
+    sizeEl.value = "48"; ovEl.value = "20"; kEl.value = "2";
+    loadDoc(0);
+    render();
+  });
+
+  loadDoc(0);
+  render();
 })();
 </script>
