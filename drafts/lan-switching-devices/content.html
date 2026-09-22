@@ -1,3 +1,5 @@
+<!-- demo-archetype: D｜空間視覺化（主，第 7 節） — 讀者在 SVG 拓樸上點主機選來源／目的、點徽章改每台主機的 VLAN、切換 Router 是否備妥兩個子介面、拖動起始 TTL，即時算出 hop 路徑、泛洪埠集合與複本數、兩張 MAC 表的成長、ARP 要問誰、跨 VLAN 是否被阻擋，以及逐跳的 MAC／IP 改寫與 TTL 遞減。
+     選 D 是因為本篇的每一個判定（forward／flood／filter、要不要交給 Gateway、跨不跨 VLAN）都是「這台主機掛在哪個埠、屬哪個 VLAN」的函式——必須能在拓樸空間上點選與改配置，因果才摸得到；做成逐步播放器等於把因果換成敘事。 -->
 <style>
   /* 本篇專屬：lan-* 命名空間，不覆蓋全站 base 類別 */
   #lan-root {
@@ -34,96 +36,108 @@
   .lan-layer-card .lt { font-weight: 700; font-size: 14px; margin-bottom: 2px; }
   .lan-layer-card .ls { font-family: var(--mono); font-size: 11px; color: var(--text-3); margin-bottom: 8px; }
   .lan-layer-card ul { margin: 0; padding-left: 1.15em; font-size: 13px; color: var(--text-2); line-height: 1.6; }
-  .lan-topo-static {
-    display: flex; flex-wrap: wrap; align-items: center; justify-content: center;
-    gap: 6px; margin: 12px 0 4px; font-family: var(--mono); font-size: 12px;
+  /* 靜態拓樸：節點是盒、邊是箭頭，兩者不同元素 */
+  .lan-row {
+    display: flex; flex-wrap: wrap; gap: 8px;
+    align-items: stretch; justify-content: center; margin: 14px 0 6px;
   }
-  .lan-chip {
-    border: 1px solid var(--border-strong); border-radius: 6px;
-    padding: 7px 11px; background: #fff; color: var(--text); font-weight: 600;
+  .lan-box {
+    border: 1px solid var(--border-strong); border-radius: 8px;
+    background: #fff; padding: 10px 12px;
+    min-width: 110px; max-width: 180px; text-align: center;
   }
-  .lan-chip.modem { background: var(--lan-modem-soft); border-color: var(--lan-modem); color: var(--lan-modem); }
-  .lan-chip.router { background: var(--lan-router-soft); border-color: var(--lan-router); color: var(--lan-router); }
-  .lan-chip.switch { background: var(--lan-switch-soft); border-color: var(--lan-switch); color: var(--lan-switch); }
-  .lan-chip.host { background: var(--lan-host-soft); border-color: var(--lan-host); color: var(--lan-host); }
-  .lan-chip.op { background: var(--bg-soft); color: var(--text-3); border-style: dashed; font-weight: 500; }
+  .lan-box .nn { font-family: var(--mono); font-size: 12px; font-weight: 700; color: var(--text); }
+  .lan-box .ns { font-size: 11px; color: var(--text-2); margin-top: 3px; line-height: 1.4; }
+  .lan-box.host { border-top: 3px solid var(--lan-host); }
+  .lan-box.switch { border-top: 3px solid var(--lan-switch); }
+  .lan-box.router { border-top: 3px solid var(--lan-router); }
+  .lan-box.modem { border-top: 3px solid var(--lan-modem); }
+  .lan-box.isp { border-top: 3px solid var(--border-strong); }
+  .lan-arrow {
+    display: flex; align-items: center; white-space: nowrap;
+    font-family: var(--mono); font-size: 13px; color: var(--text-3);
+  }
+  /* 直向堆疊：由外而內的接線層級 */
+  .lan-stack {
+    border: 1px solid var(--border); border-radius: 8px;
+    overflow: hidden; margin: 14px 0 6px;
+  }
+  .lan-stack .sl {
+    display: grid; grid-template-columns: 148px 1fr; gap: 12px;
+    padding: 10px 14px; background: #fff;
+    border-bottom: 1px solid var(--border); align-items: center;
+  }
+  .lan-stack .sl:last-child { border-bottom: none; }
+  .lan-stack .sd { font-family: var(--mono); font-size: 12px; font-weight: 700; }
+  .lan-stack .sx { font-size: 12.5px; color: var(--text-2); line-height: 1.5; }
+  .lan-stack .sl.isp .sd { color: var(--text-3); }
+  .lan-stack .sl.modem .sd { color: var(--lan-modem); }
+  .lan-stack .sl.router .sd { color: var(--lan-router); }
+  .lan-stack .sl.switch .sd { color: var(--lan-switch); }
+  .lan-stack .sl.host .sd { color: var(--lan-host); }
+  @media (max-width: 640px) { .lan-stack .sl { grid-template-columns: 1fr; gap: 4px; } }
   .lan-wire-list { margin: 8px 0; padding-left: 1.2em; }
   .lan-wire-list li { margin: 4px 0; font-size: 13.5px; line-height: 1.55; }
   .lan-wire-list code { font-size: 12px; }
 
-  /* Demo layout */
-  .lan-demo-controls { display: flex; flex-wrap: wrap; gap: 8px; margin: 10px 0 8px; align-items: center; }
-  .lan-topo {
-    display: grid;
-    grid-template-columns: 1fr;
-    gap: 10px;
-    margin: 8px 0;
+  /* 轉發模擬器（lsim-*，本 demo 專用，全新撰寫） */
+  .lsim-ctl { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 10px 0 8px; }
+  .lsim-slider {
+    display: flex; align-items: center; gap: 6px;
+    font-family: var(--mono); font-size: 11.5px; color: var(--text-2);
   }
-  .lan-isp-row, .lan-core-row, .lan-host-row {
-    display: flex; flex-wrap: wrap; justify-content: center; align-items: stretch; gap: 10px;
-  }
-  .lan-branch-row {
-    display: flex; flex-wrap: wrap; justify-content: center; align-items: flex-start; gap: 28px;
-  }
-  .lan-branch { display: flex; flex-direction: column; align-items: center; gap: 10px; }
-  .lan-node {
-    border: 1.5px solid var(--border-strong); border-radius: var(--radius-sm);
-    padding: 10px 12px; background: #fff; min-width: 108px; text-align: center;
-    transition: box-shadow .2s, border-color .2s, background .2s;
-  }
-  .lan-node .nn { font-weight: 700; font-size: 13px; }
-  .lan-node .nk { font-family: var(--mono); font-size: 10.5px; color: var(--text-3); margin-top: 2px; }
-  .lan-node .ni { font-family: var(--mono); font-size: 11px; color: var(--text-2); margin-top: 4px; }
-  .lan-node.modem { border-color: var(--lan-modem); }
-  .lan-node.router { border-color: var(--lan-router); }
-  .lan-node.switch { border-color: var(--lan-switch); }
-  .lan-node.host { border-color: var(--lan-host); }
-  .lan-node.hot {
-    box-shadow: 0 0 0 3px var(--accent-soft);
-    border-color: var(--accent);
-    background: var(--accent-soft);
-  }
-  .lan-node.done { background: var(--ok-soft); border-color: var(--ok); }
-  .lan-node.skip { opacity: .42; }
-  .lan-link-label {
-    align-self: center; font-family: var(--mono); font-size: 11px;
-    color: var(--text-3); padding: 0 2px;
-  }
-  .lan-link-label.live { color: var(--accent); font-weight: 700; }
-  .lan-mac-wrap { overflow-x: auto; margin: 8px 0 4px; }
-  .lan-mac {
-    width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: 12px;
-  }
-  .lan-mac th, .lan-mac td {
-    border: 1px solid var(--border); padding: 7px 9px; text-align: left; white-space: nowrap;
-  }
-  .lan-mac th {
-    background: var(--bg-soft); color: var(--text-2); font-weight: 600;
-    letter-spacing: .04em; font-size: 11px; text-transform: uppercase;
-  }
-  .lan-mac tr.hit td { background: var(--ok-soft); }
-  .lan-mac tr.new td { background: var(--accent-soft); }
-  .lan-pkt {
+  .lsim-slider input[type="range"] { width: 140px; }
+  .lsim-hint { font-family: var(--mono); font-size: 11.5px; color: var(--accent); font-weight: 700; }
+  #lsim-svg { width: 100%; height: auto; display: block; margin: 6px 0 2px; }
+  .lsim-link { stroke: var(--border-strong); stroke-width: 2; fill: none; }
+  .lsim-link.on { stroke: var(--accent); stroke-width: 3.5; }
+  .lsim-link.flood { stroke-dasharray: 5 4; }
+  .lsim-node rect.box { fill: #fff; stroke: var(--border-strong); stroke-width: 1.5; }
+  .lsim-node.on rect.box { stroke: var(--accent); stroke-width: 2.5; }
+  .lsim-node.src rect.box { fill: var(--accent-soft); stroke: var(--accent); stroke-width: 2.5; }
+  .lsim-node.dst rect.box { fill: var(--ok-soft); stroke: var(--ok); stroke-width: 2.5; }
+  .lsim-node.bad rect.box { fill: var(--bad-soft); stroke: var(--bad); stroke-width: 2.5; }
+  .lsim-node text { font-family: var(--mono); fill: #262a2f; }
+  .lsim-node[data-host] { cursor: pointer; }
+  .lsim-badge { cursor: pointer; }
+  .lsim-badge rect { stroke-width: 1; }
+  .lsim-badge.v10 rect { fill: var(--lan-switch-soft); stroke: var(--lan-switch); }
+  .lsim-badge.v20 rect { fill: var(--lan-host-soft); stroke: var(--lan-host); }
+  .lsim-badge.v10 text { fill: var(--lan-switch); }
+  .lsim-badge.v20 text { fill: var(--lan-host); }
+  .lsim-pl { font-family: var(--mono); font-size: 11px; fill: var(--text-3); }
+  .lsim-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 10px; }
+  @media (max-width: 640px) { .lsim-grid { grid-template-columns: 1fr; } }
+  .lsim-card {
     border: 1px solid var(--border); border-radius: var(--radius-sm);
-    padding: 12px; background: #fff; margin-top: 8px;
+    padding: 12px; background: #fff; margin-top: 10px;
   }
-  .lan-pkt .pt {
-    font-size: 11px; color: var(--text-3); letter-spacing: .06em;
-    text-transform: uppercase; font-family: var(--mono); margin-bottom: 8px;
+  .lsim-grid .lsim-card { margin-top: 0; }
+  .lsim-tt {
+    font-family: var(--mono); font-size: 11px; letter-spacing: .06em;
+    text-transform: uppercase; color: var(--text-3); margin-bottom: 8px;
   }
-  .lan-pkt .row {
-    display: flex; justify-content: space-between; gap: 8px;
-    font-family: var(--mono); font-size: 12.5px; padding: 3px 0;
-    border-bottom: 1px dashed var(--border);
+  .lsim-empty { font-size: 12px; color: var(--text-3); margin: 0; }
+  .lsim-scroll { overflow-x: auto; }
+  .lsim-tbl { width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: 11.5px; }
+  .lsim-tbl th, .lsim-tbl td {
+    border: 1px solid var(--border); padding: 5px 7px; text-align: left; white-space: nowrap;
   }
-  .lan-pkt .row:last-child { border-bottom: none; }
-  .lan-pkt .k { color: var(--text-3); }
-  .lan-pkt .v { color: var(--text); font-weight: 600; }
-  .lan-pkt .v.chg { color: var(--ok); }
-  .lan-pkt-grid {
-    display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 10px;
+  .lsim-tbl th {
+    background: var(--bg-soft); color: var(--text-2); font-weight: 600;
+    font-size: 10.5px; letter-spacing: .04em; text-transform: uppercase;
   }
-  @media (max-width: 640px) { .lan-pkt-grid { grid-template-columns: 1fr; } }
+  .lsim-tbl td.chg { color: var(--ok); font-weight: 700; }
+  .lsim-frow {
+    display: grid; grid-template-columns: 82px 1fr; gap: 10px;
+    padding: 5px 0; border-bottom: 1px dashed var(--border);
+  }
+  .lsim-frow:last-child { border-bottom: none; }
+  .lsim-frow .fk { font-family: var(--mono); font-size: 11px; color: var(--text-3); }
+  .lsim-frow .fv {
+    font-family: var(--mono); font-size: 11.5px; color: var(--text);
+    line-height: 1.5; word-break: break-word;
+  }
 </style>
 
 <div id="lan-root">
@@ -141,17 +155,18 @@
 
   <p>本篇不重複 IP／CIDR／NAT 細節，專注<strong>設備角色</strong>與<strong>L2／L3 分工</strong>：誰看 MAC、誰看 IP、VLAN 怎麼切開廣播域，以及家用／小型辦公室的基本實體拓樸該怎麼接。</p>
 
-  <div class="lan-topo-static" aria-hidden="true">
-    <span class="lan-chip host">Host</span>
-    <span class="lan-chip op">—線—</span>
-    <span class="lan-chip switch">Switch (L2)</span>
-    <span class="lan-chip op">—線—</span>
-    <span class="lan-chip router">Router (L3)</span>
-    <span class="lan-chip op">—線—</span>
-    <span class="lan-chip modem">Modem</span>
-    <span class="lan-chip op">—</span>
-    <span class="lan-chip op">ISP</span>
+  <div class="lan-row">
+    <div class="lan-box host"><div class="nn">Host</div><div class="ns">終端裝置</div></div>
+    <span class="lan-arrow">──線──▸</span>
+    <div class="lan-box switch"><div class="nn">Switch</div><div class="ns">L2 · 看 MAC</div></div>
+    <span class="lan-arrow">──線──▸</span>
+    <div class="lan-box router"><div class="nn">Router</div><div class="ns">L3 · 看 IP</div></div>
+    <span class="lan-arrow">──線──▸</span>
+    <div class="lan-box modem"><div class="nn">Modem</div><div class="ns">對 ISP 的訊號轉換</div></div>
+    <span class="lan-arrow">──▸</span>
+    <div class="lan-box isp"><div class="nn">ISP</div><div class="ns">外部網路</div></div>
   </div>
+  <p class="cap">由內而外的五個角色：注意中間兩格——Switch 停在 MAC、Router 才開始看 IP，這條界線是本篇所有除錯判斷的起點。</p>
 
   <div class="callout accent">
     <div class="c-title"><span class="ic">座標</span>這篇在系列中的位置</div>
@@ -398,17 +413,14 @@
     <li><code>Switch</code> 各埠 → 電腦、印表機、AP、NAS</li>
   </ol>
 
-  <div class="lan-topo-static" aria-hidden="true">
-    <span class="lan-chip op">ISP</span>
-    <span class="lan-chip op">→</span>
-    <span class="lan-chip modem">Modem</span>
-    <span class="lan-chip op">→ WAN</span>
-    <span class="lan-chip router">Router</span>
-    <span class="lan-chip op">LAN →</span>
-    <span class="lan-chip switch">Switch</span>
-    <span class="lan-chip op">→</span>
-    <span class="lan-chip host">Hosts</span>
+  <div class="lan-stack">
+    <div class="sl isp"><div class="sd">ISP</div><div class="sx">外部線路進屋的那一端</div></div>
+    <div class="sl modem"><div class="sd">Modem / ONU</div><div class="sx">接 ISP 線路；LAN 口朝內</div></div>
+    <div class="sl router"><div class="sd">Router</div><div class="sx">WAN 口朝外接 Modem；LAN 口朝內</div></div>
+    <div class="sl switch"><div class="sd">Switch</div><div class="sx">上聯埠接 Router 的 LAN 口；其餘埠朝內</div></div>
+    <div class="sl host"><div class="sd">Hosts</div><div class="sx">電腦、印表機、AP、NAS</div></div>
   </div>
+  <p class="cap">同一條路徑改用直向堆疊呈現「由外而內」的層級：每一列的右欄寫的是「這台設備的哪個口朝外、哪個口朝內」——接錯線幾乎都錯在這一欄。</p>
 
   <div class="tbl-wrap">
     <table>
@@ -453,113 +465,134 @@
 <hr class="div">
 
 <section id="s7">
-  <div class="sec-head"><span class="sec-num">07</span><h2>互動 · 封包怎麼穿過設備</h2></div>
-  <p class="sec-sub">選情境、逐步播放：看哪些節點亮起、Switch 的 MAC 表如何學習，以及 L2／L3 誰動了信封。</p>
+  <div class="sec-head"><span class="sec-num">07</span><h2>互動 · 點選兩台主機，看 Frame 實際怎麼走</h2></div>
+  <p class="sec-sub">主機掛在哪個埠、屬哪個 VLAN，決定了 forward／flood／filter、要不要交給 Gateway、以及誰改寫了信封——全部即時算出來。</p>
 
   <div class="demo" id="demo-lan-path">
     <div class="demo-bar">
-      <span class="label">互動 · LAN 設備路徑</span>
-      <span class="label" style="text-transform:none;font-family:var(--sans);font-size:12px;color:var(--text-2)">情境切換後按「下一步」</span>
+      <span class="label">互動 · LAN 轉發模擬器</span>
+      <span class="label" style="text-transform:none;font-family:var(--sans);font-size:12px;color:var(--text-2)">點主機選來源／目的，點徽章換 VLAN</span>
     </div>
     <div class="demo-body">
-      <div class="seg" role="group" aria-label="情境切換">
-        <button data-sc="same" aria-pressed="true">同網段 A→B</button>
-        <button data-sc="gw" aria-pressed="false">跨網段經 Gateway</button>
-        <button data-sc="inet" aria-pressed="false">出外網經 Modem</button>
+      <div class="seg" role="group" aria-label="Router 子介面設定">
+        <button data-iv="1" aria-pressed="true">Router：VLAN 10 + 20 子介面</button>
+        <button data-iv="0" aria-pressed="false">Router：只設了 VLAN 10</button>
       </div>
 
-      <div class="lan-demo-controls">
-        <button class="btn primary" id="lan-btn-next">下一步</button>
-        <button class="btn" id="lan-btn-reset">重置</button>
+      <div class="lsim-ctl">
+        <button class="btn primary" id="lsim-send">送出 Frame</button>
+        <button class="btn" id="lsim-age">老化清空（MAC + ARP）</button>
+        <button class="btn" id="lsim-reset">重置</button>
+        <label class="lsim-slider" for="lsim-ttl">起始 TTL
+          <input type="range" id="lsim-ttl" min="1" max="255" value="64">
+          <output id="lsim-ttl-out">64</output>
+        </label>
+        <span class="lsim-hint" id="lsim-hint">下一次點主機 → 設為「來源」</span>
       </div>
 
       <div class="legend">
-        <span><i class="dot ns-idle"></i>待命</span>
-        <span><i class="dot ns-wait"></i>目前處理</span>
-        <span><i class="dot ns-ok"></i>已走過</span>
-        <span><i class="dot ns-lock"></i>本情境未使用</span>
+        <span><i class="dot ns-wait"></i>來源主機</span>
+        <span><i class="dot ns-ok"></i>目的主機</span>
+        <span><i class="dot ns-idle"></i>未參與</span>
+        <span><i class="dot ns-bad"></i>被阻擋</span>
       </div>
 
-      <div class="lan-topo" id="lan-topo" aria-hidden="true">
-        <div class="lan-isp-row">
-          <div class="lan-node modem" data-node="modem">
-            <div class="nn">Modem</div>
-            <div class="nk">對 ISP</div>
-            <div class="ni">訊號轉換</div>
-          </div>
-          <span class="lan-link-label" data-link="modem-router">—</span>
-          <div class="lan-node router" data-node="router">
-            <div class="nn">Router</div>
-            <div class="nk">L3 · Gateway</div>
-            <div class="ni">.1.1 / .2.1</div>
-          </div>
-        </div>
-        <div class="lan-branch-row">
-          <div class="lan-branch">
-            <span class="lan-link-label" data-link="router-switch">↕ 192.168.1.0/24</span>
-            <div class="lan-node switch" data-node="switch">
-              <div class="nn">Switch</div>
-              <div class="nk">L2 · MAC</div>
-              <div class="ni">VLAN 10</div>
-            </div>
-            <span class="lan-link-label" data-link="switch-hosts">↕</span>
-            <div class="lan-host-row">
-              <div class="lan-node host" data-node="hostA">
-                <div class="nn">Host A</div>
-                <div class="nk">PC</div>
-                <div class="ni">.1.10 · MAC-A</div>
-              </div>
-              <div class="lan-node host" data-node="hostB">
-                <div class="nn">Host B</div>
-                <div class="nk">同網段</div>
-                <div class="ni">.1.20 · MAC-B</div>
-              </div>
-            </div>
-          </div>
-          <div class="lan-branch">
-            <span class="lan-link-label" data-link="router-segB">↕ 192.168.2.0/24</span>
-            <div class="lan-node host" data-node="hostC">
-              <div class="nn">Host C</div>
-              <div class="nk">另一網段</div>
-              <div class="ni">.2.50 · via GW</div>
-            </div>
-          </div>
-        </div>
+      <svg id="lsim-svg" viewBox="0 0 700 320" role="img" aria-label="兩台交換器與一台路由器組成的 LAN 拓樸，可點選主機與 VLAN 徽章">
+        <title>LAN 拓樸畫布：Router、SW-A、SW-B 與四台主機</title>
+        <defs>
+          <marker id="lsim-ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="#3f6188"></path>
+          </marker>
+        </defs>
+
+        <line class="lsim-link" data-link="r-a" x1="355" y1="62" x2="185" y2="118"></line>
+        <line class="lsim-link" data-link="a-b" x1="252" y1="142" x2="448" y2="142"></line>
+        <line class="lsim-link" data-link="a-h1" x1="185" y1="166" x2="88" y2="232"></line>
+        <line class="lsim-link" data-link="a-h2" x1="185" y1="166" x2="228" y2="232"></line>
+        <line class="lsim-link" data-link="b-h3" x1="515" y1="166" x2="468" y2="232"></line>
+        <line class="lsim-link" data-link="b-h4" x1="515" y1="166" x2="608" y2="232"></line>
+
+        <text class="lsim-pl" x="272" y="84">Gi0/24 trunk</text>
+        <text class="lsim-pl" x="350" y="134" text-anchor="middle">Gi0/23 trunk</text>
+        <text class="lsim-pl" x="112" y="196">Gi0/1</text>
+        <text class="lsim-pl" x="214" y="196">Gi0/2</text>
+        <text class="lsim-pl" x="462" y="196" text-anchor="end">Gi0/1</text>
+        <text class="lsim-pl" x="566" y="196">Gi0/2</text>
+
+        <g class="lsim-node" data-node="router">
+          <rect class="box" x="285" y="14" width="140" height="48" rx="7"></rect>
+          <text x="355" y="34" text-anchor="middle" font-size="13" font-weight="700">Router</text>
+          <text x="355" y="50" text-anchor="middle" font-size="11" fill="#5b6270">Gi0/0.10 · Gi0/0.20</text>
+        </g>
+        <g id="lsim-blockmark" opacity="0">
+          <line x1="336" y1="72" x2="374" y2="98" stroke="#b4444b" stroke-width="3"></line>
+          <line x1="374" y1="72" x2="336" y2="98" stroke="#b4444b" stroke-width="3"></line>
+        </g>
+
+        <g class="lsim-node" data-node="swa">
+          <rect class="box" x="118" y="118" width="134" height="48" rx="7"></rect>
+          <text x="185" y="138" text-anchor="middle" font-size="13" font-weight="700">SW-A</text>
+          <text x="185" y="154" text-anchor="middle" font-size="11" fill="#5b6270">L2 · 4 埠</text>
+        </g>
+        <g class="lsim-node" data-node="swb">
+          <rect class="box" x="448" y="118" width="134" height="48" rx="7"></rect>
+          <text x="515" y="138" text-anchor="middle" font-size="13" font-weight="700">SW-B</text>
+          <text x="515" y="154" text-anchor="middle" font-size="11" fill="#5b6270">L2 · 3 埠</text>
+        </g>
+
+        <g class="lsim-node" data-node="h0" data-host="0">
+          <rect class="box" x="26" y="232" width="124" height="66" rx="7"></rect>
+          <text x="88" y="250" text-anchor="middle" font-size="13" font-weight="700">H1</text>
+          <text x="88" y="265" text-anchor="middle" font-size="11" fill="#5b6270" data-ip="0">192.168.10.10</text>
+          <g class="lsim-badge v10" data-badge="0">
+            <rect x="52" y="272" width="72" height="18" rx="4"></rect>
+            <text x="88" y="285" text-anchor="middle" font-size="11" data-badge-text="0">VLAN 10</text>
+          </g>
+        </g>
+        <g class="lsim-node" data-node="h1" data-host="1">
+          <rect class="box" x="166" y="232" width="124" height="66" rx="7"></rect>
+          <text x="228" y="250" text-anchor="middle" font-size="13" font-weight="700">H2</text>
+          <text x="228" y="265" text-anchor="middle" font-size="11" fill="#5b6270" data-ip="1">192.168.20.20</text>
+          <g class="lsim-badge v20" data-badge="1">
+            <rect x="192" y="272" width="72" height="18" rx="4"></rect>
+            <text x="228" y="285" text-anchor="middle" font-size="11" data-badge-text="1">VLAN 20</text>
+          </g>
+        </g>
+        <g class="lsim-node" data-node="h2" data-host="2">
+          <rect class="box" x="406" y="232" width="124" height="66" rx="7"></rect>
+          <text x="468" y="250" text-anchor="middle" font-size="13" font-weight="700">H3</text>
+          <text x="468" y="265" text-anchor="middle" font-size="11" fill="#5b6270" data-ip="2">192.168.10.30</text>
+          <g class="lsim-badge v10" data-badge="2">
+            <rect x="432" y="272" width="72" height="18" rx="4"></rect>
+            <text x="468" y="285" text-anchor="middle" font-size="11" data-badge-text="2">VLAN 10</text>
+          </g>
+        </g>
+        <g class="lsim-node" data-node="h3" data-host="3">
+          <rect class="box" x="546" y="232" width="124" height="66" rx="7"></rect>
+          <text x="608" y="250" text-anchor="middle" font-size="13" font-weight="700">H4</text>
+          <text x="608" y="265" text-anchor="middle" font-size="11" fill="#5b6270" data-ip="3">192.168.20.40</text>
+          <g class="lsim-badge v20" data-badge="3">
+            <rect x="572" y="272" width="72" height="18" rx="4"></rect>
+            <text x="608" y="285" text-anchor="middle" font-size="11" data-badge-text="3">VLAN 20</text>
+          </g>
+        </g>
+      </svg>
+      <p class="cap">拓樸畫布：粗藍線是本次算出來的實際路徑，虛線是同一個 VLAN 內收到泛洪複本的鏈路。點主機盒切換來源／目的，點下方徽章換 VLAN（改埠的 VLAN 會連帶清空 MAC 表，與真實交換器一致）；IP 末碼由主機序號、網段由 VLAN 算出。</p>
+
+      <div class="status-line" id="lsim-status" aria-live="polite">點兩台主機開始。</div>
+
+      <div class="lsim-card" id="lsim-facts"></div>
+
+      <div class="lsim-grid">
+        <div class="lsim-card lsim-scroll" id="lsim-mac-a"></div>
+        <div class="lsim-card lsim-scroll" id="lsim-mac-b"></div>
       </div>
 
-      <div class="status-line" id="lan-status" aria-live="polite">選擇情境後按「下一步」，觀察封包路徑與 MAC 表。</div>
-
-      <div class="lan-pkt-grid">
-        <div class="lan-pkt" id="lan-pkt-l2">
-          <div class="pt">L2 Frame</div>
-          <div class="row"><span class="k">Src MAC</span><span class="v" data-f="smac">—</span></div>
-          <div class="row"><span class="k">Dst MAC</span><span class="v" data-f="dmac">—</span></div>
-          <div class="row"><span class="k">動作</span><span class="v" data-f="l2act">—</span></div>
-        </div>
-        <div class="lan-pkt" id="lan-pkt-l3">
-          <div class="pt">L3 Packet</div>
-          <div class="row"><span class="k">Src IP</span><span class="v" data-f="sip">—</span></div>
-          <div class="row"><span class="k">Dst IP</span><span class="v" data-f="dip">—</span></div>
-          <div class="row"><span class="k">動作</span><span class="v" data-f="l3act">—</span></div>
-        </div>
+      <div class="lsim-card lsim-scroll">
+        <div class="lsim-tt">逐跳表頭改寫帶</div>
+        <div id="lsim-hdr"></div>
       </div>
-
-      <p class="cap" style="margin-top:12px">Switch MAC Table（模擬）</p>
-      <div class="lan-mac-wrap">
-        <table class="lan-mac">
-          <thead>
-            <tr>
-              <th>MAC</th>
-              <th>Port</th>
-              <th>VLAN</th>
-              <th>備註</th>
-            </tr>
-          </thead>
-          <tbody id="lan-mac-tbody">
-            <tr><td colspan="4" style="color:var(--text-3);text-align:center">尚無學習紀錄</td></tr>
-          </tbody>
-        </table>
-      </div>
+      <p class="cap">每一列是一個 L2 區段：綠色的 MAC 欄代表在 Router 被整組改寫，而 Src／Dst IP 兩列相同——這就是「L3 換信封、不換收件人」。</p>
     </div>
   </div>
 </section>
