@@ -1377,7 +1377,7 @@
         <a href="#s3"><span class="n">03</span>寫路徑：Aside 失效、Write-Through、Write-Back、Write-Around</a>
         <a href="#s4"><span class="n">04</span>TTL 與 Eviction：命中率是容量的函數</a>
         <a href="#s5"><span class="n">05</span>這份資料該不該快取</a>
-        <a href="#s6"><span class="n">06</span>互動 Demo：讀寫時序與淘汰對照</a>
+        <a href="#s6"><span class="n">06</span>互動 · 淘汰參數掃描：把容量與偏斜推到兩端</a>
         <a href="#s7"><span class="n">07</span>面試折衷與邊界</a>
       </div>
     </nav>
@@ -1393,7 +1393,13 @@
     <!-- ===================== MAIN CONTENT ===================== -->
     <main>
       <div class="inner">
-        <style>
+        <!-- demo-archetype: B｜參數掃描（主，第 6 節）＋C｜並排對照（次，第 3 節） — 主 demo 讓讀者拖動快取容量、
+     熱點偏斜、key 基數、序列長度與 TTL，並切換「純熱點／掃描污染」兩種存取樣式，對同一條確定性生成的存取序列
+     同時重跑 LRU／LFU／FIFO，即時算出三者的命中率、淘汰次數、熱 key 被踢次數與首訪／重取 miss 拆解；
+     次 demo 讓讀者挑兩種讀寫模式並排，對同一組操作序列真算往返次數、客戶端延遲、stale 窗與崩潰遺失的已 ACK 寫入。
+     選 B 當主是因為本篇第 4 節的命題「命中率是容量的函數、容量不夠時換演算法救不了」本身就是一條參數→結果的函數關係；
+     選 C 當次是因為五種寫路徑是對立取捨，唯有同一組輸入並排才看得出 ACK 點差在哪裡。 -->
+<style>
   /* 本篇專屬：cp-* 命名空間，不覆蓋全站 base 類別 */
   #cp-root {
     --cp-c: #3f6188; --cp-c-soft: #eef2f7;
@@ -1414,14 +1420,18 @@
   .cp-card .cl { font-family: var(--mono); font-size: 11px; color: var(--text-3); margin-bottom: 6px; letter-spacing: .04em; }
   .cp-card .cs { font-size: 12.5px; color: var(--text-2); line-height: 1.55; }
 
-  .cp-flow { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin: 10px 0 4px; font-family: var(--mono); font-size: 12px; }
-  .cp-chip { border: 1px solid var(--border-strong); border-radius: 6px; padding: 6px 10px; background: #fff; font-weight: 600; color: var(--text); }
-  .cp-chip.cli { background: var(--cp-c-soft); border-color: var(--cp-c); color: var(--cp-c); }
-  .cp-chip.cache { background: var(--cp-alt-soft); border-color: var(--cp-alt); color: var(--cp-alt); }
-  .cp-chip.db { background: var(--cp-s-soft); border-color: var(--cp-s); color: var(--cp-s); }
-  .cp-chip.op { background: var(--bg-soft); color: var(--text-3); border-style: dashed; font-weight: 500; }
-  .cp-chip.bad { background: var(--cp-bad-soft); border-color: var(--cp-bad); color: var(--cp-bad); }
-  .cp-chip.warn { background: var(--cp-w-soft); border-color: var(--cp-w); color: var(--cp-w); }
+  /* 讀路徑 swimlane（時序語意用 grid，不用 chip row） */
+  .cp-lane {
+    display: grid; grid-template-columns: 46px repeat(3, 1fr); gap: 1px;
+    background: var(--border); border: 1px solid var(--border);
+    border-radius: 8px; overflow: hidden; margin: 14px 0 6px;
+  }
+  .cp-lane > div { background: #fff; padding: 8px 10px; font-size: 12px; line-height: 1.5; }
+  .cp-lane .lh { background: var(--bg-soft); font-family: var(--mono); font-size: 11px; font-weight: 700; color: var(--text-2); }
+  .cp-lane .lt { background: var(--bg-soft); font-family: var(--mono); font-size: 11px; color: var(--text-3); }
+  .cp-lane .lc.act { background: var(--accent-soft); }
+  .cp-lane .lc.ok  { background: var(--ok-soft); }
+  @media (max-width: 720px) { .cp-lane { grid-template-columns: 40px repeat(3, minmax(0, 1fr)); font-size: 11px; } }
 
   .cp-split { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin: 12px 0; }
   @media (max-width: 640px) { .cp-split { grid-template-columns: 1fr; } }
@@ -1450,98 +1460,63 @@
   .cp-q .fk { font-family: var(--mono); font-size: 11px; color: var(--text-3); margin-bottom: 6px; letter-spacing: .04em; }
   .cp-q .fs { font-size: 12.5px; color: var(--text-2); line-height: 1.55; }
 
-  .cp-ctrl { display: flex; flex-wrap: wrap; gap: 10px; margin: 10px 0 8px; align-items: center; }
-  .cp-metric { display: flex; flex-wrap: wrap; gap: 14px; margin: 8px 0 4px; font-size: 13px; color: var(--text-2); }
-  .cp-metric strong { color: var(--text); font-family: var(--mono); font-size: 12.5px; }
+  /* ===== demo 共用控制列 ===== */
+  .cpx-knobs { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px 14px; margin: 10px 0 6px; }
+  @media (max-width: 720px) { .cpx-knobs { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+  @media (max-width: 460px) { .cpx-knobs { grid-template-columns: 1fr; } }
+  .cpx-knob { display: flex; flex-direction: column; gap: 3px; }
+  .cpx-knob label { font-size: 11.5px; color: var(--text-2); display: flex; justify-content: space-between; gap: 6px; }
+  .cpx-knob label b { font-family: var(--mono); font-size: 12px; color: var(--text); font-weight: 700; }
+  .cpx-knob input[type="range"] { width: 100%; accent-color: var(--accent); }
+  .cpx-knob select {
+    font-family: var(--mono); font-size: 12px; padding: 5px 6px;
+    border: 1px solid var(--border-strong); border-radius: 6px; background: #fff; color: var(--text);
+  }
+  .cpx-actions { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin: 8px 0 4px; }
+  .cpx-note { font-size: 11.5px; color: var(--text-3); line-height: 1.5; margin: 6px 0 0; }
+  .cpx-fig { border: 1px solid var(--border); border-radius: var(--radius-sm); background: #fff; padding: 8px; margin: 10px 0 4px; }
+  .cpx-fig svg { width: 100%; height: auto; display: block; }
 
-  .cp-actors { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin: 12px 0 6px; }
-  .cp-actors[hidden], #cp-evict-view[hidden] { display: none; }
-  @media (max-width: 640px) { .cp-actors { grid-template-columns: 1fr; } }
-  .cp-actor {
-    border: 1.5px solid var(--border-strong); border-radius: var(--radius-sm);
-    padding: 12px 12px 10px; background: #fff; text-align: center;
-    transition: background .18s, border-color .18s, box-shadow .18s;
+  /* ===== demo B：淘汰參數掃描 ===== */
+  .cpe-grid { width: 100%; border-collapse: collapse; margin: 8px 0 2px; font-size: 12.5px; }
+  .cpe-grid th, .cpe-grid td {
+    border: 1px solid var(--border); padding: 6px 8px; text-align: right;
+    font-family: var(--mono); font-size: 12px; color: var(--text-2);
   }
-  .cp-actor .an { font-weight: 700; font-size: 13px; letter-spacing: .03em; }
-  .cp-actor .al { font-family: var(--mono); font-size: 10.5px; color: var(--text-3); margin-top: 2px; }
-  .cp-actor .av { font-family: var(--mono); font-size: 16px; font-weight: 700; margin-top: 8px; color: var(--text); }
-  .cp-actor .ah { font-size: 11.5px; color: var(--text-2); margin-top: 4px; min-height: 1.4em; }
-  .cp-actor.on { background: var(--accent-soft); border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
-  .cp-actor.on .an { color: var(--accent); }
-  .cp-actor.ok { background: var(--ok-soft); border-color: var(--ok); }
-  .cp-actor.ok .an { color: var(--ok); }
-  .cp-actor.dirty { background: var(--warn-soft); border-color: var(--warn); }
-  .cp-actor.dirty .an { color: var(--warn); }
-  .cp-actor.bad { background: var(--bad-soft); border-color: var(--bad); }
-  .cp-actor.bad .an { color: var(--bad); }
+  .cpe-grid th { background: var(--bg-soft); color: var(--text-2); font-weight: 700; text-align: right; }
+  .cpe-grid th:first-child, .cpe-grid td:first-child { text-align: left; }
+  .cpe-grid td.best { background: var(--ok-soft); color: var(--text); font-weight: 700; }
+  .cpe-grid td.warnv { background: var(--bad-soft); color: var(--text); }
 
-  .cp-slots { display: flex; flex-wrap: wrap; gap: 8px; margin: 10px 0 4px; }
-  .cp-slot {
-    min-width: 88px; flex: 1;
-    border: 1.5px solid var(--border-strong); border-radius: var(--radius-sm);
-    padding: 10px 8px; background: #fff; text-align: center;
+  /* ===== demo C：讀寫路徑並排 ===== */
+  .cpw-split { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin: 10px 0 4px; }
+  @media (max-width: 720px) { .cpw-split { grid-template-columns: 1fr; } }
+  .cpw-col { border: 1px solid var(--border); border-radius: var(--radius-sm); background: #fff; padding: 10px; }
+  .cpw-col > h4 {
+    margin: 0 0 6px; font-size: 12.5px; font-family: var(--mono); font-weight: 700;
+    color: var(--text); letter-spacing: .03em;
   }
-  .cp-slot .sk { font-family: var(--mono); font-size: 13px; font-weight: 700; color: var(--text); }
-  .cp-slot .sm { font-family: var(--mono); font-size: 10.5px; color: var(--text-3); margin-top: 4px; }
-  .cp-slot.empty { background: var(--bg-soft); }
-  .cp-slot.empty .sk { color: var(--text-3); font-weight: 500; }
-  .cp-slot.hit { background: var(--ok-soft); border-color: var(--ok); }
-  .cp-slot.evict { background: var(--bad-soft); border-color: var(--bad); }
-  .cp-slot.fresh { background: var(--accent-soft); border-color: var(--accent); }
-
-  .cp-panels { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 12px; }
-  @media (max-width: 640px) { .cp-panels { grid-template-columns: 1fr; } }
-  .cp-panel { border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 12px; background: #fff; }
-  .cp-panel .pt {
-    font-size: 11px; color: var(--text-3); letter-spacing: .06em; text-transform: uppercase;
-    font-family: var(--mono); margin-bottom: 8px;
+  .cpw-col.left > h4 { color: var(--cp-c); }
+  .cpw-col.right > h4 { color: var(--cp-w); }
+  .cpw-col svg { width: 100%; height: auto; display: block; }
+  .cpw-grid { width: 100%; border-collapse: collapse; margin: 8px 0 2px; }
+  .cpw-grid th, .cpw-grid td {
+    border: 1px solid var(--border); padding: 6px 8px;
+    font-family: var(--mono); font-size: 12px; color: var(--text-2); text-align: right;
   }
-  .cp-panel .prow {
-    display: flex; justify-content: space-between; gap: 8px;
-    font-family: var(--mono); font-size: 12px; padding: 4px 0;
-    border-bottom: 1px dashed var(--border);
-  }
-  .cp-panel .prow:last-child { border-bottom: none; }
-  .cp-panel .pk { color: var(--text-3); white-space: nowrap; }
-  .cp-panel .pv { color: var(--text); font-weight: 600; text-align: right; }
-  .cp-panel .pv.good { color: var(--ok); }
-  .cp-panel .pv.bad { color: var(--bad); }
-  .cp-panel .pv.warn { color: var(--warn); }
-
-  .cp-wire {
-    border: 1px solid var(--border); border-radius: var(--radius-sm);
-    background: #fff; padding: 8px 10px; margin-top: 10px; max-height: 260px; overflow-y: auto;
-  }
-  .cp-row {
-    display: flex; align-items: baseline; gap: 8px;
-    font-family: var(--mono); font-size: 11.5px; padding: 4px 0;
-    border-bottom: 1px dashed var(--border);
-  }
-  .cp-row:last-child { border-bottom: none; }
-  .cp-row .ar { width: 42px; flex: none; text-align: center; color: var(--text-3); font-weight: 700; }
-  .cp-row .tg {
-    flex: none; border-radius: 4px; padding: 2px 6px; font-size: 10.5px; font-weight: 700;
-    border: 1px solid var(--border-strong); background: var(--bg-soft); color: var(--text-3);
-  }
-  .cp-row .tx { color: var(--text-2); line-height: 1.5; }
-  .cp-row.read .tg { background: var(--cp-c-soft); border-color: var(--cp-c); color: var(--cp-c); }
-  .cp-row.write .tg { background: var(--cp-w-soft); border-color: var(--cp-w); color: var(--cp-w); }
-  .cp-row.ok .tg { background: var(--cp-s-soft); border-color: var(--cp-s); color: var(--cp-s); }
-  .cp-row.bad .tg { background: var(--cp-bad-soft); border-color: var(--cp-bad); color: var(--cp-bad); }
-  .cp-row.bad .tx { color: var(--bad); }
-  .cp-row.note { background: var(--bg-soft); border-radius: 4px; }
-  .cp-row.note .tx { color: var(--text-3); }
-
-  .cp-verdict {
+  .cpw-grid th { background: var(--bg-soft); font-weight: 700; }
+  .cpw-grid th:first-child, .cpw-grid td:first-child { text-align: left; }
+  .cpw-grid td.hi { color: var(--text); font-weight: 700; }
+  .cpw-grid td.risk { background: var(--bad-soft); color: var(--text); font-weight: 700; }
+  .cpw-call {
     margin-top: 10px; padding: 10px 12px; border-radius: var(--radius-sm);
-    border: 1px solid var(--border); background: var(--bg-soft);
-    font-size: 13px; color: var(--text-2); line-height: 1.55;
+    border: 1px solid var(--border); border-left: 3px solid var(--border-strong);
+    background: var(--bg-soft); font-size: 13px; color: var(--text-2); line-height: 1.6;
   }
-  .cp-verdict.tone-ok { border-left: 3px solid var(--ok); background: var(--ok-soft); color: var(--text); }
-  .cp-verdict.tone-lock { border-left: 3px solid var(--warn); background: var(--warn-soft); color: var(--text); }
-  .cp-verdict.tone-bad { border-left: 3px solid var(--bad); background: var(--bad-soft); color: var(--text); }
-
-  .cp-mode-hint { font-size: 12.5px; color: var(--text-2); margin: 8px 0 4px; line-height: 1.55; }
+  .cpw-call.k-lose { border-left-color: var(--bad); background: var(--bad-soft); color: var(--text); }
+  .cpw-call.k-stale { border-left-color: var(--warn); background: var(--warn-soft); color: var(--text); }
+  .cpw-call.k-slow { border-left-color: var(--accent); background: var(--accent-soft); color: var(--text); }
+  .cpw-call.k-even { border-left-color: var(--ok); background: var(--ok-soft); color: var(--text); }
 </style>
 
 <div id="cp-root">
@@ -1593,31 +1568,33 @@
 
   <p class="cp-sub">1 · Cache-Aside（Lazy Loading）</p>
   <p>應用擁有完整讀路徑。這是面試預設答案，也是 Redis 最常見的用法。</p>
-  <div class="cp-flow">
-    <span class="cp-chip cli">Client GET</span>
-    <span class="cp-chip op">→</span>
-    <span class="cp-chip cache">Cache GET</span>
-    <span class="cp-chip op">hit？回傳</span>
-    <span class="cp-chip op">miss →</span>
-    <span class="cp-chip db">DB GET</span>
-    <span class="cp-chip op">→</span>
-    <span class="cp-chip cache">Cache SET</span>
-    <span class="cp-chip op">→</span>
-    <span class="cp-chip cli">回傳</span>
-  </div>
+  <pre class="mermaid">
+sequenceDiagram
+    participant A as 應用
+    participant C as 快取
+    participant D as 資料庫
+    A->>C: GET key
+    C-->>A: MISS
+    A->>D: SELECT key
+    D-->>A: 值 A
+    A->>C: SET key = A
+    A-->>A: 回傳 A
+</pre>
+  <p class="cap">三條往返全部由應用發起：快取與資料庫都是它的下游，所以回填失敗時它仍握有可以回傳的值。</p>
   <p>步驟順序固定：<strong>先問快取，沒有才問權威來源，再回填</strong>。應用必須同時認得 Cache 與 DB 的介面。好處是快取掛了可以降級直打 DB（可用性高、延遲變差）；壞處是回填、失效、編碼格式全散落在業務程式碼。</p>
 
   <p class="cp-sub">2 · Read-Through</p>
   <p>應用只面對快取。Miss 時由快取層（或它前面的 library／proxy）自己去 load loader、填入、再回給呼叫端。</p>
-  <div class="cp-flow">
-    <span class="cp-chip cli">Client GET</span>
-    <span class="cp-chip op">→</span>
-    <span class="cp-chip cache">Cache GET</span>
-    <span class="cp-chip op">hit？回傳</span>
-    <span class="cp-chip op">miss → Cache 內部</span>
-    <span class="cp-chip db">Loader → DB</span>
-    <span class="cp-chip op">→ 填入後回傳</span>
+  <div class="cp-lane">
+    <div class="lh">步驟</div><div class="lh">應用</div><div class="lh">快取（含 loader）</div><div class="lh">資料庫</div>
+    <div class="lt">t1</div>
+    <div class="lc act">GET key</div><div class="lc">查表：MISS</div><div class="lc">—</div>
+    <div class="lt">t2</div>
+    <div class="lc">仍在等同一次 GET</div><div class="lc act">loader 代為回源</div><div class="lc">SELECT key → 值 A</div>
+    <div class="lt">t3</div>
+    <div class="lc ok">收到 A</div><div class="lc ok">填入後回傳</div><div class="lc">—</div>
   </div>
+  <p class="cap">看 t2 那一列：應用那一欄是空的——回源整段發生在快取內部，所以快取進程掛掉時，讀請求沒有旁路可走。</p>
   <p>呼叫端變乾淨，回源策略可以集中（超時、重試、單 key 合併——那些手段留給失效模式那篇）。代價是：<strong>快取變成讀路徑上的必經節點</strong>。Cache 進程掛掉，讀就停，除非你另外做旁路。Read-Through 幾乎總是跟 Write-Through 或 Write-Back 成對出現，很少單獨搭配「應用自己寫 DB」。</p>
 
   <div class="cp-split">
@@ -1640,6 +1617,7 @@
       </ul>
     </div>
   </div>
+  <p class="cap">左欄說 stale 只會被「另一次寫入」打開；右欄說故障時讀到什麼取決於是誰掛了——兩欄合起來就是讀路徑的全部風險面。</p>
 
   <div class="callout warn">
     <div class="c-title"><span class="ic">陷阱</span>回填失敗不要假裝命中</div>
@@ -1660,39 +1638,14 @@
 
   <p class="cp-sub">1 · Cache-Aside 的寫：更新 DB，再讓快取失效</p>
   <p>經典寫法不是「寫 DB 再寫 cache」，而是 <strong>Write DB → Delete cache key</strong>。下次讀走 miss 回填，自然拿到新值。若改成「寫 DB 再 SET cache」，兩次寫入之間任何失敗都會留下 DB 與 cache 長期分歧，而且你還得處理編碼、TTL 與部分更新。</p>
-  <div class="cp-flow">
-    <span class="cp-chip cli">Client SET B</span>
-    <span class="cp-chip op">→</span>
-    <span class="cp-chip db">DB SET B</span>
-    <span class="cp-chip op">成功後</span>
-    <span class="cp-chip cache">Cache DEL</span>
-    <span class="cp-chip warn">窗口：DB 已 B、cache 仍 A</span>
-  </div>
   <p>Stale window 就在這兩步之間，通常是毫秒級。真正危險的是<strong>刪除失敗</strong>：DB 已是 B，cache 裡的 A 會一直活到 TTL。這時 TTL 不是效能參數，是一致性的最後保險。</p>
 
   <p class="cp-sub">2 · Write-Through</p>
   <p>應用寫入快取；快取<strong>同步</strong>把同一筆寫進 DB，兩邊都成功才 ACK。</p>
-  <div class="cp-flow">
-    <span class="cp-chip cli">Client SET B</span>
-    <span class="cp-chip op">→</span>
-    <span class="cp-chip cache">Cache SET B</span>
-    <span class="cp-chip op">同步</span>
-    <span class="cp-chip db">DB SET B</span>
-    <span class="cp-chip op">→</span>
-    <span class="cp-chip cli">ACK</span>
-  </div>
   <p>寫延遲 ≈ cache + DB。換來的是：讀幾乎總能 hit 剛寫的值、cache 掛了資料仍在 DB。適合「讀多、寫不能丟、可接受寫變慢」——例如帳戶餘額的讀側加速，但仍以 DB 為準。</p>
 
   <p class="cp-sub">3 · Write-Back（Write-Behind）</p>
   <p>應用寫入快取後立刻 ACK；DB 由背景排程刷入。Cache 條目帶 dirty bit。</p>
-  <div class="cp-flow">
-    <span class="cp-chip cli">Client SET B</span>
-    <span class="cp-chip op">→</span>
-    <span class="cp-chip cache">Cache SET B · dirty</span>
-    <span class="cp-chip cli">立即 ACK</span>
-    <span class="cp-chip op">稍後</span>
-    <span class="cp-chip db">Flush → DB</span>
-  </div>
   <div class="callout warn">
     <div class="c-title"><span class="ic">陷阱</span>Write-Back 的權威暫時不在 DB</div>
     <p>Flush 之前，DB 是舊的。任何繞過快取的讀（報表、ETL、另一個沒打 cache 的服務）都會讀到 A。<strong>Cache 在 flush 前崩潰 = 丟失已 ACK 給客戶端的寫入。</strong> 這不是「可能不一致」，是耐久性失敗。Write-Back 只適合能容忍丟失、或快取本身有 WAL／複寫的場景（本地 page cache、某些 LSM 的 memtable）——普通 Redis 單機當 Write-Back 緩衝，面試裡通常是扣分答案。</p>
@@ -1700,13 +1653,6 @@
 
   <p class="cp-sub">4 · Write-Around</p>
   <p>寫入只打 DB，<strong>不碰快取</strong>。用意是避免把「寫完很少再讀」的資料佔滿熱點集合（例如一次性匯入、日誌型更新）。</p>
-  <div class="cp-flow">
-    <span class="cp-chip cli">Client SET B</span>
-    <span class="cp-chip op">→</span>
-    <span class="cp-chip db">DB SET B</span>
-    <span class="cp-chip cache">Cache 仍為 A</span>
-    <span class="cp-chip bad">stale 直到 TTL／驅逐／顯式 DEL</span>
-  </div>
   <p>若 key 本來就在 cache 裡，Write-Around 會製造<strong>最長、最容易被忽略的 stale window</strong>。實務上寫-around 幾乎一定要搭配「順便 DEL」或短 TTL；否則它只適合「這個 key 根本不該在 cache」的寫入。</p>
 
   <div class="tbl-wrap">
@@ -1753,6 +1699,88 @@
     </table>
   </div>
   <p class="cap">ACK 點愈靠近快取，寫愈快、丟資料風險愈高；愈靠近 DB，愈耐久、stale 愈短、寫延遲愈高。</p>
+
+  <div class="demo" id="demo-cp-write">
+    <div class="demo-bar">
+      <span class="label">互動 · 兩種寫路徑跑同一組操作</span>
+      <span class="label" style="text-transform:none;font-family:var(--sans);font-size:12px;color:var(--text-2)">挑兩種模式、拖 RTT 與崩潰點，兩欄同時重算</span>
+    </div>
+    <div class="demo-body">
+      <div class="seg" role="group" aria-label="工作負載" id="cpw-seg">
+        <button data-wl="readheavy" aria-pressed="false">讀多寫少</button>
+        <button data-wl="writeheavy" aria-pressed="true">寫多讀少</button>
+        <button data-wl="wtr" aria-pressed="false">寫後立即讀</button>
+      </div>
+
+      <div class="cpx-knobs">
+        <div class="cpx-knob">
+          <label for="cpw-left">左欄模式</label>
+          <select id="cpw-left">
+            <option value="aside" selected>Cache-Aside</option>
+            <option value="readthru">Read-Through</option>
+            <option value="writethru">Write-Through</option>
+            <option value="writeback">Write-Back</option>
+            <option value="writearound">Write-Around</option>
+          </select>
+        </div>
+        <div class="cpx-knob">
+          <label for="cpw-right">右欄模式</label>
+          <select id="cpw-right">
+            <option value="aside">Cache-Aside</option>
+            <option value="readthru">Read-Through</option>
+            <option value="writethru">Write-Through</option>
+            <option value="writeback" selected>Write-Back</option>
+            <option value="writearound">Write-Around</option>
+          </select>
+        </div>
+        <div class="cpx-knob">
+          <label for="cpw-ops">操作數 <b id="cpw-ops-v">10</b></label>
+          <input type="range" id="cpw-ops" min="4" max="16" step="1" value="10">
+        </div>
+        <div class="cpx-knob">
+          <label for="cpw-crtt">Cache RTT <b id="cpw-crtt-v">2 ms</b></label>
+          <input type="range" id="cpw-crtt" min="1" max="10" step="1" value="2">
+        </div>
+        <div class="cpx-knob">
+          <label for="cpw-drtt">DB RTT <b id="cpw-drtt-v">50 ms</b></label>
+          <input type="range" id="cpw-drtt" min="5" max="100" step="5" value="50">
+        </div>
+        <div class="cpx-knob">
+          <label for="cpw-crash">崩潰於第 N 步後 <b id="cpw-crash-v">7</b></label>
+          <input type="range" id="cpw-crash" min="0" max="16" step="1" value="7">
+        </div>
+        <div class="cpx-knob">
+          <label for="cpw-flush">Write-Back 刷盤間隔 <b id="cpw-flush-v">4</b></label>
+          <input type="range" id="cpw-flush" min="1" max="8" step="1" value="4">
+        </div>
+        <div class="cpx-actions">
+          <button class="btn" id="cpw-reset">重置</button>
+        </div>
+      </div>
+
+      <div class="legend">
+        <span><i class="dot ns-wait"></i>快取往返</span>
+        <span><i class="dot ns-ok"></i>ACK 給客戶端</span>
+        <span><i class="dot ns-lock"></i>該步結束時 cache ≠ DB</span>
+        <span><i class="dot ns-bad"></i>快取崩潰</span>
+      </div>
+
+      <div class="cpw-split" id="cpw-split" aria-live="polite">
+        <div class="cpw-col left"><h4 id="cpw-lt">左欄</h4><div id="cpw-lsvg"></div></div>
+        <div class="cpw-col right"><h4 id="cpw-rt">右欄</h4><div id="cpw-rsvg"></div></div>
+      </div>
+
+      <div class="tbl-wrap">
+        <table class="cpw-grid" id="cpw-table"></table>
+      </div>
+      <p class="cap">同一行比左右兩欄：延遲來自「ACK 之前經過幾次往返 × 每次的 RTT」，stale 長度來自「快取被更新或被刪掉了沒有」，遺失寫入只會出現在 ACK 早於落盤的那一欄。</p>
+
+      <div class="status-line" id="cpw-status">拖動任一旋鈕，兩欄會同時重算。</div>
+      <div class="cpw-call" id="cpw-call">判定待算。</div>
+      <p class="cpx-note">序列由工作負載樣式循環展開（讀多寫少＝R R W R R、寫多讀少＝W W R W R、寫後立即讀＝W R W R）；每次寫入產生下一個值（A→B→C…）。延遲＝ACK 前的快取往返 × Cache RTT ＋ DB 往返 × DB RTT；Write-Back 的背景刷盤不計入客戶端延遲。Read-Through 這一欄假設應用自己寫 DB 再讓快取失效，好讓它與 Cache-Aside 只差在讀路徑。</p>
+    </div>
+  </div>
+
 
   <div class="oneliner">
     <b>一句話答法</b>Aside 寫 DB 再 DEL cache；Through 同步雙寫才 ACK；Back 先 ACK 再刷盤（崩潰可能丟寫）；Around 只寫 DB、cache 靠 TTL 自己過期。
@@ -1818,6 +1846,8 @@
     <p>若熱點集合永遠大於快取容量，換 LRU 或 LFU 只是換一種 miss 圖案，命中率不會奇蹟上升。面試裡先說：<strong>估計 working set 大小 × 物件平均體積，對上記憶體預算</strong>；容量明顯不夠就分層（本地小 LRU + 遠端大快取）或承認這份資料不該全部進 cache。演算法是微調，容量是一階項。</p>
   </div>
 
+  <p>這一節的每一句斷言都可以被量出來：本篇文末的互動 demo 會把同一條存取序列同時餵給 LRU／LFU／FIFO，讓你把容量與偏斜推到兩端，看命中率、熱 key 被踢次數與 miss 的組成如何隨之改變。</p>
+
   <div class="oneliner">
     <b>一句話答法</b>TTL 限制能有多舊；Eviction 限制能留多大。LRU 賭最近、LFU 賭最常；容量小於 working set 時，換演算法救不了命中率。
   </div>
@@ -1874,102 +1904,69 @@
 <section id="s6">
   <div class="sec-head">
     <span class="sec-num">06</span>
-    <h2>互動 Demo：讀寫時序與淘汰對照</h2>
+    <h2>互動 · 淘汰參數掃描：把容量與偏斜推到兩端</h2>
   </div>
-  <p class="sec-sub">同一把 key 走完讀→寫→再讀→故障；或同一組存取序列看 LRU／LFU／TTL 各踢誰。</p>
+  <p class="sec-sub">同一條存取序列，同時餵給 LRU、LFU 與 FIFO。把容量與偏斜推到兩端，看命中率、熱 key 被踢次數與 miss 的組成怎麼變。</p>
 
-  <div class="demo" id="demo-cp">
+  <div class="demo" id="demo-cp-evict">
     <div class="demo-bar">
-      <span class="label">互動 · Cache Patterns</span>
-      <span class="label" style="text-transform:none;font-family:var(--sans);font-size:12px;color:var(--text-2)">先選模式，按「下一步」看 ACK 與 stale</span>
+      <span class="label">互動 · TTL 與 Eviction 參數掃描</span>
+      <span class="label" style="text-transform:none;font-family:var(--sans);font-size:12px;color:var(--text-2)">拖任何一個旋鈕，三條策略即時重跑</span>
     </div>
     <div class="demo-body">
-      <p class="cp-mode-hint" id="cp-mode-hint">讀寫路徑：key <code>profile:42</code>，DB 初值 A。逐步看 miss 回填、寫入 ACK、以及 cache 崩潰時會不會丟資料。</p>
-
-      <div class="seg" role="group" aria-label="Demo 類型" id="cp-seg-mode">
-        <button data-mode="path" aria-pressed="true">讀寫路徑</button>
-        <button data-mode="evict" aria-pressed="false">淘汰策略</button>
+      <div class="seg" role="group" aria-label="存取樣式" id="cpe-seg">
+        <button data-pat="zipf" aria-pressed="true">純熱點</button>
+        <button data-pat="scan" aria-pressed="false">熱點＋掃描污染</button>
       </div>
 
-      <div class="seg" role="group" aria-label="情境切換" id="cp-seg-sc" style="margin-top:8px">
-        <button data-sc="aside" aria-pressed="true">Cache-Aside</button>
-        <button data-sc="readthru" aria-pressed="false">Read-Through</button>
-        <button data-sc="writethru" aria-pressed="false">Write-Through</button>
-        <button data-sc="writeback" aria-pressed="false">Write-Back</button>
-        <button data-sc="writearound" aria-pressed="false">Write-Around</button>
-      </div>
-
-      <div class="cp-ctrl">
-        <button class="btn primary" id="cp-btn-next">下一步</button>
-        <button class="btn" id="cp-btn-reset">重置</button>
-      </div>
-
-      <div class="cp-metric">
-        <span>步驟 <strong id="cp-m-step">0</strong></span>
-        <span>Cache hit <strong id="cp-m-hits">0</strong></span>
-        <span>DB 讀 <strong id="cp-m-dbr">0</strong></span>
-        <span>DB 寫 <strong id="cp-m-dbw">0</strong></span>
-        <span>Stale 讀 <strong id="cp-m-stale">0</strong></span>
+      <div class="cpx-knobs">
+        <div class="cpx-knob">
+          <label for="cpe-cap">快取容量 <b id="cpe-cap-v">4 槽</b></label>
+          <input type="range" id="cpe-cap" min="2" max="16" step="1" value="4">
+        </div>
+        <div class="cpx-knob">
+          <label for="cpe-keys">key 基數 <b id="cpe-keys-v">12</b></label>
+          <input type="range" id="cpe-keys" min="6" max="40" step="1" value="12">
+        </div>
+        <div class="cpx-knob">
+          <label for="cpe-hot">熱點佔比 <b id="cpe-hot-v">70%</b></label>
+          <input type="range" id="cpe-hot" min="10" max="90" step="5" value="70">
+        </div>
+        <div class="cpx-knob">
+          <label for="cpe-len">序列長度 <b id="cpe-len-v">60 次</b></label>
+          <input type="range" id="cpe-len" min="20" max="120" step="5" value="60">
+        </div>
+        <div class="cpx-knob">
+          <label for="cpe-ttl">TTL（存取次數） <b id="cpe-ttl-v">關閉</b></label>
+          <input type="range" id="cpe-ttl" min="0" max="40" step="1" value="0">
+        </div>
+        <div class="cpx-actions">
+          <button class="btn" id="cpe-reset">重置</button>
+        </div>
       </div>
 
       <div class="legend">
-        <span><i class="dot ns-idle"></i>未參與</span>
-        <span><i class="dot ns-wait"></i>本步作用中</span>
-        <span><i class="dot ns-lock"></i>dirty／stale</span>
-        <span><i class="dot ns-ok"></i>已對齊／命中</span>
-        <span><i class="dot ns-bad"></i>崩潰／驅逐</span>
+        <span><i class="dot ns-ok"></i>命中（最矮）</span>
+        <span><i class="dot ns-idle"></i>未命中·仍有空位</span>
+        <span><i class="dot ns-bad"></i>未命中·踢掉別人（最高）</span>
+        <span><i class="dot ns-wait"></i>這次存取的是熱 key</span>
       </div>
 
-      <div class="cp-actors" id="cp-actors" aria-live="polite">
-        <div class="cp-actor" data-role="client">
-          <div class="an">Client</div>
-          <div class="al">呼叫端</div>
-          <div class="av" id="cp-client-val">—</div>
-          <div class="ah" id="cp-client-hint">待命</div>
-        </div>
-        <div class="cp-actor" data-role="cache">
-          <div class="an">Cache</div>
-          <div class="al">可丟棄副本</div>
-          <div class="av" id="cp-cache-val">∅</div>
-          <div class="ah" id="cp-cache-hint">空</div>
-        </div>
-        <div class="cp-actor" data-role="db">
-          <div class="an">DB</div>
-          <div class="al">權威來源</div>
-          <div class="av" id="cp-db-val">A</div>
-          <div class="ah" id="cp-db-hint">初值 A</div>
-        </div>
-      </div>
+      <div class="cpx-fig" id="cpe-fig" aria-live="polite"></div>
+      <p class="cap">三列共用同一條存取序列與同一個 x 軸：刻度愈高代表這次存取愈貴（命中最矮、踢人最高），刻度下方的針標出被踢掉的 key；紅針代表被踢的是熱 key。右下的方塊是序列跑完後還留在槽位裡的東西。</p>
 
-      <div id="cp-evict-view" hidden>
-        <div class="cp-slots" id="cp-slots" aria-label="快取槽位"></div>
+      <div class="tbl-wrap">
+        <table class="cpe-grid" id="cpe-table"></table>
       </div>
+      <p class="cap">「首訪 miss」對三種策略永遠相同（誰都不可能命中沒載入過的 key）；三者的差距只出現在「重取 miss」那一行——那一行有多大，才決定換演算法值不值得。</p>
 
-      <div class="cp-panels">
-        <div class="cp-panel">
-          <div class="pt">本步語義</div>
-          <div class="prow"><span class="pk">操作</span><span class="pv" id="cp-p-op">—</span></div>
-          <div class="prow"><span class="pk">ACK 點</span><span class="pv" id="cp-p-ack">—</span></div>
-          <div class="prow"><span class="pk">Stale window</span><span class="pv" id="cp-p-stale">—</span></div>
-          <div class="prow"><span class="pk">崩潰損失</span><span class="pv" id="cp-p-loss">—</span></div>
-        </div>
-        <div class="cp-panel">
-          <div class="pt">計數</div>
-          <div class="prow"><span class="pk">cache 狀態</span><span class="pv" id="cp-p-cstate">empty</span></div>
-          <div class="prow"><span class="pk">dirty bit</span><span class="pv" id="cp-p-dirty">false</span></div>
-          <div class="prow"><span class="pk">命中率（本回合）</span><span class="pv" id="cp-p-hr">—</span></div>
-          <div class="prow"><span class="pk">被踢出</span><span class="pv" id="cp-p-victim">—</span></div>
-        </div>
-      </div>
-
-      <div class="status-line" id="cp-status">選擇模式後按「下一步」。先走冷讀，再寫成 B，最後看崩潰。</div>
-      <div class="cp-verdict" id="cp-verdict">判定尚未產生——走完序列後會摘要 ACK、stale 與崩潰損失。</div>
-      <div class="cp-wire" id="cp-wire" aria-label="事件日誌"></div>
+      <div class="status-line" id="cpe-status">拖動旋鈕即可重算。</div>
+      <p class="cpx-note">存取序列由參數以固定種子的線性同餘產生器生成（種子固定，故同一組參數永遠得到同一條序列）：key 基數的前 25% 視為熱點集合，熱點佔比是每次存取落在熱點集合的機率；「熱點＋掃描污染」會在每 12 次存取中插入 5 次一次性的冷 key 掃描。TTL 以存取次數計，屬絕對 TTL（寫入起算，命中不延長）。</p>
     </div>
   </div>
 
   <div class="oneliner">
-    <b>一句話答法</b>Demo 要對的是時序：誰先寫、何時 ACK、哪一步 cache 與 DB 不同值、以及 Write-Back 崩潰會丟掉已確認的 B。
+    <b>一句話答法</b>把容量拖過 working set，三條策略會合而為一；容量不足時，LFU 靠頻次保住熱 key，LRU 與 FIFO 則會被掃描流量洗掉——而 TTL 夠短的話，三者一起失效。
   </div>
 </section>
 
@@ -2106,768 +2103,736 @@
 (function () {
   "use strict";
 
-  var demo = document.getElementById("demo-cp");
-  if (!demo) return;
-
-  var mode = "path";
-  var scenario = "aside";
-  var step = 0;
-
-  var statusEl = document.getElementById("cp-status");
-  var verdictEl = document.getElementById("cp-verdict");
-  var wireEl = document.getElementById("cp-wire");
-  var btnNext = document.getElementById("cp-btn-next");
-  var btnReset = document.getElementById("cp-btn-reset");
-  var segMode = document.getElementById("cp-seg-mode");
-  var segSc = document.getElementById("cp-seg-sc");
-  var modeHint = document.getElementById("cp-mode-hint");
-  var actorsEl = document.getElementById("cp-actors");
-  var evictView = document.getElementById("cp-evict-view");
-  var slotsEl = document.getElementById("cp-slots");
-
-  var mStep = document.getElementById("cp-m-step");
-  var mHits = document.getElementById("cp-m-hits");
-  var mDbr = document.getElementById("cp-m-dbr");
-  var mDbw = document.getElementById("cp-m-dbw");
-  var mStale = document.getElementById("cp-m-stale");
-
-  var clientVal = document.getElementById("cp-client-val");
-  var clientHint = document.getElementById("cp-client-hint");
-  var cacheVal = document.getElementById("cp-cache-val");
-  var cacheHint = document.getElementById("cp-cache-hint");
-  var dbVal = document.getElementById("cp-db-val");
-  var dbHint = document.getElementById("cp-db-hint");
-
-  var pOp = document.getElementById("cp-p-op");
-  var pAck = document.getElementById("cp-p-ack");
-  var pStale = document.getElementById("cp-p-stale");
-  var pLoss = document.getElementById("cp-p-loss");
-  var pCstate = document.getElementById("cp-p-cstate");
-  var pDirty = document.getElementById("cp-p-dirty");
-  var pHr = document.getElementById("cp-p-hr");
-  var pVictim = document.getElementById("cp-p-victim");
-
-  var PATH_BTNS = [
-    ["aside", "Cache-Aside"],
-    ["readthru", "Read-Through"],
-    ["writethru", "Write-Through"],
-    ["writeback", "Write-Back"],
-    ["writearound", "Write-Around"]
-  ];
-  var EVICT_BTNS = [
-    ["lru", "LRU"],
-    ["lfu", "LFU"],
-    ["ttl", "TTL"]
-  ];
-
-  var PATH = {
-    aside: [
-      {
-        client: { val: "GET", hint: "冷讀 profile:42", cls: "on" },
-        cache: { val: "∅", hint: "MISS", cls: "on" },
-        db: { val: "A", hint: "未參與", cls: "" },
-        op: "Cache GET → miss", ack: "尚未回傳", staleWin: "無", loss: "—",
-        cstate: "empty", dirty: "false", hr: "0/1", victim: "—",
-        hits: 0, dbr: 0, dbw: 0, stale: 0,
-        status: "Cache-Aside：應用先問快取。空的，這次必須回源。",
-        log: [
-          { cls: "read", ar: "C→$", tg: "GET", tx: "GET profile:42 → MISS" }
-        ]
-      },
-      {
-        client: { val: "…", hint: "改打 DB", cls: "on" },
-        cache: { val: "∅", hint: "仍空", cls: "" },
-        db: { val: "A", hint: "GET A", cls: "on" },
-        op: "DB GET", ack: "尚未回傳", staleWin: "無", loss: "—",
-        cstate: "empty", dirty: "false", hr: "0/1", victim: "—",
-        hits: 0, dbr: 1, dbw: 0, stale: 0,
-        status: "應用自己打權威來源，讀到 A。快取還沒填。",
-        log: [
-          { cls: "read", ar: "C→DB", tg: "GET", tx: "GET profile:42 → A" }
-        ]
-      },
-      {
-        client: { val: "A", hint: "回傳 A", cls: "ok" },
-        cache: { val: "A", hint: "回填", cls: "ok" },
-        db: { val: "A", hint: "權威", cls: "" },
-        op: "Cache SET A；回傳 A", ack: "讀完成（值來自 DB）", staleWin: "無", loss: "—",
-        cstate: "filled", dirty: "false", hr: "0/1", victim: "—",
-        hits: 0, dbr: 1, dbw: 0, stale: 0,
-        status: "回填成功。這次是 miss，不算 hit。下次才走快取。",
-        log: [
-          { cls: "ok", ar: "C→$", tg: "SET", tx: "SET profile:42 = A" },
-          { cls: "note", ar: "·", tg: "note", tx: "回填失敗時仍應把 A 回給這次請求" }
-        ]
-      },
-      {
-        client: { val: "A", hint: "命中", cls: "ok" },
-        cache: { val: "A", hint: "HIT", cls: "ok" },
-        db: { val: "A", hint: "未參與", cls: "" },
-        op: "Cache GET → hit", ack: "讀完成（值來自 cache）", staleWin: "無", loss: "—",
-        cstate: "filled", dirty: "false", hr: "1/2", victim: "—",
-        hits: 1, dbr: 1, dbw: 0, stale: 0,
-        status: "熱讀命中。DB 完全沒被碰到。",
-        log: [
-          { cls: "ok", ar: "C→$", tg: "HIT", tx: "GET profile:42 → A" }
-        ]
-      },
-      {
-        client: { val: "SET B", hint: "寫入", cls: "on" },
-        cache: { val: "A", hint: "仍是舊值", cls: "dirty" },
-        db: { val: "B", hint: "已寫入 B", cls: "ok" },
-        op: "DB SET B", ack: "寫入尚未對客戶完成（還要 DEL）", staleWin: "已打開：DB=B、cache=A", loss: "—",
-        cstate: "stale", dirty: "false", hr: "1/2", victim: "—",
-        hits: 1, dbr: 1, dbw: 1, stale: 0,
-        status: "經典 Aside 寫法第一步：先讓權威來源變成 B。此刻若有讀會拿到舊的 A。",
-        log: [
-          { cls: "write", ar: "C→DB", tg: "SET", tx: "SET profile:42 = B" },
-          { cls: "note", ar: "·", tg: "stale", tx: "stale window 從這裡開始" }
-        ]
-      },
-      {
-        client: { val: "OK", hint: "寫入 ACK", cls: "ok" },
-        cache: { val: "∅", hint: "已 DEL", cls: "" },
-        db: { val: "B", hint: "權威 B", cls: "ok" },
-        op: "Cache DEL", ack: "DB 成功後才 ACK", staleWin: "已關閉", loss: "無（寫在 DB）",
-        cstate: "empty", dirty: "false", hr: "1/2", victim: "—",
-        hits: 1, dbr: 1, dbw: 1, stale: 0,
-        status: "刪除快取 key。若這一步失敗，A 會活到 TTL——TTL 是一致性保險。",
-        log: [
-          { cls: "write", ar: "C→$", tg: "DEL", tx: "DEL profile:42" }
-        ]
-      },
-      {
-        client: { val: "B", hint: "回填後回傳", cls: "ok" },
-        cache: { val: "B", hint: "miss 回填", cls: "ok" },
-        db: { val: "B", hint: "GET B", cls: "on" },
-        op: "讀：miss → DB GET B → SET", ack: "讀完成", staleWin: "無", loss: "無",
-        cstate: "filled", dirty: "false", hr: "1/3", victim: "—",
-        hits: 1, dbr: 2, dbw: 1, stale: 0,
-        status: "寫後再讀走 miss 回填，拿到 B。路徑正確。",
-        log: [
-          { cls: "read", ar: "C→$", tg: "MISS", tx: "GET → miss" },
-          { cls: "read", ar: "C→DB", tg: "GET", tx: "→ B，回填 cache" }
-        ]
-      },
-      {
-        client: { val: "—", hint: "下一讀改打 DB", cls: "" },
-        cache: { val: "∅", hint: "進程崩潰", cls: "bad" },
-        db: { val: "B", hint: "資料仍在", cls: "ok" },
-        op: "Cache crash", ack: "已 ACK 的寫入仍在 DB", staleWin: "—", loss: "無",
-        cstate: "down", dirty: "false", hr: "1/3", victim: "—",
-        hits: 1, dbr: 2, dbw: 1, stale: 0,
-        status: "快取整份丟掉。寫入安全，只是下一讀變慢。這就是「可丟棄副本」。",
-        verdict: { tone: "ok", text: "判定：Cache-Aside 崩潰不丟寫入。Stale 只出現在 DB SET 與 DEL 之間；DEL 失敗才會長駐到 TTL。" },
-        log: [
-          { cls: "bad", ar: "$", tg: "CRASH", tx: "cache process gone · DB 仍為 B" }
-        ]
-      }
-    ],
-    readthru: [
-      {
-        client: { val: "GET", hint: "只打 Cache", cls: "on" },
-        cache: { val: "∅", hint: "MISS，準備 load", cls: "on" },
-        db: { val: "A", hint: "尚未被 loader 碰到", cls: "" },
-        op: "Client → Cache GET", ack: "尚未回傳", staleWin: "無", loss: "—",
-        cstate: "empty", dirty: "false", hr: "0/1", victim: "—",
-        hits: 0, dbr: 0, dbw: 0, stale: 0,
-        status: "Read-Through：應用不認得 DB。Miss 由快取層自己回源。",
-        log: [
-          { cls: "read", ar: "C→$", tg: "GET", tx: "GET profile:42 · 應用不直打 DB" }
-        ]
-      },
-      {
-        client: { val: "…", hint: "仍在等 Cache", cls: "on" },
-        cache: { val: "∅", hint: "loader 進行中", cls: "on" },
-        db: { val: "A", hint: "被 Cache loader 讀取", cls: "on" },
-        op: "Cache loader → DB GET", ack: "尚未回傳", staleWin: "無", loss: "—",
-        cstate: "loading", dirty: "false", hr: "0/1", victim: "—",
-        hits: 0, dbr: 1, dbw: 0, stale: 0,
-        status: "回源發生在快取內部。客戶端看起來只是一次比較慢的 GET。",
-        log: [
-          { cls: "read", ar: "$→DB", tg: "LOAD", tx: "loader GET → A" }
-        ]
-      },
-      {
-        client: { val: "A", hint: "Cache 回傳", cls: "ok" },
-        cache: { val: "A", hint: "已填入", cls: "ok" },
-        db: { val: "A", hint: "權威", cls: "" },
-        op: "填入後回傳 A", ack: "讀完成", staleWin: "無", loss: "—",
-        cstate: "filled", dirty: "false", hr: "0/1", victim: "—",
-        hits: 0, dbr: 1, dbw: 0, stale: 0,
-        status: "應用程式碼沒有 SET cache 的句子——耦合被收到快取層。",
-        log: [
-          { cls: "ok", ar: "$→C", tg: "RET", tx: "return A" }
-        ]
-      },
-      {
-        client: { val: "A", hint: "命中", cls: "ok" },
-        cache: { val: "A", hint: "HIT", cls: "ok" },
-        db: { val: "A", hint: "未參與", cls: "" },
-        op: "Cache GET → hit", ack: "讀完成", staleWin: "無", loss: "—",
-        cstate: "filled", dirty: "false", hr: "1/2", victim: "—",
-        hits: 1, dbr: 1, dbw: 0, stale: 0,
-        status: "熱讀與 Aside 一樣快。差異在 miss 與故障時顯現。",
-        log: [
-          { cls: "ok", ar: "C→$", tg: "HIT", tx: "GET → A" }
-        ]
-      },
-      {
-        client: { val: "SET B", hint: "寫仍打 DB（本例）", cls: "on" },
-        cache: { val: "A", hint: "尚未失效", cls: "dirty" },
-        db: { val: "B", hint: "已更新", cls: "ok" },
-        op: "DB SET B（寫路徑另定）", ack: "DB 成功", staleWin: "DB=B、cache=A", loss: "—",
-        cstate: "stale", dirty: "false", hr: "1/2", victim: "—",
-        hits: 1, dbr: 1, dbw: 1, stale: 0,
-        status: "Read-Through 不定義寫。若寫入只打 DB、忘記讓 cache 失效，讀會繼續命中 A。",
-        log: [
-          { cls: "write", ar: "C→DB", tg: "SET", tx: "SET B · cache 仍為 A" }
-        ]
-      },
-      {
-        client: { val: "A", hint: "讀到過期值", cls: "dirty" },
-        cache: { val: "A", hint: "HIT 舊值", cls: "dirty" },
-        db: { val: "B", hint: "權威已是 B", cls: "" },
-        op: "Cache GET → stale hit", ack: "讀完成但值舊", staleWin: "仍開著", loss: "—",
-        cstate: "stale", dirty: "false", hr: "2/3", victim: "—",
-        hits: 2, dbr: 1, dbw: 1, stale: 1,
-        status: "這次是 stale 讀。Read-Through 命中率很好看，但不保證新。寫入必須 DEL 或走 Through／Back。",
-        log: [
-          { cls: "write", ar: "C→$", tg: "HIT", tx: "回傳 A · 與 DB=B 不一致" }
-        ]
-      },
-      {
-        client: { val: "ERR", hint: "沒有旁路", cls: "bad" },
-        cache: { val: "∅", hint: "進程崩潰", cls: "bad" },
-        db: { val: "B", hint: "還在，但應用打不到", cls: "" },
-        op: "Cache crash", ack: "讀失敗", staleWin: "—", loss: "不丟已寫入 DB 的 B；讀不可用",
-        cstate: "down", dirty: "false", hr: "2/3", victim: "—",
-        hits: 2, dbr: 1, dbw: 1, stale: 1,
-        status: "快取是讀路徑單點。沒有設計旁路時，DB 再健康也讀不到。",
-        verdict: { tone: "lock", text: "判定：Read-Through 讓應用變乾淨，但把可用性綁在快取上。寫入若不失效，命中會變成系統性的過期讀。" },
-        log: [
-          { cls: "bad", ar: "C→$", tg: "FAIL", tx: "cache down · 無 DB 旁路" }
-        ]
-      }
-    ],
-    writethru: [
-      {
-        client: { val: "GET", hint: "冷讀", cls: "on" },
-        cache: { val: "∅", hint: "MISS", cls: "on" },
-        db: { val: "A", hint: "loader／應用回源", cls: "on" },
-        op: "miss 回填 A", ack: "讀完成", staleWin: "無", loss: "—",
-        cstate: "filled", dirty: "false", hr: "0/1", victim: "—",
-        hits: 0, dbr: 1, dbw: 0, stale: 0,
-        status: "先把 cache 與 DB 都放到 A，準備對照寫路徑。",
-        log: [
-          { cls: "read", ar: "C→$→DB", tg: "FILL", tx: "miss → A → SET cache" }
-        ]
-      },
-      {
-        client: { val: "A", hint: "命中", cls: "ok" },
-        cache: { val: "A", hint: "HIT", cls: "ok" },
-        db: { val: "A", hint: "未參與", cls: "" },
-        op: "Cache GET → hit", ack: "讀完成", staleWin: "無", loss: "—",
-        cstate: "filled", dirty: "false", hr: "1/2", victim: "—",
-        hits: 1, dbr: 1, dbw: 0, stale: 0,
-        status: "熱讀命中。接下來寫 B。",
-        log: [
-          { cls: "ok", ar: "C→$", tg: "HIT", tx: "GET → A" }
-        ]
-      },
-      {
-        client: { val: "SET B", hint: "等待雙寫", cls: "on" },
-        cache: { val: "B", hint: "已寫入，尚未 ACK", cls: "on" },
-        db: { val: "A", hint: "同步寫入尚未完成", cls: "dirty" },
-        op: "Cache SET B（DB 未完成）", ack: "還沒——Through 要等 DB", staleWin: "瞬時：cache 新、DB 舊", loss: "若此刻崩潰，視實作而定",
-        cstate: "ahead", dirty: "true", hr: "1/2", victim: "—",
-        hits: 1, dbr: 1, dbw: 0, stale: 0,
-        status: "Write-Through 的中間態：快取先有 B，DB 還是 A。ACK 還不能發。",
-        log: [
-          { cls: "write", ar: "C→$", tg: "SET", tx: "cache = B · 等待 DB" }
-        ]
-      },
-      {
-        client: { val: "OK", hint: "雙寫成功才 ACK", cls: "ok" },
-        cache: { val: "B", hint: "與 DB 對齊", cls: "ok" },
-        db: { val: "B", hint: "同步寫入完成", cls: "ok" },
-        op: "Cache → DB SET B", ack: "Cache 與 DB 都成功", staleWin: "已關閉", loss: "無",
-        cstate: "filled", dirty: "false", hr: "1/2", victim: "—",
-        hits: 1, dbr: 1, dbw: 1, stale: 0,
-        status: "寫延遲 ≈ cache + DB。換來讀側幾乎總是新值。",
-        log: [
-          { cls: "write", ar: "$→DB", tg: "SET", tx: "DB = B" },
-          { cls: "ok", ar: "C", tg: "ACK", tx: "client 收到成功" }
-        ]
-      },
-      {
-        client: { val: "B", hint: "命中剛寫的值", cls: "ok" },
-        cache: { val: "B", hint: "HIT", cls: "ok" },
-        db: { val: "B", hint: "未參與", cls: "" },
-        op: "Cache GET → hit B", ack: "讀完成", staleWin: "無", loss: "無",
-        cstate: "filled", dirty: "false", hr: "2/3", victim: "—",
-        hits: 2, dbr: 1, dbw: 1, stale: 0,
-        status: "讀到 B，沒有 Aside 那種「先讀到舊值」的窗口。",
-        log: [
-          { cls: "ok", ar: "C→$", tg: "HIT", tx: "GET → B" }
-        ]
-      },
-      {
-        client: { val: "—", hint: "下一讀 miss 回源", cls: "" },
-        cache: { val: "∅", hint: "進程崩潰", cls: "bad" },
-        db: { val: "B", hint: "已持久化", cls: "ok" },
-        op: "Cache crash", ack: "已 ACK 的 B 在 DB", staleWin: "—", loss: "無",
-        cstate: "down", dirty: "false", hr: "2/3", victim: "—",
-        hits: 2, dbr: 1, dbw: 1, stale: 0,
-        status: "崩潰不丟已確認寫入。這是 Through 相對 Back 的核心承諾。",
-        verdict: { tone: "ok", text: "判定：Write-Through 用寫延遲換耐久與短 stale。ACK 點在雙寫之後；cache 可丟。" },
-        log: [
-          { cls: "bad", ar: "$", tg: "CRASH", tx: "cache gone · DB 仍為 B" }
-        ]
-      }
-    ],
-    writeback: [
-      {
-        client: { val: "GET", hint: "冷讀", cls: "on" },
-        cache: { val: "A", hint: "回填 A", cls: "ok" },
-        db: { val: "A", hint: "權威", cls: "" },
-        op: "miss 回填 A", ack: "讀完成", staleWin: "無", loss: "—",
-        cstate: "filled", dirty: "false", hr: "0/1", victim: "—",
-        hits: 0, dbr: 1, dbw: 0, stale: 0,
-        status: "預熱完成：cache=A、DB=A、dirty=false。",
-        log: [
-          { cls: "read", ar: "C→$→DB", tg: "FILL", tx: "miss → A" }
-        ]
-      },
-      {
-        client: { val: "OK", hint: "立刻 ACK", cls: "ok" },
-        cache: { val: "B", hint: "dirty", cls: "dirty" },
-        db: { val: "A", hint: "尚未 flush", cls: "dirty" },
-        op: "Cache SET B · dirty", ack: "只寫入 cache 就 ACK", staleWin: "DB 在 flush 前一直舊", loss: "此刻崩潰會丟 B",
-        cstate: "dirty", dirty: "true", hr: "0/1", victim: "—",
-        hits: 0, dbr: 1, dbw: 0, stale: 0,
-        status: "Write-Back：客戶端以為 B 已保存。權威其實暫時不在 DB。",
-        log: [
-          { cls: "write", ar: "C→$", tg: "SET", tx: "cache = B (dirty)" },
-          { cls: "ok", ar: "C", tg: "ACK", tx: "成功回傳 · DB 仍為 A" }
-        ]
-      },
-      {
-        client: { val: "B", hint: "命中未 flush 的值", cls: "ok" },
-        cache: { val: "B", hint: "HIT dirty", cls: "dirty" },
-        db: { val: "A", hint: "報表若直打 DB 會看到 A", cls: "dirty" },
-        op: "Cache GET → hit B", ack: "讀完成", staleWin: "任何旁路讀都舊", loss: "仍未 flush",
-        cstate: "dirty", dirty: "true", hr: "1/2", victim: "—",
-        hits: 1, dbr: 1, dbw: 0, stale: 0,
-        status: "走快取的讀是對的；繞過快取的讀（ETL、另一服務）是錯的。",
-        log: [
-          { cls: "ok", ar: "C→$", tg: "HIT", tx: "GET → B" },
-          { cls: "note", ar: "·", tg: "note", tx: "DB 旁路讀仍為 A" }
-        ]
-      },
-      {
-        client: { val: "B?", hint: "已 ACK 的值消失", cls: "bad" },
-        cache: { val: "∅", hint: "崩潰，dirty 沒了", cls: "bad" },
-        db: { val: "A", hint: "從未收到 B", cls: "dirty" },
-        op: "Cache crash before flush", ack: "當時已對客戶 ACK", staleWin: "—", loss: "已確認的 B",
-        cstate: "down", dirty: "lost", hr: "1/2", victim: "—",
-        hits: 1, dbr: 1, dbw: 0, stale: 0,
-        status: "這不是「短暫不一致」，是耐久性失敗：客戶端拿到成功，資料卻回到 A。",
-        verdict: { tone: "bad", text: "判定：Write-Back 把 ACK 提前到快取。Flush 前崩潰 = 丟失已確認寫入。普通單機 Redis 不當這個緩衝。" },
-        log: [
-          { cls: "bad", ar: "$", tg: "CRASH", tx: "dirty B 消失 · DB 仍為 A" }
-        ]
-      }
-    ],
-    writearound: [
-      {
-        client: { val: "A", hint: "已預熱", cls: "ok" },
-        cache: { val: "A", hint: "熱資料", cls: "ok" },
-        db: { val: "A", hint: "權威", cls: "" },
-        op: "預熱 hit 路徑就緒", ack: "—", staleWin: "無", loss: "—",
-        cstate: "filled", dirty: "false", hr: "1/1", victim: "—",
-        hits: 1, dbr: 1, dbw: 0, stale: 0,
-        status: "假設 profile:42 已在 cache。Write-Around 專門處理「寫入不想污染 working set」。",
-        log: [
-          { cls: "ok", ar: "C→$", tg: "HIT", tx: "預熱 GET → A" }
-        ]
-      },
-      {
-        client: { val: "OK", hint: "寫入只打 DB", cls: "ok" },
-        cache: { val: "A", hint: "沒被碰到", cls: "dirty" },
-        db: { val: "B", hint: "已是 B", cls: "ok" },
-        op: "DB SET B · cache 不動", ack: "DB 成功", staleWin: "打開：直到 TTL／DEL／驅逐", loss: "無",
-        cstate: "stale", dirty: "false", hr: "1/1", victim: "—",
-        hits: 1, dbr: 1, dbw: 1, stale: 0,
-        status: "寫入繞過快取。這能避免把冷寫入灌進 LRU，但舊值 A 還坐在槽位上。",
-        log: [
-          { cls: "write", ar: "C→DB", tg: "SET", tx: "DB = B · cache 未 DEL" }
-        ]
-      },
-      {
-        client: { val: "A", hint: "過期命中", cls: "dirty" },
-        cache: { val: "A", hint: "HIT 舊值", cls: "dirty" },
-        db: { val: "B", hint: "權威 B", cls: "" },
-        op: "Cache GET → stale hit", ack: "讀完成但值舊", staleWin: "仍開著", loss: "無",
-        cstate: "stale", dirty: "false", hr: "2/2", victim: "—",
-        hits: 2, dbr: 1, dbw: 1, stale: 1,
-        status: "Write-Around 最容易被忽略的後果：命中率很好看，答案是錯的。",
-        log: [
-          { cls: "write", ar: "C→$", tg: "HIT", tx: "回傳 A · stale" }
-        ]
-      },
-      {
-        client: { val: "—", hint: "等回填", cls: "" },
-        cache: { val: "∅", hint: "TTL 到期", cls: "" },
-        db: { val: "B", hint: "權威", cls: "" },
-        op: "TTL expire", ack: "—", staleWin: "因過期而關閉", loss: "無",
-        cstate: "empty", dirty: "false", hr: "2/2", victim: "A (TTL)",
-        hits: 2, dbr: 1, dbw: 1, stale: 1,
-        status: "沒有顯式 DEL 時，TTL 是唯一關門人。窗口長度 = 你設的過期時間。",
-        log: [
-          { cls: "note", ar: "$", tg: "TTL", tx: "profile:42 expired" }
-        ]
-      },
-      {
-        client: { val: "B", hint: "miss 回填新值", cls: "ok" },
-        cache: { val: "B", hint: "重新填入", cls: "ok" },
-        db: { val: "B", hint: "GET B", cls: "on" },
-        op: "miss → DB → SET B", ack: "讀完成", staleWin: "無", loss: "無",
-        cstate: "filled", dirty: "false", hr: "2/3", victim: "—",
-        hits: 2, dbr: 2, dbw: 1, stale: 1,
-        status: "過期後的第一次讀才對齊。實務上 Around 幾乎一定要順便 DEL 或把 TTL 壓短。",
-        log: [
-          { cls: "read", ar: "C→$→DB", tg: "FILL", tx: "miss → B" }
-        ]
-      },
-      {
-        client: { val: "—", hint: "下一讀 miss", cls: "" },
-        cache: { val: "∅", hint: "進程崩潰", cls: "bad" },
-        db: { val: "B", hint: "寫入安全", cls: "ok" },
-        op: "Cache crash", ack: "已 ACK 的寫在 DB", staleWin: "—", loss: "無",
-        cstate: "down", dirty: "false", hr: "2/3", victim: "—",
-        hits: 2, dbr: 2, dbw: 1, stale: 1,
-        status: "崩潰不丟寫入。Write-Around 的代價是過期讀，不是丟資料。",
-        verdict: { tone: "lock", text: "判定：Write-Around 保護 working set，但若 key 已在 cache，會留下最長 stale window。搭配 DEL 或短 TTL，否則不要用。" },
-        log: [
-          { cls: "bad", ar: "$", tg: "CRASH", tx: "cache gone · DB 仍為 B" }
-        ]
-      }
-    ]
+  /* (1) 常數與參數表 */
+  var CP_KEY_LABELS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmn";
+  var CP_HOT_RATIO = 0.25;
+  var CP_SEED = 12345;
+  var CP_LCG_MUL = 48271;
+  var CP_LCG_MOD = 2147483647;
+  var CP_SCAN_CYCLE = 12;
+  var CP_SCAN_FROM = 7;
+  var CP_POLICIES = ["lru", "lfu", "fifo"];
+  var CP_POLICY_LABELS = { lru: "LRU", lfu: "LFU", fifo: "FIFO" };
+  var CP_POLICY_RULES = {
+    lru: "踢最久沒被碰過的",
+    lfu: "踢累計次數最少的（同頻比最近）",
+    fifo: "踢最早進來的"
   };
 
-  var ACCESSES = ["A", "A", "B", "C", "D"];
-  var CAP = 3;
-  var TTL_LIFE = 3;
+  var CPW_WORKLOADS = {
+    readheavy: ["R", "R", "W", "R", "R"],
+    writeheavy: ["W", "W", "R", "W", "R"],
+    wtr: ["W", "R", "W", "R"]
+  };
+  var CPW_VALUES = "BCDEFGHIJKLMNOPQRSTUVWXYZ";
+  var CPW_MODE_LABELS = {
+    aside: "Cache-Aside",
+    readthru: "Read-Through",
+    writethru: "Write-Through",
+    writeback: "Write-Back",
+    writearound: "Write-Around"
+  };
 
-  function cloneSlots(list) {
-    return list.map(function (e) {
-      return { key: e.key, freq: e.freq, last: e.last, inserted: e.inserted, cls: e.cls };
-    });
+  /* (2) compute* 純函式 —— 只吃參數、只回傳物件 */
+
+  function cpKeyLabel(i) {
+    if (i < CP_KEY_LABELS.length) return CP_KEY_LABELS.charAt(i);
+    return "k" + i;
   }
 
-  function simulateEviction(policy) {
-    var map = [];
-    var clock = 0;
-    var hits = 0;
-    var frames = [];
-
-    function expire() {
-      if (policy !== "ttl") return [];
-      var dead = [];
-      var keep = [];
-      for (var i = 0; i < map.length; i++) {
-        if (clock - map[i].inserted >= TTL_LIFE) dead.push(map[i].key);
-        else keep.push(map[i]);
-      }
-      map = keep;
-      return dead;
-    }
-
-    function find(k) {
-      for (var i = 0; i < map.length; i++) if (map[i].key === k) return i;
-      return -1;
-    }
-
-    function pickVictim() {
-      var best = 0;
-      for (var i = 1; i < map.length; i++) {
-        if (policy === "lfu") {
-          if (map[i].freq < map[best].freq) best = i;
-          else if (map[i].freq === map[best].freq && map[i].last < map[best].last) best = i;
-        } else if (policy === "lru") {
-          if (map[i].last < map[best].last) best = i;
-        } else if (map[i].inserted < map[best].inserted) best = i;
-      }
-      return best;
-    }
-
-    for (var n = 0; n < ACCESSES.length; n++) {
-      var k = ACCESSES[n];
-      clock += 1;
-      var expired = expire();
-      for (var j = 0; j < map.length; j++) map[j].cls = "";
-      var idx = find(k);
-      var hit = idx !== -1;
-      var victimKey = "—";
-      var op;
-      if (hit) {
-        map[idx].freq += 1;
-        map[idx].last = clock;
-        map[idx].cls = "hit";
-        hits += 1;
-        op = "GET " + k + " → HIT";
+  function cpBuildSequence(p) {
+    var keys = p.keys;
+    var hotCount = Math.max(1, Math.ceil(keys * CP_HOT_RATIO));
+    var coldCount = Math.max(1, keys - hotCount);
+    var s = CP_SEED;
+    var seq = [];
+    var scanCursor = 0;
+    for (var i = 0; i < p.len; i++) {
+      s = (s * CP_LCG_MUL) % CP_LCG_MOD;
+      var r1 = s / CP_LCG_MOD;
+      s = (s * CP_LCG_MUL) % CP_LCG_MOD;
+      var r2 = s / CP_LCG_MOD;
+      var k;
+      if (p.pattern === "scan" && (i % CP_SCAN_CYCLE) >= CP_SCAN_FROM) {
+        k = hotCount + (scanCursor % coldCount);
+        scanCursor += 1;
+      } else if (r1 * 100 < p.hotPct) {
+        k = Math.floor(r2 * hotCount);
+        if (k >= hotCount) k = hotCount - 1;
       } else {
-        if (map.length >= CAP) {
-          var v = pickVictim();
-          victimKey = map[v].key;
-          map[v].cls = "evict";
-          map.splice(v, 1);
+        k = hotCount + Math.floor(r2 * coldCount);
+        if (k >= keys) k = keys - 1;
+      }
+      seq.push(k);
+    }
+    return { seq: seq, hotCount: hotCount };
+  }
+
+  function cpFindSlot(slots, k) {
+    for (var i = 0; i < slots.length; i++) if (slots[i].k === k) return i;
+    return -1;
+  }
+
+  function cpPickVictim(slots, policy) {
+    var best = 0;
+    for (var i = 1; i < slots.length; i++) {
+      if (policy === "lfu") {
+        if (slots[i].freq < slots[best].freq) best = i;
+        else if (slots[i].freq === slots[best].freq && slots[i].last < slots[best].last) best = i;
+      } else if (policy === "lru") {
+        if (slots[i].last < slots[best].last) best = i;
+      } else if (slots[i].ins < slots[best].ins) best = i;
+    }
+    return best;
+  }
+
+  function cpRunPolicy(seq, hotCount, cap, ttl, policy) {
+    var slots = [];
+    var track = [];
+    var hits = 0, evictions = 0, hotEvicted = 0, ttlExpired = 0, firstMiss = 0, refetchMiss = 0;
+    var seen = [];
+    for (var c = 0; c < seq.length; c++) {
+      var k = seq[c];
+      var clock = c + 1;
+      if (ttl > 0) {
+        var keep = [];
+        for (var e = 0; e < slots.length; e++) {
+          if (clock - slots[e].ins >= ttl) ttlExpired += 1;
+          else keep.push(slots[e]);
         }
-        map.push({ key: k, freq: 1, last: clock, inserted: clock, cls: "fresh" });
-        op = "GET " + k + " → MISS，寫入槽位";
+        slots = keep;
       }
-      var reads = n + 1;
-      var staleNote = expired.length ? ("TTL 先帶走 " + expired.join(",")) : "無";
-      var loss = victimKey !== "—" ? ("驅逐 " + victimKey) : (expired.length ? ("過期 " + expired.join(",")) : "無");
-      var policyLabel = policy === "lru" ? "最近最少用" : policy === "lfu" ? "最少頻次（同頻用 LRU 決勝）" : "絕對 TTL=" + TTL_LIFE + " 步";
-      frames.push({
-        slots: cloneSlots(map),
-        op: op,
-        ack: policyLabel,
-        staleWin: staleNote,
-        loss: loss,
-        cstate: map.map(function (e) { return e.key; }).join(",") || "empty",
-        dirty: "n/a",
-        hr: hits + "/" + reads,
-        victim: victimKey,
-        hits: hits,
-        dbr: reads - hits,
-        dbw: 0,
-        stale: 0,
-        status: hit
-          ? (k + " 命中。" + (policy === "lfu" ? ("頻次現為 " + map[find(k)].freq + "。") : "更新近用時間。"))
-          : (k + " 未命中。" + (victimKey !== "—" ? ("容量滿，踢出 " + victimKey + "。") : (expired.length ? ("先過期 " + expired.join(",") + "。") : "仍有空位。"))),
-        log: [
-          { cls: hit ? "ok" : "read", ar: "t" + clock, tg: hit ? "HIT" : "MISS", tx: "GET " + k + (victimKey !== "—" ? (" · evict " + victimKey) : "") + (expired.length ? (" · ttl-expire " + expired.join(",")) : "") }
-        ],
-        verdict: n === ACCESSES.length - 1 ? finishEvictVerdict(policy, hits, reads, map, victimKey) : null
-      });
-    }
-    return frames;
-  }
-
-  function finishEvictVerdict(policy, hits, reads, map, lastVictim) {
-    var remain = map.map(function (e) { return e.key; }).join(", ");
-    if (policy === "lru") {
-      return { tone: "lock", text: "判定：同一序列 A,A,B,C,D、容量 3。LRU 在 D 進來時踢掉 A（最舊），即使 A 被讀過兩次。留下 " + remain + "。" };
-    }
-    if (policy === "lfu") {
-      return { tone: "ok", text: "判定：LFU 保住 A（頻次 2），改踢較冷的 B。留下 " + remain + "。熱點穩定時這通常比 LRU 準。" };
-    }
-    return { tone: "lock", text: "判定：絕對 TTL=3 步，A 在第 3 步就過期——與是否熱點無關，容量也還沒滿。TTL 是時效預算，不是「留下熱資料」的演算法。" };
-  }
-
-  var EVICT_CACHE = {};
-
-  function framesOf() {
-    if (mode === "path") return PATH[scenario] || PATH.aside;
-    if (!EVICT_CACHE[scenario]) EVICT_CACHE[scenario] = simulateEviction(scenario);
-    return EVICT_CACHE[scenario];
-  }
-
-  function setActor(el, hintEl, spec) {
-    if (!el) return;
-    el.textContent = spec.val;
-    if (hintEl) hintEl.textContent = spec.hint;
-    var box = el.parentNode;
-    box.className = "cp-actor" + (spec.cls ? " " + spec.cls : "");
-  }
-
-  function setText(el, v) {
-    if (el) el.textContent = v;
-  }
-
-  function paintSlots(slots) {
-    if (!slotsEl) return;
-    slotsEl.innerHTML = "";
-    var i;
-    for (i = 0; i < CAP; i++) {
-      var div = document.createElement("div");
-      var item = slots[i];
-      if (!item) {
-        div.className = "cp-slot empty";
-        div.innerHTML = '<div class="sk">empty</div><div class="sm">slot ' + (i + 1) + "</div>";
+      var idx = cpFindSlot(slots, k);
+      var row = { k: k, hot: k < hotCount, r: "hit", v: -1, vhot: false };
+      if (idx !== -1) {
+        slots[idx].freq += 1;
+        slots[idx].last = clock;
+        hits += 1;
       } else {
-        div.className = "cp-slot" + (item.cls ? " " + item.cls : "");
-        var meta = "f=" + item.freq + " · t=" + item.last;
-        if (mode === "evict" && scenario === "ttl") meta = "in@" + item.inserted + " · f=" + item.freq;
-        div.innerHTML = '<div class="sk">' + item.key + '</div><div class="sm">' + meta + "</div>";
+        row.r = "fill";
+        if (seen[k]) refetchMiss += 1; else firstMiss += 1;
+        if (slots.length >= cap) {
+          var vi = cpPickVictim(slots, policy);
+          row.r = "evict";
+          row.v = slots[vi].k;
+          row.vhot = slots[vi].k < hotCount;
+          evictions += 1;
+          if (row.vhot) hotEvicted += 1;
+          slots.splice(vi, 1);
+        }
+        slots.push({ k: k, freq: 1, last: clock, ins: clock });
       }
-      slotsEl.appendChild(div);
+      seen[k] = true;
+      track.push(row);
     }
+    var final = [];
+    for (var f = 0; f < slots.length; f++) {
+      final.push({
+        label: cpKeyLabel(slots[f].k), freq: slots[f].freq,
+        last: slots[f].last, hot: slots[f].k < hotCount
+      });
+    }
+    return {
+      policy: policy,
+      hits: hits,
+      misses: seq.length - hits,
+      hitRate: seq.length ? hits / seq.length : 0,
+      evictions: evictions,
+      hotEvicted: hotEvicted,
+      ttlExpired: ttlExpired,
+      firstMiss: firstMiss,
+      refetchMiss: refetchMiss,
+      track: track,
+      finalSlots: final
+    };
   }
 
-  function appendLog(rows, replace) {
-    if (!wireEl) return;
-    if (replace) wireEl.innerHTML = "";
+  // @probe fn       computeEvictionSweep
+  // @probe baseline {"cap":4,"keys":12,"hotPct":70,"len":60,"ttl":0,"pattern":"zipf"}
+  // @probe sweep    {"cap":[2,16],"keys":[6,40],"hotPct":[10,90],"len":[20,120],"ttl":[0,5],"pattern":["zipf","scan"]}
+  function computeEvictionSweep(p) {
+    var built = cpBuildSequence(p);
+    var runs = [];
+    var best = null;
+    var bestNames = [];
+    for (var i = 0; i < CP_POLICIES.length; i++) {
+      var r = cpRunPolicy(built.seq, built.hotCount, p.cap, p.ttl, CP_POLICIES[i]);
+      runs.push(r);
+      if (best === null || r.hits > best) { best = r.hits; bestNames = [CP_POLICIES[i]]; }
+      else if (r.hits === best) bestNames.push(CP_POLICIES[i]);
+    }
+    var distinct = [];
+    for (var d = 0; d < built.seq.length; d++) {
+      if (distinct.indexOf(built.seq[d]) === -1) distinct.push(built.seq[d]);
+    }
+    var hi = Math.max(runs[0].hitRate, runs[1].hitRate, runs[2].hitRate);
+    var lo = Math.min(runs[0].hitRate, runs[1].hitRate, runs[2].hitRate);
+    return {
+      runs: runs,
+      seq: built.seq,
+      hotCount: built.hotCount,
+      distinctKeys: distinct.length,
+      firstMiss: runs[0].firstMiss,
+      coverage: p.keys ? p.cap / p.keys : 0,
+      hotCoverage: built.hotCount ? Math.min(1, p.cap / built.hotCount) : 0,
+      bestPolicy: bestNames.join(" ＝ "),
+      bestList: bestNames,
+      spread: hi - lo
+    };
+  }
+
+  /* ---- demo 2：讀寫路徑並排 ---- */
+
+  function cpwOps(workload, ops) {
+    var pat = CPW_WORKLOADS[workload] || CPW_WORKLOADS.readheavy;
+    var list = [];
+    for (var i = 0; i < ops; i++) list.push(pat[i % pat.length]);
+    return list;
+  }
+
+  function cpwReadHops(mode, hasValue) {
+    if (hasValue) return [{ f: "C", t: "$", n: "GET · HIT", d: "cache" }];
+    if (mode === "readthru" || mode === "writethru" || mode === "writeback") {
+      return [
+        { f: "C", t: "$", n: "GET · MISS", d: "cache" },
+        { f: "$", t: "DB", n: "loader 回源", d: "db" }
+      ];
+    }
+    return [
+      { f: "C", t: "$", n: "GET · MISS", d: "cache" },
+      { f: "C", t: "DB", n: "SELECT", d: "db" },
+      { f: "C", t: "$", n: "SET · 回填", d: "cache" }
+    ];
+  }
+
+  function cpwWriteHops(mode, val) {
+    if (mode === "writethru") {
+      return [
+        { f: "C", t: "$", n: "SET " + val, d: "cache" },
+        { f: "$", t: "DB", n: "UPDATE " + val, d: "db" }
+      ];
+    }
+    if (mode === "writeback") {
+      return [{ f: "C", t: "$", n: "SET " + val + " · dirty", d: "cache" }];
+    }
+    if (mode === "writearound") {
+      return [{ f: "C", t: "DB", n: "UPDATE " + val, d: "db" }];
+    }
+    return [
+      { f: "C", t: "DB", n: "UPDATE " + val, d: "db" },
+      { f: "C", t: "$", n: "DEL", d: "cache" }
+    ];
+  }
+
+  function cpwRunPane(mode, opList, p) {
+    var cacheVal = null, dirty = false, dbVal = "A", down = false;
+    var pendingWrites = 0, writeNo = 0;
+    var hits = 0, reads = 0, dbReads = 0, dbWrites = 0, cacheTrips = 0;
+    var staleOps = 0, staleReads = 0, staleSpan = 0, run = 0, lostWrites = 0, totalLatency = 0;
+    var steps = [];
+    for (var i = 0; i < opList.length; i++) {
+      var kind = opList[i];
+      var hops, lat = 0, note = "";
+      if (kind === "R") {
+        reads += 1;
+        var hasValue = cacheVal !== null;
+        hops = cpwReadHops(mode, hasValue);
+        if (hasValue) {
+          hits += 1;
+          if (cacheVal !== dbVal) {
+            staleReads += 1;
+            note = "讀到舊值 " + cacheVal + "（DB 已是 " + dbVal + "）";
+          }
+        } else {
+          cacheVal = dbVal;
+          note = "回源後回填 " + dbVal;
+        }
+      } else {
+        writeNo += 1;
+        var val = CPW_VALUES.charAt((writeNo - 1) % CPW_VALUES.length);
+        hops = cpwWriteHops(mode, val);
+        if (mode === "writethru") { cacheVal = val; dbVal = val; dirty = false; }
+        else if (mode === "writeback") {
+          cacheVal = val; dirty = true; pendingWrites += 1;
+          note = "已 ACK 但未落盤：" + pendingWrites + " 筆";
+        } else if (mode === "writearound") {
+          dbVal = val;
+          if (cacheVal !== null) note = "快取沒被通知，仍是 " + cacheVal;
+        } else {
+          dbVal = val; cacheVal = null;
+          note = "DB 成功後刪除快取 key";
+        }
+      }
+      for (var h = 0; h < hops.length; h++) {
+        if (hops[h].d === "db") { lat += p.dbRtt; if (kind === "R") dbReads += 1; else dbWrites += 1; }
+        else { lat += p.cacheRtt; cacheTrips += 1; }
+      }
+      totalLatency += lat;
+      var flush = false;
+      if (mode === "writeback" && p.flushEvery > 0 && ((i + 1) % p.flushEvery === 0) && dirty) {
+        dbVal = cacheVal; dirty = false; pendingWrites = 0; dbWrites += 1; flush = true;
+      }
+      var crash = (p.crashAt > 0 && p.crashAt === i + 1);
+      if (crash) {
+        lostWrites += pendingWrites;
+        cacheVal = null; dirty = false; pendingWrites = 0; down = true;
+      }
+      var stale = cacheVal !== null && cacheVal !== dbVal;
+      if (stale) { staleOps += 1; run += 1; if (run > staleSpan) staleSpan = run; } else run = 0;
+      steps.push({
+        i: i + 1, kind: kind, hops: hops, lat: lat,
+        cacheVal: cacheVal, dbVal: dbVal, dirty: dirty, stale: stale,
+        flush: flush, crash: crash, note: note
+      });
+    }
+    return {
+      mode: mode, label: CPW_MODE_LABELS[mode], steps: steps,
+      reads: reads, hits: hits, hitRate: reads ? hits / reads : 0,
+      dbReads: dbReads, dbWrites: dbWrites, cacheTrips: cacheTrips,
+      totalLatency: totalLatency, avgLatency: opList.length ? totalLatency / opList.length : 0,
+      staleOps: staleOps, staleReads: staleReads, staleSpan: staleSpan,
+      lostWrites: lostWrites, down: down
+    };
+  }
+
+  // @probe fn       computeWritePaths
+  // @probe baseline {"left":"aside","right":"writeback","workload":"writeheavy","ops":10,"cacheRtt":2,"dbRtt":50,"crashAt":7,"flushEvery":4}
+  // @probe sweep    {"left":["aside","writearound"],"right":["writethru","writeback"],"workload":["readheavy","wtr"],"ops":[4,16],"cacheRtt":[1,10],"dbRtt":[5,100],"crashAt":[0,16],"flushEvery":[1,8]}
+  function computeWritePaths(p) {
+    var opList = cpwOps(p.workload, p.ops);
+    var L = cpwRunPane(p.left, opList, p);
+    var R = cpwRunPane(p.right, opList, p);
+    var kind = "balanced";
+    if (L.lostWrites > 0 || R.lostWrites > 0) kind = "lose-writes";
+    else if (Math.max(L.staleSpan, R.staleSpan) >= 3) kind = "long-stale";
+    else {
+      var hi = Math.max(L.totalLatency, R.totalLatency);
+      var lo = Math.min(L.totalLatency, R.totalLatency);
+      if (lo > 0 && hi / lo >= 1.5) kind = "slow-write";
+    }
+    return {
+      ops: opList, left: L, right: R,
+      verdictKind: kind,
+      latencyRatio: Math.min(L.totalLatency, R.totalLatency) > 0
+        ? Math.max(L.totalLatency, R.totalLatency) / Math.min(L.totalLatency, R.totalLatency) : 1,
+      slowerPane: L.totalLatency >= R.totalLatency ? L.label : R.label,
+      fasterPane: L.totalLatency >= R.totalLatency ? R.label : L.label,
+      riskPane: L.lostWrites >= R.lostWrites ? L.label : R.label,
+      stalePane: L.staleSpan >= R.staleSpan ? L.label : R.label,
+      maxLost: Math.max(L.lostWrites, R.lostWrites),
+      maxStaleSpan: Math.max(L.staleSpan, R.staleSpan)
+    };
+  }
+
+  /* (3) DOM 參照 */
+  var eDemo = document.getElementById("demo-cp-evict");
+  var wDemo = document.getElementById("demo-cp-write");
+  if (!eDemo && !wDemo) return;
+
+  var eSeg = document.getElementById("cpe-seg");
+  var eCap = document.getElementById("cpe-cap");
+  var eKeys = document.getElementById("cpe-keys");
+  var eHot = document.getElementById("cpe-hot");
+  var eLen = document.getElementById("cpe-len");
+  var eTtl = document.getElementById("cpe-ttl");
+  var eReset = document.getElementById("cpe-reset");
+  var eFig = document.getElementById("cpe-fig");
+  var eTable = document.getElementById("cpe-table");
+  var eStatus = document.getElementById("cpe-status");
+  var eOut = {
+    cap: document.getElementById("cpe-cap-v"),
+    keys: document.getElementById("cpe-keys-v"),
+    hot: document.getElementById("cpe-hot-v"),
+    len: document.getElementById("cpe-len-v"),
+    ttl: document.getElementById("cpe-ttl-v")
+  };
+  var ePattern = "zipf";
+
+  var wSeg = document.getElementById("cpw-seg");
+  var wLeft = document.getElementById("cpw-left");
+  var wRight = document.getElementById("cpw-right");
+  var wOps = document.getElementById("cpw-ops");
+  var wCrtt = document.getElementById("cpw-crtt");
+  var wDrtt = document.getElementById("cpw-drtt");
+  var wCrash = document.getElementById("cpw-crash");
+  var wFlush = document.getElementById("cpw-flush");
+  var wReset = document.getElementById("cpw-reset");
+  var wLsvg = document.getElementById("cpw-lsvg");
+  var wRsvg = document.getElementById("cpw-rsvg");
+  var wLt = document.getElementById("cpw-lt");
+  var wRt = document.getElementById("cpw-rt");
+  var wTable = document.getElementById("cpw-table");
+  var wStatus = document.getElementById("cpw-status");
+  var wCall = document.getElementById("cpw-call");
+  var wOut = {
+    ops: document.getElementById("cpw-ops-v"),
+    crtt: document.getElementById("cpw-crtt-v"),
+    drtt: document.getElementById("cpw-drtt-v"),
+    crash: document.getElementById("cpw-crash-v"),
+    flush: document.getElementById("cpw-flush-v")
+  };
+  var wWorkload = "writeheavy";
+
+  /* (4) render —— 只讀 state 畫出來 */
+
+  function pct(x) { return (x * 100).toFixed(1) + "%"; }
+  function esc(t) {
+    return String(t).split("&").join("&amp;").split("<").join("&lt;").split(">").join("&gt;");
+  }
+
+  function renderEvictFigure(res, cap) {
+    var len = res.seq.length;
+    var W = 720, x0 = 54, avail = W - x0 - 8;
+    var stepW = Math.max(3, Math.min(6, Math.floor(avail / len)));
+    var barW = Math.max(2, stepW - 1);
+    var blockH = 96, top0 = 18;
+    var H = top0 + CP_POLICIES.length * blockH;
+    var showLetters = stepW >= 5;
+    var out = '<svg viewBox="0 0 ' + W + " " + H + '" role="img" style="width:100%;height:auto">';
+    out += "<title>三種淘汰策略在同一條存取序列上的逐次成本刻度與終態槽位</title>";
+    out += '<rect x="0" y="0" width="' + W + '" height="' + H + '" fill="#ffffff"></rect>';
+    for (var i = 0; i < res.runs.length; i++) {
+      var r = res.runs[i];
+      var top = top0 + i * blockH;
+      var base = top + 46;
+      out += '<text x="2" y="' + (top + 12) + '" font-family="var(--mono)" font-size="12" font-weight="700" fill="#262a2f">' +
+        CP_POLICY_LABELS[r.policy] + "</text>";
+      out += '<text x="2" y="' + (top + 26) + '" font-family="var(--mono)" font-size="11" fill="#6b7280">' +
+        pct(r.hitRate) + "</text>";
+      out += '<line x1="' + x0 + '" y1="' + base + '" x2="' + (x0 + len * stepW) + '" y2="' + base +
+        '" stroke="var(--border-strong)" stroke-width="1"></line>';
+      for (var t = 0; t < len; t++) {
+        var row = r.track[t];
+        var x = x0 + t * stepW;
+        var h = row.r === "hit" ? 10 : (row.r === "fill" ? 20 : 30);
+        var fill = row.r === "hit" ? "var(--ok)" : (row.r === "fill" ? "var(--border-strong)" : "var(--bad)");
+        out += '<rect x="' + x + '" y="' + (base - h) + '" width="' + barW + '" height="' + h + '" fill="' + fill + '"></rect>';
+        if (row.hot) {
+          out += '<rect x="' + x + '" y="' + (base - h - 3) + '" width="' + barW + '" height="2" fill="var(--accent)"></rect>';
+        }
+        if (row.r === "evict") {
+          out += '<line x1="' + (x + barW / 2) + '" y1="' + (base + 1) + '" x2="' + (x + barW / 2) + '" y2="' + (base + 9) +
+            '" stroke="' + (row.vhot ? "var(--bad)" : "var(--text-3)") + '" stroke-width="1"></line>';
+          if (showLetters) {
+            out += '<text x="' + (x + barW / 2) + '" y="' + (base + 18) + '" text-anchor="middle" font-family="var(--mono)" font-size="8" fill="' +
+              (row.vhot ? "var(--bad)" : "#6b7280") + '">' + cpKeyLabel(row.v) + "</text>";
+          }
+        }
+      }
+      var boxW = Math.min(44, Math.floor(avail / Math.max(1, cap)));
+      var sy = top + 64;
+      out += '<text x="2" y="' + (sy + 15) + '" font-family="var(--mono)" font-size="9" fill="#6b7280">終態</text>';
+      for (var f = 0; f < cap; f++) {
+        var item = r.finalSlots[f];
+        var bx = x0 + f * boxW;
+        out += '<rect x="' + bx + '" y="' + sy + '" width="' + (boxW - 3) + '" height="24" rx="3" fill="' +
+          (item ? (item.hot ? "var(--accent-soft)" : "#ffffff") : "var(--bg-soft)") +
+          '" stroke="' + (item ? "var(--border-strong)" : "var(--border)") + '" stroke-width="1"></rect>';
+        if (item) {
+          out += '<text x="' + (bx + 4) + '" y="' + (sy + 11) + '" font-family="var(--mono)" font-size="10" font-weight="700" fill="#262a2f">' +
+            item.label + "</text>";
+          out += '<text x="' + (bx + 4) + '" y="' + (sy + 21) + '" font-family="var(--mono)" font-size="8" fill="#6b7280">f=' +
+            item.freq + " t=" + item.last + "</text>";
+        }
+      }
+    }
+    out += "</svg>";
+    return out;
+  }
+
+  function renderEvictTable(res, params) {
+    var rows = [
+      ["命中率", function (r) { return pct(r.hitRate); }, "rate"],
+      ["命中 / 存取", function (r) { return r.hits + " / " + params.len; }, ""],
+      ["淘汰次數", function (r) { return String(r.evictions); }, ""],
+      ["其中踢掉熱 key", function (r) { return String(r.hotEvicted); }, "hot"],
+      ["TTL 到期筆數", function (r) { return String(r.ttlExpired); }, ""],
+      ["首訪 miss（不可避免）", function (r) { return String(r.firstMiss); }, ""],
+      ["重取 miss（容量／TTL 造成）", function (r) { return String(r.refetchMiss); }, ""],
+      ["終態槽位", function (r) {
+        var t = [];
+        for (var i = 0; i < r.finalSlots.length; i++) t.push(r.finalSlots[i].label);
+        return t.length ? t.join(" ") : "—";
+      }, ""]
+    ];
+    var html = "<thead><tr><th>指標</th>";
+    for (var i = 0; i < res.runs.length; i++) {
+      html += "<th>" + CP_POLICY_LABELS[res.runs[i].policy] + "</th>";
+    }
+    html += "</tr></thead><tbody>";
+    for (var r = 0; r < rows.length; r++) {
+      html += "<tr><td>" + rows[r][0] + "</td>";
+      for (var c = 0; c < res.runs.length; c++) {
+        var run = res.runs[c];
+        var cls = "";
+        if (rows[r][2] === "rate" && res.bestList.indexOf(run.policy) !== -1) cls = ' class="best"';
+        if (rows[r][2] === "hot" && run.hotEvicted > 0) cls = ' class="warnv"';
+        html += "<td" + cls + ">" + esc(rows[r][1](run)) + "</td>";
+      }
+      html += "</tr>";
+    }
+    html += "</tbody>";
+    return html;
+  }
+
+  function evictParams() {
+    return {
+      cap: parseInt(eCap.value, 10),
+      keys: parseInt(eKeys.value, 10),
+      hotPct: parseInt(eHot.value, 10),
+      len: parseInt(eLen.value, 10),
+      ttl: parseInt(eTtl.value, 10),
+      pattern: ePattern
+    };
+  }
+
+  function renderEvict() {
+    var p = evictParams();
+    eOut.cap.textContent = p.cap + " 槽";
+    eOut.keys.textContent = String(p.keys);
+    eOut.hot.textContent = p.hotPct + "%";
+    eOut.len.textContent = p.len + " 次";
+    eOut.ttl.textContent = p.ttl === 0 ? "關閉" : (p.ttl + " 次存取");
+    var res = computeEvictionSweep(p);
+    eFig.innerHTML = renderEvictFigure(res, p.cap);
+    eTable.innerHTML = renderEvictTable(res, p);
+    var best = res.runs[0];
+    for (var i = 1; i < res.runs.length; i++) if (res.runs[i].hitRate > best.hitRate) best = res.runs[i];
+    var line = "容量 " + p.cap + " 槽對上熱點集合 " + res.hotCount + " 個 key（序列實際碰到 " +
+      res.distinctKeys + " 個）：熱點放得下 " + pct(res.hotCoverage) + "。";
+    line += "目前最高命中率是 " + res.bestPolicy.toUpperCase() + "（" + pct(best.hitRate) + "），三者差距 " +
+      (res.spread * 100).toFixed(1) + " 個百分點。";
+    if (res.spread < 0.02) {
+      line += "差距已經小到換演算法沒有意義——這時候該動的是容量或 TTL，不是策略。";
+    } else {
+      line += CP_POLICY_LABELS[best.policy] + " 的規則是「" + CP_POLICY_RULES[best.policy] +
+        "」，在這條序列上它踢掉熱 key " + best.hotEvicted + " 次。";
+    }
+    eStatus.textContent = line;
+  }
+
+  function renderPaneSvg(pane, params) {
+    var W = 330, xC = 56, xCa = 168, xDb = 292;
+    var rowH = 14, pad = 7;
+    var tops = [];
+    var y = 26;
+    var i, h;
+    for (i = 0; i < pane.steps.length; i++) {
+      var n = pane.steps[i].hops.length + (pane.steps[i].flush ? 1 : 0) + (pane.steps[i].crash ? 1 : 0);
+      tops.push({ top: y, h: n * rowH + pad });
+      y += n * rowH + pad;
+    }
+    var H = y + 8;
+    var out = '<svg viewBox="0 0 ' + W + " " + H + '" role="img" style="width:100%;height:auto">';
+    out += "<title>" + esc(pane.label) + " 在同一組操作序列上的往返與一致性</title>";
+    out += "<defs><marker id=\"cpw-ar-" + pane.mode + "\" viewBox=\"0 0 8 8\" refX=\"7\" refY=\"4\" markerWidth=\"6\" markerHeight=\"6\" orient=\"auto\">" +
+      "<path d=\"M0,0 L8,4 L0,8 z\" fill=\"var(--text-3)\"></path></marker></defs>";
+    out += '<rect x="0" y="0" width="' + W + '" height="' + H + '" fill="#ffffff"></rect>';
+    for (i = 0; i < pane.steps.length; i++) {
+      if (!pane.steps[i].stale) continue;
+      out += '<rect x="26" y="' + tops[i].top + '" width="' + (W - 28) + '" height="' + tops[i].h +
+        '" fill="var(--warn-soft)"></rect>';
+    }
+    var lanes = [[xC, "客戶端"], [xCa, "快取"], [xDb, "DB"]];
+    for (i = 0; i < lanes.length; i++) {
+      out += '<text x="' + lanes[i][0] + '" y="12" text-anchor="middle" font-family="var(--mono)" font-size="10" fill="#6b7280">' +
+        lanes[i][1] + "</text>";
+      out += '<line x1="' + lanes[i][0] + '" y1="18" x2="' + lanes[i][0] + '" y2="' + (H - 4) +
+        '" stroke="var(--border)" stroke-width="1"></line>';
+    }
+    var xOf = { C: xC, "$": xCa, DB: xDb };
+    for (i = 0; i < pane.steps.length; i++) {
+      var st = pane.steps[i];
+      var ly = tops[i].top;
+      out += '<text x="2" y="' + (ly + 12) + '" font-family="var(--mono)" font-size="9" fill="#6b7280">#' +
+        st.i + " " + st.kind + "</text>";
+      var line = 0;
+      for (h = 0; h < st.hops.length; h++) {
+        var hop = st.hops[h];
+        var hy = ly + 10 + line * rowH;
+        var x1 = xOf[hop.f], x2 = xOf[hop.t];
+        out += '<line x1="' + x1 + '" y1="' + hy + '" x2="' + x2 + '" y2="' + hy +
+          '" stroke="var(--text-3)" stroke-width="1" marker-end="url(#cpw-ar-' + pane.mode + ')"></line>';
+        out += '<text x="' + ((x1 + x2) / 2) + '" y="' + (hy - 3) + '" text-anchor="middle" font-family="var(--mono)" font-size="8.5" fill="#262a2f">' +
+          esc(hop.n) + "</text>";
+        if (h === st.hops.length - 1) {
+          out += '<rect x="' + (xC - 3) + '" y="' + (hy - 3) + '" width="6" height="6" fill="var(--ok)"></rect>';
+        }
+        line += 1;
+      }
+      if (st.flush) {
+        var fy = ly + 10 + line * rowH;
+        out += '<line x1="' + xCa + '" y1="' + fy + '" x2="' + xDb + '" y2="' + fy +
+          '" stroke="var(--text-3)" stroke-width="1" stroke-dasharray="3 2" marker-end="url(#cpw-ar-' + pane.mode + ')"></line>';
+        out += '<text x="' + ((xCa + xDb) / 2) + '" y="' + (fy - 3) + '" text-anchor="middle" font-family="var(--mono)" font-size="8.5" fill="#6b7280">背景刷盤</text>';
+        line += 1;
+      }
+      if (st.crash) {
+        var cy = ly + 10 + line * rowH;
+        out += '<line x1="' + (xCa - 7) + '" y1="' + (cy - 5) + '" x2="' + (xCa + 7) + '" y2="' + (cy + 5) +
+          '" stroke="var(--bad)" stroke-width="1.6"></line>';
+        out += '<line x1="' + (xCa - 7) + '" y1="' + (cy + 5) + '" x2="' + (xCa + 7) + '" y2="' + (cy - 5) +
+          '" stroke="var(--bad)" stroke-width="1.6"></line>';
+        out += '<text x="' + (xCa + 12) + '" y="' + (cy + 3) + '" font-family="var(--mono)" font-size="8.5" fill="var(--bad)">快取整份消失</text>';
+      }
+    }
+    out += "</svg>";
+    return out;
+  }
+
+  function renderWriteTable(res) {
+    var L = res.left, R = res.right;
+    var rows = [
+      ["客戶端總延遲", L.totalLatency + " ms", R.totalLatency + " ms", "hi"],
+      ["平均每操作延遲", L.avgLatency.toFixed(1) + " ms", R.avgLatency.toFixed(1) + " ms", ""],
+      ["快取往返次數", String(L.cacheTrips), String(R.cacheTrips), ""],
+      ["DB 讀 / DB 寫", L.dbReads + " / " + L.dbWrites, R.dbReads + " / " + R.dbWrites, ""],
+      ["讀命中率", L.hits + "/" + L.reads + "（" + pct(L.hitRate) + "）", R.hits + "/" + R.reads + "（" + pct(R.hitRate) + "）", ""],
+      ["結束時 cache≠DB 的步數", String(L.staleOps), String(R.staleOps), ""],
+      ["最長連續 stale", String(L.staleSpan), String(R.staleSpan), ""],
+      ["實際讀到舊值", String(L.staleReads), String(R.staleReads), ""],
+      ["崩潰遺失的已 ACK 寫入", String(L.lostWrites), String(R.lostWrites), "risk"]
+    ];
+    var html = "<thead><tr><th>指標</th><th>" + esc(L.label) + "</th><th>" + esc(R.label) + "</th></tr></thead><tbody>";
     for (var i = 0; i < rows.length; i++) {
-      var r = rows[i];
-      var row = document.createElement("div");
-      row.className = "cp-row " + (r.cls || "note");
-      row.innerHTML = '<span class="ar">' + r.ar + '</span><span class="tg">' + r.tg + '</span><span class="tx">' + r.tx + "</span>";
-      wireEl.appendChild(row);
+      var lc = "", rc = "";
+      if (rows[i][3] === "risk") {
+        lc = L.lostWrites > 0 ? ' class="risk"' : "";
+        rc = R.lostWrites > 0 ? ' class="risk"' : "";
+      } else if (rows[i][3] === "hi") { lc = ' class="hi"'; rc = ' class="hi"'; }
+      html += "<tr><td>" + rows[i][0] + "</td><td" + lc + ">" + esc(rows[i][1]) + "</td><td" + rc + ">" + esc(rows[i][2]) + "</td></tr>";
     }
-    wireEl.scrollTop = wireEl.scrollHeight;
+    html += "</tbody>";
+    return html;
   }
 
-  function idlePath() {
-    setActor(clientVal, clientHint, { val: "—", hint: "待命", cls: "" });
-    setActor(cacheVal, cacheHint, { val: "∅", hint: "空", cls: "" });
-    setActor(dbVal, dbHint, { val: "A", hint: "初值 A", cls: "" });
-    setText(mStep, "0");
-    setText(mHits, "0");
-    setText(mDbr, "0");
-    setText(mDbw, "0");
-    setText(mStale, "0");
-    setText(pOp, "—");
-    setText(pAck, "—");
-    setText(pStale, "—");
-    setText(pLoss, "—");
-    setText(pCstate, "empty");
-    setText(pDirty, "false");
-    setText(pHr, "—");
-    setText(pVictim, "—");
-    if (statusEl) statusEl.textContent = "選擇模式後按「下一步」。先走冷讀，再寫成 B，最後看崩潰。";
-    if (verdictEl) {
-      verdictEl.className = "cp-verdict";
-      verdictEl.textContent = "判定尚未產生——走完序列後會摘要 ACK、stale 與崩潰損失。";
+  function writeParams() {
+    return {
+      left: wLeft.value,
+      right: wRight.value,
+      workload: wWorkload,
+      ops: parseInt(wOps.value, 10),
+      cacheRtt: parseInt(wCrtt.value, 10),
+      dbRtt: parseInt(wDrtt.value, 10),
+      crashAt: parseInt(wCrash.value, 10),
+      flushEvery: parseInt(wFlush.value, 10)
+    };
+  }
+
+  function renderWrite() {
+    var p = writeParams();
+    wOut.ops.textContent = String(p.ops);
+    wOut.crtt.textContent = p.cacheRtt + " ms";
+    wOut.drtt.textContent = p.dbRtt + " ms";
+    wOut.crash.textContent = p.crashAt === 0 ? "不崩潰" : String(p.crashAt);
+    wOut.flush.textContent = String(p.flushEvery);
+    var res = computeWritePaths(p);
+    wLt.textContent = res.left.label;
+    wRt.textContent = res.right.label;
+    wLsvg.innerHTML = renderPaneSvg(res.left, p);
+    wRsvg.innerHTML = renderPaneSvg(res.right, p);
+    wTable.innerHTML = renderWriteTable(res);
+
+    var seqTxt = res.ops.join("");
+    wStatus.textContent = "序列 " + seqTxt + "（" + p.ops + " 個操作，共 " +
+      (res.left.reads) + " 讀 " + (p.ops - res.left.reads) + " 寫）：左欄總延遲 " +
+      res.left.totalLatency + " ms、右欄 " + res.right.totalLatency + " ms；" +
+      (p.crashAt === 0 ? "本回合沒有崩潰。" : ("崩潰發生在第 " + p.crashAt + " 步之後。"));
+
+    var text, cls;
+    if (res.verdictKind === "lose-writes") {
+      cls = "k-lose";
+      text = "判定：" + res.riskPane + " 在第 " + p.crashAt + " 步崩潰時丟掉 " + res.maxLost +
+        " 筆已經回給客戶端的寫入——ACK 早於落盤，這不是「可能不一致」，是耐久性失敗。把刷盤間隔從 " +
+        p.flushEvery + " 調小可以縮短暴露窗，但只要間隔大於 1 就還有損失。";
+    } else if (res.verdictKind === "long-stale") {
+      cls = "k-stale";
+      text = "判定：兩欄都沒丟寫入，但 " + res.stalePane + " 有一段長達 " + res.maxStaleSpan +
+        " 個操作的 stale 窗，其中 " + Math.max(res.left.staleReads, res.right.staleReads) +
+        " 次真的被讀到舊值。沒有人會察覺——直到 TTL 或驅逐把它帶走。";
+    } else if (res.verdictKind === "slow-write") {
+      cls = "k-slow";
+      text = "判定：耐久與一致都沒出事，差別只在延遲——" + res.slowerPane + " 是 " +
+        res.fasterPane + " 的 " + res.latencyRatio.toFixed(1) + " 倍，因為它的 ACK 點在 DB 那一側。";
+    } else {
+      cls = "k-even";
+      text = "判定：這組參數下兩欄的耐久、stale 與延遲都沒有實質差距（延遲比 " +
+        res.latencyRatio.toFixed(2) + " 倍）。差別在別處——例如誰認得 DB、快取掛掉時讀請求還走不走得通。";
     }
-    if (wireEl) wireEl.innerHTML = "";
+    wCall.className = "cpw-call " + cls;
+    wCall.textContent = text;
   }
 
-  function idleEvict() {
-    paintSlots([]);
-    setText(mStep, "0");
-    setText(mHits, "0");
-    setText(mDbr, "0");
-    setText(mDbw, "0");
-    setText(mStale, "0");
-    setText(pOp, "—");
-    setText(pAck, scenario === "lru" ? "最近最少用" : scenario === "lfu" ? "最少頻次" : "絕對 TTL=3");
-    setText(pStale, "—");
-    setText(pLoss, "—");
-    setText(pCstate, "empty");
-    setText(pDirty, "n/a");
-    setText(pHr, "—");
-    setText(pVictim, "—");
-    if (statusEl) statusEl.textContent = "容量 3，序列 A → A → B → C → D。按「下一步」看誰被留下。";
-    if (verdictEl) {
-      verdictEl.className = "cp-verdict";
-      verdictEl.textContent = "判定尚未產生——對照三種策略在 D 進入時的受害者。";
-    }
-    if (wireEl) wireEl.innerHTML = "";
-  }
+  /* (5) 事件綁定 */
+  function bindRange(el, fn) { if (el) el.addEventListener("input", fn); }
 
-  function applyFrame(f, idx, total) {
-    setText(mStep, String(idx + 1) + " / " + total);
-    setText(mHits, String(f.hits));
-    setText(mDbr, String(f.dbr));
-    setText(mDbw, String(f.dbw));
-    setText(mStale, String(f.stale));
-    setText(pOp, f.op);
-    setText(pAck, f.ack);
-    setText(pStale, f.staleWin);
-    setText(pLoss, f.loss);
-    setText(pCstate, f.cstate);
-    setText(pDirty, f.dirty);
-    setText(pHr, f.hr);
-    setText(pVictim, f.victim);
-    if (statusEl) statusEl.textContent = f.status;
-    if (f.client) setActor(clientVal, clientHint, f.client);
-    if (f.cache) setActor(cacheVal, cacheHint, f.cache);
-    if (f.db) setActor(dbVal, dbHint, f.db);
-    if (f.slots) paintSlots(f.slots);
-    appendLog(f.log || [], idx === 0);
-    if (f.verdict && verdictEl) {
-      verdictEl.className = "cp-verdict tone-" + f.verdict.tone;
-      verdictEl.textContent = f.verdict.text;
-    }
-  }
-
-  function rebuildScButtons() {
-    var defs = mode === "path" ? PATH_BTNS : EVICT_BTNS;
-    if (!defs.some(function (d) { return d[0] === scenario; })) {
-      scenario = defs[0][0];
-    }
-    segSc.innerHTML = "";
-    for (var i = 0; i < defs.length; i++) {
-      var b = document.createElement("button");
-      b.setAttribute("data-sc", defs[i][0]);
-      b.setAttribute("aria-pressed", defs[i][0] === scenario ? "true" : "false");
-      b.textContent = defs[i][1];
-      segSc.appendChild(b);
-    }
-  }
-
-  function setModeUi() {
-    var path = mode === "path";
-    if (actorsEl) actorsEl.hidden = !path;
-    if (evictView) evictView.hidden = path;
-    if (modeHint) {
-      modeHint.innerHTML = path
-        ? "讀寫路徑：key <code>profile:42</code>，DB 初值 A。逐步看 miss 回填、寫入 ACK、以及 cache 崩潰時會不會丟資料。"
-        : "淘汰策略：容量 3，同一序列 <code>A, A, B, C, D</code>。LRU 踢最舊、LFU 踢最冷、絕對 TTL=3 步則讓時間先帶走 A。";
-    }
-    rebuildScButtons();
-  }
-
-  function reset(keepLog) {
-    step = 0;
-    if (btnNext) btnNext.disabled = false;
-    setModeUi();
-    if (mode === "path") idlePath();
-    else idleEvict();
-    if (!keepLog && wireEl) wireEl.innerHTML = "";
-  }
-
-  function onNext() {
-    var frames = framesOf();
-    if (step >= frames.length) return;
-    applyFrame(frames[step], step, frames.length);
-    step += 1;
-    if (step >= frames.length && btnNext) btnNext.disabled = true;
-  }
-
-  if (segMode) {
-    segMode.addEventListener("click", function (e) {
-      var btn = e.target.closest("button[data-mode]");
-      if (!btn) return;
-      mode = btn.getAttribute("data-mode");
-      Array.prototype.forEach.call(segMode.querySelectorAll("button[data-mode]"), function (b) {
-        b.setAttribute("aria-pressed", b === btn ? "true" : "false");
+  if (eDemo) {
+    bindRange(eCap, renderEvict);
+    bindRange(eKeys, renderEvict);
+    bindRange(eHot, renderEvict);
+    bindRange(eLen, renderEvict);
+    bindRange(eTtl, renderEvict);
+    if (eSeg) {
+      eSeg.addEventListener("click", function (ev) {
+        var btn = ev.target.closest("button[data-pat]");
+        if (!btn) return;
+        ePattern = btn.getAttribute("data-pat");
+        var all = eSeg.querySelectorAll("button[data-pat]");
+        for (var i = 0; i < all.length; i++) {
+          all[i].setAttribute("aria-pressed", all[i] === btn ? "true" : "false");
+        }
+        renderEvict();
       });
-      scenario = mode === "path" ? "aside" : "lru";
-      reset(true);
-    });
-  }
-
-  if (segSc) {
-    segSc.addEventListener("click", function (e) {
-      var btn = e.target.closest("button[data-sc]");
-      if (!btn) return;
-      scenario = btn.getAttribute("data-sc");
-      Array.prototype.forEach.call(segSc.querySelectorAll("button[data-sc]"), function (b) {
-        b.setAttribute("aria-pressed", b === btn ? "true" : "false");
+    }
+    if (eReset) {
+      eReset.addEventListener("click", function () {
+        eCap.value = "4"; eKeys.value = "12"; eHot.value = "70"; eLen.value = "60"; eTtl.value = "0";
+        ePattern = "zipf";
+        var all = eSeg ? eSeg.querySelectorAll("button[data-pat]") : [];
+        for (var i = 0; i < all.length; i++) {
+          all[i].setAttribute("aria-pressed", all[i].getAttribute("data-pat") === "zipf" ? "true" : "false");
+        }
+        renderEvict();
       });
-      reset(true);
-    });
+    }
+    renderEvict();
   }
 
-  if (btnNext) btnNext.addEventListener("click", onNext);
-  if (btnReset) btnReset.addEventListener("click", function () { reset(true); });
-
-  reset(false);
+  if (wDemo) {
+    bindRange(wOps, renderWrite);
+    bindRange(wCrtt, renderWrite);
+    bindRange(wDrtt, renderWrite);
+    bindRange(wCrash, renderWrite);
+    bindRange(wFlush, renderWrite);
+    if (wLeft) wLeft.addEventListener("change", renderWrite);
+    if (wRight) wRight.addEventListener("change", renderWrite);
+    if (wSeg) {
+      wSeg.addEventListener("click", function (ev) {
+        var btn = ev.target.closest("button[data-wl]");
+        if (!btn) return;
+        wWorkload = btn.getAttribute("data-wl");
+        var all = wSeg.querySelectorAll("button[data-wl]");
+        for (var i = 0; i < all.length; i++) {
+          all[i].setAttribute("aria-pressed", all[i] === btn ? "true" : "false");
+        }
+        renderWrite();
+      });
+    }
+    if (wReset) {
+      wReset.addEventListener("click", function () {
+        wLeft.value = "aside"; wRight.value = "writeback";
+        wOps.value = "10"; wCrtt.value = "2"; wDrtt.value = "50";
+        wCrash.value = "7"; wFlush.value = "4";
+        wWorkload = "writeheavy";
+        var all = wSeg ? wSeg.querySelectorAll("button[data-wl]") : [];
+        for (var i = 0; i < all.length; i++) {
+          all[i].setAttribute("aria-pressed", all[i].getAttribute("data-wl") === "writeheavy" ? "true" : "false");
+        }
+        renderWrite();
+      });
+    }
+    renderWrite();
+  }
 })();
 </script>
 
