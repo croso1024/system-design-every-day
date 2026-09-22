@@ -2,228 +2,534 @@
 (function () {
   "use strict";
 
-  var scenario = "weak";
-  var ran = false;
+  /* (1) 常數與參數表 */
+  /* 檢索 demo：10 筆候選的來源標籤（只是列的名字，不參與任何計算） */
+  var CANDIDATES = [
+    "shipping§時效", "policy-v3§退貨", "promo-faq§活動", "old-policy-v1", "policy-v3§例外",
+    "policy-v3§運費", "faq§付款", "shipping§通知", "promo-faq§會員", "faq§發票"
+  ];
+  var POOL = 10;                 /* 候選池大小（rank 1..10） */
+  var DEFAULT_MASK = 18;         /* 二進位 0000010010：rank 2 與 rank 5 為金標 */
 
-  var statusEl = document.getElementById("rev-status");
-  var hitsEl = document.getElementById("rev-hits");
-  var answerEl = document.getElementById("rev-answer");
-  var verdictEl = document.getElementById("rev-verdict");
-  var btnRun = document.getElementById("rev-btn-run");
-  var btnReset = document.getElementById("rev-btn-reset");
-  var mSc = document.getElementById("rev-m-sc");
-  var mRec = document.getElementById("rev-m-rec");
-  var mPre = document.getElementById("rev-m-pre");
-  var sFaith = document.getElementById("rev-s-faith");
-  var sArel = document.getElementById("rev-s-arel");
-  var sCrel = document.getElementById("rev-s-crel");
-  var sHall = document.getElementById("rev-s-hall");
-  var segRoot = document.querySelector("#demo-rev-eval .seg");
+  /* 忠實度 demo：切分字元表與規模上限 */
+  var SENT_END = "。！？；!?;";
+  var CLAUSE_END = "，、,";
+  var PUNCT = "。！？；!?;，、,：:「」『』（）()《》〈〉…—－-·／/＼\\\"'";
+  var MAX_CLAIMS = 12;
+  var MAX_CTX = 6;
+  var MAX_CHARS = 1200;
+  var W_FAITH = 0.65;            /* 幻覺風險 = 0.65×(1-faithfulness) + 0.35×(1-平均最佳支撐度) */
+  var RISK_LOW = 0.25;           /* < 0.25 判低 */
+  var RISK_MID = 0.50;           /* < 0.50 判中，其餘判高 */
 
-  var SCENARIOS = {
-    weak: {
-      label: "弱檢索 · Top-3 雜訊",
-      recall: "0/2",
-      precision: "0/3",
-      hits: [
-        {
-          meta: "rank#1 · promo-faq · score 0.81",
-          body: "本季滿額贈運費 ethereal；詳見活動頁。與退貨期限無關。",
-          tone: "bad",
-          gold: false
-        },
-        {
-          meta: "rank#2 · shipping · score 0.74",
-          body: "標準配送約 2–4 個工作天送達。到貨通知以簡訊為準。",
-          tone: "lock",
-          gold: false
-        },
-        {
-          meta: "rank#3 · old-policy-v1 · score 0.69",
-          body: "（過期）到貨後 7 日內可申請退貨。條款已廢止。",
-          tone: "bad",
-          gold: false
-        }
-      ],
-      answer: "依目前資料，到貨後大約 7 日內可以退貨；電子票券通常也能退，建議直接聯繫客服加急處理。",
-      faith: "1.2",
-      arel: "3.8",
-      crel: "1.5",
-      hall: "高",
-      faithCls: "bad",
-      arelCls: "warn",
-      crelCls: "bad",
-      hallCls: "bad",
-      verdictTone: "tone-bad",
-      status: "Top-3 無任一金標：命中促銷與過期條款。模型仍產出「完整答案」，期限 7 日與「票券可退」皆無據。",
-      verdict: "Judge：Faithfulness 極低、幻覺風險高。Answer Relevance 看起來還行——這正是只看最終答案會誤判「還不錯」的典型。"
-    },
-    vector: {
-      label: "純向量 · Top-3",
-      recall: "1/2",
-      precision: "1/3",
-      hits: [
-        {
-          meta: "rank#1 · policy-v3§退貨 · score 0.88",
-          body: "顧客可於到貨後 14 日內申請退貨。商品須保持原包裝與完整配件。",
-          tone: "ok",
-          gold: true
-        },
-        {
-          meta: "rank#2 · shipping · score 0.71",
-          body: "標準配送約 2–4 個工作天。運費規則另見配送專章。",
-          tone: "lock",
-          gold: false
-        },
-        {
-          meta: "rank#3 · promo-faq · score 0.66",
-          body: "會員可享延長鑑賞期活動（僅限指定 SKU）。",
-          tone: "bad",
-          gold: false
-        }
-      ],
-      answer: "到貨後 14 日內可申請退貨，且須保持原包裝。關於電子票券是否適用，本次檢索未涵蓋明確例外條款，建議再查退貨專章例外段。",
-      faith: "4.2",
-      arel: "3.5",
-      crel: "3.0",
-      hall: "中",
-      faithCls: "good",
-      arelCls: "warn",
-      crelCls: "warn",
-      hallCls: "warn",
-      verdictTone: "tone-lock",
-      status: "Recall 50%：金標 A（14 日）命中；金標 B（票券例外）未進 Top-3。答案對已知部分忠實，對缺證部分選擇保留。",
-      verdict: "Judge：Faithfulness 尚可（有拒答／不確定），但 Answer Relevance 因漏答票券例外而扣分。下一步應提高召回或加 keyword／metadata。"
-    },
-    hybrid: {
-      label: "過濾＋Rerank",
-      recall: "2/2",
-      precision: "2/3",
-      hits: [
-        {
-          meta: "rank#1 · policy-v3§退貨 · rerank 0.94",
-          body: "顧客可於到貨後 14 日內申請退貨。商品須保持原包裝與完整配件。",
-          tone: "ok",
-          gold: true
-        },
-        {
-          meta: "rank#2 · policy-v3§例外 · rerank 0.91",
-          body: "電子票券與客製化商品不適用本退貨條款。",
-          tone: "ok",
-          gold: true
-        },
-        {
-          meta: "rank#3 · policy-v3§運費 · rerank 0.55",
-          body: "退貨運費規則另見配送專章（弱相關，佔位）。",
-          tone: "lock",
-          gold: false
-        }
-      ],
-      answer: "到貨後 14 日內可申請退貨（須原包裝與完整配件）。電子票券與客製化商品不適用本退貨條款，故電子票券不能依此條款退貨。",
-      faith: "4.8",
-      arel: "4.7",
-      crel: "4.5",
-      hall: "低",
-      faithCls: "good",
-      arelCls: "good",
-      crelCls: "good",
-      hallCls: "good",
-      verdictTone: "tone-ok",
-      status: "兩金標皆入選；metadata 過濾掉過期政策，rerank 把例外條款抬到 Top-2。Context 乾淨，生成可完整覆蓋問題。",
-      verdict: "Judge：四軸分數同步上升。結論：品質躍升來自檢索設定，而非換更大的生成模型。"
-    }
-  };
+  /* (2) compute* 純函式 —— 完全不碰 DOM，只吃參數、只回傳物件 */
 
-  function setScore(el, value, cls) {
-    el.textContent = value;
-    el.classList.remove("good", "warn", "bad");
-    if (cls) el.classList.add(cls);
+  function clampInt(v, lo, hi) {
+    var n = Math.round(Number(v));
+    if (isNaN(n)) { n = lo; }
+    if (n < lo) { return lo; }
+    if (n > hi) { return hi; }
+    return n;
   }
 
-  function renderIdle() {
-    hitsEl.innerHTML = "";
-    answerEl.textContent = "尚未執行。三種設定共用同一問題與同一組金標；差異只在「撈到什麼」如何牽動生成與評分。";
-    verdictEl.textContent = "";
-    verdictEl.className = "rev-verdict";
-    mSc.textContent = "—";
-    mRec.textContent = "—";
-    mPre.textContent = "—";
-    setScore(sFaith, "—", "");
-    setScore(sArel, "—", "");
-    setScore(sCrel, "—", "");
-    setScore(sHall, "—", "");
-    statusEl.textContent = "選擇檢索設定後按「執行評測」，同一問題下對比 Recall／Precision 與生成面分數。";
+  function log2(x) { return Math.log(x) / Math.LN2; }
+
+  function bitAt(mask, i) {
+    return Math.floor(mask / Math.pow(2, i)) % 2 === 1;
   }
 
-  function renderHits(hits, active) {
-    hitsEl.innerHTML = "";
-    hits.forEach(function (h) {
-      var div = document.createElement("div");
-      div.className = "rev-hit" + (active ? " active tone-" + h.tone : "");
-      var meta = document.createElement("div");
-      meta.className = "hm";
-      meta.textContent = h.meta + (h.gold ? " · GOLD" : "");
-      var body = document.createElement("div");
-      body.textContent = h.body;
-      div.appendChild(meta);
-      div.appendChild(body);
-      hitsEl.appendChild(div);
-    });
-  }
-
-  function run() {
-    var sc = SCENARIOS[scenario];
-    if (!sc) return;
-    ran = true;
-    statusEl.textContent = "評測中…";
-    renderHits(sc.hits, false);
-    setTimeout(function () {
-      renderHits(sc.hits, true);
-      mSc.textContent = sc.label;
-      mRec.textContent = sc.recall;
-      mPre.textContent = sc.precision;
-      setScore(sFaith, sc.faith, sc.faithCls);
-      setScore(sArel, sc.arel, sc.arelCls);
-      setScore(sCrel, sc.crel, sc.crelCls);
-      setScore(sHall, sc.hall, sc.hallCls);
-      answerEl.textContent = sc.answer;
-      verdictEl.textContent = sc.verdict;
-      verdictEl.className = "rev-verdict " + sc.verdictTone;
-      statusEl.textContent = sc.status;
-    }, 280);
-  }
-
-  function reset() {
-    ran = false;
-    scenario = "weak";
-    if (segRoot) {
-      var buttons = segRoot.querySelectorAll("button[data-sc]");
-      buttons.forEach(function (btn) {
-        btn.setAttribute("aria-pressed", btn.getAttribute("data-sc") === "weak" ? "true" : "false");
-      });
-    }
-    renderIdle();
-  }
-
-  if (segRoot) {
-    segRoot.addEventListener("click", function (e) {
-      var btn = e.target.closest("button[data-sc]");
-      if (!btn || !segRoot.contains(btn)) return;
-      scenario = btn.getAttribute("data-sc");
-      var buttons = segRoot.querySelectorAll("button[data-sc]");
-      buttons.forEach(function (b) {
-        b.setAttribute("aria-pressed", b === btn ? "true" : "false");
-      });
-      if (ran) run();
-      else {
-        statusEl.textContent = "已切換為「" + (SCENARIOS[scenario] && SCENARIOS[scenario].label) + "」。按「執行評測」查看分數。";
+  /* rerank 規則：每一輪從 rank 1 往後掃，遇到「自己是金標、前一名不是金標」就與前一名交換，
+     交換後直接往後走（所以每個金標每輪最多前移 1 位，相鄰兩個金標不會互換位置）。 */
+  function rerankOnce(list) {
+    for (var i = 1; i < list.length; i++) {
+      if (list[i].gold && !list[i - 1].gold) {
+        var tmp = list[i - 1];
+        list[i - 1] = list[i];
+        list[i] = tmp;
       }
-    });
+    }
+    return list;
   }
 
-  if (btnRun) btnRun.addEventListener("click", run);
-  if (btnReset) btnReset.addEventListener("click", reset);
+  // @probe fn       computeRetrievalMetrics
+  // @probe baseline {"k":3,"goldMask":18,"missedGold":1,"rerank":0}
+  // @probe sweep    {"k":[1,10],"goldMask":[1,1023],"missedGold":[0,4],"rerank":[0,3]}
+  function computeRetrievalMetrics(p) {
+    var k = clampInt(p.k, 1, POOL);
+    var mask = clampInt(p.goldMask, 0, 1023);
+    var missedGold = clampInt(p.missedGold, 0, 4);
+    var rerank = clampInt(p.rerank, 0, 3);
 
-  renderIdle();
+    var list = [];
+    var i;
+    for (i = 0; i < POOL; i++) {
+      list.push({ id: CANDIDATES[i], gold: bitAt(mask, i), baseRank: i + 1 });
+    }
+    for (i = 0; i < rerank; i++) { list = rerankOnce(list); }
+
+    var ranking = [];
+    var goldInTop = 0;
+    for (i = 0; i < POOL; i++) {
+      ranking.push({ rank: i + 1, id: list[i].id, gold: list[i].gold ? 1 : 0, baseRank: list[i].baseRank });
+      if (list[i].gold) { goldInTop += 1; }
+    }
+    var relevantTotal = goldInTop + missedGold;
+
+    var hitsAtK = 0;
+    var firstRelRank = 0;
+    var terms = [];
+    var dcgAtK = 0;
+    for (i = 0; i < k; i++) {
+      var rel = ranking[i].gold;
+      if (rel === 1) {
+        hitsAtK += 1;
+        if (firstRelRank === 0) { firstRelRank = i + 1; }
+      }
+      var disc = 1 / log2(i + 2);
+      var gain = rel * disc;
+      dcgAtK += gain;
+      terms.push({ i: i + 1, id: ranking[i].id, rel: rel, disc: disc, gain: gain });
+    }
+
+    var idealRel = relevantTotal < k ? relevantTotal : k;
+    var idcgAtK = 0;
+    for (i = 0; i < idealRel; i++) { idcgAtK += 1 / log2(i + 2); }
+
+    return {
+      k: k,
+      rerank: rerank,
+      missedGold: missedGold,
+      ranking: ranking,
+      goldInTop: goldInTop,
+      relevantTotal: relevantTotal,
+      hitsAtK: hitsAtK,
+      recallAtK: relevantTotal > 0 ? hitsAtK / relevantTotal : 0,
+      precisionAtK: hitsAtK / k,
+      noiseRatio: (k - hitsAtK) / k,
+      firstRelRank: firstRelRank,
+      rr: firstRelRank > 0 ? 1 / firstRelRank : 0,
+      terms: terms,
+      dcgAtK: dcgAtK,
+      idealRel: idealRel,
+      idcgAtK: idcgAtK,
+      ndcgAtK: idcgAtK > 0 ? dcgAtK / idcgAtK : 0
+    };
+  }
+
+  function isIn(setStr, ch) { return setStr.indexOf(ch) >= 0; }
+
+  function isBlank(ch) {
+    return ch === " " || ch === "\t" || ch === "　" || ch === "\r" || ch === "\n";
+  }
+
+  /* 以 '\n' 或 '|' 切出 context 片段（不使用 RegExp） */
+  function splitContexts(s) {
+    var out = [];
+    var cur = "";
+    for (var i = 0; i < s.length; i++) {
+      var ch = s.charAt(i);
+      if (ch === "\n" || ch === "|" || ch === "\r") {
+        if (cur.length > 0) { out.push(cur); }
+        cur = "";
+      } else {
+        cur += ch;
+      }
+      if (out.length >= MAX_CTX) { return out; }
+    }
+    if (cur.length > 0 && out.length < MAX_CTX) { out.push(cur); }
+    return out;
+  }
+
+  /* claim 切分：sentence 模式只在句末標點斷開；clause 模式再依逗號斷到子句 */
+  function splitClaims(s, mode) {
+    var out = [];
+    var cur = "";
+    var i, ch, brk;
+    for (i = 0; i < s.length; i++) {
+      ch = s.charAt(i);
+      brk = isIn(SENT_END, ch) || ch === "\n" || (mode === "clause" && isIn(CLAUSE_END, ch));
+      if (brk) {
+        if (trimText(cur).length >= 2) { out.push(trimText(cur)); }
+        cur = "";
+      } else {
+        cur += ch;
+      }
+      if (out.length >= MAX_CLAIMS) { return out; }
+    }
+    if (trimText(cur).length >= 2 && out.length < MAX_CLAIMS) { out.push(trimText(cur)); }
+    return out;
+  }
+
+  function trimText(s) {
+    var a = 0, b = s.length;
+    while (a < b && isBlank(s.charAt(a))) { a += 1; }
+    while (b > a && isBlank(s.charAt(b - 1))) { b -= 1; }
+    return s.slice(a, b);
+  }
+
+  /* 只留下非空白、非標點的字元，再切成字元 bigram 或 unigram；去重用陣列 indexOf */
+  function grams(text, mode) {
+    var core = "";
+    var i, ch;
+    for (i = 0; i < text.length && i < MAX_CHARS; i++) {
+      ch = text.charAt(i);
+      if (!isBlank(ch) && !isIn(PUNCT, ch)) { core += ch; }
+    }
+    var out = [];
+    var g;
+    if (mode === "unigram" || core.length < 2) {
+      for (i = 0; i < core.length; i++) {
+        g = core.charAt(i);
+        if (out.indexOf(g) < 0) { out.push(g); }
+      }
+      return out;
+    }
+    for (i = 0; i + 1 < core.length; i++) {
+      g = core.charAt(i) + core.charAt(i + 1);
+      if (out.indexOf(g) < 0) { out.push(g); }
+    }
+    return out;
+  }
+
+  /* 支撐度＝containment：claim 的 gram 有多少比例出現在該 context（對應本篇寫的 CLAIM ⊆ CONTEXT，
+     方向不對稱——我們問的是「claim 被 context 蓋住了嗎」，不是兩段文字有多像） */
+  function containment(claimGrams, ctxGrams) {
+    if (claimGrams.length === 0 || ctxGrams.length === 0) { return 0; }
+    var inter = 0;
+    for (var i = 0; i < claimGrams.length; i++) {
+      if (ctxGrams.indexOf(claimGrams[i]) >= 0) { inter += 1; }
+    }
+    return inter / claimGrams.length;
+  }
+
+  // @probe fn       computeFaithfulness
+  // @probe baseline {"answer":"到貨後 14 日內可申請退貨，商品須保持原包裝。電子票券也可以退。","contexts":"顧客可於到貨後 14 日內申請退貨，商品須保持原包裝與完整配件。|電子票券與客製化商品不適用本退貨條款。|標準配送約 2-4 個工作天送達，到貨通知以簡訊為準。","threshold":0.50,"tokenMode":"bigram","claimSplit":"sentence"}
+  // @probe sweep    {"answer":["到貨後 14 日內可申請退貨。","到貨後 30 日內可申請退貨，電子票券也可以退，並可延長鑑賞期至 60 日。"],"contexts":["顧客可於到貨後 14 日內申請退貨。","顧客可於到貨後 14 日內申請退貨，商品須保持原包裝與完整配件。|電子票券與客製化商品不適用本退貨條款。|標準配送約 2-4 個工作天送達，到貨通知以簡訊為準。|會員延長鑑賞期活動僅限指定 SKU。"],"threshold":[0.05,0.90],"tokenMode":["bigram","unigram"],"claimSplit":["sentence","clause"]}
+  function computeFaithfulness(p) {
+    var threshold = Number(p.threshold);
+    if (isNaN(threshold)) { threshold = 0.5; }
+    if (threshold < 0.05) { threshold = 0.05; }
+    if (threshold > 0.9) { threshold = 0.9; }
+    var tokenMode = p.tokenMode === "unigram" ? "unigram" : "bigram";
+    var claimSplit = p.claimSplit === "clause" ? "clause" : "sentence";
+
+    var ctxTexts = splitContexts(String(p.contexts));
+    var claimTexts = splitClaims(String(p.answer), claimSplit);
+
+    var ctxGrams = [];
+    var i, c;
+    for (i = 0; i < ctxTexts.length; i++) {
+      ctxTexts[i] = trimText(ctxTexts[i]);
+      ctxGrams.push(grams(ctxTexts[i], tokenMode));
+    }
+
+    var matrix = [];
+    var claims = [];
+    var supportedCount = 0;
+    var sumBest = 0;
+    var ctxHit = [];
+    for (i = 0; i < ctxTexts.length; i++) { ctxHit.push(0); }
+
+    for (i = 0; i < claimTexts.length; i++) {
+      var cg = grams(claimTexts[i], tokenMode);
+      var row = [];
+      var bestSim = 0;
+      var bestIdx = -1;
+      for (c = 0; c < ctxGrams.length; c++) {
+        var sim = containment(cg, ctxGrams[c]);
+        row.push(sim);
+        if (sim > bestSim) { bestSim = sim; bestIdx = c; }
+      }
+      var sup = bestSim >= threshold && bestIdx >= 0;
+      if (sup) {
+        supportedCount += 1;
+        ctxHit[bestIdx] = 1;
+      }
+      sumBest += bestSim;
+      matrix.push(row);
+      claims.push({
+        text: claimTexts[i],
+        grams: cg.length,
+        bestIdx: bestIdx,
+        bestSim: bestSim,
+        gap: sup ? 0 : threshold - bestSim,
+        supported: sup ? 1 : 0
+      });
+    }
+
+    var claimCount = claims.length;
+    var ctxUsed = 0;
+    for (i = 0; i < ctxHit.length; i++) { ctxUsed += ctxHit[i]; }
+    var faithfulness = claimCount > 0 ? supportedCount / claimCount : 0;
+    var avgBestSim = claimCount > 0 ? sumBest / claimCount : 0;
+    var hallucScore = W_FAITH * (1 - faithfulness) + (1 - W_FAITH) * (1 - avgBestSim);
+    var hallucLevel = hallucScore < RISK_LOW ? "低" : (hallucScore < RISK_MID ? "中" : "高");
+
+    var unsupported = [];
+    for (i = 0; i < claims.length; i++) {
+      if (!claims[i].supported) {
+        unsupported.push({ i: i + 1, text: claims[i].text, bestSim: claims[i].bestSim, gap: claims[i].gap });
+      }
+    }
+
+    return {
+      threshold: threshold,
+      tokenMode: tokenMode,
+      claimSplit: claimSplit,
+      contexts: ctxTexts,
+      claims: claims,
+      matrix: matrix,
+      claimCount: claimCount,
+      supportedCount: supportedCount,
+      faithfulness: faithfulness,
+      avgBestSim: avgBestSim,
+      unsupported: unsupported,
+      ctxCount: ctxTexts.length,
+      ctxUsed: ctxUsed,
+      ctxUsage: ctxTexts.length > 0 ? ctxUsed / ctxTexts.length : 0,
+      hallucScore: hallucScore,
+      hallucLevel: hallucLevel
+    };
+  }
+
+  /* (3) DOM 參照 */
+  var demoRqk = document.getElementById("demo-rqk");
+  var demoFcl = document.getElementById("demo-fcl");
+  if (!demoRqk && !demoFcl) { return; }
+
+  var FCL_DEFAULT_ANSWER = "到貨後 14 日內可申請退貨，商品須保持原包裝。電子票券也可以退。";
+  var FCL_DEFAULT_CTX = "顧客可於到貨後 14 日內申請退貨，商品須保持原包裝與完整配件。\n電子票券與客製化商品不適用本退貨條款。\n標準配送約 2-4 個工作天送達，到貨通知以簡訊為準。";
+
+  var rqkK = document.getElementById("rqk-k");
+  var rqkMissed = document.getElementById("rqk-missed");
+  var rqkRerank = document.getElementById("rqk-rerank");
+  var rqkReset = document.getElementById("rqk-reset");
+  var rqkVK = document.getElementById("rqk-v-k");
+  var rqkVMissed = document.getElementById("rqk-v-missed");
+  var rqkVRerank = document.getElementById("rqk-v-rerank");
+  var rqkRuler = document.getElementById("rqk-ruler");
+  var rqkDisc = document.getElementById("rqk-disc");
+  var rqkExpand = document.getElementById("rqk-expand");
+  var rqkStatus = document.getElementById("rqk-status");
+  var goldMask = DEFAULT_MASK;
+
+  var fclAnswer = document.getElementById("fcl-answer");
+  var fclCtx = document.getElementById("fcl-ctx");
+  var fclTh = document.getElementById("fcl-th");
+  var fclSplit = document.getElementById("fcl-split");
+  var fclMode = document.getElementById("fcl-mode");
+  var fclReset = document.getElementById("fcl-reset");
+  var fclVTh = document.getElementById("fcl-v-th");
+  var fclStrip = document.getElementById("fcl-strip");
+  var fclGrid = document.getElementById("fcl-grid");
+  var fclExpand = document.getElementById("fcl-expand");
+  var fclStatus = document.getElementById("fcl-status");
+
+  /* (4) render(state) —— 只讀 state 畫出來，不做任何判斷 */
+
+  function f3(x) { return (Math.round(x * 1000) / 1000).toFixed(3); }
+  function f2(x) { return (Math.round(x * 100) / 100).toFixed(2); }
+  function esc(s) {
+    var out = "";
+    for (var i = 0; i < s.length; i++) {
+      var ch = s.charAt(i);
+      if (ch === "&") { out += "&amp;"; }
+      else if (ch === "<") { out += "&lt;"; }
+      else if (ch === ">") { out += "&gt;"; }
+      else if (ch === '"') { out += "&quot;"; }
+      else { out += ch; }
+    }
+    return out;
+  }
+
+  function rowHtml(name, formula, value) {
+    return '<div class="er"><span class="en">' + name + '</span>' +
+           '<span class="ef">' + formula + '</span>' +
+           '<span class="ev">' + value + '</span></div>';
+  }
+
+  function renderRetrieval(state) {
+    rqkVK.textContent = String(state.k);
+    rqkVMissed.textContent = String(state.missedGold);
+    rqkVRerank.textContent = String(state.rerank);
+
+    var s = "";
+    var i, r;
+    for (i = 0; i < state.ranking.length; i++) {
+      r = state.ranking[i];
+      s += '<button type="button" class="rqk-cell' + (r.gold ? " gold" : "") +
+           (r.rank > state.k ? " out" : "") + (r.rank === state.k ? " cut" : "") +
+           '" data-rank="' + r.rank + '" data-base="' + r.baseRank +
+           '" aria-pressed="' + (r.gold ? "true" : "false") + '">' +
+           '<span class="rk">#' + r.rank + '</span>' +
+           '<span class="star">' + (r.gold ? "★" : "☆") + '</span>' +
+           '<span class="src">' + esc(r.id) + '</span></button>';
+    }
+    rqkRuler.innerHTML = s;
+
+    s = "";
+    for (i = 0; i < POOL; i++) {
+      var disc = 1 / log2(i + 2);
+      var within = i < state.k;
+      var rel = state.ranking[i].gold === 1;
+      s += '<div class="rqk-dcol ' + (within && rel ? "on" : "off") + (within ? "" : " beyond") + '">' +
+           '<span class="dv">' + f3(disc) + '</span>' +
+           '<span class="db" style="height:' + Math.round(disc * 100) + '%"></span></div>';
+    }
+    rqkDisc.innerHTML = s;
+
+    var termStr = "";
+    for (i = 0; i < state.terms.length; i++) {
+      termStr += (i > 0 ? " + " : "") + state.terms[i].rel + "/log2(" + (i + 2) + ")";
+    }
+    rqkExpand.innerHTML =
+      rowHtml("Recall@" + state.k,
+              "|Retrieved∩Relevant| / |Relevant| = " + state.hitsAtK + " / " + state.relevantTotal,
+              f3(state.recallAtK)) +
+      rowHtml("Precision@" + state.k,
+              "|Retrieved∩Relevant| / k = " + state.hitsAtK + " / " + state.k,
+              f3(state.precisionAtK)) +
+      rowHtml("MRR（單查詢＝RR）",
+              state.firstRelRank > 0 ? "1 / 首個金標名次 = 1 / " + state.firstRelRank : "Top-" + state.k + " 內沒有金標",
+              f3(state.rr)) +
+      rowHtml("DCG@" + state.k, termStr + " = " + f3(state.dcgAtK), f3(state.dcgAtK)) +
+      rowHtml("IDCG@" + state.k,
+              "把 min(|Relevant|, k) = " + state.idealRel + " 個金標排到最前面 = " + f3(state.idcgAtK),
+              f3(state.idcgAtK)) +
+      rowHtml("nDCG@" + state.k,
+              "DCG / IDCG = " + f3(state.dcgAtK) + " / " + f3(state.idcgAtK),
+              f3(state.ndcgAtK));
+
+    rqkStatus.textContent =
+      "Top-" + state.k + " 撈到 " + state.hitsAtK + " 個金標，Context 裡有 " +
+      Math.round(state.noiseRatio * 100) + "% 是非金標；金標總數 " + state.relevantTotal +
+      "（Top-10 內 " + state.goldInTop + " 個、完全沒撈到 " + state.missedGold + " 個）" +
+      "；rerank " + state.rerank + " 輪後首個金標落在 rank " +
+      (state.firstRelRank > 0 ? state.firstRelRank : "—") + "。";
+  }
+
+  function renderFaithfulness(state) {
+    fclVTh.textContent = f2(state.threshold);
+
+    var s = "";
+    var i, c;
+    if (state.claimCount === 0) {
+      s = '<div class="fcl-seg">（答案是空的，切不出任何 claim）</div>';
+    }
+    for (i = 0; i < state.claims.length; i++) {
+      s += '<span class="fcl-seg ' + (state.claims[i].supported ? "sup" : "unsup") + '">' +
+           '<span class="cn">C' + (i + 1) + '</span>' + esc(state.claims[i].text) + '</span>';
+    }
+    fclStrip.innerHTML = s;
+
+    fclGrid.style.gridTemplateColumns = "minmax(0,1.6fr) repeat(" + (state.ctxCount + 1) + ", minmax(0,1fr))";
+    s = '<div class="gh">claim ＼ context</div>';
+    for (c = 0; c < state.ctxCount; c++) { s += '<div class="gh">CTX' + (c + 1) + '</div>'; }
+    s += '<div class="gh">最佳／判定</div>';
+    for (i = 0; i < state.claims.length; i++) {
+      s += '<div class="gr">C' + (i + 1) + '　' + esc(state.claims[i].text.slice(0, 18)) +
+           (state.claims[i].text.length > 18 ? "…" : "") + '</div>';
+      for (c = 0; c < state.ctxCount; c++) {
+        var sim = state.matrix[i][c];
+        var pass = sim >= state.threshold;
+        s += '<div class="gc' + (pass ? " pass" : "") +
+             '" style="background:rgba(63,97,136,' + f2(sim * 0.32) + ')">' + f3(sim) + '</div>';
+      }
+      s += '<div class="gb ' + (state.claims[i].supported ? "sup" : "unsup") + '">' +
+           (state.claims[i].bestIdx >= 0 ? "CTX" + (state.claims[i].bestIdx + 1) : "—") + " " +
+           f3(state.claims[i].bestSim) + (state.claims[i].supported ? " ✓" : " ✗") + '</div>';
+    }
+    fclGrid.innerHTML = s;
+
+    var unsupStr = "—";
+    if (state.unsupported.length > 0) {
+      unsupStr = "";
+      for (i = 0; i < state.unsupported.length; i++) {
+        unsupStr += (i > 0 ? "、" : "") + "C" + state.unsupported[i].i +
+                    "（差 " + f3(state.unsupported[i].gap) + "）";
+      }
+    }
+    fclExpand.innerHTML =
+      rowHtml("Faithfulness",
+              "被支撐 claims / 全部 claims = " + state.supportedCount + " / " + state.claimCount,
+              f3(state.faithfulness)) +
+      rowHtml("未支撐的 claim", "最佳支撐度離門檻還差多少", unsupStr) +
+      rowHtml("平均最佳支撐度",
+              "Σ 每個 claim 的最佳支撐度 / " + state.claimCount, f3(state.avgBestSim)) +
+      rowHtml("Context 使用率",
+              "真的支撐到某個 claim 的片段數 / 全部片段 = " + state.ctxUsed + " / " + state.ctxCount,
+              f3(state.ctxUsage)) +
+      rowHtml("幻覺風險",
+              "0.65×(1-忠實度) + 0.35×(1-平均最佳支撐度) = " + f3(state.hallucScore),
+              state.hallucLevel);
+
+    fclStatus.textContent =
+      "切分規則「" + (state.claimSplit === "clause" ? "切到子句" : "切句") + "」下共 " +
+      state.claimCount + " 個 claim，其中 " + state.supportedCount + " 個在門檻 " +
+      f2(state.threshold) + "（" + (state.tokenMode === "unigram" ? "字元 unigram" : "字元 bigram") +
+      " containment）之上被支撐；" + state.ctxCount + " 個 context 裡有 " + state.ctxUsed +
+      " 個真的派上用場。";
+  }
+
+  /* (5) 事件綁定 */
+  function updateRetrieval() {
+    renderRetrieval(computeRetrievalMetrics({
+      k: parseInt(rqkK.value, 10),
+      goldMask: goldMask,
+      missedGold: parseInt(rqkMissed.value, 10),
+      rerank: parseInt(rqkRerank.value, 10)
+    }));
+  }
+
+  function updateFaithfulness() {
+    renderFaithfulness(computeFaithfulness({
+      answer: fclAnswer.value,
+      contexts: fclCtx.value,
+      threshold: parseInt(fclTh.value, 10) / 100,
+      tokenMode: fclMode.value,
+      claimSplit: fclSplit.value
+    }));
+  }
+
+  if (demoRqk) {
+    rqkK.addEventListener("input", updateRetrieval);
+    rqkMissed.addEventListener("input", updateRetrieval);
+    rqkRerank.addEventListener("input", updateRetrieval);
+    rqkRuler.addEventListener("click", function (e) {
+      var el = e.target;
+      while (el && el !== rqkRuler && !el.getAttribute("data-base")) { el = el.parentNode; }
+      if (!el || el === rqkRuler) { return; }
+      var base = parseInt(el.getAttribute("data-base"), 10);
+      goldMask = bitAt(goldMask, base - 1)
+        ? goldMask - Math.pow(2, base - 1)
+        : goldMask + Math.pow(2, base - 1);
+      updateRetrieval();
+    });
+    rqkReset.addEventListener("click", function () {
+      goldMask = DEFAULT_MASK;
+      rqkK.value = 3;
+      rqkMissed.value = 1;
+      rqkRerank.value = 0;
+      updateRetrieval();
+    });
+    updateRetrieval();
+  }
+
+  if (demoFcl) {
+    fclAnswer.addEventListener("input", updateFaithfulness);
+    fclCtx.addEventListener("input", updateFaithfulness);
+    fclTh.addEventListener("input", updateFaithfulness);
+    fclSplit.addEventListener("change", updateFaithfulness);
+    fclMode.addEventListener("change", updateFaithfulness);
+    fclReset.addEventListener("click", function () {
+      fclAnswer.value = FCL_DEFAULT_ANSWER;
+      fclCtx.value = FCL_DEFAULT_CTX;
+      fclTh.value = 50;
+      fclSplit.value = "sentence";
+      fclMode.value = "bigram";
+      updateFaithfulness();
+    });
+    updateFaithfulness();
+  }
 })();
 </script>

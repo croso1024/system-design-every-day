@@ -1377,7 +1377,7 @@
         <a href="#s3"><span class="n">03</span>生成面：忠實度、幻覺與答案相關性</a>
         <a href="#s4"><span class="n">04</span>離線評測 vs 線上觀測</a>
         <a href="#s5"><span class="n">05</span>LLM-as-Judge：用法與陷阱</a>
-        <a href="#s6"><span class="n">06</span>互動 · 同一問題、三種檢索設定</a>
+        <a href="#s6"><span class="n">06</span>互動 · 把一個答案拆成 claims 對照 Context</a>
         <a href="#s7"><span class="n">07</span>面試折衷與實務清單</a>
       </div>
     </nav>
@@ -1393,7 +1393,12 @@
     <!-- ===================== MAIN CONTENT ===================== -->
     <main>
       <div class="inner">
-        <style>
+        <!-- demo-archetype: F｜拆解器（主，第 6 節：把一段答案拆成 claims、逐一對照 context 算支撐度）＋
+     F｜拆解器（次，第 2 節：把一份排序後的檢索結果沿 rank 攤開，逐項展開 Recall@k／Precision@k／RR／nDCG@k）
+     — 讀者可改答案與 context 原文、claim 切分規則、相似度切詞法與支撐門檻，也可點選 rank 格改金標、拖動 k
+     與 rerank 強度；所有分數與每一項的分子分母都由輸入即時算出。選 F 是因為本篇的命題就是「這個分數的
+     分子分母到底是什麼」，那必須逐層拆開給讀者看每一步的數，而不是給一組結論。 -->
+<style>
   /* 本篇專屬：rev-* 命名空間（rag-evaluation），不覆蓋全站 base 類別 */
   #rev-root {
     --rev-ret: #3f6188; --rev-ret-soft: #eef2f7;
@@ -1436,20 +1441,6 @@
   }
   .rev-side ul { margin: 0; padding-left: 1.15em; font-size: 13px; color: var(--text-2); line-height: 1.65; }
 
-  .rev-flow {
-    display: flex; flex-wrap: wrap; gap: 6px; align-items: center;
-    margin: 12px 0; font-family: var(--mono); font-size: 11.5px;
-  }
-  .rev-chip {
-    border: 1px solid var(--border-strong); border-radius: 6px;
-    padding: 6px 10px; background: #fff; color: var(--text); font-weight: 600;
-  }
-  .rev-chip.ret { background: var(--rev-ret-soft); border-color: var(--rev-ret); color: var(--rev-ret); }
-  .rev-chip.gen { background: var(--rev-gen-soft); border-color: var(--rev-gen); color: var(--rev-gen); }
-  .rev-chip.off { background: var(--rev-off-soft); border-color: var(--rev-off); color: var(--rev-off); }
-  .rev-chip.on { background: var(--rev-on-soft); border-color: var(--rev-on); color: var(--rev-on); }
-  .rev-chip.op { background: var(--bg-soft); color: var(--text-3); border-style: dashed; font-weight: 500; }
-
   .rev-metric-grid {
     display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin: 12px 0;
   }
@@ -1487,89 +1478,102 @@
     display: flex; align-items: center;
   }
 
-  /* Demo */
-  .rev-demo-controls {
-    display: flex; flex-wrap: wrap; gap: 8px; margin: 10px 0 8px; align-items: center;
+  /* Demo 1（rqk-*）：排名尺 + 逐項 DCG 折扣柱 */
+  .rqk-knobs {
+    display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px 16px; margin: 4px 0 10px;
   }
-  .rev-query-box {
-    border: 1px solid var(--border-strong); border-radius: var(--radius-sm);
-    background: #fff; padding: 10px 12px; margin: 8px 0 12px;
+  @media (max-width: 720px) { .rqk-knobs { grid-template-columns: 1fr; } }
+  .rqk-knob { display: flex; flex-direction: column; gap: 3px; }
+  .rqk-knob label {
+    font-size: 12px; color: var(--text-2); display: flex; justify-content: space-between; gap: 8px;
   }
-  .rev-query-box .ql {
-    font-family: var(--mono); font-size: 11px; color: var(--text-3);
-    letter-spacing: .04em; margin-bottom: 4px; font-weight: 600;
+  .rqk-knob label b { font-family: var(--mono); font-size: 12px; color: var(--text); font-weight: 700; }
+  .rqk-knob input[type="range"] { width: 100%; accent-color: var(--accent); }
+  .rqk-acts { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 2px 0 10px; }
+
+  .rqk-ruler {
+    display: grid; grid-template-columns: repeat(10, minmax(0, 1fr)); gap: 2px;
+    margin: 10px 0 2px;
   }
-  .rev-gold {
-    border: 1px solid var(--border); border-radius: var(--radius-sm);
-    background: var(--bg-soft); padding: 12px; margin: 10px 0;
-    font-size: 13px; line-height: 1.65; color: var(--text-2);
+  @media (max-width: 720px) { .rqk-ruler { grid-template-columns: repeat(5, minmax(0, 1fr)); } }
+  .rqk-cell {
+    border: 1px solid var(--border); border-radius: 6px; background: #fff;
+    padding: 6px 3px 7px; text-align: center; cursor: pointer;
+    font-family: var(--mono); font-size: 10px; color: var(--text-2);
+    display: flex; flex-direction: column; gap: 3px; align-items: center;
   }
-  .rev-gold .ql {
-    font-family: var(--mono); font-size: 11px; color: var(--text-3);
-    letter-spacing: .04em; margin-bottom: 6px; font-weight: 600;
+  .rqk-cell .rk { font-weight: 700; color: var(--text); font-size: 11px; }
+  .rqk-cell .src { font-size: 9px; color: var(--text-3); line-height: 1.25; word-break: break-all; }
+  .rqk-cell .star { font-size: 11px; color: var(--text-3); }
+  .rqk-cell.gold { background: var(--ok-soft); border-color: var(--ok); }
+  .rqk-cell.gold .star { color: var(--ok); }
+  .rqk-cell.out { opacity: .42; }
+  .rqk-cell.cut { border-right: 3px solid var(--accent); }
+  .rqk-cell:focus-visible { outline: 2px solid var(--accent); }
+
+  .rqk-disc {
+    display: grid; grid-template-columns: repeat(10, minmax(0, 1fr)); gap: 2px;
+    align-items: end; height: 84px; margin: 8px 0 2px;
   }
-  .rev-panels {
-    display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin: 10px 0;
+  @media (max-width: 720px) { .rqk-disc { grid-template-columns: repeat(5, minmax(0, 1fr)); height: 70px; } }
+  .rqk-dcol { display: flex; flex-direction: column; justify-content: flex-end; align-items: center; height: 100%; gap: 2px; }
+  .rqk-dcol .dv { font-family: var(--mono); font-size: 8.5px; color: var(--text-3); }
+  .rqk-dcol .db { width: 72%; border: 1px solid var(--border-strong); border-radius: 2px 2px 0 0; background: #fff; }
+  .rqk-dcol.on .db { background: var(--ok-soft); border-color: var(--ok); }
+  .rqk-dcol.off .db { background: var(--bg-soft); }
+  .rqk-dcol.beyond { opacity: .32; }
+
+  .rqk-expand { display: flex; flex-direction: column; gap: 1px; background: var(--border); border: 1px solid var(--border); border-radius: 8px; overflow: hidden; margin: 10px 0 2px; }
+  .rqk-expand .er { background: #fff; padding: 7px 10px; display: flex; justify-content: space-between; gap: 10px; flex-wrap: wrap; font-size: 12px; }
+  .rqk-expand .er .en { font-weight: 700; color: var(--text); }
+  .rqk-expand .er .ef { font-family: var(--mono); font-size: 11.5px; color: var(--text-2); }
+  .rqk-expand .er .ev { font-family: var(--mono); font-weight: 700; color: var(--accent); }
+
+  /* Demo 2（fcl-*）：claim × context 支撐度矩陣 */
+  .fcl-io { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin: 4px 0 10px; }
+  @media (max-width: 760px) { .fcl-io { grid-template-columns: 1fr; } }
+  .fcl-io label { font-size: 11px; font-family: var(--mono); color: var(--text-3); display: block; margin-bottom: 3px; letter-spacing: .04em; }
+  .fcl-io textarea {
+    width: 100%; box-sizing: border-box; border: 1px solid var(--border-strong); border-radius: 6px;
+    padding: 8px 10px; font-family: var(--sans); font-size: 12.5px; line-height: 1.6;
+    color: var(--text); background: #fff; resize: vertical; min-height: 92px;
   }
-  @media (max-width: 720px) { .rev-panels { grid-template-columns: 1fr; } }
-  .rev-panel {
-    border: 1px solid var(--border); border-radius: var(--radius-sm);
-    background: #fff; padding: 12px; min-height: 160px;
+  .fcl-knobs { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px 16px; margin: 4px 0 10px; }
+  @media (max-width: 720px) { .fcl-knobs { grid-template-columns: 1fr; } }
+  .fcl-knob { display: flex; flex-direction: column; gap: 3px; }
+  .fcl-knob label { font-size: 12px; color: var(--text-2); display: flex; justify-content: space-between; gap: 8px; }
+  .fcl-knob label b { font-family: var(--mono); font-size: 12px; color: var(--text); font-weight: 700; }
+  .fcl-knob input[type="range"] { width: 100%; accent-color: var(--accent); }
+  .fcl-knob select {
+    border: 1px solid var(--border-strong); border-radius: 6px; background: #fff;
+    padding: 5px 8px; font-size: 12px; color: var(--text); font-family: var(--sans);
   }
-  .rev-panel .pt {
-    font-family: var(--mono); font-size: 11px; color: var(--text-3);
-    letter-spacing: .04em; margin-bottom: 8px; font-weight: 600;
+  .fcl-acts { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 2px 0 10px; }
+
+  .fcl-strip { display: flex; flex-wrap: wrap; gap: 4px; margin: 8px 0 2px; }
+  .fcl-seg {
+    border: 1px solid var(--border-strong); border-radius: 6px; padding: 5px 8px;
+    font-size: 12.5px; line-height: 1.5; background: #fff; max-width: 100%;
   }
-  .rev-hit {
-    border: 1px solid var(--border); border-radius: 6px;
-    padding: 8px 10px; margin-bottom: 6px; background: var(--bg-soft);
-    font-size: 12.5px; line-height: 1.5; color: var(--text-2);
-    transition: border-color .2s, background .2s, opacity .2s;
-    opacity: .55;
-  }
-  .rev-hit.active { opacity: 1; border-color: var(--border-strong); }
-  .rev-hit.tone-ok { background: var(--ok-soft); border-color: var(--ok); }
-  .rev-hit.tone-lock { background: var(--warn-soft); border-color: var(--warn); }
-  .rev-hit.tone-bad { background: var(--bad-soft); border-color: var(--bad); }
-  .rev-hit.tone-idle { background: var(--bg-soft); }
-  .rev-hit .hm {
-    font-family: var(--mono); font-size: 11px; color: var(--text-3);
-    margin-bottom: 3px; font-weight: 600;
-  }
-  .rev-score-row {
-    display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin: 10px 0;
-  }
-  @media (max-width: 720px) { .rev-score-row { grid-template-columns: 1fr 1fr; } }
-  .rev-score {
-    border: 1px solid var(--border); border-radius: var(--radius-sm);
-    background: var(--bg-soft); padding: 10px; text-align: center;
-  }
-  .rev-score .sn {
-    font-family: var(--mono); font-size: 10.5px; color: var(--text-3);
-    letter-spacing: .04em; margin-bottom: 4px; font-weight: 600;
-  }
-  .rev-score .sv {
-    font-family: var(--mono); font-size: 18px; font-weight: 700; color: var(--text);
-  }
-  .rev-score .sv.good { color: var(--ok); }
-  .rev-score .sv.warn { color: var(--warn); }
-  .rev-score .sv.bad { color: var(--bad); }
-  .rev-answer {
-    border: 1px solid var(--border); border-radius: 6px;
-    background: var(--bg-soft); padding: 10px 12px;
-    font-size: 13px; line-height: 1.6; color: var(--text-2); min-height: 72px;
-  }
-  .rev-verdict {
-    font-size: 13px; line-height: 1.6; color: var(--text-2);
-  }
-  .rev-verdict.tone-ok { color: var(--ok); }
-  .rev-verdict.tone-lock { color: var(--warn); }
-  .rev-verdict.tone-bad { color: var(--bad); }
-  .rev-metric {
-    display: flex; flex-wrap: wrap; gap: 14px; margin: 8px 0 4px;
-    font-family: var(--mono); font-size: 12px; color: var(--text-2);
-  }
-  .rev-metric strong { color: var(--text); font-weight: 700; }
+  .fcl-seg .cn { font-family: var(--mono); font-size: 10px; color: var(--text-3); margin-right: 5px; }
+  .fcl-seg.sup { background: var(--ok-soft); border-color: var(--ok); }
+  .fcl-seg.unsup { background: var(--bad-soft); border-color: var(--bad); }
+
+  .fcl-grid { display: grid; gap: 1px; background: var(--border); border: 1px solid var(--border); border-radius: 8px; overflow: hidden; margin: 10px 0 2px; }
+  .fcl-grid > div { background: #fff; padding: 6px 8px; font-size: 11.5px; line-height: 1.4; }
+  .fcl-grid .gh { background: var(--bg-soft); font-family: var(--mono); font-size: 10.5px; color: var(--text-2); font-weight: 700; }
+  .fcl-grid .gr { background: var(--bg-soft); font-family: var(--mono); font-size: 10.5px; color: var(--text-3); }
+  .fcl-grid .gc { font-family: var(--mono); text-align: center; color: var(--text-2); }
+  .fcl-grid .gc.pass { outline: 2px solid var(--ok); outline-offset: -2px; color: var(--text); font-weight: 700; }
+  .fcl-grid .gb { font-family: var(--mono); text-align: center; font-weight: 700; }
+  .fcl-grid .gb.sup { color: var(--ok); }
+  .fcl-grid .gb.unsup { color: var(--bad); }
+
+  .fcl-expand { display: flex; flex-direction: column; gap: 1px; background: var(--border); border: 1px solid var(--border); border-radius: 8px; overflow: hidden; margin: 10px 0 2px; }
+  .fcl-expand .er { background: #fff; padding: 7px 10px; display: flex; justify-content: space-between; gap: 10px; flex-wrap: wrap; font-size: 12px; }
+  .fcl-expand .er .en { font-weight: 700; color: var(--text); }
+  .fcl-expand .er .ef { font-family: var(--mono); font-size: 11.5px; color: var(--text-2); }
+  .fcl-expand .er .ev { font-family: var(--mono); font-weight: 700; color: var(--accent); }
 </style>
 
 <div id="rev-root">
@@ -1603,17 +1607,40 @@
     <p>評估不是另一套產品，而是掛在 pipeline 旁的量測層：離線用標註集驗證「改動方向」，線上用回饋與抽樣盯「真實分布」。本篇與切塊／hybrid 篇互補——那些調旋鈕，這裡告訴你旋鈕轉完有沒有變好。</p>
   </div>
 
-  <div class="rev-flow">
-    <span class="rev-chip ret">檢索面</span>
-    <span class="rev-chip op">召回／精準</span>
-    <span class="rev-chip op">→</span>
-    <span class="rev-chip gen">生成面</span>
-    <span class="rev-chip op">忠實／相關</span>
-    <span class="rev-chip op">→</span>
-    <span class="rev-chip off">離線評測</span>
-    <span class="rev-chip op">＋</span>
-    <span class="rev-chip on">線上觀測</span>
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr><th>量測面</th><th>回答的問題</th><th>主要指標</th><th>壞掉時的徵狀</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><strong>檢索面</strong></td>
+          <td class="hl">該進 Context 的證據有沒有被撈到、排得夠不夠前</td>
+          <td>Recall@k、Precision@k、MRR／nDCG@k</td>
+          <td>引用空或引用一堆卻答偏</td>
+        </tr>
+        <tr>
+          <td><strong>生成面</strong></td>
+          <td class="hl">答案有沒有忠於證據、有沒有回答到問題</td>
+          <td>Faithfulness、Answer Relevance</td>
+          <td>證據齊全卻加油添醋，或正確但答非所問</td>
+        </tr>
+        <tr>
+          <td><strong>離線評測</strong></td>
+          <td class="hl">這次改動的方向對不對（可重複、可比較）</td>
+          <td>固定 golden set 上的前兩列指標</td>
+          <td>分數上升但線上沒感覺</td>
+        </tr>
+        <tr>
+          <td><strong>線上觀測</strong></td>
+          <td class="hl">真實分布下實際發生了什麼</td>
+          <td>引用點擊、負回饋率、拒答率、抽樣人工複核</td>
+          <td>Golden set 過關卻上線翻車</td>
+        </tr>
+      </tbody>
+    </table>
   </div>
+  <p class="cap">四列由上到下是「量測什麼」到「在哪裡量」：前兩列切開品質的兩個面，後兩列切開量測的兩個場域——四格都要有人負責，缺一格就會出現「分數好看但使用者不買單」。</p>
 
   <div class="oneliner">
     <b>一句話答法</b>RAG 品質要拆檢索與生成兩面量測；沒有可重複評測，調參只是在賭 demo。
@@ -1646,6 +1673,51 @@
 
   <div class="formula">Recall@k = |Retrieved<sub>k</sub> ∩ Relevant| / |Relevant|</div>
   <div class="formula">Precision@k = |Retrieved<sub>k</sub> ∩ Relevant| / k</div>
+
+  <div class="demo" id="demo-rqk">
+    <div class="demo-bar">
+      <span class="label">互動 · 把一份排名結果攤開成四個指標</span>
+      <span class="label" style="text-transform:none;font-family:var(--sans);font-size:12px;color:var(--text-2)">點 rank 格改金標，拖 k 與 rerank</span>
+    </div>
+    <div class="demo-body">
+      <p style="font-size:13px;color:var(--text-2);margin:2px 0 10px">
+        同一個查詢撈回 10 筆候選（已依分數排序）。<strong>點任一格</strong>可把它標成／取消金標（★）；再用下面三個旋鈕改 <var>k</var>、改「完全沒進 Top-10 的金標數」、改 rerank 強度。四個指標與它們的分子分母即時重算。
+      </p>
+
+      <div class="rqk-knobs">
+        <div class="rqk-knob">
+          <label for="rqk-k">Top-<var>k</var> 的 k<b id="rqk-v-k">3</b></label>
+          <input type="range" id="rqk-k" min="1" max="10" step="1" value="3">
+        </div>
+        <div class="rqk-knob">
+          <label for="rqk-missed">沒進 Top-10 的金標數<b id="rqk-v-missed">1</b></label>
+          <input type="range" id="rqk-missed" min="0" max="4" step="1" value="1">
+        </div>
+        <div class="rqk-knob">
+          <label for="rqk-rerank">rerank 強度（每輪金標前移 1 位）<b id="rqk-v-rerank">0</b></label>
+          <input type="range" id="rqk-rerank" min="0" max="3" step="1" value="0">
+        </div>
+      </div>
+
+      <div class="rqk-acts">
+        <button class="btn" id="rqk-reset">重置</button>
+        <div class="legend">
+          <span><i class="dot ns-ok"></i>金標（★）</span>
+          <span><i class="dot ns-idle"></i>非金標</span>
+          <span><i class="dot ns-wait"></i>k 的切線</span>
+        </div>
+      </div>
+
+      <div class="rqk-ruler" id="rqk-ruler"></div>
+      <p class="cap">排名尺：左到右是 rank 1…10，藍色右邊界就是 Top-<var>k</var> 的切線，切線右邊的候選不進 Context。rerank 只會讓 ★ 往左移，不會憑空生出金標——所以它救得了排序指標，救不了召回。</p>
+
+      <div class="rqk-disc" id="rqk-disc"></div>
+      <p class="cap">每根柱是該名次的折扣權重 <code>1/log2(i+1)</code>：rank 1 拿滿 1.000、rank 2 只剩 0.631、rank 10 只剩 0.289。填色的柱才真的有金標、才計入 DCG——這就是「排越前面越值錢」的量化樣子。</p>
+
+      <div class="rqk-expand" id="rqk-expand"></div>
+      <div class="status-line" id="rqk-status">點 rank 格或拖旋鈕，看四個指標的分子分母怎麼變。</div>
+    </div>
+  </div>
 
   <div class="callout warn">
     <div class="c-title"><span class="ic">陷阱</span>只優化 Recall@k</div>
@@ -1697,7 +1769,7 @@
       <ul>
         <li>答案中的可驗證主張，是否都能被檢索到的 Context 支持。</li>
         <li>低忠實度 ≈ 幻覺／捏造數字、期限、例外條款。</li>
-        <li>可用人工勾選，或 LLM-as-judge 逐句對照 Context。</li>
+        <li>可用人工勾選，或 LLM-as-judge 逐句對照 Context。本篇文末的互動 demo 會把這個逐句拆解程序完整跑一遍。</li>
       </ul>
     </div>
     <div class="rev-side gen">
@@ -1876,88 +1948,72 @@
 <section id="s6">
   <div class="sec-head">
     <span class="sec-num">06</span>
-    <h2>互動 · 同一問題、三種檢索設定</h2>
+    <h2>互動 · 把一個答案拆成 claims 對照 Context</h2>
   </div>
-  <p class="sec-sub">固定問題與金標證據，切換弱檢索／僅向量 Top-3／過濾＋rerank——觀察檢索與生成評分如何一起變。</p>
+  <p class="sec-sub">Faithfulness 不是一個感覺分數，而是一套可以手算的程序：切 claims → 逐一比對 Context → 過門檻的算被支撐 → 相除。這裡把四層全攤開。</p>
 
-  <div class="demo" id="demo-rev-eval">
+  <div class="demo" id="demo-fcl">
     <div class="demo-bar">
-      <span class="label">互動 · RAG 評分隨檢索設定變化</span>
-      <span class="label" style="text-transform:none;font-family:var(--sans);font-size:12px;color:var(--text-2)">選設定後按「執行評測」</span>
+      <span class="label">互動 · Faithfulness 逐句拆解器</span>
+      <span class="label" style="text-transform:none;font-family:var(--sans);font-size:12px;color:var(--text-2)">改文字、改切分規則、改門檻</span>
     </div>
     <div class="demo-body">
-      <div class="rev-query-box">
-        <div class="ql">USER QUERY</div>
-        <div>到貨後多久可以退貨？電子票券能退嗎？</div>
+      <div class="fcl-io">
+        <div>
+          <label for="fcl-answer">ANSWER · 模型產出的答案（可整段改寫）</label>
+          <textarea id="fcl-answer" spellcheck="false">到貨後 14 日內可申請退貨，商品須保持原包裝。電子票券也可以退。</textarea>
+        </div>
+        <div>
+          <label for="fcl-ctx">CONTEXT · 檢索到的片段（一行一段）</label>
+          <textarea id="fcl-ctx" spellcheck="false">顧客可於到貨後 14 日內申請退貨，商品須保持原包裝與完整配件。
+電子票券與客製化商品不適用本退貨條款。
+標準配送約 2-4 個工作天送達，到貨通知以簡訊為準。</textarea>
+        </div>
       </div>
 
-      <div class="rev-gold">
-        <div class="ql">GOLD · 必須涵蓋的證據</div>
-        <div>金標 chunk A：到貨後 <strong>14 日內</strong>可申請退貨。<br>金標 chunk B：<strong>電子票券與客製化商品不適用</strong>本退貨條款。</div>
+      <div class="fcl-knobs">
+        <div class="fcl-knob">
+          <label for="fcl-th">支撐門檻（支撐度 ≥ 此值才算被支撐）<b id="fcl-v-th">0.50</b></label>
+          <input type="range" id="fcl-th" min="5" max="90" step="1" value="50">
+        </div>
+        <div class="fcl-knob">
+          <label for="fcl-split">claim 切分規則</label>
+          <select id="fcl-split">
+            <option value="sentence" selected>句末標點（。！？；）切句</option>
+            <option value="clause">再依逗號（，、）切到子句</option>
+          </select>
+        </div>
+        <div class="fcl-knob">
+          <label for="fcl-mode">相似度切詞法</label>
+          <select id="fcl-mode">
+            <option value="bigram" selected>中文字元 bigram</option>
+            <option value="unigram">字元 unigram（較寬鬆）</option>
+          </select>
+        </div>
       </div>
 
-      <div class="seg" role="group" aria-label="檢索設定">
-        <button data-sc="weak" aria-pressed="true">弱檢索 · Top-3 雜訊</button>
-        <button data-sc="vector" aria-pressed="false">純向量 · Top-3</button>
-        <button data-sc="hybrid" aria-pressed="false">過濾＋Rerank</button>
-      </div>
-
-      <div class="rev-demo-controls">
-        <button class="btn primary" id="rev-btn-run">執行評測</button>
-        <button class="btn" id="rev-btn-reset">重置</button>
+      <div class="fcl-acts">
+        <button class="btn" id="fcl-reset">重置</button>
         <div class="legend">
-          <span><i class="dot ns-ok"></i>金標命中</span>
-          <span><i class="dot ns-lock"></i>弱相關</span>
-          <span><i class="dot ns-bad"></i>噪音／誤導</span>
-          <span><i class="dot ns-idle"></i>未入選</span>
-          <span><i class="dot ns-wait"></i>評測中</span>
+          <span><i class="dot ns-ok"></i>被 Context 支撐</span>
+          <span><i class="dot ns-bad"></i>無據（計入幻覺）</span>
+          <span><i class="dot ns-idle"></i>相似度未過門檻</span>
         </div>
       </div>
 
-      <div class="status-line" id="rev-status">選擇檢索設定後按「執行評測」，同一問題下對比 Recall／Precision 與生成面分數。</div>
+      <div class="fcl-strip" id="fcl-strip"></div>
+      <p class="cap">第一層：答案依切分規則被切成幾個 claim。切得越細，分母越大、同一段答案的分數就越嚴——所以「Faithfulness = 0.75」這種數字，離開切分規則是沒有意義的。</p>
 
-      <div class="rev-metric" id="rev-metric" aria-live="polite">
-        <span>設定：<strong id="rev-m-sc">—</strong></span>
-        <span>Recall@3：<strong id="rev-m-rec">—</strong></span>
-        <span>Precision@3：<strong id="rev-m-pre">—</strong></span>
-      </div>
+      <div class="fcl-grid" id="fcl-grid"></div>
+      <p class="cap">第二層：每一格是<strong>支撐度</strong>＝該 claim 的 gram 有多少比例出現在該 context（containment，對應忠實度那一節寫的 <code>CLAIM ⊆ CONTEXT</code>——方向不對稱，問的是「claim 被蓋住了嗎」），綠框代表過了門檻。<strong>把門檻從 0.50 降到 0.35 試試</strong>：「電子票券也可以退」對上「電子票券與客製化商品<strong>不適用</strong>本退貨條款」會翻成「被支撐」，分數衝到 1.000——但語意完全相反。字面公式讀不出否定，這正是忠實度最後需要 LLM-as-Judge 或人工複核的原因，也是本篇談 Judge 那一節要處理的難題。</p>
 
-      <div class="rev-score-row" id="rev-scores" aria-live="polite">
-        <div class="rev-score">
-          <div class="sn">FAITHFULNESS</div>
-          <div class="sv" id="rev-s-faith">—</div>
-        </div>
-        <div class="rev-score">
-          <div class="sn">ANSWER REL.</div>
-          <div class="sv" id="rev-s-arel">—</div>
-        </div>
-        <div class="rev-score">
-          <div class="sn">CONTEXT REL.</div>
-          <div class="sv" id="rev-s-crel">—</div>
-        </div>
-        <div class="rev-score">
-          <div class="sn">HALLUC. RISK</div>
-          <div class="sv" id="rev-s-hall">—</div>
-        </div>
-      </div>
-
-      <div class="rev-panels">
-        <div class="rev-panel">
-          <div class="pt">Top-3 Retrieved（示意）</div>
-          <div id="rev-hits"></div>
-        </div>
-        <div class="rev-panel">
-          <div class="pt">模擬生成答案 → Judge 判定</div>
-          <div class="rev-answer" id="rev-answer">尚未執行。三種設定共用同一問題與同一組金標；差異只在「撈到什麼」如何牽動生成與評分。</div>
-          <div class="rev-verdict" id="rev-verdict" style="margin-top:10px"></div>
-        </div>
-      </div>
-      <p class="cap" style="text-align:center">注意弱檢索情境：答案可能「看起來完整」但期限是捏造的——這正是只看最終答案會漏掉的風險。</p>
+      <div class="fcl-expand" id="fcl-expand"></div>
+      <div class="status-line" id="fcl-status">改上面的文字或旋鈕，四層拆解會即時重算。</div>
     </div>
   </div>
 
   <div class="oneliner">
-    <b>一句話答法</b>同一問題換檢索設定，應同時看 Recall／Precision 與 Faithfulness；高相關答案若無金標支持，判為幻覺風險。
+    <b>一句話答法</b>Faithfulness＝被 Context 支撐的 claims／全部 claims；報這個分數時必須同時交代 claim 切分規則、相似度定義與門檻，否則數字不可比較。
   </div>
 </section>
 
@@ -2090,229 +2146,535 @@
 (function () {
   "use strict";
 
-  var scenario = "weak";
-  var ran = false;
+  /* (1) 常數與參數表 */
+  /* 檢索 demo：10 筆候選的來源標籤（只是列的名字，不參與任何計算） */
+  var CANDIDATES = [
+    "shipping§時效", "policy-v3§退貨", "promo-faq§活動", "old-policy-v1", "policy-v3§例外",
+    "policy-v3§運費", "faq§付款", "shipping§通知", "promo-faq§會員", "faq§發票"
+  ];
+  var POOL = 10;                 /* 候選池大小（rank 1..10） */
+  var DEFAULT_MASK = 18;         /* 二進位 0000010010：rank 2 與 rank 5 為金標 */
 
-  var statusEl = document.getElementById("rev-status");
-  var hitsEl = document.getElementById("rev-hits");
-  var answerEl = document.getElementById("rev-answer");
-  var verdictEl = document.getElementById("rev-verdict");
-  var btnRun = document.getElementById("rev-btn-run");
-  var btnReset = document.getElementById("rev-btn-reset");
-  var mSc = document.getElementById("rev-m-sc");
-  var mRec = document.getElementById("rev-m-rec");
-  var mPre = document.getElementById("rev-m-pre");
-  var sFaith = document.getElementById("rev-s-faith");
-  var sArel = document.getElementById("rev-s-arel");
-  var sCrel = document.getElementById("rev-s-crel");
-  var sHall = document.getElementById("rev-s-hall");
-  var segRoot = document.querySelector("#demo-rev-eval .seg");
+  /* 忠實度 demo：切分字元表與規模上限 */
+  var SENT_END = "。！？；!?;";
+  var CLAUSE_END = "，、,";
+  var PUNCT = "。！？；!?;，、,：:「」『』（）()《》〈〉…—－-·／/＼\\\"'";
+  var MAX_CLAIMS = 12;
+  var MAX_CTX = 6;
+  var MAX_CHARS = 1200;
+  var W_FAITH = 0.65;            /* 幻覺風險 = 0.65×(1-faithfulness) + 0.35×(1-平均最佳支撐度) */
+  var RISK_LOW = 0.25;           /* < 0.25 判低 */
+  var RISK_MID = 0.50;           /* < 0.50 判中，其餘判高 */
 
-  var SCENARIOS = {
-    weak: {
-      label: "弱檢索 · Top-3 雜訊",
-      recall: "0/2",
-      precision: "0/3",
-      hits: [
-        {
-          meta: "rank#1 · promo-faq · score 0.81",
-          body: "本季滿額贈運費 ethereal；詳見活動頁。與退貨期限無關。",
-          tone: "bad",
-          gold: false
-        },
-        {
-          meta: "rank#2 · shipping · score 0.74",
-          body: "標準配送約 2–4 個工作天送達。到貨通知以簡訊為準。",
-          tone: "lock",
-          gold: false
-        },
-        {
-          meta: "rank#3 · old-policy-v1 · score 0.69",
-          body: "（過期）到貨後 7 日內可申請退貨。條款已廢止。",
-          tone: "bad",
-          gold: false
-        }
-      ],
-      answer: "依目前資料，到貨後大約 7 日內可以退貨；電子票券通常也能退，建議直接聯繫客服加急處理。",
-      faith: "1.2",
-      arel: "3.8",
-      crel: "1.5",
-      hall: "高",
-      faithCls: "bad",
-      arelCls: "warn",
-      crelCls: "bad",
-      hallCls: "bad",
-      verdictTone: "tone-bad",
-      status: "Top-3 無任一金標：命中促銷與過期條款。模型仍產出「完整答案」，期限 7 日與「票券可退」皆無據。",
-      verdict: "Judge：Faithfulness 極低、幻覺風險高。Answer Relevance 看起來還行——這正是只看最終答案會誤判「還不錯」的典型。"
-    },
-    vector: {
-      label: "純向量 · Top-3",
-      recall: "1/2",
-      precision: "1/3",
-      hits: [
-        {
-          meta: "rank#1 · policy-v3§退貨 · score 0.88",
-          body: "顧客可於到貨後 14 日內申請退貨。商品須保持原包裝與完整配件。",
-          tone: "ok",
-          gold: true
-        },
-        {
-          meta: "rank#2 · shipping · score 0.71",
-          body: "標準配送約 2–4 個工作天。運費規則另見配送專章。",
-          tone: "lock",
-          gold: false
-        },
-        {
-          meta: "rank#3 · promo-faq · score 0.66",
-          body: "會員可享延長鑑賞期活動（僅限指定 SKU）。",
-          tone: "bad",
-          gold: false
-        }
-      ],
-      answer: "到貨後 14 日內可申請退貨，且須保持原包裝。關於電子票券是否適用，本次檢索未涵蓋明確例外條款，建議再查退貨專章例外段。",
-      faith: "4.2",
-      arel: "3.5",
-      crel: "3.0",
-      hall: "中",
-      faithCls: "good",
-      arelCls: "warn",
-      crelCls: "warn",
-      hallCls: "warn",
-      verdictTone: "tone-lock",
-      status: "Recall 50%：金標 A（14 日）命中；金標 B（票券例外）未進 Top-3。答案對已知部分忠實，對缺證部分選擇保留。",
-      verdict: "Judge：Faithfulness 尚可（有拒答／不確定），但 Answer Relevance 因漏答票券例外而扣分。下一步應提高召回或加 keyword／metadata。"
-    },
-    hybrid: {
-      label: "過濾＋Rerank",
-      recall: "2/2",
-      precision: "2/3",
-      hits: [
-        {
-          meta: "rank#1 · policy-v3§退貨 · rerank 0.94",
-          body: "顧客可於到貨後 14 日內申請退貨。商品須保持原包裝與完整配件。",
-          tone: "ok",
-          gold: true
-        },
-        {
-          meta: "rank#2 · policy-v3§例外 · rerank 0.91",
-          body: "電子票券與客製化商品不適用本退貨條款。",
-          tone: "ok",
-          gold: true
-        },
-        {
-          meta: "rank#3 · policy-v3§運費 · rerank 0.55",
-          body: "退貨運費規則另見配送專章（弱相關，佔位）。",
-          tone: "lock",
-          gold: false
-        }
-      ],
-      answer: "到貨後 14 日內可申請退貨（須原包裝與完整配件）。電子票券與客製化商品不適用本退貨條款，故電子票券不能依此條款退貨。",
-      faith: "4.8",
-      arel: "4.7",
-      crel: "4.5",
-      hall: "低",
-      faithCls: "good",
-      arelCls: "good",
-      crelCls: "good",
-      hallCls: "good",
-      verdictTone: "tone-ok",
-      status: "兩金標皆入選；metadata 過濾掉過期政策，rerank 把例外條款抬到 Top-2。Context 乾淨，生成可完整覆蓋問題。",
-      verdict: "Judge：四軸分數同步上升。結論：品質躍升來自檢索設定，而非換更大的生成模型。"
-    }
-  };
+  /* (2) compute* 純函式 —— 完全不碰 DOM，只吃參數、只回傳物件 */
 
-  function setScore(el, value, cls) {
-    el.textContent = value;
-    el.classList.remove("good", "warn", "bad");
-    if (cls) el.classList.add(cls);
+  function clampInt(v, lo, hi) {
+    var n = Math.round(Number(v));
+    if (isNaN(n)) { n = lo; }
+    if (n < lo) { return lo; }
+    if (n > hi) { return hi; }
+    return n;
   }
 
-  function renderIdle() {
-    hitsEl.innerHTML = "";
-    answerEl.textContent = "尚未執行。三種設定共用同一問題與同一組金標；差異只在「撈到什麼」如何牽動生成與評分。";
-    verdictEl.textContent = "";
-    verdictEl.className = "rev-verdict";
-    mSc.textContent = "—";
-    mRec.textContent = "—";
-    mPre.textContent = "—";
-    setScore(sFaith, "—", "");
-    setScore(sArel, "—", "");
-    setScore(sCrel, "—", "");
-    setScore(sHall, "—", "");
-    statusEl.textContent = "選擇檢索設定後按「執行評測」，同一問題下對比 Recall／Precision 與生成面分數。";
+  function log2(x) { return Math.log(x) / Math.LN2; }
+
+  function bitAt(mask, i) {
+    return Math.floor(mask / Math.pow(2, i)) % 2 === 1;
   }
 
-  function renderHits(hits, active) {
-    hitsEl.innerHTML = "";
-    hits.forEach(function (h) {
-      var div = document.createElement("div");
-      div.className = "rev-hit" + (active ? " active tone-" + h.tone : "");
-      var meta = document.createElement("div");
-      meta.className = "hm";
-      meta.textContent = h.meta + (h.gold ? " · GOLD" : "");
-      var body = document.createElement("div");
-      body.textContent = h.body;
-      div.appendChild(meta);
-      div.appendChild(body);
-      hitsEl.appendChild(div);
-    });
-  }
-
-  function run() {
-    var sc = SCENARIOS[scenario];
-    if (!sc) return;
-    ran = true;
-    statusEl.textContent = "評測中…";
-    renderHits(sc.hits, false);
-    setTimeout(function () {
-      renderHits(sc.hits, true);
-      mSc.textContent = sc.label;
-      mRec.textContent = sc.recall;
-      mPre.textContent = sc.precision;
-      setScore(sFaith, sc.faith, sc.faithCls);
-      setScore(sArel, sc.arel, sc.arelCls);
-      setScore(sCrel, sc.crel, sc.crelCls);
-      setScore(sHall, sc.hall, sc.hallCls);
-      answerEl.textContent = sc.answer;
-      verdictEl.textContent = sc.verdict;
-      verdictEl.className = "rev-verdict " + sc.verdictTone;
-      statusEl.textContent = sc.status;
-    }, 280);
-  }
-
-  function reset() {
-    ran = false;
-    scenario = "weak";
-    if (segRoot) {
-      var buttons = segRoot.querySelectorAll("button[data-sc]");
-      buttons.forEach(function (btn) {
-        btn.setAttribute("aria-pressed", btn.getAttribute("data-sc") === "weak" ? "true" : "false");
-      });
-    }
-    renderIdle();
-  }
-
-  if (segRoot) {
-    segRoot.addEventListener("click", function (e) {
-      var btn = e.target.closest("button[data-sc]");
-      if (!btn || !segRoot.contains(btn)) return;
-      scenario = btn.getAttribute("data-sc");
-      var buttons = segRoot.querySelectorAll("button[data-sc]");
-      buttons.forEach(function (b) {
-        b.setAttribute("aria-pressed", b === btn ? "true" : "false");
-      });
-      if (ran) run();
-      else {
-        statusEl.textContent = "已切換為「" + (SCENARIOS[scenario] && SCENARIOS[scenario].label) + "」。按「執行評測」查看分數。";
+  /* rerank 規則：每一輪從 rank 1 往後掃，遇到「自己是金標、前一名不是金標」就與前一名交換，
+     交換後直接往後走（所以每個金標每輪最多前移 1 位，相鄰兩個金標不會互換位置）。 */
+  function rerankOnce(list) {
+    for (var i = 1; i < list.length; i++) {
+      if (list[i].gold && !list[i - 1].gold) {
+        var tmp = list[i - 1];
+        list[i - 1] = list[i];
+        list[i] = tmp;
       }
-    });
+    }
+    return list;
   }
 
-  if (btnRun) btnRun.addEventListener("click", run);
-  if (btnReset) btnReset.addEventListener("click", reset);
+  // @probe fn       computeRetrievalMetrics
+  // @probe baseline {"k":3,"goldMask":18,"missedGold":1,"rerank":0}
+  // @probe sweep    {"k":[1,10],"goldMask":[1,1023],"missedGold":[0,4],"rerank":[0,3]}
+  function computeRetrievalMetrics(p) {
+    var k = clampInt(p.k, 1, POOL);
+    var mask = clampInt(p.goldMask, 0, 1023);
+    var missedGold = clampInt(p.missedGold, 0, 4);
+    var rerank = clampInt(p.rerank, 0, 3);
 
-  renderIdle();
+    var list = [];
+    var i;
+    for (i = 0; i < POOL; i++) {
+      list.push({ id: CANDIDATES[i], gold: bitAt(mask, i), baseRank: i + 1 });
+    }
+    for (i = 0; i < rerank; i++) { list = rerankOnce(list); }
+
+    var ranking = [];
+    var goldInTop = 0;
+    for (i = 0; i < POOL; i++) {
+      ranking.push({ rank: i + 1, id: list[i].id, gold: list[i].gold ? 1 : 0, baseRank: list[i].baseRank });
+      if (list[i].gold) { goldInTop += 1; }
+    }
+    var relevantTotal = goldInTop + missedGold;
+
+    var hitsAtK = 0;
+    var firstRelRank = 0;
+    var terms = [];
+    var dcgAtK = 0;
+    for (i = 0; i < k; i++) {
+      var rel = ranking[i].gold;
+      if (rel === 1) {
+        hitsAtK += 1;
+        if (firstRelRank === 0) { firstRelRank = i + 1; }
+      }
+      var disc = 1 / log2(i + 2);
+      var gain = rel * disc;
+      dcgAtK += gain;
+      terms.push({ i: i + 1, id: ranking[i].id, rel: rel, disc: disc, gain: gain });
+    }
+
+    var idealRel = relevantTotal < k ? relevantTotal : k;
+    var idcgAtK = 0;
+    for (i = 0; i < idealRel; i++) { idcgAtK += 1 / log2(i + 2); }
+
+    return {
+      k: k,
+      rerank: rerank,
+      missedGold: missedGold,
+      ranking: ranking,
+      goldInTop: goldInTop,
+      relevantTotal: relevantTotal,
+      hitsAtK: hitsAtK,
+      recallAtK: relevantTotal > 0 ? hitsAtK / relevantTotal : 0,
+      precisionAtK: hitsAtK / k,
+      noiseRatio: (k - hitsAtK) / k,
+      firstRelRank: firstRelRank,
+      rr: firstRelRank > 0 ? 1 / firstRelRank : 0,
+      terms: terms,
+      dcgAtK: dcgAtK,
+      idealRel: idealRel,
+      idcgAtK: idcgAtK,
+      ndcgAtK: idcgAtK > 0 ? dcgAtK / idcgAtK : 0
+    };
+  }
+
+  function isIn(setStr, ch) { return setStr.indexOf(ch) >= 0; }
+
+  function isBlank(ch) {
+    return ch === " " || ch === "\t" || ch === "　" || ch === "\r" || ch === "\n";
+  }
+
+  /* 以 '\n' 或 '|' 切出 context 片段（不使用 RegExp） */
+  function splitContexts(s) {
+    var out = [];
+    var cur = "";
+    for (var i = 0; i < s.length; i++) {
+      var ch = s.charAt(i);
+      if (ch === "\n" || ch === "|" || ch === "\r") {
+        if (cur.length > 0) { out.push(cur); }
+        cur = "";
+      } else {
+        cur += ch;
+      }
+      if (out.length >= MAX_CTX) { return out; }
+    }
+    if (cur.length > 0 && out.length < MAX_CTX) { out.push(cur); }
+    return out;
+  }
+
+  /* claim 切分：sentence 模式只在句末標點斷開；clause 模式再依逗號斷到子句 */
+  function splitClaims(s, mode) {
+    var out = [];
+    var cur = "";
+    var i, ch, brk;
+    for (i = 0; i < s.length; i++) {
+      ch = s.charAt(i);
+      brk = isIn(SENT_END, ch) || ch === "\n" || (mode === "clause" && isIn(CLAUSE_END, ch));
+      if (brk) {
+        if (trimText(cur).length >= 2) { out.push(trimText(cur)); }
+        cur = "";
+      } else {
+        cur += ch;
+      }
+      if (out.length >= MAX_CLAIMS) { return out; }
+    }
+    if (trimText(cur).length >= 2 && out.length < MAX_CLAIMS) { out.push(trimText(cur)); }
+    return out;
+  }
+
+  function trimText(s) {
+    var a = 0, b = s.length;
+    while (a < b && isBlank(s.charAt(a))) { a += 1; }
+    while (b > a && isBlank(s.charAt(b - 1))) { b -= 1; }
+    return s.slice(a, b);
+  }
+
+  /* 只留下非空白、非標點的字元，再切成字元 bigram 或 unigram；去重用陣列 indexOf */
+  function grams(text, mode) {
+    var core = "";
+    var i, ch;
+    for (i = 0; i < text.length && i < MAX_CHARS; i++) {
+      ch = text.charAt(i);
+      if (!isBlank(ch) && !isIn(PUNCT, ch)) { core += ch; }
+    }
+    var out = [];
+    var g;
+    if (mode === "unigram" || core.length < 2) {
+      for (i = 0; i < core.length; i++) {
+        g = core.charAt(i);
+        if (out.indexOf(g) < 0) { out.push(g); }
+      }
+      return out;
+    }
+    for (i = 0; i + 1 < core.length; i++) {
+      g = core.charAt(i) + core.charAt(i + 1);
+      if (out.indexOf(g) < 0) { out.push(g); }
+    }
+    return out;
+  }
+
+  /* 支撐度＝containment：claim 的 gram 有多少比例出現在該 context（對應本篇寫的 CLAIM ⊆ CONTEXT，
+     方向不對稱——我們問的是「claim 被 context 蓋住了嗎」，不是兩段文字有多像） */
+  function containment(claimGrams, ctxGrams) {
+    if (claimGrams.length === 0 || ctxGrams.length === 0) { return 0; }
+    var inter = 0;
+    for (var i = 0; i < claimGrams.length; i++) {
+      if (ctxGrams.indexOf(claimGrams[i]) >= 0) { inter += 1; }
+    }
+    return inter / claimGrams.length;
+  }
+
+  // @probe fn       computeFaithfulness
+  // @probe baseline {"answer":"到貨後 14 日內可申請退貨，商品須保持原包裝。電子票券也可以退。","contexts":"顧客可於到貨後 14 日內申請退貨，商品須保持原包裝與完整配件。|電子票券與客製化商品不適用本退貨條款。|標準配送約 2-4 個工作天送達，到貨通知以簡訊為準。","threshold":0.50,"tokenMode":"bigram","claimSplit":"sentence"}
+  // @probe sweep    {"answer":["到貨後 14 日內可申請退貨。","到貨後 30 日內可申請退貨，電子票券也可以退，並可延長鑑賞期至 60 日。"],"contexts":["顧客可於到貨後 14 日內申請退貨。","顧客可於到貨後 14 日內申請退貨，商品須保持原包裝與完整配件。|電子票券與客製化商品不適用本退貨條款。|標準配送約 2-4 個工作天送達，到貨通知以簡訊為準。|會員延長鑑賞期活動僅限指定 SKU。"],"threshold":[0.05,0.90],"tokenMode":["bigram","unigram"],"claimSplit":["sentence","clause"]}
+  function computeFaithfulness(p) {
+    var threshold = Number(p.threshold);
+    if (isNaN(threshold)) { threshold = 0.5; }
+    if (threshold < 0.05) { threshold = 0.05; }
+    if (threshold > 0.9) { threshold = 0.9; }
+    var tokenMode = p.tokenMode === "unigram" ? "unigram" : "bigram";
+    var claimSplit = p.claimSplit === "clause" ? "clause" : "sentence";
+
+    var ctxTexts = splitContexts(String(p.contexts));
+    var claimTexts = splitClaims(String(p.answer), claimSplit);
+
+    var ctxGrams = [];
+    var i, c;
+    for (i = 0; i < ctxTexts.length; i++) {
+      ctxTexts[i] = trimText(ctxTexts[i]);
+      ctxGrams.push(grams(ctxTexts[i], tokenMode));
+    }
+
+    var matrix = [];
+    var claims = [];
+    var supportedCount = 0;
+    var sumBest = 0;
+    var ctxHit = [];
+    for (i = 0; i < ctxTexts.length; i++) { ctxHit.push(0); }
+
+    for (i = 0; i < claimTexts.length; i++) {
+      var cg = grams(claimTexts[i], tokenMode);
+      var row = [];
+      var bestSim = 0;
+      var bestIdx = -1;
+      for (c = 0; c < ctxGrams.length; c++) {
+        var sim = containment(cg, ctxGrams[c]);
+        row.push(sim);
+        if (sim > bestSim) { bestSim = sim; bestIdx = c; }
+      }
+      var sup = bestSim >= threshold && bestIdx >= 0;
+      if (sup) {
+        supportedCount += 1;
+        ctxHit[bestIdx] = 1;
+      }
+      sumBest += bestSim;
+      matrix.push(row);
+      claims.push({
+        text: claimTexts[i],
+        grams: cg.length,
+        bestIdx: bestIdx,
+        bestSim: bestSim,
+        gap: sup ? 0 : threshold - bestSim,
+        supported: sup ? 1 : 0
+      });
+    }
+
+    var claimCount = claims.length;
+    var ctxUsed = 0;
+    for (i = 0; i < ctxHit.length; i++) { ctxUsed += ctxHit[i]; }
+    var faithfulness = claimCount > 0 ? supportedCount / claimCount : 0;
+    var avgBestSim = claimCount > 0 ? sumBest / claimCount : 0;
+    var hallucScore = W_FAITH * (1 - faithfulness) + (1 - W_FAITH) * (1 - avgBestSim);
+    var hallucLevel = hallucScore < RISK_LOW ? "低" : (hallucScore < RISK_MID ? "中" : "高");
+
+    var unsupported = [];
+    for (i = 0; i < claims.length; i++) {
+      if (!claims[i].supported) {
+        unsupported.push({ i: i + 1, text: claims[i].text, bestSim: claims[i].bestSim, gap: claims[i].gap });
+      }
+    }
+
+    return {
+      threshold: threshold,
+      tokenMode: tokenMode,
+      claimSplit: claimSplit,
+      contexts: ctxTexts,
+      claims: claims,
+      matrix: matrix,
+      claimCount: claimCount,
+      supportedCount: supportedCount,
+      faithfulness: faithfulness,
+      avgBestSim: avgBestSim,
+      unsupported: unsupported,
+      ctxCount: ctxTexts.length,
+      ctxUsed: ctxUsed,
+      ctxUsage: ctxTexts.length > 0 ? ctxUsed / ctxTexts.length : 0,
+      hallucScore: hallucScore,
+      hallucLevel: hallucLevel
+    };
+  }
+
+  /* (3) DOM 參照 */
+  var demoRqk = document.getElementById("demo-rqk");
+  var demoFcl = document.getElementById("demo-fcl");
+  if (!demoRqk && !demoFcl) { return; }
+
+  var FCL_DEFAULT_ANSWER = "到貨後 14 日內可申請退貨，商品須保持原包裝。電子票券也可以退。";
+  var FCL_DEFAULT_CTX = "顧客可於到貨後 14 日內申請退貨，商品須保持原包裝與完整配件。\n電子票券與客製化商品不適用本退貨條款。\n標準配送約 2-4 個工作天送達，到貨通知以簡訊為準。";
+
+  var rqkK = document.getElementById("rqk-k");
+  var rqkMissed = document.getElementById("rqk-missed");
+  var rqkRerank = document.getElementById("rqk-rerank");
+  var rqkReset = document.getElementById("rqk-reset");
+  var rqkVK = document.getElementById("rqk-v-k");
+  var rqkVMissed = document.getElementById("rqk-v-missed");
+  var rqkVRerank = document.getElementById("rqk-v-rerank");
+  var rqkRuler = document.getElementById("rqk-ruler");
+  var rqkDisc = document.getElementById("rqk-disc");
+  var rqkExpand = document.getElementById("rqk-expand");
+  var rqkStatus = document.getElementById("rqk-status");
+  var goldMask = DEFAULT_MASK;
+
+  var fclAnswer = document.getElementById("fcl-answer");
+  var fclCtx = document.getElementById("fcl-ctx");
+  var fclTh = document.getElementById("fcl-th");
+  var fclSplit = document.getElementById("fcl-split");
+  var fclMode = document.getElementById("fcl-mode");
+  var fclReset = document.getElementById("fcl-reset");
+  var fclVTh = document.getElementById("fcl-v-th");
+  var fclStrip = document.getElementById("fcl-strip");
+  var fclGrid = document.getElementById("fcl-grid");
+  var fclExpand = document.getElementById("fcl-expand");
+  var fclStatus = document.getElementById("fcl-status");
+
+  /* (4) render(state) —— 只讀 state 畫出來，不做任何判斷 */
+
+  function f3(x) { return (Math.round(x * 1000) / 1000).toFixed(3); }
+  function f2(x) { return (Math.round(x * 100) / 100).toFixed(2); }
+  function esc(s) {
+    var out = "";
+    for (var i = 0; i < s.length; i++) {
+      var ch = s.charAt(i);
+      if (ch === "&") { out += "&amp;"; }
+      else if (ch === "<") { out += "&lt;"; }
+      else if (ch === ">") { out += "&gt;"; }
+      else if (ch === '"') { out += "&quot;"; }
+      else { out += ch; }
+    }
+    return out;
+  }
+
+  function rowHtml(name, formula, value) {
+    return '<div class="er"><span class="en">' + name + '</span>' +
+           '<span class="ef">' + formula + '</span>' +
+           '<span class="ev">' + value + '</span></div>';
+  }
+
+  function renderRetrieval(state) {
+    rqkVK.textContent = String(state.k);
+    rqkVMissed.textContent = String(state.missedGold);
+    rqkVRerank.textContent = String(state.rerank);
+
+    var s = "";
+    var i, r;
+    for (i = 0; i < state.ranking.length; i++) {
+      r = state.ranking[i];
+      s += '<button type="button" class="rqk-cell' + (r.gold ? " gold" : "") +
+           (r.rank > state.k ? " out" : "") + (r.rank === state.k ? " cut" : "") +
+           '" data-rank="' + r.rank + '" data-base="' + r.baseRank +
+           '" aria-pressed="' + (r.gold ? "true" : "false") + '">' +
+           '<span class="rk">#' + r.rank + '</span>' +
+           '<span class="star">' + (r.gold ? "★" : "☆") + '</span>' +
+           '<span class="src">' + esc(r.id) + '</span></button>';
+    }
+    rqkRuler.innerHTML = s;
+
+    s = "";
+    for (i = 0; i < POOL; i++) {
+      var disc = 1 / log2(i + 2);
+      var within = i < state.k;
+      var rel = state.ranking[i].gold === 1;
+      s += '<div class="rqk-dcol ' + (within && rel ? "on" : "off") + (within ? "" : " beyond") + '">' +
+           '<span class="dv">' + f3(disc) + '</span>' +
+           '<span class="db" style="height:' + Math.round(disc * 100) + '%"></span></div>';
+    }
+    rqkDisc.innerHTML = s;
+
+    var termStr = "";
+    for (i = 0; i < state.terms.length; i++) {
+      termStr += (i > 0 ? " + " : "") + state.terms[i].rel + "/log2(" + (i + 2) + ")";
+    }
+    rqkExpand.innerHTML =
+      rowHtml("Recall@" + state.k,
+              "|Retrieved∩Relevant| / |Relevant| = " + state.hitsAtK + " / " + state.relevantTotal,
+              f3(state.recallAtK)) +
+      rowHtml("Precision@" + state.k,
+              "|Retrieved∩Relevant| / k = " + state.hitsAtK + " / " + state.k,
+              f3(state.precisionAtK)) +
+      rowHtml("MRR（單查詢＝RR）",
+              state.firstRelRank > 0 ? "1 / 首個金標名次 = 1 / " + state.firstRelRank : "Top-" + state.k + " 內沒有金標",
+              f3(state.rr)) +
+      rowHtml("DCG@" + state.k, termStr + " = " + f3(state.dcgAtK), f3(state.dcgAtK)) +
+      rowHtml("IDCG@" + state.k,
+              "把 min(|Relevant|, k) = " + state.idealRel + " 個金標排到最前面 = " + f3(state.idcgAtK),
+              f3(state.idcgAtK)) +
+      rowHtml("nDCG@" + state.k,
+              "DCG / IDCG = " + f3(state.dcgAtK) + " / " + f3(state.idcgAtK),
+              f3(state.ndcgAtK));
+
+    rqkStatus.textContent =
+      "Top-" + state.k + " 撈到 " + state.hitsAtK + " 個金標，Context 裡有 " +
+      Math.round(state.noiseRatio * 100) + "% 是非金標；金標總數 " + state.relevantTotal +
+      "（Top-10 內 " + state.goldInTop + " 個、完全沒撈到 " + state.missedGold + " 個）" +
+      "；rerank " + state.rerank + " 輪後首個金標落在 rank " +
+      (state.firstRelRank > 0 ? state.firstRelRank : "—") + "。";
+  }
+
+  function renderFaithfulness(state) {
+    fclVTh.textContent = f2(state.threshold);
+
+    var s = "";
+    var i, c;
+    if (state.claimCount === 0) {
+      s = '<div class="fcl-seg">（答案是空的，切不出任何 claim）</div>';
+    }
+    for (i = 0; i < state.claims.length; i++) {
+      s += '<span class="fcl-seg ' + (state.claims[i].supported ? "sup" : "unsup") + '">' +
+           '<span class="cn">C' + (i + 1) + '</span>' + esc(state.claims[i].text) + '</span>';
+    }
+    fclStrip.innerHTML = s;
+
+    fclGrid.style.gridTemplateColumns = "minmax(0,1.6fr) repeat(" + (state.ctxCount + 1) + ", minmax(0,1fr))";
+    s = '<div class="gh">claim ＼ context</div>';
+    for (c = 0; c < state.ctxCount; c++) { s += '<div class="gh">CTX' + (c + 1) + '</div>'; }
+    s += '<div class="gh">最佳／判定</div>';
+    for (i = 0; i < state.claims.length; i++) {
+      s += '<div class="gr">C' + (i + 1) + '　' + esc(state.claims[i].text.slice(0, 18)) +
+           (state.claims[i].text.length > 18 ? "…" : "") + '</div>';
+      for (c = 0; c < state.ctxCount; c++) {
+        var sim = state.matrix[i][c];
+        var pass = sim >= state.threshold;
+        s += '<div class="gc' + (pass ? " pass" : "") +
+             '" style="background:rgba(63,97,136,' + f2(sim * 0.32) + ')">' + f3(sim) + '</div>';
+      }
+      s += '<div class="gb ' + (state.claims[i].supported ? "sup" : "unsup") + '">' +
+           (state.claims[i].bestIdx >= 0 ? "CTX" + (state.claims[i].bestIdx + 1) : "—") + " " +
+           f3(state.claims[i].bestSim) + (state.claims[i].supported ? " ✓" : " ✗") + '</div>';
+    }
+    fclGrid.innerHTML = s;
+
+    var unsupStr = "—";
+    if (state.unsupported.length > 0) {
+      unsupStr = "";
+      for (i = 0; i < state.unsupported.length; i++) {
+        unsupStr += (i > 0 ? "、" : "") + "C" + state.unsupported[i].i +
+                    "（差 " + f3(state.unsupported[i].gap) + "）";
+      }
+    }
+    fclExpand.innerHTML =
+      rowHtml("Faithfulness",
+              "被支撐 claims / 全部 claims = " + state.supportedCount + " / " + state.claimCount,
+              f3(state.faithfulness)) +
+      rowHtml("未支撐的 claim", "最佳支撐度離門檻還差多少", unsupStr) +
+      rowHtml("平均最佳支撐度",
+              "Σ 每個 claim 的最佳支撐度 / " + state.claimCount, f3(state.avgBestSim)) +
+      rowHtml("Context 使用率",
+              "真的支撐到某個 claim 的片段數 / 全部片段 = " + state.ctxUsed + " / " + state.ctxCount,
+              f3(state.ctxUsage)) +
+      rowHtml("幻覺風險",
+              "0.65×(1-忠實度) + 0.35×(1-平均最佳支撐度) = " + f3(state.hallucScore),
+              state.hallucLevel);
+
+    fclStatus.textContent =
+      "切分規則「" + (state.claimSplit === "clause" ? "切到子句" : "切句") + "」下共 " +
+      state.claimCount + " 個 claim，其中 " + state.supportedCount + " 個在門檻 " +
+      f2(state.threshold) + "（" + (state.tokenMode === "unigram" ? "字元 unigram" : "字元 bigram") +
+      " containment）之上被支撐；" + state.ctxCount + " 個 context 裡有 " + state.ctxUsed +
+      " 個真的派上用場。";
+  }
+
+  /* (5) 事件綁定 */
+  function updateRetrieval() {
+    renderRetrieval(computeRetrievalMetrics({
+      k: parseInt(rqkK.value, 10),
+      goldMask: goldMask,
+      missedGold: parseInt(rqkMissed.value, 10),
+      rerank: parseInt(rqkRerank.value, 10)
+    }));
+  }
+
+  function updateFaithfulness() {
+    renderFaithfulness(computeFaithfulness({
+      answer: fclAnswer.value,
+      contexts: fclCtx.value,
+      threshold: parseInt(fclTh.value, 10) / 100,
+      tokenMode: fclMode.value,
+      claimSplit: fclSplit.value
+    }));
+  }
+
+  if (demoRqk) {
+    rqkK.addEventListener("input", updateRetrieval);
+    rqkMissed.addEventListener("input", updateRetrieval);
+    rqkRerank.addEventListener("input", updateRetrieval);
+    rqkRuler.addEventListener("click", function (e) {
+      var el = e.target;
+      while (el && el !== rqkRuler && !el.getAttribute("data-base")) { el = el.parentNode; }
+      if (!el || el === rqkRuler) { return; }
+      var base = parseInt(el.getAttribute("data-base"), 10);
+      goldMask = bitAt(goldMask, base - 1)
+        ? goldMask - Math.pow(2, base - 1)
+        : goldMask + Math.pow(2, base - 1);
+      updateRetrieval();
+    });
+    rqkReset.addEventListener("click", function () {
+      goldMask = DEFAULT_MASK;
+      rqkK.value = 3;
+      rqkMissed.value = 1;
+      rqkRerank.value = 0;
+      updateRetrieval();
+    });
+    updateRetrieval();
+  }
+
+  if (demoFcl) {
+    fclAnswer.addEventListener("input", updateFaithfulness);
+    fclCtx.addEventListener("input", updateFaithfulness);
+    fclTh.addEventListener("input", updateFaithfulness);
+    fclSplit.addEventListener("change", updateFaithfulness);
+    fclMode.addEventListener("change", updateFaithfulness);
+    fclReset.addEventListener("click", function () {
+      fclAnswer.value = FCL_DEFAULT_ANSWER;
+      fclCtx.value = FCL_DEFAULT_CTX;
+      fclTh.value = 50;
+      fclSplit.value = "sentence";
+      fclMode.value = "bigram";
+      updateFaithfulness();
+    });
+    updateFaithfulness();
+  }
 })();
 </script>
 
