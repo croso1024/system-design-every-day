@@ -1,3 +1,9 @@
+<!-- demo-archetype: B｜參數掃描（主，第 6 節）＋C｜並排對照（次，第 3 節） — 主 demo 讓讀者拖動快取容量、
+     熱點偏斜、key 基數、序列長度與 TTL，並切換「純熱點／掃描污染」兩種存取樣式，對同一條確定性生成的存取序列
+     同時重跑 LRU／LFU／FIFO，即時算出三者的命中率、淘汰次數、熱 key 被踢次數與首訪／重取 miss 拆解；
+     次 demo 讓讀者挑兩種讀寫模式並排，對同一組操作序列真算往返次數、客戶端延遲、stale 窗與崩潰遺失的已 ACK 寫入。
+     選 B 當主是因為本篇第 4 節的命題「命中率是容量的函數、容量不夠時換演算法救不了」本身就是一條參數→結果的函數關係；
+     選 C 當次是因為五種寫路徑是對立取捨，唯有同一組輸入並排才看得出 ACK 點差在哪裡。 -->
 <style>
   /* 本篇專屬：cp-* 命名空間，不覆蓋全站 base 類別 */
   #cp-root {
@@ -19,14 +25,18 @@
   .cp-card .cl { font-family: var(--mono); font-size: 11px; color: var(--text-3); margin-bottom: 6px; letter-spacing: .04em; }
   .cp-card .cs { font-size: 12.5px; color: var(--text-2); line-height: 1.55; }
 
-  .cp-flow { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin: 10px 0 4px; font-family: var(--mono); font-size: 12px; }
-  .cp-chip { border: 1px solid var(--border-strong); border-radius: 6px; padding: 6px 10px; background: #fff; font-weight: 600; color: var(--text); }
-  .cp-chip.cli { background: var(--cp-c-soft); border-color: var(--cp-c); color: var(--cp-c); }
-  .cp-chip.cache { background: var(--cp-alt-soft); border-color: var(--cp-alt); color: var(--cp-alt); }
-  .cp-chip.db { background: var(--cp-s-soft); border-color: var(--cp-s); color: var(--cp-s); }
-  .cp-chip.op { background: var(--bg-soft); color: var(--text-3); border-style: dashed; font-weight: 500; }
-  .cp-chip.bad { background: var(--cp-bad-soft); border-color: var(--cp-bad); color: var(--cp-bad); }
-  .cp-chip.warn { background: var(--cp-w-soft); border-color: var(--cp-w); color: var(--cp-w); }
+  /* 讀路徑 swimlane（時序語意用 grid，不用 chip row） */
+  .cp-lane {
+    display: grid; grid-template-columns: 46px repeat(3, 1fr); gap: 1px;
+    background: var(--border); border: 1px solid var(--border);
+    border-radius: 8px; overflow: hidden; margin: 14px 0 6px;
+  }
+  .cp-lane > div { background: #fff; padding: 8px 10px; font-size: 12px; line-height: 1.5; }
+  .cp-lane .lh { background: var(--bg-soft); font-family: var(--mono); font-size: 11px; font-weight: 700; color: var(--text-2); }
+  .cp-lane .lt { background: var(--bg-soft); font-family: var(--mono); font-size: 11px; color: var(--text-3); }
+  .cp-lane .lc.act { background: var(--accent-soft); }
+  .cp-lane .lc.ok  { background: var(--ok-soft); }
+  @media (max-width: 720px) { .cp-lane { grid-template-columns: 40px repeat(3, minmax(0, 1fr)); font-size: 11px; } }
 
   .cp-split { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin: 12px 0; }
   @media (max-width: 640px) { .cp-split { grid-template-columns: 1fr; } }
@@ -55,98 +65,63 @@
   .cp-q .fk { font-family: var(--mono); font-size: 11px; color: var(--text-3); margin-bottom: 6px; letter-spacing: .04em; }
   .cp-q .fs { font-size: 12.5px; color: var(--text-2); line-height: 1.55; }
 
-  .cp-ctrl { display: flex; flex-wrap: wrap; gap: 10px; margin: 10px 0 8px; align-items: center; }
-  .cp-metric { display: flex; flex-wrap: wrap; gap: 14px; margin: 8px 0 4px; font-size: 13px; color: var(--text-2); }
-  .cp-metric strong { color: var(--text); font-family: var(--mono); font-size: 12.5px; }
+  /* ===== demo 共用控制列 ===== */
+  .cpx-knobs { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px 14px; margin: 10px 0 6px; }
+  @media (max-width: 720px) { .cpx-knobs { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+  @media (max-width: 460px) { .cpx-knobs { grid-template-columns: 1fr; } }
+  .cpx-knob { display: flex; flex-direction: column; gap: 3px; }
+  .cpx-knob label { font-size: 11.5px; color: var(--text-2); display: flex; justify-content: space-between; gap: 6px; }
+  .cpx-knob label b { font-family: var(--mono); font-size: 12px; color: var(--text); font-weight: 700; }
+  .cpx-knob input[type="range"] { width: 100%; accent-color: var(--accent); }
+  .cpx-knob select {
+    font-family: var(--mono); font-size: 12px; padding: 5px 6px;
+    border: 1px solid var(--border-strong); border-radius: 6px; background: #fff; color: var(--text);
+  }
+  .cpx-actions { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin: 8px 0 4px; }
+  .cpx-note { font-size: 11.5px; color: var(--text-3); line-height: 1.5; margin: 6px 0 0; }
+  .cpx-fig { border: 1px solid var(--border); border-radius: var(--radius-sm); background: #fff; padding: 8px; margin: 10px 0 4px; }
+  .cpx-fig svg { width: 100%; height: auto; display: block; }
 
-  .cp-actors { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin: 12px 0 6px; }
-  .cp-actors[hidden], #cp-evict-view[hidden] { display: none; }
-  @media (max-width: 640px) { .cp-actors { grid-template-columns: 1fr; } }
-  .cp-actor {
-    border: 1.5px solid var(--border-strong); border-radius: var(--radius-sm);
-    padding: 12px 12px 10px; background: #fff; text-align: center;
-    transition: background .18s, border-color .18s, box-shadow .18s;
+  /* ===== demo B：淘汰參數掃描 ===== */
+  .cpe-grid { width: 100%; border-collapse: collapse; margin: 8px 0 2px; font-size: 12.5px; }
+  .cpe-grid th, .cpe-grid td {
+    border: 1px solid var(--border); padding: 6px 8px; text-align: right;
+    font-family: var(--mono); font-size: 12px; color: var(--text-2);
   }
-  .cp-actor .an { font-weight: 700; font-size: 13px; letter-spacing: .03em; }
-  .cp-actor .al { font-family: var(--mono); font-size: 10.5px; color: var(--text-3); margin-top: 2px; }
-  .cp-actor .av { font-family: var(--mono); font-size: 16px; font-weight: 700; margin-top: 8px; color: var(--text); }
-  .cp-actor .ah { font-size: 11.5px; color: var(--text-2); margin-top: 4px; min-height: 1.4em; }
-  .cp-actor.on { background: var(--accent-soft); border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
-  .cp-actor.on .an { color: var(--accent); }
-  .cp-actor.ok { background: var(--ok-soft); border-color: var(--ok); }
-  .cp-actor.ok .an { color: var(--ok); }
-  .cp-actor.dirty { background: var(--warn-soft); border-color: var(--warn); }
-  .cp-actor.dirty .an { color: var(--warn); }
-  .cp-actor.bad { background: var(--bad-soft); border-color: var(--bad); }
-  .cp-actor.bad .an { color: var(--bad); }
+  .cpe-grid th { background: var(--bg-soft); color: var(--text-2); font-weight: 700; text-align: right; }
+  .cpe-grid th:first-child, .cpe-grid td:first-child { text-align: left; }
+  .cpe-grid td.best { background: var(--ok-soft); color: var(--text); font-weight: 700; }
+  .cpe-grid td.warnv { background: var(--bad-soft); color: var(--text); }
 
-  .cp-slots { display: flex; flex-wrap: wrap; gap: 8px; margin: 10px 0 4px; }
-  .cp-slot {
-    min-width: 88px; flex: 1;
-    border: 1.5px solid var(--border-strong); border-radius: var(--radius-sm);
-    padding: 10px 8px; background: #fff; text-align: center;
+  /* ===== demo C：讀寫路徑並排 ===== */
+  .cpw-split { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin: 10px 0 4px; }
+  @media (max-width: 720px) { .cpw-split { grid-template-columns: 1fr; } }
+  .cpw-col { border: 1px solid var(--border); border-radius: var(--radius-sm); background: #fff; padding: 10px; }
+  .cpw-col > h4 {
+    margin: 0 0 6px; font-size: 12.5px; font-family: var(--mono); font-weight: 700;
+    color: var(--text); letter-spacing: .03em;
   }
-  .cp-slot .sk { font-family: var(--mono); font-size: 13px; font-weight: 700; color: var(--text); }
-  .cp-slot .sm { font-family: var(--mono); font-size: 10.5px; color: var(--text-3); margin-top: 4px; }
-  .cp-slot.empty { background: var(--bg-soft); }
-  .cp-slot.empty .sk { color: var(--text-3); font-weight: 500; }
-  .cp-slot.hit { background: var(--ok-soft); border-color: var(--ok); }
-  .cp-slot.evict { background: var(--bad-soft); border-color: var(--bad); }
-  .cp-slot.fresh { background: var(--accent-soft); border-color: var(--accent); }
-
-  .cp-panels { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 12px; }
-  @media (max-width: 640px) { .cp-panels { grid-template-columns: 1fr; } }
-  .cp-panel { border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 12px; background: #fff; }
-  .cp-panel .pt {
-    font-size: 11px; color: var(--text-3); letter-spacing: .06em; text-transform: uppercase;
-    font-family: var(--mono); margin-bottom: 8px;
+  .cpw-col.left > h4 { color: var(--cp-c); }
+  .cpw-col.right > h4 { color: var(--cp-w); }
+  .cpw-col svg { width: 100%; height: auto; display: block; }
+  .cpw-grid { width: 100%; border-collapse: collapse; margin: 8px 0 2px; }
+  .cpw-grid th, .cpw-grid td {
+    border: 1px solid var(--border); padding: 6px 8px;
+    font-family: var(--mono); font-size: 12px; color: var(--text-2); text-align: right;
   }
-  .cp-panel .prow {
-    display: flex; justify-content: space-between; gap: 8px;
-    font-family: var(--mono); font-size: 12px; padding: 4px 0;
-    border-bottom: 1px dashed var(--border);
-  }
-  .cp-panel .prow:last-child { border-bottom: none; }
-  .cp-panel .pk { color: var(--text-3); white-space: nowrap; }
-  .cp-panel .pv { color: var(--text); font-weight: 600; text-align: right; }
-  .cp-panel .pv.good { color: var(--ok); }
-  .cp-panel .pv.bad { color: var(--bad); }
-  .cp-panel .pv.warn { color: var(--warn); }
-
-  .cp-wire {
-    border: 1px solid var(--border); border-radius: var(--radius-sm);
-    background: #fff; padding: 8px 10px; margin-top: 10px; max-height: 260px; overflow-y: auto;
-  }
-  .cp-row {
-    display: flex; align-items: baseline; gap: 8px;
-    font-family: var(--mono); font-size: 11.5px; padding: 4px 0;
-    border-bottom: 1px dashed var(--border);
-  }
-  .cp-row:last-child { border-bottom: none; }
-  .cp-row .ar { width: 42px; flex: none; text-align: center; color: var(--text-3); font-weight: 700; }
-  .cp-row .tg {
-    flex: none; border-radius: 4px; padding: 2px 6px; font-size: 10.5px; font-weight: 700;
-    border: 1px solid var(--border-strong); background: var(--bg-soft); color: var(--text-3);
-  }
-  .cp-row .tx { color: var(--text-2); line-height: 1.5; }
-  .cp-row.read .tg { background: var(--cp-c-soft); border-color: var(--cp-c); color: var(--cp-c); }
-  .cp-row.write .tg { background: var(--cp-w-soft); border-color: var(--cp-w); color: var(--cp-w); }
-  .cp-row.ok .tg { background: var(--cp-s-soft); border-color: var(--cp-s); color: var(--cp-s); }
-  .cp-row.bad .tg { background: var(--cp-bad-soft); border-color: var(--cp-bad); color: var(--cp-bad); }
-  .cp-row.bad .tx { color: var(--bad); }
-  .cp-row.note { background: var(--bg-soft); border-radius: 4px; }
-  .cp-row.note .tx { color: var(--text-3); }
-
-  .cp-verdict {
+  .cpw-grid th { background: var(--bg-soft); font-weight: 700; }
+  .cpw-grid th:first-child, .cpw-grid td:first-child { text-align: left; }
+  .cpw-grid td.hi { color: var(--text); font-weight: 700; }
+  .cpw-grid td.risk { background: var(--bad-soft); color: var(--text); font-weight: 700; }
+  .cpw-call {
     margin-top: 10px; padding: 10px 12px; border-radius: var(--radius-sm);
-    border: 1px solid var(--border); background: var(--bg-soft);
-    font-size: 13px; color: var(--text-2); line-height: 1.55;
+    border: 1px solid var(--border); border-left: 3px solid var(--border-strong);
+    background: var(--bg-soft); font-size: 13px; color: var(--text-2); line-height: 1.6;
   }
-  .cp-verdict.tone-ok { border-left: 3px solid var(--ok); background: var(--ok-soft); color: var(--text); }
-  .cp-verdict.tone-lock { border-left: 3px solid var(--warn); background: var(--warn-soft); color: var(--text); }
-  .cp-verdict.tone-bad { border-left: 3px solid var(--bad); background: var(--bad-soft); color: var(--text); }
-
-  .cp-mode-hint { font-size: 12.5px; color: var(--text-2); margin: 8px 0 4px; line-height: 1.55; }
+  .cpw-call.k-lose { border-left-color: var(--bad); background: var(--bad-soft); color: var(--text); }
+  .cpw-call.k-stale { border-left-color: var(--warn); background: var(--warn-soft); color: var(--text); }
+  .cpw-call.k-slow { border-left-color: var(--accent); background: var(--accent-soft); color: var(--text); }
+  .cpw-call.k-even { border-left-color: var(--ok); background: var(--ok-soft); color: var(--text); }
 </style>
 
 <div id="cp-root">
@@ -198,31 +173,33 @@
 
   <p class="cp-sub">1 · Cache-Aside（Lazy Loading）</p>
   <p>應用擁有完整讀路徑。這是面試預設答案，也是 Redis 最常見的用法。</p>
-  <div class="cp-flow">
-    <span class="cp-chip cli">Client GET</span>
-    <span class="cp-chip op">→</span>
-    <span class="cp-chip cache">Cache GET</span>
-    <span class="cp-chip op">hit？回傳</span>
-    <span class="cp-chip op">miss →</span>
-    <span class="cp-chip db">DB GET</span>
-    <span class="cp-chip op">→</span>
-    <span class="cp-chip cache">Cache SET</span>
-    <span class="cp-chip op">→</span>
-    <span class="cp-chip cli">回傳</span>
-  </div>
+  <pre class="mermaid">
+sequenceDiagram
+    participant A as 應用
+    participant C as 快取
+    participant D as 資料庫
+    A->>C: GET key
+    C-->>A: MISS
+    A->>D: SELECT key
+    D-->>A: 值 A
+    A->>C: SET key = A
+    A-->>A: 回傳 A
+</pre>
+  <p class="cap">三條往返全部由應用發起：快取與資料庫都是它的下游，所以回填失敗時它仍握有可以回傳的值。</p>
   <p>步驟順序固定：<strong>先問快取，沒有才問權威來源，再回填</strong>。應用必須同時認得 Cache 與 DB 的介面。好處是快取掛了可以降級直打 DB（可用性高、延遲變差）；壞處是回填、失效、編碼格式全散落在業務程式碼。</p>
 
   <p class="cp-sub">2 · Read-Through</p>
   <p>應用只面對快取。Miss 時由快取層（或它前面的 library／proxy）自己去 load loader、填入、再回給呼叫端。</p>
-  <div class="cp-flow">
-    <span class="cp-chip cli">Client GET</span>
-    <span class="cp-chip op">→</span>
-    <span class="cp-chip cache">Cache GET</span>
-    <span class="cp-chip op">hit？回傳</span>
-    <span class="cp-chip op">miss → Cache 內部</span>
-    <span class="cp-chip db">Loader → DB</span>
-    <span class="cp-chip op">→ 填入後回傳</span>
+  <div class="cp-lane">
+    <div class="lh">步驟</div><div class="lh">應用</div><div class="lh">快取（含 loader）</div><div class="lh">資料庫</div>
+    <div class="lt">t1</div>
+    <div class="lc act">GET key</div><div class="lc">查表：MISS</div><div class="lc">—</div>
+    <div class="lt">t2</div>
+    <div class="lc">仍在等同一次 GET</div><div class="lc act">loader 代為回源</div><div class="lc">SELECT key → 值 A</div>
+    <div class="lt">t3</div>
+    <div class="lc ok">收到 A</div><div class="lc ok">填入後回傳</div><div class="lc">—</div>
   </div>
+  <p class="cap">看 t2 那一列：應用那一欄是空的——回源整段發生在快取內部，所以快取進程掛掉時，讀請求沒有旁路可走。</p>
   <p>呼叫端變乾淨，回源策略可以集中（超時、重試、單 key 合併——那些手段留給失效模式那篇）。代價是：<strong>快取變成讀路徑上的必經節點</strong>。Cache 進程掛掉，讀就停，除非你另外做旁路。Read-Through 幾乎總是跟 Write-Through 或 Write-Back 成對出現，很少單獨搭配「應用自己寫 DB」。</p>
 
   <div class="cp-split">
@@ -245,6 +222,7 @@
       </ul>
     </div>
   </div>
+  <p class="cap">左欄說 stale 只會被「另一次寫入」打開；右欄說故障時讀到什麼取決於是誰掛了——兩欄合起來就是讀路徑的全部風險面。</p>
 
   <div class="callout warn">
     <div class="c-title"><span class="ic">陷阱</span>回填失敗不要假裝命中</div>
@@ -265,39 +243,14 @@
 
   <p class="cp-sub">1 · Cache-Aside 的寫：更新 DB，再讓快取失效</p>
   <p>經典寫法不是「寫 DB 再寫 cache」，而是 <strong>Write DB → Delete cache key</strong>。下次讀走 miss 回填，自然拿到新值。若改成「寫 DB 再 SET cache」，兩次寫入之間任何失敗都會留下 DB 與 cache 長期分歧，而且你還得處理編碼、TTL 與部分更新。</p>
-  <div class="cp-flow">
-    <span class="cp-chip cli">Client SET B</span>
-    <span class="cp-chip op">→</span>
-    <span class="cp-chip db">DB SET B</span>
-    <span class="cp-chip op">成功後</span>
-    <span class="cp-chip cache">Cache DEL</span>
-    <span class="cp-chip warn">窗口：DB 已 B、cache 仍 A</span>
-  </div>
   <p>Stale window 就在這兩步之間，通常是毫秒級。真正危險的是<strong>刪除失敗</strong>：DB 已是 B，cache 裡的 A 會一直活到 TTL。這時 TTL 不是效能參數，是一致性的最後保險。</p>
 
   <p class="cp-sub">2 · Write-Through</p>
   <p>應用寫入快取；快取<strong>同步</strong>把同一筆寫進 DB，兩邊都成功才 ACK。</p>
-  <div class="cp-flow">
-    <span class="cp-chip cli">Client SET B</span>
-    <span class="cp-chip op">→</span>
-    <span class="cp-chip cache">Cache SET B</span>
-    <span class="cp-chip op">同步</span>
-    <span class="cp-chip db">DB SET B</span>
-    <span class="cp-chip op">→</span>
-    <span class="cp-chip cli">ACK</span>
-  </div>
   <p>寫延遲 ≈ cache + DB。換來的是：讀幾乎總能 hit 剛寫的值、cache 掛了資料仍在 DB。適合「讀多、寫不能丟、可接受寫變慢」——例如帳戶餘額的讀側加速，但仍以 DB 為準。</p>
 
   <p class="cp-sub">3 · Write-Back（Write-Behind）</p>
   <p>應用寫入快取後立刻 ACK；DB 由背景排程刷入。Cache 條目帶 dirty bit。</p>
-  <div class="cp-flow">
-    <span class="cp-chip cli">Client SET B</span>
-    <span class="cp-chip op">→</span>
-    <span class="cp-chip cache">Cache SET B · dirty</span>
-    <span class="cp-chip cli">立即 ACK</span>
-    <span class="cp-chip op">稍後</span>
-    <span class="cp-chip db">Flush → DB</span>
-  </div>
   <div class="callout warn">
     <div class="c-title"><span class="ic">陷阱</span>Write-Back 的權威暫時不在 DB</div>
     <p>Flush 之前，DB 是舊的。任何繞過快取的讀（報表、ETL、另一個沒打 cache 的服務）都會讀到 A。<strong>Cache 在 flush 前崩潰 = 丟失已 ACK 給客戶端的寫入。</strong> 這不是「可能不一致」，是耐久性失敗。Write-Back 只適合能容忍丟失、或快取本身有 WAL／複寫的場景（本地 page cache、某些 LSM 的 memtable）——普通 Redis 單機當 Write-Back 緩衝，面試裡通常是扣分答案。</p>
@@ -305,13 +258,6 @@
 
   <p class="cp-sub">4 · Write-Around</p>
   <p>寫入只打 DB，<strong>不碰快取</strong>。用意是避免把「寫完很少再讀」的資料佔滿熱點集合（例如一次性匯入、日誌型更新）。</p>
-  <div class="cp-flow">
-    <span class="cp-chip cli">Client SET B</span>
-    <span class="cp-chip op">→</span>
-    <span class="cp-chip db">DB SET B</span>
-    <span class="cp-chip cache">Cache 仍為 A</span>
-    <span class="cp-chip bad">stale 直到 TTL／驅逐／顯式 DEL</span>
-  </div>
   <p>若 key 本來就在 cache 裡，Write-Around 會製造<strong>最長、最容易被忽略的 stale window</strong>。實務上寫-around 幾乎一定要搭配「順便 DEL」或短 TTL；否則它只適合「這個 key 根本不該在 cache」的寫入。</p>
 
   <div class="tbl-wrap">
@@ -358,6 +304,88 @@
     </table>
   </div>
   <p class="cap">ACK 點愈靠近快取，寫愈快、丟資料風險愈高；愈靠近 DB，愈耐久、stale 愈短、寫延遲愈高。</p>
+
+  <div class="demo" id="demo-cp-write">
+    <div class="demo-bar">
+      <span class="label">互動 · 兩種寫路徑跑同一組操作</span>
+      <span class="label" style="text-transform:none;font-family:var(--sans);font-size:12px;color:var(--text-2)">挑兩種模式、拖 RTT 與崩潰點，兩欄同時重算</span>
+    </div>
+    <div class="demo-body">
+      <div class="seg" role="group" aria-label="工作負載" id="cpw-seg">
+        <button data-wl="readheavy" aria-pressed="false">讀多寫少</button>
+        <button data-wl="writeheavy" aria-pressed="true">寫多讀少</button>
+        <button data-wl="wtr" aria-pressed="false">寫後立即讀</button>
+      </div>
+
+      <div class="cpx-knobs">
+        <div class="cpx-knob">
+          <label for="cpw-left">左欄模式</label>
+          <select id="cpw-left">
+            <option value="aside" selected>Cache-Aside</option>
+            <option value="readthru">Read-Through</option>
+            <option value="writethru">Write-Through</option>
+            <option value="writeback">Write-Back</option>
+            <option value="writearound">Write-Around</option>
+          </select>
+        </div>
+        <div class="cpx-knob">
+          <label for="cpw-right">右欄模式</label>
+          <select id="cpw-right">
+            <option value="aside">Cache-Aside</option>
+            <option value="readthru">Read-Through</option>
+            <option value="writethru">Write-Through</option>
+            <option value="writeback" selected>Write-Back</option>
+            <option value="writearound">Write-Around</option>
+          </select>
+        </div>
+        <div class="cpx-knob">
+          <label for="cpw-ops">操作數 <b id="cpw-ops-v">10</b></label>
+          <input type="range" id="cpw-ops" min="4" max="16" step="1" value="10">
+        </div>
+        <div class="cpx-knob">
+          <label for="cpw-crtt">Cache RTT <b id="cpw-crtt-v">2 ms</b></label>
+          <input type="range" id="cpw-crtt" min="1" max="10" step="1" value="2">
+        </div>
+        <div class="cpx-knob">
+          <label for="cpw-drtt">DB RTT <b id="cpw-drtt-v">50 ms</b></label>
+          <input type="range" id="cpw-drtt" min="5" max="100" step="5" value="50">
+        </div>
+        <div class="cpx-knob">
+          <label for="cpw-crash">崩潰於第 N 步後 <b id="cpw-crash-v">7</b></label>
+          <input type="range" id="cpw-crash" min="0" max="16" step="1" value="7">
+        </div>
+        <div class="cpx-knob">
+          <label for="cpw-flush">Write-Back 刷盤間隔 <b id="cpw-flush-v">4</b></label>
+          <input type="range" id="cpw-flush" min="1" max="8" step="1" value="4">
+        </div>
+        <div class="cpx-actions">
+          <button class="btn" id="cpw-reset">重置</button>
+        </div>
+      </div>
+
+      <div class="legend">
+        <span><i class="dot ns-wait"></i>快取往返</span>
+        <span><i class="dot ns-ok"></i>ACK 給客戶端</span>
+        <span><i class="dot ns-lock"></i>該步結束時 cache ≠ DB</span>
+        <span><i class="dot ns-bad"></i>快取崩潰</span>
+      </div>
+
+      <div class="cpw-split" id="cpw-split" aria-live="polite">
+        <div class="cpw-col left"><h4 id="cpw-lt">左欄</h4><div id="cpw-lsvg"></div></div>
+        <div class="cpw-col right"><h4 id="cpw-rt">右欄</h4><div id="cpw-rsvg"></div></div>
+      </div>
+
+      <div class="tbl-wrap">
+        <table class="cpw-grid" id="cpw-table"></table>
+      </div>
+      <p class="cap">同一行比左右兩欄：延遲來自「ACK 之前經過幾次往返 × 每次的 RTT」，stale 長度來自「快取被更新或被刪掉了沒有」，遺失寫入只會出現在 ACK 早於落盤的那一欄。</p>
+
+      <div class="status-line" id="cpw-status">拖動任一旋鈕，兩欄會同時重算。</div>
+      <div class="cpw-call" id="cpw-call">判定待算。</div>
+      <p class="cpx-note">序列由工作負載樣式循環展開（讀多寫少＝R R W R R、寫多讀少＝W W R W R、寫後立即讀＝W R W R）；每次寫入產生下一個值（A→B→C…）。延遲＝ACK 前的快取往返 × Cache RTT ＋ DB 往返 × DB RTT；Write-Back 的背景刷盤不計入客戶端延遲。Read-Through 這一欄假設應用自己寫 DB 再讓快取失效，好讓它與 Cache-Aside 只差在讀路徑。</p>
+    </div>
+  </div>
+
 
   <div class="oneliner">
     <b>一句話答法</b>Aside 寫 DB 再 DEL cache；Through 同步雙寫才 ACK；Back 先 ACK 再刷盤（崩潰可能丟寫）；Around 只寫 DB、cache 靠 TTL 自己過期。
@@ -423,6 +451,8 @@
     <p>若熱點集合永遠大於快取容量，換 LRU 或 LFU 只是換一種 miss 圖案，命中率不會奇蹟上升。面試裡先說：<strong>估計 working set 大小 × 物件平均體積，對上記憶體預算</strong>；容量明顯不夠就分層（本地小 LRU + 遠端大快取）或承認這份資料不該全部進 cache。演算法是微調，容量是一階項。</p>
   </div>
 
+  <p>這一節的每一句斷言都可以被量出來：本篇文末的互動 demo 會把同一條存取序列同時餵給 LRU／LFU／FIFO，讓你把容量與偏斜推到兩端，看命中率、熱 key 被踢次數與 miss 的組成如何隨之改變。</p>
+
   <div class="oneliner">
     <b>一句話答法</b>TTL 限制能有多舊；Eviction 限制能留多大。LRU 賭最近、LFU 賭最常；容量小於 working set 時，換演算法救不了命中率。
   </div>
@@ -479,102 +509,69 @@
 <section id="s6">
   <div class="sec-head">
     <span class="sec-num">06</span>
-    <h2>互動 Demo：讀寫時序與淘汰對照</h2>
+    <h2>互動 · 淘汰參數掃描：把容量與偏斜推到兩端</h2>
   </div>
-  <p class="sec-sub">同一把 key 走完讀→寫→再讀→故障；或同一組存取序列看 LRU／LFU／TTL 各踢誰。</p>
+  <p class="sec-sub">同一條存取序列，同時餵給 LRU、LFU 與 FIFO。把容量與偏斜推到兩端，看命中率、熱 key 被踢次數與 miss 的組成怎麼變。</p>
 
-  <div class="demo" id="demo-cp">
+  <div class="demo" id="demo-cp-evict">
     <div class="demo-bar">
-      <span class="label">互動 · Cache Patterns</span>
-      <span class="label" style="text-transform:none;font-family:var(--sans);font-size:12px;color:var(--text-2)">先選模式，按「下一步」看 ACK 與 stale</span>
+      <span class="label">互動 · TTL 與 Eviction 參數掃描</span>
+      <span class="label" style="text-transform:none;font-family:var(--sans);font-size:12px;color:var(--text-2)">拖任何一個旋鈕，三條策略即時重跑</span>
     </div>
     <div class="demo-body">
-      <p class="cp-mode-hint" id="cp-mode-hint">讀寫路徑：key <code>profile:42</code>，DB 初值 A。逐步看 miss 回填、寫入 ACK、以及 cache 崩潰時會不會丟資料。</p>
-
-      <div class="seg" role="group" aria-label="Demo 類型" id="cp-seg-mode">
-        <button data-mode="path" aria-pressed="true">讀寫路徑</button>
-        <button data-mode="evict" aria-pressed="false">淘汰策略</button>
+      <div class="seg" role="group" aria-label="存取樣式" id="cpe-seg">
+        <button data-pat="zipf" aria-pressed="true">純熱點</button>
+        <button data-pat="scan" aria-pressed="false">熱點＋掃描污染</button>
       </div>
 
-      <div class="seg" role="group" aria-label="情境切換" id="cp-seg-sc" style="margin-top:8px">
-        <button data-sc="aside" aria-pressed="true">Cache-Aside</button>
-        <button data-sc="readthru" aria-pressed="false">Read-Through</button>
-        <button data-sc="writethru" aria-pressed="false">Write-Through</button>
-        <button data-sc="writeback" aria-pressed="false">Write-Back</button>
-        <button data-sc="writearound" aria-pressed="false">Write-Around</button>
-      </div>
-
-      <div class="cp-ctrl">
-        <button class="btn primary" id="cp-btn-next">下一步</button>
-        <button class="btn" id="cp-btn-reset">重置</button>
-      </div>
-
-      <div class="cp-metric">
-        <span>步驟 <strong id="cp-m-step">0</strong></span>
-        <span>Cache hit <strong id="cp-m-hits">0</strong></span>
-        <span>DB 讀 <strong id="cp-m-dbr">0</strong></span>
-        <span>DB 寫 <strong id="cp-m-dbw">0</strong></span>
-        <span>Stale 讀 <strong id="cp-m-stale">0</strong></span>
+      <div class="cpx-knobs">
+        <div class="cpx-knob">
+          <label for="cpe-cap">快取容量 <b id="cpe-cap-v">4 槽</b></label>
+          <input type="range" id="cpe-cap" min="2" max="16" step="1" value="4">
+        </div>
+        <div class="cpx-knob">
+          <label for="cpe-keys">key 基數 <b id="cpe-keys-v">12</b></label>
+          <input type="range" id="cpe-keys" min="6" max="40" step="1" value="12">
+        </div>
+        <div class="cpx-knob">
+          <label for="cpe-hot">熱點佔比 <b id="cpe-hot-v">70%</b></label>
+          <input type="range" id="cpe-hot" min="10" max="90" step="5" value="70">
+        </div>
+        <div class="cpx-knob">
+          <label for="cpe-len">序列長度 <b id="cpe-len-v">60 次</b></label>
+          <input type="range" id="cpe-len" min="20" max="120" step="5" value="60">
+        </div>
+        <div class="cpx-knob">
+          <label for="cpe-ttl">TTL（存取次數） <b id="cpe-ttl-v">關閉</b></label>
+          <input type="range" id="cpe-ttl" min="0" max="40" step="1" value="0">
+        </div>
+        <div class="cpx-actions">
+          <button class="btn" id="cpe-reset">重置</button>
+        </div>
       </div>
 
       <div class="legend">
-        <span><i class="dot ns-idle"></i>未參與</span>
-        <span><i class="dot ns-wait"></i>本步作用中</span>
-        <span><i class="dot ns-lock"></i>dirty／stale</span>
-        <span><i class="dot ns-ok"></i>已對齊／命中</span>
-        <span><i class="dot ns-bad"></i>崩潰／驅逐</span>
+        <span><i class="dot ns-ok"></i>命中（最矮）</span>
+        <span><i class="dot ns-idle"></i>未命中·仍有空位</span>
+        <span><i class="dot ns-bad"></i>未命中·踢掉別人（最高）</span>
+        <span><i class="dot ns-wait"></i>這次存取的是熱 key</span>
       </div>
 
-      <div class="cp-actors" id="cp-actors" aria-live="polite">
-        <div class="cp-actor" data-role="client">
-          <div class="an">Client</div>
-          <div class="al">呼叫端</div>
-          <div class="av" id="cp-client-val">—</div>
-          <div class="ah" id="cp-client-hint">待命</div>
-        </div>
-        <div class="cp-actor" data-role="cache">
-          <div class="an">Cache</div>
-          <div class="al">可丟棄副本</div>
-          <div class="av" id="cp-cache-val">∅</div>
-          <div class="ah" id="cp-cache-hint">空</div>
-        </div>
-        <div class="cp-actor" data-role="db">
-          <div class="an">DB</div>
-          <div class="al">權威來源</div>
-          <div class="av" id="cp-db-val">A</div>
-          <div class="ah" id="cp-db-hint">初值 A</div>
-        </div>
-      </div>
+      <div class="cpx-fig" id="cpe-fig" aria-live="polite"></div>
+      <p class="cap">三列共用同一條存取序列與同一個 x 軸：刻度愈高代表這次存取愈貴（命中最矮、踢人最高），刻度下方的針標出被踢掉的 key；紅針代表被踢的是熱 key。右下的方塊是序列跑完後還留在槽位裡的東西。</p>
 
-      <div id="cp-evict-view" hidden>
-        <div class="cp-slots" id="cp-slots" aria-label="快取槽位"></div>
+      <div class="tbl-wrap">
+        <table class="cpe-grid" id="cpe-table"></table>
       </div>
+      <p class="cap">「首訪 miss」對三種策略永遠相同（誰都不可能命中沒載入過的 key）；三者的差距只出現在「重取 miss」那一行——那一行有多大，才決定換演算法值不值得。</p>
 
-      <div class="cp-panels">
-        <div class="cp-panel">
-          <div class="pt">本步語義</div>
-          <div class="prow"><span class="pk">操作</span><span class="pv" id="cp-p-op">—</span></div>
-          <div class="prow"><span class="pk">ACK 點</span><span class="pv" id="cp-p-ack">—</span></div>
-          <div class="prow"><span class="pk">Stale window</span><span class="pv" id="cp-p-stale">—</span></div>
-          <div class="prow"><span class="pk">崩潰損失</span><span class="pv" id="cp-p-loss">—</span></div>
-        </div>
-        <div class="cp-panel">
-          <div class="pt">計數</div>
-          <div class="prow"><span class="pk">cache 狀態</span><span class="pv" id="cp-p-cstate">empty</span></div>
-          <div class="prow"><span class="pk">dirty bit</span><span class="pv" id="cp-p-dirty">false</span></div>
-          <div class="prow"><span class="pk">命中率（本回合）</span><span class="pv" id="cp-p-hr">—</span></div>
-          <div class="prow"><span class="pk">被踢出</span><span class="pv" id="cp-p-victim">—</span></div>
-        </div>
-      </div>
-
-      <div class="status-line" id="cp-status">選擇模式後按「下一步」。先走冷讀，再寫成 B，最後看崩潰。</div>
-      <div class="cp-verdict" id="cp-verdict">判定尚未產生——走完序列後會摘要 ACK、stale 與崩潰損失。</div>
-      <div class="cp-wire" id="cp-wire" aria-label="事件日誌"></div>
+      <div class="status-line" id="cpe-status">拖動旋鈕即可重算。</div>
+      <p class="cpx-note">存取序列由參數以固定種子的線性同餘產生器生成（種子固定，故同一組參數永遠得到同一條序列）：key 基數的前 25% 視為熱點集合，熱點佔比是每次存取落在熱點集合的機率；「熱點＋掃描污染」會在每 12 次存取中插入 5 次一次性的冷 key 掃描。TTL 以存取次數計，屬絕對 TTL（寫入起算，命中不延長）。</p>
     </div>
   </div>
 
   <div class="oneliner">
-    <b>一句話答法</b>Demo 要對的是時序：誰先寫、何時 ACK、哪一步 cache 與 DB 不同值、以及 Write-Back 崩潰會丟掉已確認的 B。
+    <b>一句話答法</b>把容量拖過 working set，三條策略會合而為一；容量不足時，LFU 靠頻次保住熱 key，LRU 與 FIFO 則會被掃描流量洗掉——而 TTL 夠短的話，三者一起失效。
   </div>
 </section>
 
