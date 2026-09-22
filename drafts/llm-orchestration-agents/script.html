@@ -2,247 +2,463 @@
 (function () {
   "use strict";
 
-  var scenario = "normal";
-  var stepIdx = 0;
+  /* (1) 常數與參數表 */
+  var ZIPF_S = 0.9;            /* 分支出現頻率的 Zipf 指數：w_i = i^-0.9 */
+  var RETRY_MAX = 2;           /* 重試上限（次） */
+  var STEP_TOK = 850;          /* workflow 每次 LLM 呼叫的 prompt token：固定骨架 500 + 該步 context 350 */
+  var AG_BASE_TOK = 900;       /* agent 第一輪 prompt token：system prompt + 全部工具 schema */
+  var AG_TURN_TOK = 420;       /* agent 每多繞一輪、累積進 context 的 thought/action/observation token */
+  var OUT_TOK = 120;           /* 每次 LLM 呼叫的輸出 token */
+  var PRICE_IN = 0.30;         /* USD / 1M prompt token */
+  var PRICE_OUT = 1.20;        /* USD / 1M output token */
+  var LLM_LAT = 900;           /* ms / 次 LLM 往返 */
+  var TOOL_LAT = 250;          /* ms / 次工具呼叫 */
+  var WF_HANDLER_AMORT = 1.2;  /* 每個 handler 攤提到「每千次任務」的工程成本 (USD) */
+  var AG_GUARD_AMORT = 6.0;    /* agent 護欄 / trace / eval harness 的攤提 (USD 每千次任務) */
+  var MAX_B = 12;              /* 交叉曲線的橫軸上限 */
+  var CUT_BARS = 3;            /* max-iterations 之後畫幾根灰色截斷柱 */
 
-  var wfStatusEl = document.getElementById("orch-wf-status");
-  var agStatusEl = document.getElementById("orch-ag-status");
-  var traceEl = document.getElementById("orch-ag-trace");
-  var captionEl = document.getElementById("orch-caption");
-  var btnNext = document.getElementById("orch-btn-next");
-  var btnReset = document.getElementById("orch-btn-reset");
+  /* (2) compute* 純函式 —— 完全不碰 DOM，只吃參數、只回傳物件 */
 
-  var TAGS = {
-    thought: { cls: "thought", label: "Thought" },
-    action: { cls: "action", label: "Action" },
-    observation: { cls: "observation", label: "Observe" },
-    answer: { cls: "answer", label: "Answer" }
-  };
-
-  var SCENARIOS = {
-    normal: {
-      frames: [
-        {
-          wf: { hot: null, done: [], bad: [] },
-          wfStatus: "收到問題，固定 pipeline 準備啟動。",
-          trace: [],
-          agStatus: "收到問題，Agent 準備推理。",
-          caption: "同一個問題進來：左軌照既定步驟跑，右軌讓 LLM 現場決定下一步。"
-        },
-        {
-          wf: { hot: "intent", done: [], bad: [] },
-          wfStatus: "① 意圖分類 → 判定為『訂單追蹤』，進入固定流程。",
-          trace: [
-            { t: "thought", x: "使用者想知道訂單 #A1234 的到貨時間。第一步：先查訂單狀態。" }
-          ],
-          agStatus: "① Thought：規劃第一步。",
-          caption: "起手看似相同，但左軌是規則分類、右軌是 LLM 自由推理。"
-        },
-        {
-          wf: { hot: "order", done: ["intent"], bad: [] },
-          wfStatus: "② 查訂單 DB → 狀態＝已出貨，物流單號＝SF123。",
-          trace: [
-            { t: "thought", x: "使用者想知道訂單 #A1234 的到貨時間。第一步：先查訂單狀態。" },
-            { t: "action", x: "get_order(order_id=\"A1234\")" }
-          ],
-          agStatus: "② Action：呼叫 get_order 工具。",
-          caption: "右軌每個 Action 都是 LLM 當下決定要呼叫的，不是預先排好的。"
-        },
-        {
-          wf: { hot: "ship", done: ["intent", "order"], bad: [] },
-          wfStatus: "③ 查物流 API → 用 SF123 查得預計 7/21 送達。",
-          trace: [
-            { t: "thought", x: "使用者想知道訂單 #A1234 的到貨時間。第一步：先查訂單狀態。" },
-            { t: "action", x: "get_order(order_id=\"A1234\")" },
-            { t: "observation", x: "status=已出貨, tracking=SF123" },
-            { t: "thought", x: "已出貨且有物流單號，還需要到貨時效 → 再呼叫物流工具。" }
-          ],
-          agStatus: "③ Observation → Thought：讀完結果，決定再查物流。",
-          caption: "這一步右軌『多想了一輪』：先看觀察，再決定下一步。"
-        },
-        {
-          wf: { hot: "template", done: ["intent", "order", "ship"], bad: [] },
-          wfStatus: "④ 模板組裝 → 把訂單狀態與到貨日填入回覆模板。",
-          trace: [
-            { t: "thought", x: "使用者想知道訂單 #A1234 的到貨時間。第一步：先查訂單狀態。" },
-            { t: "action", x: "get_order(order_id=\"A1234\")" },
-            { t: "observation", x: "status=已出貨, tracking=SF123" },
-            { t: "thought", x: "已出貨且有物流單號，還需要到貨時效 → 再呼叫物流工具。" },
-            { t: "action", x: "get_shipping(tracking=\"SF123\")" },
-            { t: "observation", x: "預計 7/21 送達" }
-          ],
-          agStatus: "④ Action + Observation：查得到貨日。",
-          caption: "右軌走到這裡才確定總共要兩次工具呼叫——事前無法預知步數。"
-        },
-        {
-          wf: { hot: null, done: ["intent", "order", "ship", "template", "reply"], bad: [] },
-          wfStatus: "⑤ 回覆：『您的訂單已出貨，預計 7/21 送達。』——固定 5 步，每步都可預測。",
-          trace: [
-            { t: "thought", x: "使用者想知道訂單 #A1234 的到貨時間。第一步：先查訂單狀態。" },
-            { t: "action", x: "get_order(order_id=\"A1234\")" },
-            { t: "observation", x: "status=已出貨, tracking=SF123" },
-            { t: "thought", x: "已出貨且有物流單號，還需要到貨時效 → 再呼叫物流工具。" },
-            { t: "action", x: "get_shipping(tracking=\"SF123\")" },
-            { t: "observation", x: "預計 7/21 送達" },
-            { t: "answer", x: "您的訂單已出貨，預計 7/21 送達。" }
-          ],
-          agStatus: "⑤ Answer：判斷資訊已足夠 → 產生回覆（本次剛好也用了 2 次工具）。",
-          caption: "正常路徑下兩軌結論相同；差別是左軌路徑固定，右軌每一步都是 LLM 現場決策。"
-        }
-      ]
-    },
-    edge: {
-      frames: [
-        {
-          wf: { hot: null, done: [], bad: [] },
-          wfStatus: "收到同樣的問題，固定 pipeline 準備啟動。",
-          trace: [],
-          agStatus: "收到問題，Agent 準備推理。",
-          caption: "這次訂單還沒出貨（沒有物流單號），看兩軌怎麼應對同一個缺失。"
-        },
-        {
-          wf: { hot: "intent", done: [], bad: [] },
-          wfStatus: "① 意圖分類 → 同樣判為『訂單追蹤』，走同一條寫死的流程。",
-          trace: [
-            { t: "thought", x: "先查訂單 #A1234 的狀態。" }
-          ],
-          agStatus: "① Thought：先查訂單。",
-          caption: "左右起手一致——差異要到遇上缺失才會爆發。"
-        },
-        {
-          wf: { hot: "order", done: ["intent"], bad: [] },
-          wfStatus: "② 查訂單 DB → 狀態＝備貨中，預計出貨＝1–2 個工作天，物流單號＝（空）。",
-          trace: [
-            { t: "thought", x: "先查訂單 #A1234 的狀態。" },
-            { t: "action", x: "get_order(order_id=\"A1234\")" }
-          ],
-          agStatus: "② Action：查訂單。",
-          caption: "關鍵資料回來了：訂單存在，但還沒有物流單號。"
-        },
-        {
-          wf: { hot: null, done: ["intent", "order"], bad: ["ship"] },
-          wfStatus: "③ 查物流 API → pipeline 硬性下一步就是查物流，但沒有物流單號 → API 回錯。回覆模板本來就靠物流結果來填。",
-          trace: [
-            { t: "thought", x: "先查訂單 #A1234 的狀態。" },
-            { t: "action", x: "get_order(order_id=\"A1234\")" },
-            { t: "observation", x: "status=備貨中, est_ship=1–2 個工作天, tracking=(無)" },
-            { t: "thought", x: "尚未出貨、沒有物流單號，查物流沒有意義。改用訂單的預計出貨時間回答，不呼叫物流工具。" }
-          ],
-          agStatus: "③ Observation → Thought：Agent 察覺缺物流單號，自主決定跳過物流查詢。",
-          caption: "分岔點：左軌照表操課撞上缺失，右軌因為『讀懂了觀察』而改道。"
-        },
-        {
-          wf: { hot: null, done: ["intent", "order"], bad: ["ship", "template", "reply"] },
-          wfStatus: "④ 落入 fallback → 回覆模板是為『已出貨→填物流 ETA』設計的，沒有『備貨中』這條分支，只能降級回：『您的訂單備貨中，暫時無法提供到貨時間』。",
-          trace: [
-            { t: "thought", x: "先查訂單 #A1234 的狀態。" },
-            { t: "action", x: "get_order(order_id=\"A1234\")" },
-            { t: "observation", x: "status=備貨中, est_ship=1–2 個工作天, tracking=(無)" },
-            { t: "thought", x: "尚未出貨、沒有物流單號，查物流沒有意義。改用訂單的預計出貨時間回答，不呼叫物流工具。" },
-            { t: "answer", x: "您的訂單 #A1234 目前備貨中，預計 1–2 個工作天內出貨；出貨後我會提供物流追蹤資訊。" }
-          ],
-          agStatus: "④ Answer：Agent 用同一份訂單資訊（含預計出貨時間），給出真正有用的回覆。",
-          caption: "同一份『備貨中＋預計出貨』資料：左軌模板沒有這條分支只能降級，右軌據此給出完整回覆。"
-        },
-        {
-          wf: { hot: null, done: ["intent", "order"], bad: ["ship", "template", "reply"] },
-          wfStatus: "⑤ Workflow 撞牆 → 除非工程師『事先想到』備貨中且尚無物流單號這條分支並補上模板，否則固定流程遇到未預期路徑就只能降級。",
-          trace: [
-            { t: "thought", x: "先查訂單 #A1234 的狀態。" },
-            { t: "action", x: "get_order(order_id=\"A1234\")" },
-            { t: "observation", x: "status=備貨中, est_ship=1–2 個工作天, tracking=(無)" },
-            { t: "thought", x: "尚未出貨、沒有物流單號，查物流沒有意義。改用訂單的預計出貨時間回答，不呼叫物流工具。" },
-            { t: "answer", x: "您的訂單 #A1234 目前備貨中，預計 1–2 個工作天內出貨；出貨後我會提供物流追蹤資訊。" }
-          ],
-          agStatus: "⑤ 代價提醒：Agent 這個『跳過物流』的判斷是 LLM 現場推理，也可能判斷錯（幻覺）——正式環境需要護欄與可觀測性（見 s5）。",
-          caption: "自主性的價值與代價：Agent 能吃下長尾分支，但不可預測、需要護欄——正是下一章的主題。"
-        }
-      ]
-    }
-  };
-
-  function setText(el, text) {
-    if (el) el.textContent = text;
+  function clampInt(v, lo, hi) {
+    var n = Math.round(Number(v));
+    if (isNaN(n)) { n = lo; }
+    if (n < lo) { return lo; }
+    if (n > hi) { return hi; }
+    return n;
   }
 
-  function renderWorkflow(wf) {
-    var nodes = document.querySelectorAll("#orch-wf-pipe .orch-node");
-    nodes.forEach(function (el) {
-      var id = el.getAttribute("data-wf");
-      el.classList.remove("hot", "done", "bad");
-      if (wf.done.indexOf(id) !== -1) el.classList.add("done");
-      if (wf.bad.indexOf(id) !== -1) el.classList.add("bad");
-      if (wf.hot === id) {
-        el.classList.remove("done", "bad");
-        el.classList.add("hot");
+  /* 前 n 個分支的 Zipf 頻率和；覆蓋率＝前 H 個 / 前 B 個 */
+  function zipfPrefix(n) {
+    var s = 0;
+    for (var i = 1; i <= n; i++) { s += Math.pow(i, -ZIPF_S); }
+    return s;
+  }
+
+  /* 有限項等比級數 1 + r + r^2 + ... + r^(terms-1) */
+  function geomSum(r, terms) {
+    var s = 0;
+    var x = 1;
+    for (var i = 0; i < terms; i++) { s += x; x *= r; }
+    return s;
+  }
+
+  function perSuccess(total, success) {
+    if (success <= 0.000001) { return null; }   /* 不可達：不回傳 Infinity，保持可 JSON 序列化 */
+    return total / success;
+  }
+
+  /* 固定 pipeline：步數寫死、每步只帶該步 context（prompt 不累積），沒寫到的分支只能降級 */
+  function workflowSide(branches, handlersRaw, toolSteps, failRate, ckpt) {
+    var handlers = handlersRaw > branches ? branches : handlersRaw;   /* note: H 內部 clamp 至 B */
+    var coverage = zipfPrefix(handlers) / zipfPrefix(branches);
+    var oneShot = Math.pow(1 - failRate, toolSteps);                  /* 整條一次跑完不出錯的機率 */
+    var attempts = ckpt ? 1 : geomSum(1 - oneShot, RETRY_MAX + 1);    /* 期望整條重跑次數 */
+    var toolCalls = ckpt
+      ? toolSteps * geomSum(failRate, RETRY_MAX + 1)                  /* 只重跑失敗那一步 */
+      : toolSteps * attempts;                                         /* 整條重來，工具全部再跑一次 */
+    var llmCalls = ckpt
+      ? (toolSteps + 2) + (toolCalls - toolSteps)                     /* 意圖分類 + 每個工具步抽參數 + 模板生成，重試步各再一次 */
+      : (toolSteps + 2) * attempts;
+    var stepOk = ckpt
+      ? Math.pow(1 - Math.pow(failRate, RETRY_MAX + 1), toolSteps)
+      : 1 - Math.pow(1 - oneShot, RETRY_MAX + 1);
+    var success = coverage * stepOk;
+    var promptTok = llmCalls * STEP_TOK;
+    var outTok = llmCalls * OUT_TOK;
+    var exec = (promptTok * PRICE_IN + outTok * PRICE_OUT) / 1000;    /* USD 每千次任務 */
+    var eng = handlers * WF_HANDLER_AMORT;
+    var bars = [];
+    var i;
+    for (i = 0; i < toolSteps + 2; i++) {
+      bars.push({ tok: STEP_TOK, alive: 1, cut: false, retry: false });
+    }
+    var retryBars = Math.round(llmCalls - (toolSteps + 2));
+    if (retryBars > 6) { retryBars = 6; }
+    for (i = 0; i < retryBars; i++) {
+      bars.push({ tok: STEP_TOK, alive: 1, cut: false, retry: true });
+    }
+    return {
+      handlers: handlers,
+      coverage: coverage,
+      llmCalls: llmCalls,
+      toolCalls: toolCalls,
+      promptTok: promptTok,
+      outTok: outTok,
+      wallMs: llmCalls * LLM_LAT + toolCalls * TOOL_LAT,
+      success: success,
+      execUsd: exec,
+      engUsd: eng,
+      totalUsd: exec + eng,
+      costPerSuccess: perSuccess(exec + eng, success),
+      bars: bars
+    };
+  }
+
+  /* 自主 agent：不必枚舉分支，但每輪重送全歷史、可能走錯路、撞上 max-iterations 就被砍掉 */
+  function agentSide(toolSteps, failRate, hitRate, maxIter, ckpt) {
+    var pEff = hitRate * (ckpt ? 1 - failRate * failRate : 1 - failRate);
+    var dist = [];
+    var k;
+    for (k = 0; k <= toolSteps; k++) { dist.push(0); }
+    dist[0] = 1;
+    var bars = [];
+    var llmCalls = 0;
+    var toolCalls = 0;
+    var promptTok = 0;
+    var t, alive, tok, adv;
+    for (t = 1; t <= maxIter; t++) {
+      alive = 0;
+      for (k = 0; k < toolSteps; k++) { alive += dist[k]; }
+      tok = AG_BASE_TOK + (t - 1) * AG_TURN_TOK;
+      bars.push({ tok: tok, alive: alive, cut: false, retry: false });
+      llmCalls += alive;
+      toolCalls += alive;
+      promptTok += alive * tok;
+      for (k = toolSteps - 1; k >= 0; k--) {
+        adv = dist[k] * pEff;
+        dist[k] -= adv;
+        dist[k + 1] += adv;
       }
-    });
-  }
-
-  function renderTrace(trace) {
-    if (!traceEl) return;
-    traceEl.innerHTML = "";
-    if (!trace || !trace.length) {
-      var ph = document.createElement("div");
-      ph.className = "orch-trace-item empty";
-      ph.textContent = "Agent 待命，尚未推理。";
-      traceEl.appendChild(ph);
-      return;
     }
-    trace.forEach(function (item) {
-      var meta = TAGS[item.t] || TAGS.thought;
-      var wrap = document.createElement("div");
-      wrap.className = "orch-trace-item " + meta.cls;
-      var tag = document.createElement("span");
-      tag.className = "tag";
-      tag.textContent = meta.label;
-      wrap.appendChild(tag);
-      wrap.appendChild(document.createTextNode(item.x));
-      traceEl.appendChild(wrap);
-    });
-  }
-
-  function renderStep() {
-    var frames = SCENARIOS[scenario].frames;
-    var frame = frames[stepIdx];
-    if (!frame) return;
-
-    renderWorkflow(frame.wf);
-    renderTrace(frame.trace);
-    setText(wfStatusEl, frame.wfStatus);
-    setText(agStatusEl, frame.agStatus);
-    setText(captionEl, frame.caption);
-
-    btnNext.disabled = stepIdx >= frames.length - 1;
-  }
-
-  function reset() {
-    stepIdx = 0;
-    renderStep();
-  }
-
-  function next() {
-    var frames = SCENARIOS[scenario].frames;
-    if (stepIdx < frames.length - 1) {
-      stepIdx += 1;
-      renderStep();
+    var success = dist[toolSteps];
+    var stranded = 1 - success;
+    for (t = maxIter + 1; t <= maxIter + CUT_BARS; t++) {
+      bars.push({ tok: AG_BASE_TOK + (t - 1) * AG_TURN_TOK, alive: stranded, cut: true, retry: false });
     }
+    var outTok = llmCalls * OUT_TOK;
+    var exec = (promptTok * PRICE_IN + outTok * PRICE_OUT) / 1000;
+    var eng = AG_GUARD_AMORT;
+    return {
+      llmCalls: llmCalls,
+      toolCalls: toolCalls,
+      expIters: llmCalls,
+      promptTok: promptTok,
+      outTok: outTok,
+      wallMs: llmCalls * LLM_LAT + toolCalls * TOOL_LAT,
+      success: success,
+      stranded: stranded,
+      pEff: pEff,
+      tokFirst: AG_BASE_TOK,
+      tokLast: AG_BASE_TOK + (maxIter - 1) * AG_TURN_TOK,
+      growth: (AG_BASE_TOK + (maxIter - 1) * AG_TURN_TOK) / AG_BASE_TOK,
+      execUsd: exec,
+      engUsd: eng,
+      totalUsd: exec + eng,
+      costPerSuccess: perSuccess(exec + eng, success),
+      bars: bars
+    };
   }
 
-  document.querySelectorAll("#demo-orch .seg button").forEach(function (btn) {
-    btn.addEventListener("click", function () {
-      document.querySelectorAll("#demo-orch .seg button").forEach(function (b) {
-        b.setAttribute("aria-pressed", "false");
-      });
-      btn.setAttribute("aria-pressed", "true");
-      scenario = btn.getAttribute("data-sc");
-      reset();
-    });
+  // @probe fn       computeOrch
+  // @probe baseline {"branches":6,"handlers":3,"toolSteps":2,"toolFailPct":10,"agentHitPct":70,"maxIter":8,"checkpoint":1}
+  // @probe sweep    {"branches":[1,12],"handlers":[1,12],"toolSteps":[1,6],"toolFailPct":[0,40],"agentHitPct":[40,95],"maxIter":[3,15],"checkpoint":[0,1]}
+  function computeOrch(p) {
+    var branches = clampInt(p.branches, 1, MAX_B);
+    var handlersRaw = clampInt(p.handlers, 1, MAX_B);
+    var toolSteps = clampInt(p.toolSteps, 1, 6);
+    var failRate = clampInt(p.toolFailPct, 0, 40) / 100;
+    var hitRate = clampInt(p.agentHitPct, 40, 95) / 100;
+    var maxIter = clampInt(p.maxIter, 3, 15);
+    var ckpt = p.checkpoint ? 1 : 0;
+
+    var wf = workflowSide(branches, handlersRaw, toolSteps, failRate, ckpt);
+    var ag = agentSide(toolSteps, failRate, hitRate, maxIter, ckpt);
+
+    /* 以分支數為橫軸重掃兩條「每次成功任務成本」曲線：agent 不隨分支變動，workflow 的覆蓋率會掉 */
+    var curve = [];
+    var crossover = 0;
+    var b, w;
+    for (b = 1; b <= MAX_B; b++) {
+      w = workflowSide(b, handlersRaw, toolSteps, failRate, ckpt);
+      curve.push({ b: b, wf: w.costPerSuccess, ag: ag.costPerSuccess });
+      if (crossover === 0 && ag.costPerSuccess !== null &&
+          (w.costPerSuccess === null || ag.costPerSuccess <= w.costPerSuccess)) {
+        crossover = b;
+      }
+    }
+
+    var winner = "tie";
+    var marginPct = 0;
+    if (wf.costPerSuccess === null && ag.costPerSuccess === null) {
+      winner = "none";
+    } else if (wf.costPerSuccess === null) {
+      winner = "ag";
+      marginPct = 100;
+    } else if (ag.costPerSuccess === null) {
+      winner = "wf";
+      marginPct = 100;
+    } else if (Math.abs(wf.costPerSuccess - ag.costPerSuccess) > 0.0001) {
+      winner = wf.costPerSuccess < ag.costPerSuccess ? "wf" : "ag";
+      marginPct = Math.abs(wf.costPerSuccess - ag.costPerSuccess) /
+        Math.max(wf.costPerSuccess, ag.costPerSuccess) * 100;
+    }
+
+    var scaleMax = STEP_TOK;
+    var i;
+    for (i = 0; i < ag.bars.length; i++) {
+      if (ag.bars[i].tok > scaleMax) { scaleMax = ag.bars[i].tok; }
+    }
+
+    return {
+      branches: branches,
+      handlersUsed: wf.handlers,
+      handlersClamped: handlersRaw > branches ? 1 : 0,
+      toolSteps: toolSteps,
+      maxIter: maxIter,
+      checkpoint: ckpt,
+      scaleMax: scaleMax,
+      wf: wf,
+      ag: ag,
+      curve: curve,
+      crossover: crossover,
+      winner: winner,
+      marginPct: marginPct
+    };
+  }
+
+  /* (3) DOM 參照 */
+  var demo = document.getElementById("demo-orch");
+  if (!demo) { return; }
+
+  var DEFAULTS = {
+    branches: 6, handlers: 3, toolSteps: 2,
+    toolFailPct: 10, agentHitPct: 70, maxIter: 8, checkpoint: 1
+  };
+
+  var elBranches = document.getElementById("og-branches");
+  var elHandlers = document.getElementById("og-handlers");
+  var elTools = document.getElementById("og-tools");
+  var elFail = document.getElementById("og-fail");
+  var elHit = document.getElementById("og-hit");
+  var elIter = document.getElementById("og-iter");
+  var elCkpt = document.getElementById("og-ckpt");
+  var elReset = document.getElementById("og-reset");
+
+  var vBranches = document.getElementById("og-v-branches");
+  var vHandlers = document.getElementById("og-v-handlers");
+  var vTools = document.getElementById("og-v-tools");
+  var vFail = document.getElementById("og-v-fail");
+  var vHit = document.getElementById("og-v-hit");
+  var vIter = document.getElementById("og-v-iter");
+
+  var barsWf = document.getElementById("og-bars-wf");
+  var barsAg = document.getElementById("og-bars-ag");
+  var ledWf = document.getElementById("og-led-wf");
+  var ledAg = document.getElementById("og-led-ag");
+  var figEl = document.getElementById("og-fig");
+  var statusEl = document.getElementById("og-status");
+  var verdictEl = document.getElementById("og-verdict");
+
+  /* (4) render(state) —— 只讀 state 畫出來，不做任何判斷 */
+
+  function n1(x) { return (Math.round(x * 10) / 10).toFixed(1); }
+  function n2(x) { return (Math.round(x * 100) / 100).toFixed(2); }
+  function pct(x) { return (Math.round(x * 1000) / 10).toFixed(1) + "%"; }
+  function kTok(x) { return (Math.round(x / 10) / 100).toFixed(2) + "K"; }
+  function secs(x) { return (Math.round(x / 100) / 10).toFixed(1) + " s"; }
+  function usd(x) { return x === null ? "不可達" : "$" + n2(x); }
+
+  function barsSvg(bars, scaleMax, kind, title) {
+    var W = 320, H = 170, padL = 6, padB = 26, padT = 18;
+    var n = bars.length < 1 ? 1 : bars.length;
+    var slot = (W - padL * 2) / n;
+    var bw = slot * 0.66;
+    var plotH = H - padB - padT;
+    var s = '<svg viewBox="0 0 ' + W + ' ' + H + '" role="img" style="width:100%;height:auto">';
+    s += '<title>' + title + '</title>';
+    s += '<rect x="0" y="0" width="' + W + '" height="' + H + '" fill="#ffffff"></rect>';
+    s += '<line x1="' + padL + '" y1="' + (H - padB) + '" x2="' + (W - padL) + '" y2="' + (H - padB) +
+         '" stroke="var(--border-strong)" stroke-width="1"></line>';
+    for (var i = 0; i < bars.length; i++) {
+      var b = bars[i];
+      var h = b.tok / scaleMax * plotH;
+      if (h < 2) { h = 2; }
+      var x = padL + i * slot + (slot - bw) / 2;
+      var y = H - padB - h;
+      var fill = kind === "wf" ? "#f4efe6" : "var(--accent-soft)";
+      var stroke = kind === "wf" ? "var(--orch-wf)" : "var(--accent)";
+      var dash = "";
+      if (b.retry) { dash = ' stroke-dasharray="3 2"'; }
+      if (b.cut) { fill = "#f0f0ef"; stroke = "var(--text-3)"; dash = ' stroke-dasharray="3 2"'; }
+      s += '<rect x="' + n1(x) + '" y="' + n1(y) + '" width="' + n1(bw) + '" height="' + n1(h) +
+           '" fill="' + fill + '" stroke="' + stroke + '" stroke-width="1"' + dash + ' rx="2"></rect>';
+      if (kind === "ag" && b.alive >= 0.005 && bars.length <= 14) {
+        s += '<text x="' + n1(x + bw / 2) + '" y="' + n1(y - 4) +
+             '" font-size="8" font-family="var(--mono)" fill="' +
+             (b.cut ? "var(--text-3)" : "var(--text-2)") + '" text-anchor="middle">' +
+             Math.round(b.alive * 100) + '%</text>';
+      }
+      if (bars.length <= 12) {
+        s += '<text x="' + n1(x + bw / 2) + '" y="' + (H - padB + 11) +
+             '" font-size="8" font-family="var(--mono)" fill="var(--text-3)" text-anchor="middle">' +
+             (i + 1) + '</text>';
+      }
+    }
+    s += '<text x="' + padL + '" y="' + (H - 4) + '" font-size="9" font-family="var(--mono)" fill="var(--text-3)">' +
+         (kind === "wf" ? "第 n 次 LLM 呼叫" : "第 n 輪") + '　柱高＝prompt token（上限 ' + kTok(scaleMax) + '）</text>';
+    s += '</svg>';
+    return s;
+  }
+
+  function ledgerHtml(rows) {
+    var s = "";
+    for (var i = 0; i < rows.length; i++) {
+      s += '<div class="lr' + (rows[i].hi ? " hi" : "") + (rows[i].dim ? " dim" : "") + '">' +
+           '<span class="lk">' + rows[i].k + '</span><span class="lv">' + rows[i].v + '</span></div>';
+    }
+    return s;
+  }
+
+  function curveSvg(state) {
+    var W = 640, H = 210, padL = 52, padR = 14, padT = 14, padB = 34;
+    var plotW = W - padL - padR, plotH = H - padT - padB;
+    var i, c, top = 0;
+    for (i = 0; i < state.curve.length; i++) {
+      c = state.curve[i];
+      if (c.wf !== null && c.wf > top) { top = c.wf; }
+      if (c.ag !== null && c.ag > top) { top = c.ag; }
+    }
+    if (top <= 0) { top = 1; }
+    top = top * 1.12;
+    function px(b) { return padL + (b - 1) / (MAX_B - 1) * plotW; }
+    function py(v) { return padT + plotH - (v / top) * plotH; }
+
+    var s = '<svg viewBox="0 0 ' + W + ' ' + H + '" role="img" style="width:100%;height:auto">';
+    s += '<title>每次成功任務成本隨分支數變化，兩條曲線的交點</title>';
+    s += '<rect x="0" y="0" width="' + W + '" height="' + H + '" fill="#fafaf9"></rect>';
+    s += '<line x1="' + padL + '" y1="' + (padT + plotH) + '" x2="' + (W - padR) + '" y2="' + (padT + plotH) +
+         '" stroke="var(--border-strong)"></line>';
+    s += '<line x1="' + padL + '" y1="' + padT + '" x2="' + padL + '" y2="' + (padT + plotH) +
+         '" stroke="var(--border-strong)"></line>';
+    for (i = 0; i <= 2; i++) {
+      var gv = top * i / 2;
+      s += '<text x="' + (padL - 6) + '" y="' + n1(py(gv) + 3) +
+           '" font-size="9" font-family="var(--mono)" fill="var(--text-3)" text-anchor="end">$' + n1(gv) + '</text>';
+    }
+    var wfPts = "", agPts = "";
+    for (i = 0; i < state.curve.length; i++) {
+      c = state.curve[i];
+      if (c.wf !== null) { wfPts += n1(px(c.b)) + "," + n1(py(c.wf)) + " "; }
+      if (c.ag !== null) { agPts += n1(px(c.b)) + "," + n1(py(c.ag)) + " "; }
+      s += '<text x="' + n1(px(c.b)) + '" y="' + (padT + plotH + 13) +
+           '" font-size="9" font-family="var(--mono)" fill="var(--text-3)" text-anchor="middle">' + c.b + '</text>';
+    }
+    if (agPts) {
+      s += '<polyline points="' + agPts + '" fill="none" stroke="var(--accent)" stroke-width="2"></polyline>';
+    }
+    if (wfPts) {
+      s += '<polyline points="' + wfPts + '" fill="none" stroke="var(--orch-wf)" stroke-width="2"></polyline>';
+    }
+    if (state.crossover > 0) {
+      s += '<line x1="' + n1(px(state.crossover)) + '" y1="' + padT + '" x2="' + n1(px(state.crossover)) +
+           '" y2="' + (padT + plotH) + '" stroke="var(--bad)" stroke-width="1" stroke-dasharray="4 3"></line>';
+      s += '<text x="' + n1(px(state.crossover) + 4) + '" y="' + (padT + 11) +
+           '" font-size="10" font-family="var(--mono)" fill="var(--bad)">交叉點 B=' + state.crossover + '</text>';
+    }
+    s += '<line x1="' + n1(px(state.branches)) + '" y1="' + padT + '" x2="' + n1(px(state.branches)) +
+         '" y2="' + (padT + plotH) + '" stroke="var(--text-3)" stroke-width="1"></line>';
+    s += '<text x="' + n1(px(state.branches)) + '" y="' + (padT + plotH + 26) +
+         '" font-size="9" font-family="var(--mono)" fill="var(--text)" text-anchor="middle">目前 B</text>';
+    s += '<text x="' + (W - padR) + '" y="' + (padT + 11) +
+         '" font-size="10" font-family="var(--mono)" fill="var(--orch-wf)" text-anchor="end">Workflow</text>';
+    s += '<text x="' + (W - padR) + '" y="' + (padT + 24) +
+         '" font-size="10" font-family="var(--mono)" fill="var(--accent)" text-anchor="end">Agent</text>';
+    s += '<text x="' + padL + '" y="' + (H - 4) +
+         '" font-size="9" font-family="var(--mono)" fill="var(--text-3)">橫軸：情境分支數 B　縱軸：每千次成功任務成本 (USD)</text>';
+    s += '</svg>';
+    return s;
+  }
+
+  function render(state) {
+    vBranches.textContent = String(state.branches);
+    vHandlers.textContent = String(elHandlers.value) + (state.handlersClamped ? "（實際 " + state.handlersUsed + "）" : "");
+    vTools.textContent = String(state.toolSteps);
+    vFail.textContent = elFail.value + "%";
+    vHit.textContent = elHit.value + "%";
+    vIter.textContent = String(state.maxIter);
+
+    barsWf.innerHTML = barsSvg(state.wf.bars, state.scaleMax, "wf", "Workflow 每次 LLM 呼叫的 prompt token");
+    barsAg.innerHTML = barsSvg(state.ag.bars, state.scaleMax, "ag", "Agent 每輪的 prompt token 與存活機率");
+
+    ledWf.innerHTML = ledgerHtml([
+      { k: "LLM 呼叫（期望）", v: n1(state.wf.llmCalls) + " 次" },
+      { k: "工具呼叫（期望）", v: n1(state.wf.toolCalls) + " 次" },
+      { k: "prompt token", v: kTok(state.wf.promptTok) },
+      { k: "wall-clock（串行）", v: secs(state.wf.wallMs) },
+      { k: "分支覆蓋率 → 成功率", v: pct(state.wf.coverage) + " → " + pct(state.wf.success) },
+      { k: "每千次成功任務成本", v: usd(state.wf.costPerSuccess), hi: true }
+    ]);
+    ledAg.innerHTML = ledgerHtml([
+      { k: "LLM 呼叫＝期望輪數", v: n1(state.ag.llmCalls) + " 次" },
+      { k: "工具呼叫（期望）", v: n1(state.ag.toolCalls) + " 次" },
+      { k: "prompt token", v: kTok(state.ag.promptTok) },
+      { k: "wall-clock（串行）", v: secs(state.ag.wallMs) },
+      { k: "分支覆蓋率 → 成功率", v: "100% → " + pct(state.ag.success) },
+      { k: "每千次成功任務成本", v: usd(state.ag.costPerSuccess), hi: true }
+    ]);
+
+    figEl.innerHTML = curveSvg(state);
+
+    statusEl.textContent =
+      "Workflow：" + state.handlersUsed + " 個 handler 蓋住 " + pct(state.wf.coverage) +
+      " 的流量，期望 " + n1(state.wf.llmCalls) + " 次 LLM 呼叫、" + kTok(state.wf.promptTok) + " prompt token。" +
+      "Agent：期望跑 " + n1(state.ag.expIters) + " 輪，第 1 輪 " + kTok(state.ag.tokFirst) +
+      "、第 " + state.maxIter + " 輪 " + kTok(state.ag.tokLast) +
+      "（" + n1(state.ag.growth) + " 倍），" + pct(state.ag.stranded) + " 的任務撞上護欄被砍掉。";
+
+    var v = "";
+    if (state.winner === "wf") {
+      v = "這組參數下 <b>Workflow 便宜 " + n1(state.marginPct) + "%</b>（" +
+          usd(state.wf.costPerSuccess) + " vs " + usd(state.ag.costPerSuccess) + " 每千次成功任務）。";
+    } else if (state.winner === "ag") {
+      v = "這組參數下 <b>Agent 便宜 " + n1(state.marginPct) + "%</b>（" +
+          usd(state.ag.costPerSuccess) + " vs " + usd(state.wf.costPerSuccess) + " 每千次成功任務）。";
+    } else if (state.winner === "none") {
+      v = "這組參數下<b>兩邊都做不完這個任務</b>：workflow 的分支沒寫到、agent 也撞上 max-iterations。";
+    } else {
+      v = "這組參數下<b>兩邊成本幾乎相同</b>——正好站在交叉點上。";
+    }
+    if (state.crossover > 0) {
+      v += " 分支數增到 <b>B=" + state.crossover + "</b> 時 agent 開始划算：workflow 的 handler 數沒跟著長，覆蓋率一掉，每次成功任務的成本就被除大。";
+    } else {
+      v += " 在 B=1～" + MAX_B + " 的整段範圍內 workflow 都比較便宜——這種任務不需要自主性。";
+    }
+    verdictEl.innerHTML = v;
+    verdictEl.className = "og-verdict " + (state.winner === "ag" ? "ag-win" : "wf-win");
+  }
+
+  /* (5) 事件綁定 */
+  function readParams() {
+    return {
+      branches: parseInt(elBranches.value, 10),
+      handlers: parseInt(elHandlers.value, 10),
+      toolSteps: parseInt(elTools.value, 10),
+      toolFailPct: parseInt(elFail.value, 10),
+      agentHitPct: parseInt(elHit.value, 10),
+      maxIter: parseInt(elIter.value, 10),
+      checkpoint: elCkpt.checked ? 1 : 0
+    };
+  }
+
+  function update() { render(computeOrch(readParams())); }
+
+  var knobs = [elBranches, elHandlers, elTools, elFail, elHit, elIter];
+  for (var i = 0; i < knobs.length; i++) {
+    knobs[i].addEventListener("input", update);
+  }
+  elCkpt.addEventListener("change", update);
+  elReset.addEventListener("click", function () {
+    elBranches.value = DEFAULTS.branches;
+    elHandlers.value = DEFAULTS.handlers;
+    elTools.value = DEFAULTS.toolSteps;
+    elFail.value = DEFAULTS.toolFailPct;
+    elHit.value = DEFAULTS.agentHitPct;
+    elIter.value = DEFAULTS.maxIter;
+    elCkpt.checked = true;
+    update();
   });
 
-  btnNext.addEventListener("click", next);
-  btnReset.addEventListener("click", reset);
-
-  reset();
+  update();
 })();
 </script>
