@@ -1,3 +1,7 @@
+<!-- demo-archetype: C｜並排對照（主，第 6 節） — 讀者用一組 slider／checkbox 設定同一波流量（故障形狀、讀 QPS、熱 key 佔比、
+     打空佔比、TTL 基準與抖動幅度、時間窗），整條回源時間序列一次算完，同時畫出「裸快取」與「加防護」兩條回源負載面積，
+     中間夾一條省下的回源差值帶；再拖時間游標看某一秒的細節。選 C 是因為本篇每一種失效模式都有一個明確的錯誤解法
+     （什麼都不做）與一個防護解法，教學重點就是「同一波流量下兩者的 origin 帳單差多少」——那是一個對照問題，不是一段流程。 -->
 <style>
   /* 本篇專屬：cfm-* 命名空間，不覆蓋全站 base 類別 */
   #cfm-root {
@@ -19,14 +23,19 @@
   .cfm-card .cl { font-family: var(--mono); font-size: 11px; color: var(--text-3); margin-bottom: 6px; letter-spacing: .04em; }
   .cfm-card .cs { font-size: 12.5px; color: var(--text-2); line-height: 1.55; }
 
-  .cfm-flow { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin: 10px 0 4px; font-family: var(--mono); font-size: 12px; }
-  .cfm-chip { border: 1px solid var(--border-strong); border-radius: 6px; padding: 6px 10px; background: #fff; font-weight: 600; color: var(--text); }
-  .cfm-chip.cli { background: var(--cfm-c-soft); border-color: var(--cfm-c); color: var(--cfm-c); }
-  .cfm-chip.cache { background: var(--cfm-alt-soft); border-color: var(--cfm-alt); color: var(--cfm-alt); }
-  .cfm-chip.db { background: var(--cfm-s-soft); border-color: var(--cfm-s); color: var(--cfm-s); }
-  .cfm-chip.op { background: var(--bg-soft); color: var(--text-3); border-style: dashed; font-weight: 500; }
-  .cfm-chip.bad { background: var(--cfm-bad-soft); border-color: var(--cfm-bad); color: var(--cfm-bad); }
-  .cfm-chip.warn { background: var(--cfm-w-soft); border-color: var(--cfm-w); color: var(--cfm-w); }
+  /* 第 3 節：熱 key 到期瞬間的併發時序 swimlane（grid 不折行） */
+  .cfx-lane {
+    display: grid; grid-template-columns: 56px repeat(3, 1fr); gap: 1px;
+    background: var(--border); border: 1px solid var(--border);
+    border-radius: 8px; overflow: hidden; margin: 14px 0 6px;
+  }
+  .cfx-lane > div { background: #fff; padding: 8px 10px; font-size: 12px; line-height: 1.5; }
+  .cfx-lane .lh { background: var(--bg-soft); font-family: var(--mono); font-size: 11px; font-weight: 700; color: var(--text-2); }
+  .cfx-lane .lt { background: var(--bg-soft); font-family: var(--mono); font-size: 11px; color: var(--text-3); }
+  .cfx-lane .lc.act { background: var(--accent-soft); }
+  .cfx-lane .lc.ok  { background: var(--ok-soft); }
+  .cfx-lane .lc.bad { background: var(--bad-soft); }
+  @media (max-width: 720px) { .cfx-lane { grid-template-columns: 46px repeat(3, minmax(0, 1fr)); font-size: 11px; } }
 
   .cfm-split { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin: 12px 0; }
   @media (max-width: 640px) { .cfm-split { grid-template-columns: 1fr; } }
@@ -42,120 +51,58 @@
   .cfm-pane .ss { font-family: var(--mono); font-size: 11px; color: var(--text-3); margin-bottom: 8px; letter-spacing: .04em; }
   .cfm-pane ul { margin: 0; padding-left: 1.15em; font-size: 13px; color: var(--text-2); line-height: 1.65; }
 
-  .cfm-ctrl { display: flex; flex-wrap: wrap; gap: 10px; margin: 10px 0 8px; align-items: center; }
-  .cfm-metric { display: flex; flex-wrap: wrap; gap: 14px; margin: 8px 0 4px; font-size: 13px; color: var(--text-2); }
-  .cfm-metric strong { color: var(--text); font-family: var(--mono); font-size: 12.5px; }
-
-  .cfm-actors { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin: 12px 0 6px; }
-  @media (max-width: 640px) { .cfm-actors { grid-template-columns: 1fr; } }
-  .cfm-actor {
-    border: 1.5px solid var(--border-strong); border-radius: var(--radius-sm);
-    padding: 12px 12px 10px; background: #fff; text-align: center;
-    transition: background .18s, border-color .18s, box-shadow .18s;
+  /* ── 第 6 節 demo：cfx-* 全新骨架 ───────────────────────────── */
+  .cfx-knobs {
+    display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px 16px;
+    margin: 12px 0 10px;
   }
-  .cfm-actor .an { font-weight: 700; font-size: 13px; letter-spacing: .03em; }
-  .cfm-actor .al { font-family: var(--mono); font-size: 10.5px; color: var(--text-3); margin-top: 2px; }
-  .cfm-actor .av { font-family: var(--mono); font-size: 16px; font-weight: 700; margin-top: 8px; color: var(--text); }
-  .cfm-actor .ah { font-size: 11.5px; color: var(--text-2); margin-top: 4px; min-height: 1.4em; }
-  .cfm-actor.on { background: var(--accent-soft); border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
-  .cfm-actor.on .an { color: var(--accent); }
-  .cfm-actor.ok { background: var(--ok-soft); border-color: var(--ok); }
-  .cfm-actor.ok .an { color: var(--ok); }
-  .cfm-actor.dirty { background: var(--warn-soft); border-color: var(--warn); }
-  .cfm-actor.dirty .an { color: var(--warn); }
-  .cfm-actor.bad { background: var(--bad-soft); border-color: var(--bad); }
-  .cfm-actor.bad .an { color: var(--bad); }
+  @media (max-width: 720px) { .cfx-knobs { grid-template-columns: repeat(2, 1fr); } }
+  @media (max-width: 460px) { .cfx-knobs { grid-template-columns: 1fr; } }
+  .cfx-knob { display: block; font-size: 11.5px; color: var(--text-2); }
+  .cfx-knob .kn { display: flex; justify-content: space-between; gap: 6px; align-items: baseline; }
+  .cfx-knob .kv { font-family: var(--mono); font-size: 12px; font-weight: 700; color: var(--text); }
+  .cfx-knob input[type="range"] { width: 100%; margin: 2px 0 0; accent-color: var(--accent); }
 
-  .cfm-chart-wrap {
+  .cfx-checks {
+    display: flex; flex-wrap: wrap; gap: 6px 14px; align-items: center;
+    border: 1px solid var(--border); border-left: 3px solid var(--ok);
+    border-radius: var(--radius-sm); background: var(--bg-soft);
+    padding: 9px 12px; margin: 4px 0 10px;
+  }
+  .cfx-checks .cl { font-size: 11px; font-family: var(--mono); color: var(--text-3); letter-spacing: .05em; width: 100%; }
+  .cfx-checks label { font-size: 12.5px; color: var(--text); display: inline-flex; align-items: center; gap: 5px; cursor: pointer; }
+  .cfx-checks input { accent-color: var(--ok); }
+
+  .cfx-canvas {
     border: 1px solid var(--border); border-radius: var(--radius-sm);
-    background: #fff; padding: 18px 12px 8px; margin: 10px 0 6px; position: relative;
+    background: #fff; padding: 10px 10px 4px; margin: 10px 0 6px;
   }
-  .cfm-cap-line {
-    position: absolute; left: 12px; right: 12px;
-    border-top: 1.5px dashed var(--warn);
-    pointer-events: none; z-index: 1;
-  }
-  .cfm-cap-lab {
-    position: absolute; right: 16px; transform: translateY(-9px);
-    font-family: var(--mono); font-size: 10px; color: var(--warn);
-    background: #fff; padding: 0 4px;
-  }
-  .cfm-chart {
-    display: flex; align-items: flex-end; gap: 6px;
-    height: 132px; position: relative; z-index: 2;
-  }
-  .cfm-col { flex: 1; display: flex; flex-direction: column; align-items: center; height: 100%; justify-content: flex-end; }
-  .cfm-bar {
-    width: 100%; max-width: 36px;
-    background: var(--accent-soft); border: 1.5px solid var(--accent);
-    border-radius: 4px 4px 0 0; min-height: 3px;
-    transition: height .18s, background .18s, border-color .18s;
-  }
-  .cfm-bar.future { background: var(--bg-soft); border-color: var(--border-strong); border-style: dashed; }
-  .cfm-bar.ok { background: var(--ok-soft); border-color: var(--ok); }
-  .cfm-bar.warn { background: var(--warn-soft); border-color: var(--warn); }
-  .cfm-bar.bad { background: var(--bad-soft); border-color: var(--bad); }
-  .cfm-bar-n {
-    font-family: var(--mono); font-size: 10px; color: var(--text-3);
-    margin-bottom: 4px; min-height: 1.1em;
-  }
-  .cfm-tick {
-    font-family: var(--mono); font-size: 10px; color: var(--text-3); margin-top: 6px;
-  }
+  .cfx-canvas svg { width: 100%; height: auto; display: block; }
 
-  .cfm-panels { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 12px; }
-  @media (max-width: 640px) { .cfm-panels { grid-template-columns: 1fr; } }
-  .cfm-panel { border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 12px; background: #fff; }
-  .cfm-panel .pt {
-    font-size: 11px; color: var(--text-3); letter-spacing: .06em; text-transform: uppercase;
-    font-family: var(--mono); margin-bottom: 8px;
+  .cfx-cursor {
+    display: grid; grid-template-columns: minmax(180px, 260px) 1fr; gap: 12px;
+    align-items: center; margin: 10px 0 4px;
   }
-  .cfm-panel .prow {
-    display: flex; justify-content: space-between; gap: 8px;
-    font-family: var(--mono); font-size: 12px; padding: 4px 0;
-    border-bottom: 1px dashed var(--border);
+  @media (max-width: 640px) { .cfx-cursor { grid-template-columns: 1fr; } }
+  .cfx-detail {
+    font-family: var(--mono); font-size: 11.5px; color: var(--text-2);
+    line-height: 1.6; border-left: 2px solid var(--border-strong); padding-left: 10px;
   }
-  .cfm-panel .prow:last-child { border-bottom: none; }
-  .cfm-panel .pk { color: var(--text-3); white-space: nowrap; }
-  .cfm-panel .pv { color: var(--text); font-weight: 600; text-align: right; }
-  .cfm-panel .pv.good { color: var(--ok); }
-  .cfm-panel .pv.bad { color: var(--bad); }
-  .cfm-panel .pv.warn { color: var(--warn); }
+  .cfx-detail b { color: var(--text); }
 
-  .cfm-wire {
-    border: 1px solid var(--border); border-radius: var(--radius-sm);
-    background: #fff; padding: 8px 10px; margin-top: 10px; max-height: 260px; overflow-y: auto;
-  }
-  .cfm-row {
-    display: flex; align-items: baseline; gap: 8px;
-    font-family: var(--mono); font-size: 11.5px; padding: 4px 0;
-    border-bottom: 1px dashed var(--border);
-  }
-  .cfm-row:last-child { border-bottom: none; }
-  .cfm-row .ar { width: 36px; flex: none; text-align: center; color: var(--text-3); font-weight: 700; }
-  .cfm-row .tg {
-    flex: none; border-radius: 4px; padding: 2px 6px; font-size: 10.5px; font-weight: 700;
-    border: 1px solid var(--border-strong); background: var(--bg-soft); color: var(--text-3);
-  }
-  .cfm-row .tx { color: var(--text-2); line-height: 1.5; }
-  .cfm-row.read .tg { background: var(--cfm-c-soft); border-color: var(--cfm-c); color: var(--cfm-c); }
-  .cfm-row.ok .tg { background: var(--cfm-s-soft); border-color: var(--cfm-s); color: var(--cfm-s); }
-  .cfm-row.warn .tg { background: var(--cfm-w-soft); border-color: var(--cfm-w); color: var(--cfm-w); }
-  .cfm-row.bad .tg { background: var(--cfm-bad-soft); border-color: var(--cfm-bad); color: var(--cfm-bad); }
-  .cfm-row.bad .tx { color: var(--bad); }
-  .cfm-row.note { background: var(--bg-soft); border-radius: 4px; }
-  .cfm-row.note .tx { color: var(--text-3); }
+  .cfx-cmp td.num, .cfx-cmp th.num { font-family: var(--mono); text-align: right; white-space: nowrap; }
+  .cfx-cmp td.good { color: var(--ok); font-weight: 700; }
+  .cfx-cmp td.bad { color: var(--bad); font-weight: 700; }
+  .cfx-cmp td.warn { color: var(--warn); font-weight: 700; }
 
-  .cfm-verdict {
+  .cfx-verdict {
     margin-top: 10px; padding: 10px 12px; border-radius: var(--radius-sm);
-    border: 1px solid var(--border); background: var(--bg-soft);
-    font-size: 13px; color: var(--text-2); line-height: 1.55;
+    border: 1px solid var(--border); border-left: 3px solid var(--border-strong);
+    background: var(--bg-soft); font-size: 13px; color: var(--text-2); line-height: 1.6;
   }
-  .cfm-verdict.tone-ok { border-left: 3px solid var(--ok); background: var(--ok-soft); color: var(--text); }
-  .cfm-verdict.tone-lock { border-left: 3px solid var(--warn); background: var(--warn-soft); color: var(--text); }
-  .cfm-verdict.tone-bad { border-left: 3px solid var(--bad); background: var(--bad-soft); color: var(--text); }
-
-  .cfm-mode-hint { font-size: 12.5px; color: var(--text-2); margin: 8px 0 4px; line-height: 1.55; }
+  .cfx-verdict.safe { border-left-color: var(--ok); background: var(--ok-soft); color: var(--text); }
+  .cfx-verdict.tight { border-left-color: var(--warn); background: var(--warn-soft); color: var(--text); }
+  .cfx-verdict.over { border-left-color: var(--bad); background: var(--bad-soft); color: var(--text); }
 </style>
 
 <div id="cfm-root">
@@ -209,15 +156,18 @@
 
   <p>Cache-Aside 對「存在的熱資料」很有效：miss 一次、回填、之後命中。穿透把這個迴路拆掉——<strong>回填的對象根本沒有</strong>。每次 GET 都 miss，每次都打 DB，回傳 not found。攻擊者用隨機 ID 掃描、爬蟲打過期目錄、客戶端 bug 產生不存在的外鍵，流量形態都一樣。</p>
 
-  <div class="cfm-flow">
-    <span class="cfm-chip cli">GET sku:????</span>
-    <span class="cfm-chip op">→</span>
-    <span class="cfm-chip cache">MISS</span>
-    <span class="cfm-chip op">→</span>
-    <span class="cfm-chip bad">DB SELECT 0 rows</span>
-    <span class="cfm-chip op">→</span>
-    <span class="cfm-chip warn">不回填（或回填了也沒人再打同一把）</span>
-  </div>
+  <pre class="mermaid">
+sequenceDiagram
+    participant C as 用戶端
+    participant K as 快取
+    participant D as DB
+    C->>K: GET sku:????
+    K-->>C: MISS
+    C->>D: SELECT
+    D-->>C: 0 rows
+    Note over C,K: 沒有值可回填，下一次同樣走完整條
+  </pre>
+  <p class="cap">看最後那條 Note：Cache-Aside 的迴路靠「把 origin 的答案寫回快取」收斂，而空結果預設不會被寫回，所以這條往返每次都會重跑一遍。</p>
 
   <p class="cfm-sub">1 · 空值快取（Negative Caching）</p>
   <p>miss 且 DB 確認不存在時，把「空」本身寫進快取，帶<strong>比正常值更短的 TTL</strong>。下一次同一把 key 不會再打 origin。</p>
@@ -311,15 +261,16 @@
 
   <p>擊穿跟穿透相反：資料<strong>存在而且極熱</strong>。Cache-Aside 在 TTL 到期的那一刻，所有併發讀同時 miss，一起跑去重建。origin 上那條查詢若是聚合、多表 join、或要打下游，一台 DB 連線池可以在幾百毫秒內被打乾。</p>
 
-  <div class="cfm-flow">
-    <span class="cfm-chip cache">sku:hot TTL=0</span>
-    <span class="cfm-chip op">→</span>
-    <span class="cfm-chip bad">N 個併發 MISS</span>
-    <span class="cfm-chip op">→</span>
-    <span class="cfm-chip bad">N × origin query</span>
-    <span class="cfm-chip op">→</span>
-    <span class="cfm-chip warn">連線池耗盡 · 尾延遲爆炸</span>
+  <div class="cfx-lane">
+    <div class="lh">時刻</div><div class="lh">請求 A</div><div class="lh">其餘 N−1 個併發讀</div><div class="lh">origin</div>
+    <div class="lt">t−1</div>
+    <div class="lc ok">GET sku:hot → HIT</div><div class="lc ok">全部 HIT</div><div class="lc">閒置</div>
+    <div class="lt">t</div>
+    <div class="lc bad">TTL 到期，MISS</div><div class="lc bad">同一毫秒一起 MISS</div><div class="lc bad">收到 N 筆同樣的查詢</div>
+    <div class="lt">t+1</div>
+    <div class="lc act">拿到結果，SET 回快取</div><div class="lc act">各自也 SET 了一次</div><div class="lc bad">連線池被 N 筆重複查詢佔滿，尾延遲對齊到最慢那一筆</div>
   </div>
+  <p class="cap">看 t 這一列：N 個請求算出來的是同一份結果，origin 卻付了 N 次帳——重複的不是資料，是查詢。</p>
 
   <p class="cfm-sub">1 · 互斥重建鎖（Mutex / Single-flight lock）</p>
   <p>只有拿到鎖的那一個請求去打 origin 並 SET；其他人等鎖，然後讀剛填好的快取。分散式場景常用 <code>SET key NX PX</code> 當鎖。</p>
@@ -406,13 +357,35 @@
 
   <p>雪崩常被講成「快取掛了」。快取進程崩潰確實會讓所有讀回源，但更常見、也更可預防的是 <strong>TTL 對齊</strong>：上線時用同一個 <code>EXPIRE 3600</code> 寫入整批物件，一小時後它們一起死。部署腳本 flush、同一輪預熱、甚至「整點過期」的產品習慣，都會製造對齊。</p>
 
-  <div class="cfm-flow">
-    <span class="cfm-chip warn">TTL=3600 整批寫入</span>
-    <span class="cfm-chip op">→</span>
-    <span class="cfm-chip cache">一小時後同時 MISS</span>
-    <span class="cfm-chip op">→</span>
-    <span class="cfm-chip bad">origin QPS ≈ 讀 QPS</span>
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>時間點</th>
+          <th>快取裡發生什麼</th>
+          <th>origin 看到的 QPS</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>09:00:00 上線預熱</td>
+          <td>整批 K 把 key 以同一個 <code>EXPIRE 3600</code> 寫入</td>
+          <td>一次可控的預熱突發</td>
+        </tr>
+        <tr>
+          <td>09:00:01 – 09:59:59</td>
+          <td>幾乎全命中</td>
+          <td>接近 0（只有零星背景 miss）</td>
+        </tr>
+        <tr>
+          <td>10:00:00</td>
+          <td>K 把 key 在同一秒一起到期</td>
+          <td class="hl">≈ 讀 QPS 全額，且每把還要乘上自己的併發數</td>
+        </tr>
+      </tbody>
+    </table>
   </div>
+  <p class="cap">關鍵在第三列：中間那一小時的「零回源」不是穩定狀態，而是把帳單全部推到同一秒——TTL 對齊等於替 origin 預約了一根尖刺。</p>
 
   <p class="cfm-sub">1 · TTL 抖動（Jitter）</p>
   <p>真正寫入的過期時間不是常數，而是：</p>
@@ -528,7 +501,7 @@
       </tbody>
     </table>
   </div>
-  <p class="cap">Demo 裡把 QPS 拉到尖峰、開關 Singleflight 與 TTL 抖動，就是在看這張表的數字移動。</p>
+  <p class="cap">看中間那欄：合併能降多少，完全取決於「同一把 key 上疊了幾個併發」——下一節的模擬器就是把這一欄的數字算出來給你看。</p>
 
   <div class="oneliner">
     <b>一句話答法</b>Singleflight 把「同一把 key 的 N 次回源」收成 1 次，用等待者的尾延遲交換 origin 安全。它不擋隨機穿透，也不把雪崩的 K 把 key 變成 1。
@@ -538,119 +511,83 @@
 <section id="s6">
   <div class="sec-head">
     <span class="sec-num">06</span>
-    <h2>互動 Demo：QPS、TTL 分佈與回源負載</h2>
+    <h2>互動 Demo：同一波流量，裸快取 vs 加防護</h2>
   </div>
-  <p class="sec-sub">同一個 origin 容量，切換故障形狀、尖峰 QPS、TTL 抖動與 Singleflight，逐步看回源曲線有沒有越過容量線。</p>
+  <p class="sec-sub">同一組流量與 TTL 設定，同時餵進左邊沒有任何防護的快取與右邊勾了防護的快取。整條回源時間序列一次算完，兩張面積圖上下並排、共用同一條時間軸與同一個刻度。</p>
 
-  <div class="demo" id="demo-cfm">
+  <div class="demo" id="demo-cfx">
     <div class="demo-bar">
-      <span class="label">互動 · 失效模式回源負載</span>
-      <span class="label" style="text-transform:none;font-family:var(--sans);font-size:12px;color:var(--text-2)">調 QPS 與防護，按「下一步」看 origin 曲線</span>
+      <span class="label">互動 · 回源負載並排</span>
+      <span class="label" style="text-transform:none;font-family:var(--sans);font-size:12px;color:var(--text-2)">拖任何一個 slider 都立即重算整條序列</span>
     </div>
     <div class="demo-body">
-      <p class="cfm-mode-hint" id="cfm-mode-hint">穿透：t=3 起大量隨機空 key。開關 Bloom 才會顯著改變回源；Singleflight 幾乎沒用。</p>
-
-      <div class="seg" role="group" aria-label="故障形狀" id="cfm-seg-sc">
-        <button data-sc="pen" aria-pressed="true">穿透</button>
-        <button data-sc="brk" aria-pressed="false">擊穿</button>
-        <button data-sc="ava" aria-pressed="false">雪崩</button>
+      <div class="seg" role="group" aria-label="故障形狀" id="cfx-seg-shape">
+        <button data-shape="pen" aria-pressed="false">穿透</button>
+        <button data-shape="brk" aria-pressed="false">擊穿</button>
+        <button data-shape="ava" aria-pressed="true">雪崩</button>
       </div>
 
-      <div class="seg" role="group" aria-label="QPS 尖峰" id="cfm-seg-qps" style="margin-top:8px">
-        <button data-qps="60" aria-pressed="false">低 60</button>
-        <button data-qps="200" aria-pressed="true">中 200</button>
-        <button data-qps="640" aria-pressed="false">尖峰 640</button>
+      <div class="cfx-knobs">
+        <label class="cfx-knob"><span class="kn"><span>讀 QPS</span><span class="kv" id="cfx-v-qps">900</span></span>
+          <input type="range" id="cfx-qps" min="50" max="1500" step="10" value="900"></label>
+        <label class="cfx-knob"><span class="kn"><span>熱 key 佔比</span><span class="kv" id="cfx-v-hot">25%</span></span>
+          <input type="range" id="cfx-hot" min="0" max="90" step="5" value="25"></label>
+        <label class="cfx-knob"><span class="kn"><span>打空流量佔比</span><span class="kv" id="cfx-v-empty">20%</span></span>
+          <input type="range" id="cfx-empty" min="0" max="80" step="5" value="20"></label>
+        <label class="cfx-knob"><span class="kn"><span>TTL 基準</span><span class="kv" id="cfx-v-ttl">12s</span></span>
+          <input type="range" id="cfx-ttl" min="5" max="60" step="1" value="12"></label>
+        <label class="cfx-knob"><span class="kn"><span>TTL 抖動幅度</span><span class="kv" id="cfx-v-jit">50%</span></span>
+          <input type="range" id="cfx-jit" min="0" max="100" step="5" value="50"></label>
+        <label class="cfx-knob"><span class="kn"><span>時間窗長度</span><span class="kv" id="cfx-v-win">60s</span></span>
+          <input type="range" id="cfx-win" min="30" max="120" step="10" value="60"></label>
       </div>
 
-      <div class="seg" role="group" aria-label="TTL 分佈" id="cfm-seg-ttl" style="margin-top:8px">
-        <button data-ttl="aligned" aria-pressed="true">TTL 對齊</button>
-        <button data-ttl="jitter" aria-pressed="false">TTL 抖動</button>
-      </div>
-
-      <div class="seg" role="group" aria-label="回源合併" id="cfm-seg-sf" style="margin-top:8px">
-        <button data-sf="off" aria-pressed="true">各自回源</button>
-        <button data-sf="on" aria-pressed="false">Singleflight</button>
-      </div>
-
-      <div class="seg" role="group" aria-label="打空防護" id="cfm-seg-bloom" style="margin-top:8px">
-        <button data-bloom="off" aria-pressed="true">無 Bloom</button>
-        <button data-bloom="on" aria-pressed="false">Bloom Filter</button>
-      </div>
-
-      <div class="cfm-ctrl">
-        <button class="btn primary" id="cfm-btn-next">下一步</button>
-        <button class="btn" id="cfm-btn-reset">重置</button>
-      </div>
-
-      <div class="cfm-metric">
-        <span>時刻 <strong id="cfm-m-t">0</strong> / 7</span>
-        <span>Inbound <strong id="cfm-m-in">0</strong></span>
-        <span>Origin <strong id="cfm-m-or">0</strong></span>
-        <span>合併省下 <strong id="cfm-m-co">0</strong></span>
-        <span>超容量 <strong id="cfm-m-ov">0</strong></span>
+      <div class="cfx-checks" role="group" aria-label="右側防護組合">
+        <span class="cl">右側（防護後）啟用的手段</span>
+        <label><input type="checkbox" id="cfx-p-sf"> Singleflight</label>
+        <label><input type="checkbox" id="cfx-p-bloom"> Bloom＋空值快取</label>
+        <label><input type="checkbox" id="cfx-p-jit" checked> TTL 抖動</label>
+        <label><input type="checkbox" id="cfx-p-hot"> 熱 key 永不過期＋背景刷新</label>
+        <label><input type="checkbox" id="cfx-p-limit" checked> origin 限流</label>
+        <button class="btn" id="cfx-reset" style="margin-left:auto">重置</button>
       </div>
 
       <div class="legend">
-        <span><i class="dot ns-idle"></i>尚未走到</span>
-        <span><i class="dot ns-ok"></i>回源低於容量</span>
-        <span><i class="dot ns-lock"></i>接近容量</span>
-        <span><i class="dot ns-wait"></i>本步作用中</span>
-        <span><i class="dot ns-bad"></i>origin 過載</span>
+        <span><i class="dot ns-wait"></i>裸快取回源</span>
+        <span><i class="dot ns-ok"></i>防護後回源</span>
+        <span><i class="dot ns-bad"></i>超過 DB 容量門檻</span>
+        <span><i class="dot ns-lock"></i>限流丟掉的回源</span>
       </div>
 
-      <div class="cfm-actors" id="cfm-actors" aria-live="polite">
-        <div class="cfm-actor" data-role="in">
-          <div class="an">Inbound</div>
-          <div class="al">本刻讀 QPS</div>
-          <div class="av" id="cfm-in-val">—</div>
-          <div class="ah" id="cfm-in-hint">待命</div>
-        </div>
-        <div class="cfm-actor" data-role="cache">
-          <div class="an">Cache</div>
-          <div class="al">命中 / 攔截</div>
-          <div class="av" id="cfm-cache-val">—</div>
-          <div class="ah" id="cfm-cache-hint">待命</div>
-        </div>
-        <div class="cfm-actor" data-role="origin">
-          <div class="an">Origin</div>
-          <div class="al">容量 160 / tick</div>
-          <div class="av" id="cfm-origin-val">—</div>
-          <div class="ah" id="cfm-origin-hint">待命</div>
-        </div>
+      <div class="cfx-canvas">
+        <svg id="cfx-svg" viewBox="0 0 720 350" role="img" aria-live="polite">
+          <title id="cfx-svg-title">上下兩條同軸的回源負載面積圖：上為裸快取、下為防護後，中間為每秒省下的回源</title>
+        </svg>
+      </div>
+      <p class="cap">兩張面積圖都以自己的基線往上長、共用同一條秒軸與同一個刻度：上面那張越高就是 origin 吃越多。虛線是 DB 容量門檻，斜紋紅色是真的打穿的那幾秒；中間那條帶子是逐秒「省下的回源」，往上是省下、往下代表防護反而多打了。</p>
+
+      <div class="cfx-cursor">
+        <label class="cfx-knob"><span class="kn"><span>時間游標</span><span class="kv" id="cfx-v-cur">t=12s</span></span>
+          <input type="range" id="cfx-cur" min="0" max="59" step="1" value="12"></label>
+        <div class="cfx-detail" id="cfx-detail"></div>
       </div>
 
-      <div class="cfm-chart-wrap">
-        <div class="cfm-cap-line" id="cfm-cap-line">
-          <span class="cfm-cap-lab">cap 160</span>
-        </div>
-        <div class="cfm-chart" id="cfm-chart" aria-label="各時刻 origin QPS"></div>
+      <div class="tbl-wrap">
+        <table class="cfx-cmp">
+          <thead>
+            <tr><th>指標</th><th class="num">裸快取</th><th class="num">加防護</th><th class="num">差</th></tr>
+          </thead>
+          <tbody id="cfx-rows"></tbody>
+        </table>
       </div>
 
-      <div class="cfm-panels">
-        <div class="cfm-panel">
-          <div class="pt">本刻語義</div>
-          <div class="prow"><span class="pk">故障形狀</span><span class="pv" id="cfm-p-sc">—</span></div>
-          <div class="prow"><span class="pk">回源</span><span class="pv" id="cfm-p-or">—</span></div>
-          <div class="prow"><span class="pk">Bloom 攔截</span><span class="pv" id="cfm-p-bl">—</span></div>
-          <div class="prow"><span class="pk">合併省下</span><span class="pv" id="cfm-p-co">—</span></div>
-        </div>
-        <div class="cfm-panel">
-          <div class="pt">累計</div>
-          <div class="prow"><span class="pk">origin 總擊中</span><span class="pv" id="cfm-p-sum">0</span></div>
-          <div class="prow"><span class="pk">過載 tick</span><span class="pv" id="cfm-p-ot">0</span></div>
-          <div class="prow"><span class="pk">峰值 origin</span><span class="pv" id="cfm-p-pk">0</span></div>
-          <div class="prow"><span class="pk">容量利用率（本刻）</span><span class="pv" id="cfm-p-util">—</span></div>
-        </div>
-      </div>
-
-      <div class="status-line" id="cfm-status">選擇故障與防護後按「下一步」。origin 容量固定 160；柱高超過虛線即過載。</div>
-      <div class="cfm-verdict" id="cfm-verdict">判定尚未產生——走完 8 個時刻後會摘要峰值與過載。</div>
-      <div class="cfm-wire" id="cfm-wire" aria-label="事件日誌"></div>
+      <div class="status-line" id="cfx-status"></div>
+      <div class="cfx-verdict" id="cfx-verdict"></div>
     </div>
   </div>
 
   <div class="oneliner">
-    <b>一句話答法</b>對照三組旋鈕：穿透看 Bloom、擊穿看 Singleflight、雪崩看 TTL 抖動。尖峰 QPS 只是讓過載更容易發生，不是另一種故障。
+    <b>一句話答法</b>同一波流量下，防護要對症：打空看 Bloom、單點到期看 Singleflight 或熱 key 背景刷新、集體到期看 TTL 抖動。抖動降的是峰值不是總量，限流降的是 origin 負載不是失敗率。
   </div>
 </section>
 

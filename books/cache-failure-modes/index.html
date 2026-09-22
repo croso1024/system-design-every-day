@@ -1377,7 +1377,7 @@
         <a href="#s3"><span class="n">03</span>擊穿：單點被打穿</a>
         <a href="#s4"><span class="n">04</span>雪崩：大量同時到期</a>
         <a href="#s5"><span class="n">05</span>Thundering Herd 與 Singleflight</a>
-        <a href="#s6"><span class="n">06</span>互動 Demo：QPS、TTL 分佈與回源負載</a>
+        <a href="#s6"><span class="n">06</span>互動 Demo：同一波流量，裸快取 vs 加防護</a>
         <a href="#s7"><span class="n">07</span>面試折衷與邊界</a>
       </div>
     </nav>
@@ -1393,7 +1393,11 @@
     <!-- ===================== MAIN CONTENT ===================== -->
     <main>
       <div class="inner">
-        <style>
+        <!-- demo-archetype: C｜並排對照（主，第 6 節） — 讀者用一組 slider／checkbox 設定同一波流量（故障形狀、讀 QPS、熱 key 佔比、
+     打空佔比、TTL 基準與抖動幅度、時間窗），整條回源時間序列一次算完，同時畫出「裸快取」與「加防護」兩條回源負載面積，
+     中間夾一條省下的回源差值帶；再拖時間游標看某一秒的細節。選 C 是因為本篇每一種失效模式都有一個明確的錯誤解法
+     （什麼都不做）與一個防護解法，教學重點就是「同一波流量下兩者的 origin 帳單差多少」——那是一個對照問題，不是一段流程。 -->
+<style>
   /* 本篇專屬：cfm-* 命名空間，不覆蓋全站 base 類別 */
   #cfm-root {
     --cfm-c: #3f6188; --cfm-c-soft: #eef2f7;
@@ -1414,14 +1418,19 @@
   .cfm-card .cl { font-family: var(--mono); font-size: 11px; color: var(--text-3); margin-bottom: 6px; letter-spacing: .04em; }
   .cfm-card .cs { font-size: 12.5px; color: var(--text-2); line-height: 1.55; }
 
-  .cfm-flow { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin: 10px 0 4px; font-family: var(--mono); font-size: 12px; }
-  .cfm-chip { border: 1px solid var(--border-strong); border-radius: 6px; padding: 6px 10px; background: #fff; font-weight: 600; color: var(--text); }
-  .cfm-chip.cli { background: var(--cfm-c-soft); border-color: var(--cfm-c); color: var(--cfm-c); }
-  .cfm-chip.cache { background: var(--cfm-alt-soft); border-color: var(--cfm-alt); color: var(--cfm-alt); }
-  .cfm-chip.db { background: var(--cfm-s-soft); border-color: var(--cfm-s); color: var(--cfm-s); }
-  .cfm-chip.op { background: var(--bg-soft); color: var(--text-3); border-style: dashed; font-weight: 500; }
-  .cfm-chip.bad { background: var(--cfm-bad-soft); border-color: var(--cfm-bad); color: var(--cfm-bad); }
-  .cfm-chip.warn { background: var(--cfm-w-soft); border-color: var(--cfm-w); color: var(--cfm-w); }
+  /* 第 3 節：熱 key 到期瞬間的併發時序 swimlane（grid 不折行） */
+  .cfx-lane {
+    display: grid; grid-template-columns: 56px repeat(3, 1fr); gap: 1px;
+    background: var(--border); border: 1px solid var(--border);
+    border-radius: 8px; overflow: hidden; margin: 14px 0 6px;
+  }
+  .cfx-lane > div { background: #fff; padding: 8px 10px; font-size: 12px; line-height: 1.5; }
+  .cfx-lane .lh { background: var(--bg-soft); font-family: var(--mono); font-size: 11px; font-weight: 700; color: var(--text-2); }
+  .cfx-lane .lt { background: var(--bg-soft); font-family: var(--mono); font-size: 11px; color: var(--text-3); }
+  .cfx-lane .lc.act { background: var(--accent-soft); }
+  .cfx-lane .lc.ok  { background: var(--ok-soft); }
+  .cfx-lane .lc.bad { background: var(--bad-soft); }
+  @media (max-width: 720px) { .cfx-lane { grid-template-columns: 46px repeat(3, minmax(0, 1fr)); font-size: 11px; } }
 
   .cfm-split { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin: 12px 0; }
   @media (max-width: 640px) { .cfm-split { grid-template-columns: 1fr; } }
@@ -1437,120 +1446,58 @@
   .cfm-pane .ss { font-family: var(--mono); font-size: 11px; color: var(--text-3); margin-bottom: 8px; letter-spacing: .04em; }
   .cfm-pane ul { margin: 0; padding-left: 1.15em; font-size: 13px; color: var(--text-2); line-height: 1.65; }
 
-  .cfm-ctrl { display: flex; flex-wrap: wrap; gap: 10px; margin: 10px 0 8px; align-items: center; }
-  .cfm-metric { display: flex; flex-wrap: wrap; gap: 14px; margin: 8px 0 4px; font-size: 13px; color: var(--text-2); }
-  .cfm-metric strong { color: var(--text); font-family: var(--mono); font-size: 12.5px; }
-
-  .cfm-actors { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin: 12px 0 6px; }
-  @media (max-width: 640px) { .cfm-actors { grid-template-columns: 1fr; } }
-  .cfm-actor {
-    border: 1.5px solid var(--border-strong); border-radius: var(--radius-sm);
-    padding: 12px 12px 10px; background: #fff; text-align: center;
-    transition: background .18s, border-color .18s, box-shadow .18s;
+  /* ── 第 6 節 demo：cfx-* 全新骨架 ───────────────────────────── */
+  .cfx-knobs {
+    display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px 16px;
+    margin: 12px 0 10px;
   }
-  .cfm-actor .an { font-weight: 700; font-size: 13px; letter-spacing: .03em; }
-  .cfm-actor .al { font-family: var(--mono); font-size: 10.5px; color: var(--text-3); margin-top: 2px; }
-  .cfm-actor .av { font-family: var(--mono); font-size: 16px; font-weight: 700; margin-top: 8px; color: var(--text); }
-  .cfm-actor .ah { font-size: 11.5px; color: var(--text-2); margin-top: 4px; min-height: 1.4em; }
-  .cfm-actor.on { background: var(--accent-soft); border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
-  .cfm-actor.on .an { color: var(--accent); }
-  .cfm-actor.ok { background: var(--ok-soft); border-color: var(--ok); }
-  .cfm-actor.ok .an { color: var(--ok); }
-  .cfm-actor.dirty { background: var(--warn-soft); border-color: var(--warn); }
-  .cfm-actor.dirty .an { color: var(--warn); }
-  .cfm-actor.bad { background: var(--bad-soft); border-color: var(--bad); }
-  .cfm-actor.bad .an { color: var(--bad); }
+  @media (max-width: 720px) { .cfx-knobs { grid-template-columns: repeat(2, 1fr); } }
+  @media (max-width: 460px) { .cfx-knobs { grid-template-columns: 1fr; } }
+  .cfx-knob { display: block; font-size: 11.5px; color: var(--text-2); }
+  .cfx-knob .kn { display: flex; justify-content: space-between; gap: 6px; align-items: baseline; }
+  .cfx-knob .kv { font-family: var(--mono); font-size: 12px; font-weight: 700; color: var(--text); }
+  .cfx-knob input[type="range"] { width: 100%; margin: 2px 0 0; accent-color: var(--accent); }
 
-  .cfm-chart-wrap {
+  .cfx-checks {
+    display: flex; flex-wrap: wrap; gap: 6px 14px; align-items: center;
+    border: 1px solid var(--border); border-left: 3px solid var(--ok);
+    border-radius: var(--radius-sm); background: var(--bg-soft);
+    padding: 9px 12px; margin: 4px 0 10px;
+  }
+  .cfx-checks .cl { font-size: 11px; font-family: var(--mono); color: var(--text-3); letter-spacing: .05em; width: 100%; }
+  .cfx-checks label { font-size: 12.5px; color: var(--text); display: inline-flex; align-items: center; gap: 5px; cursor: pointer; }
+  .cfx-checks input { accent-color: var(--ok); }
+
+  .cfx-canvas {
     border: 1px solid var(--border); border-radius: var(--radius-sm);
-    background: #fff; padding: 18px 12px 8px; margin: 10px 0 6px; position: relative;
+    background: #fff; padding: 10px 10px 4px; margin: 10px 0 6px;
   }
-  .cfm-cap-line {
-    position: absolute; left: 12px; right: 12px;
-    border-top: 1.5px dashed var(--warn);
-    pointer-events: none; z-index: 1;
-  }
-  .cfm-cap-lab {
-    position: absolute; right: 16px; transform: translateY(-9px);
-    font-family: var(--mono); font-size: 10px; color: var(--warn);
-    background: #fff; padding: 0 4px;
-  }
-  .cfm-chart {
-    display: flex; align-items: flex-end; gap: 6px;
-    height: 132px; position: relative; z-index: 2;
-  }
-  .cfm-col { flex: 1; display: flex; flex-direction: column; align-items: center; height: 100%; justify-content: flex-end; }
-  .cfm-bar {
-    width: 100%; max-width: 36px;
-    background: var(--accent-soft); border: 1.5px solid var(--accent);
-    border-radius: 4px 4px 0 0; min-height: 3px;
-    transition: height .18s, background .18s, border-color .18s;
-  }
-  .cfm-bar.future { background: var(--bg-soft); border-color: var(--border-strong); border-style: dashed; }
-  .cfm-bar.ok { background: var(--ok-soft); border-color: var(--ok); }
-  .cfm-bar.warn { background: var(--warn-soft); border-color: var(--warn); }
-  .cfm-bar.bad { background: var(--bad-soft); border-color: var(--bad); }
-  .cfm-bar-n {
-    font-family: var(--mono); font-size: 10px; color: var(--text-3);
-    margin-bottom: 4px; min-height: 1.1em;
-  }
-  .cfm-tick {
-    font-family: var(--mono); font-size: 10px; color: var(--text-3); margin-top: 6px;
-  }
+  .cfx-canvas svg { width: 100%; height: auto; display: block; }
 
-  .cfm-panels { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 12px; }
-  @media (max-width: 640px) { .cfm-panels { grid-template-columns: 1fr; } }
-  .cfm-panel { border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 12px; background: #fff; }
-  .cfm-panel .pt {
-    font-size: 11px; color: var(--text-3); letter-spacing: .06em; text-transform: uppercase;
-    font-family: var(--mono); margin-bottom: 8px;
+  .cfx-cursor {
+    display: grid; grid-template-columns: minmax(180px, 260px) 1fr; gap: 12px;
+    align-items: center; margin: 10px 0 4px;
   }
-  .cfm-panel .prow {
-    display: flex; justify-content: space-between; gap: 8px;
-    font-family: var(--mono); font-size: 12px; padding: 4px 0;
-    border-bottom: 1px dashed var(--border);
+  @media (max-width: 640px) { .cfx-cursor { grid-template-columns: 1fr; } }
+  .cfx-detail {
+    font-family: var(--mono); font-size: 11.5px; color: var(--text-2);
+    line-height: 1.6; border-left: 2px solid var(--border-strong); padding-left: 10px;
   }
-  .cfm-panel .prow:last-child { border-bottom: none; }
-  .cfm-panel .pk { color: var(--text-3); white-space: nowrap; }
-  .cfm-panel .pv { color: var(--text); font-weight: 600; text-align: right; }
-  .cfm-panel .pv.good { color: var(--ok); }
-  .cfm-panel .pv.bad { color: var(--bad); }
-  .cfm-panel .pv.warn { color: var(--warn); }
+  .cfx-detail b { color: var(--text); }
 
-  .cfm-wire {
-    border: 1px solid var(--border); border-radius: var(--radius-sm);
-    background: #fff; padding: 8px 10px; margin-top: 10px; max-height: 260px; overflow-y: auto;
-  }
-  .cfm-row {
-    display: flex; align-items: baseline; gap: 8px;
-    font-family: var(--mono); font-size: 11.5px; padding: 4px 0;
-    border-bottom: 1px dashed var(--border);
-  }
-  .cfm-row:last-child { border-bottom: none; }
-  .cfm-row .ar { width: 36px; flex: none; text-align: center; color: var(--text-3); font-weight: 700; }
-  .cfm-row .tg {
-    flex: none; border-radius: 4px; padding: 2px 6px; font-size: 10.5px; font-weight: 700;
-    border: 1px solid var(--border-strong); background: var(--bg-soft); color: var(--text-3);
-  }
-  .cfm-row .tx { color: var(--text-2); line-height: 1.5; }
-  .cfm-row.read .tg { background: var(--cfm-c-soft); border-color: var(--cfm-c); color: var(--cfm-c); }
-  .cfm-row.ok .tg { background: var(--cfm-s-soft); border-color: var(--cfm-s); color: var(--cfm-s); }
-  .cfm-row.warn .tg { background: var(--cfm-w-soft); border-color: var(--cfm-w); color: var(--cfm-w); }
-  .cfm-row.bad .tg { background: var(--cfm-bad-soft); border-color: var(--cfm-bad); color: var(--cfm-bad); }
-  .cfm-row.bad .tx { color: var(--bad); }
-  .cfm-row.note { background: var(--bg-soft); border-radius: 4px; }
-  .cfm-row.note .tx { color: var(--text-3); }
+  .cfx-cmp td.num, .cfx-cmp th.num { font-family: var(--mono); text-align: right; white-space: nowrap; }
+  .cfx-cmp td.good { color: var(--ok); font-weight: 700; }
+  .cfx-cmp td.bad { color: var(--bad); font-weight: 700; }
+  .cfx-cmp td.warn { color: var(--warn); font-weight: 700; }
 
-  .cfm-verdict {
+  .cfx-verdict {
     margin-top: 10px; padding: 10px 12px; border-radius: var(--radius-sm);
-    border: 1px solid var(--border); background: var(--bg-soft);
-    font-size: 13px; color: var(--text-2); line-height: 1.55;
+    border: 1px solid var(--border); border-left: 3px solid var(--border-strong);
+    background: var(--bg-soft); font-size: 13px; color: var(--text-2); line-height: 1.6;
   }
-  .cfm-verdict.tone-ok { border-left: 3px solid var(--ok); background: var(--ok-soft); color: var(--text); }
-  .cfm-verdict.tone-lock { border-left: 3px solid var(--warn); background: var(--warn-soft); color: var(--text); }
-  .cfm-verdict.tone-bad { border-left: 3px solid var(--bad); background: var(--bad-soft); color: var(--text); }
-
-  .cfm-mode-hint { font-size: 12.5px; color: var(--text-2); margin: 8px 0 4px; line-height: 1.55; }
+  .cfx-verdict.safe { border-left-color: var(--ok); background: var(--ok-soft); color: var(--text); }
+  .cfx-verdict.tight { border-left-color: var(--warn); background: var(--warn-soft); color: var(--text); }
+  .cfx-verdict.over { border-left-color: var(--bad); background: var(--bad-soft); color: var(--text); }
 </style>
 
 <div id="cfm-root">
@@ -1604,15 +1551,18 @@
 
   <p>Cache-Aside 對「存在的熱資料」很有效：miss 一次、回填、之後命中。穿透把這個迴路拆掉——<strong>回填的對象根本沒有</strong>。每次 GET 都 miss，每次都打 DB，回傳 not found。攻擊者用隨機 ID 掃描、爬蟲打過期目錄、客戶端 bug 產生不存在的外鍵，流量形態都一樣。</p>
 
-  <div class="cfm-flow">
-    <span class="cfm-chip cli">GET sku:????</span>
-    <span class="cfm-chip op">→</span>
-    <span class="cfm-chip cache">MISS</span>
-    <span class="cfm-chip op">→</span>
-    <span class="cfm-chip bad">DB SELECT 0 rows</span>
-    <span class="cfm-chip op">→</span>
-    <span class="cfm-chip warn">不回填（或回填了也沒人再打同一把）</span>
-  </div>
+  <pre class="mermaid">
+sequenceDiagram
+    participant C as 用戶端
+    participant K as 快取
+    participant D as DB
+    C->>K: GET sku:????
+    K-->>C: MISS
+    C->>D: SELECT
+    D-->>C: 0 rows
+    Note over C,K: 沒有值可回填，下一次同樣走完整條
+  </pre>
+  <p class="cap">看最後那條 Note：Cache-Aside 的迴路靠「把 origin 的答案寫回快取」收斂，而空結果預設不會被寫回，所以這條往返每次都會重跑一遍。</p>
 
   <p class="cfm-sub">1 · 空值快取（Negative Caching）</p>
   <p>miss 且 DB 確認不存在時，把「空」本身寫進快取，帶<strong>比正常值更短的 TTL</strong>。下一次同一把 key 不會再打 origin。</p>
@@ -1706,15 +1656,16 @@
 
   <p>擊穿跟穿透相反：資料<strong>存在而且極熱</strong>。Cache-Aside 在 TTL 到期的那一刻，所有併發讀同時 miss，一起跑去重建。origin 上那條查詢若是聚合、多表 join、或要打下游，一台 DB 連線池可以在幾百毫秒內被打乾。</p>
 
-  <div class="cfm-flow">
-    <span class="cfm-chip cache">sku:hot TTL=0</span>
-    <span class="cfm-chip op">→</span>
-    <span class="cfm-chip bad">N 個併發 MISS</span>
-    <span class="cfm-chip op">→</span>
-    <span class="cfm-chip bad">N × origin query</span>
-    <span class="cfm-chip op">→</span>
-    <span class="cfm-chip warn">連線池耗盡 · 尾延遲爆炸</span>
+  <div class="cfx-lane">
+    <div class="lh">時刻</div><div class="lh">請求 A</div><div class="lh">其餘 N−1 個併發讀</div><div class="lh">origin</div>
+    <div class="lt">t−1</div>
+    <div class="lc ok">GET sku:hot → HIT</div><div class="lc ok">全部 HIT</div><div class="lc">閒置</div>
+    <div class="lt">t</div>
+    <div class="lc bad">TTL 到期，MISS</div><div class="lc bad">同一毫秒一起 MISS</div><div class="lc bad">收到 N 筆同樣的查詢</div>
+    <div class="lt">t+1</div>
+    <div class="lc act">拿到結果，SET 回快取</div><div class="lc act">各自也 SET 了一次</div><div class="lc bad">連線池被 N 筆重複查詢佔滿，尾延遲對齊到最慢那一筆</div>
   </div>
+  <p class="cap">看 t 這一列：N 個請求算出來的是同一份結果，origin 卻付了 N 次帳——重複的不是資料，是查詢。</p>
 
   <p class="cfm-sub">1 · 互斥重建鎖（Mutex / Single-flight lock）</p>
   <p>只有拿到鎖的那一個請求去打 origin 並 SET；其他人等鎖，然後讀剛填好的快取。分散式場景常用 <code>SET key NX PX</code> 當鎖。</p>
@@ -1801,13 +1752,35 @@
 
   <p>雪崩常被講成「快取掛了」。快取進程崩潰確實會讓所有讀回源，但更常見、也更可預防的是 <strong>TTL 對齊</strong>：上線時用同一個 <code>EXPIRE 3600</code> 寫入整批物件，一小時後它們一起死。部署腳本 flush、同一輪預熱、甚至「整點過期」的產品習慣，都會製造對齊。</p>
 
-  <div class="cfm-flow">
-    <span class="cfm-chip warn">TTL=3600 整批寫入</span>
-    <span class="cfm-chip op">→</span>
-    <span class="cfm-chip cache">一小時後同時 MISS</span>
-    <span class="cfm-chip op">→</span>
-    <span class="cfm-chip bad">origin QPS ≈ 讀 QPS</span>
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>時間點</th>
+          <th>快取裡發生什麼</th>
+          <th>origin 看到的 QPS</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>09:00:00 上線預熱</td>
+          <td>整批 K 把 key 以同一個 <code>EXPIRE 3600</code> 寫入</td>
+          <td>一次可控的預熱突發</td>
+        </tr>
+        <tr>
+          <td>09:00:01 – 09:59:59</td>
+          <td>幾乎全命中</td>
+          <td>接近 0（只有零星背景 miss）</td>
+        </tr>
+        <tr>
+          <td>10:00:00</td>
+          <td>K 把 key 在同一秒一起到期</td>
+          <td class="hl">≈ 讀 QPS 全額，且每把還要乘上自己的併發數</td>
+        </tr>
+      </tbody>
+    </table>
   </div>
+  <p class="cap">關鍵在第三列：中間那一小時的「零回源」不是穩定狀態，而是把帳單全部推到同一秒——TTL 對齊等於替 origin 預約了一根尖刺。</p>
 
   <p class="cfm-sub">1 · TTL 抖動（Jitter）</p>
   <p>真正寫入的過期時間不是常數，而是：</p>
@@ -1923,7 +1896,7 @@
       </tbody>
     </table>
   </div>
-  <p class="cap">Demo 裡把 QPS 拉到尖峰、開關 Singleflight 與 TTL 抖動，就是在看這張表的數字移動。</p>
+  <p class="cap">看中間那欄：合併能降多少，完全取決於「同一把 key 上疊了幾個併發」——下一節的模擬器就是把這一欄的數字算出來給你看。</p>
 
   <div class="oneliner">
     <b>一句話答法</b>Singleflight 把「同一把 key 的 N 次回源」收成 1 次，用等待者的尾延遲交換 origin 安全。它不擋隨機穿透，也不把雪崩的 K 把 key 變成 1。
@@ -1933,119 +1906,83 @@
 <section id="s6">
   <div class="sec-head">
     <span class="sec-num">06</span>
-    <h2>互動 Demo：QPS、TTL 分佈與回源負載</h2>
+    <h2>互動 Demo：同一波流量，裸快取 vs 加防護</h2>
   </div>
-  <p class="sec-sub">同一個 origin 容量，切換故障形狀、尖峰 QPS、TTL 抖動與 Singleflight，逐步看回源曲線有沒有越過容量線。</p>
+  <p class="sec-sub">同一組流量與 TTL 設定，同時餵進左邊沒有任何防護的快取與右邊勾了防護的快取。整條回源時間序列一次算完，兩張面積圖上下並排、共用同一條時間軸與同一個刻度。</p>
 
-  <div class="demo" id="demo-cfm">
+  <div class="demo" id="demo-cfx">
     <div class="demo-bar">
-      <span class="label">互動 · 失效模式回源負載</span>
-      <span class="label" style="text-transform:none;font-family:var(--sans);font-size:12px;color:var(--text-2)">調 QPS 與防護，按「下一步」看 origin 曲線</span>
+      <span class="label">互動 · 回源負載並排</span>
+      <span class="label" style="text-transform:none;font-family:var(--sans);font-size:12px;color:var(--text-2)">拖任何一個 slider 都立即重算整條序列</span>
     </div>
     <div class="demo-body">
-      <p class="cfm-mode-hint" id="cfm-mode-hint">穿透：t=3 起大量隨機空 key。開關 Bloom 才會顯著改變回源；Singleflight 幾乎沒用。</p>
-
-      <div class="seg" role="group" aria-label="故障形狀" id="cfm-seg-sc">
-        <button data-sc="pen" aria-pressed="true">穿透</button>
-        <button data-sc="brk" aria-pressed="false">擊穿</button>
-        <button data-sc="ava" aria-pressed="false">雪崩</button>
+      <div class="seg" role="group" aria-label="故障形狀" id="cfx-seg-shape">
+        <button data-shape="pen" aria-pressed="false">穿透</button>
+        <button data-shape="brk" aria-pressed="false">擊穿</button>
+        <button data-shape="ava" aria-pressed="true">雪崩</button>
       </div>
 
-      <div class="seg" role="group" aria-label="QPS 尖峰" id="cfm-seg-qps" style="margin-top:8px">
-        <button data-qps="60" aria-pressed="false">低 60</button>
-        <button data-qps="200" aria-pressed="true">中 200</button>
-        <button data-qps="640" aria-pressed="false">尖峰 640</button>
+      <div class="cfx-knobs">
+        <label class="cfx-knob"><span class="kn"><span>讀 QPS</span><span class="kv" id="cfx-v-qps">900</span></span>
+          <input type="range" id="cfx-qps" min="50" max="1500" step="10" value="900"></label>
+        <label class="cfx-knob"><span class="kn"><span>熱 key 佔比</span><span class="kv" id="cfx-v-hot">25%</span></span>
+          <input type="range" id="cfx-hot" min="0" max="90" step="5" value="25"></label>
+        <label class="cfx-knob"><span class="kn"><span>打空流量佔比</span><span class="kv" id="cfx-v-empty">20%</span></span>
+          <input type="range" id="cfx-empty" min="0" max="80" step="5" value="20"></label>
+        <label class="cfx-knob"><span class="kn"><span>TTL 基準</span><span class="kv" id="cfx-v-ttl">12s</span></span>
+          <input type="range" id="cfx-ttl" min="5" max="60" step="1" value="12"></label>
+        <label class="cfx-knob"><span class="kn"><span>TTL 抖動幅度</span><span class="kv" id="cfx-v-jit">50%</span></span>
+          <input type="range" id="cfx-jit" min="0" max="100" step="5" value="50"></label>
+        <label class="cfx-knob"><span class="kn"><span>時間窗長度</span><span class="kv" id="cfx-v-win">60s</span></span>
+          <input type="range" id="cfx-win" min="30" max="120" step="10" value="60"></label>
       </div>
 
-      <div class="seg" role="group" aria-label="TTL 分佈" id="cfm-seg-ttl" style="margin-top:8px">
-        <button data-ttl="aligned" aria-pressed="true">TTL 對齊</button>
-        <button data-ttl="jitter" aria-pressed="false">TTL 抖動</button>
-      </div>
-
-      <div class="seg" role="group" aria-label="回源合併" id="cfm-seg-sf" style="margin-top:8px">
-        <button data-sf="off" aria-pressed="true">各自回源</button>
-        <button data-sf="on" aria-pressed="false">Singleflight</button>
-      </div>
-
-      <div class="seg" role="group" aria-label="打空防護" id="cfm-seg-bloom" style="margin-top:8px">
-        <button data-bloom="off" aria-pressed="true">無 Bloom</button>
-        <button data-bloom="on" aria-pressed="false">Bloom Filter</button>
-      </div>
-
-      <div class="cfm-ctrl">
-        <button class="btn primary" id="cfm-btn-next">下一步</button>
-        <button class="btn" id="cfm-btn-reset">重置</button>
-      </div>
-
-      <div class="cfm-metric">
-        <span>時刻 <strong id="cfm-m-t">0</strong> / 7</span>
-        <span>Inbound <strong id="cfm-m-in">0</strong></span>
-        <span>Origin <strong id="cfm-m-or">0</strong></span>
-        <span>合併省下 <strong id="cfm-m-co">0</strong></span>
-        <span>超容量 <strong id="cfm-m-ov">0</strong></span>
+      <div class="cfx-checks" role="group" aria-label="右側防護組合">
+        <span class="cl">右側（防護後）啟用的手段</span>
+        <label><input type="checkbox" id="cfx-p-sf"> Singleflight</label>
+        <label><input type="checkbox" id="cfx-p-bloom"> Bloom＋空值快取</label>
+        <label><input type="checkbox" id="cfx-p-jit" checked> TTL 抖動</label>
+        <label><input type="checkbox" id="cfx-p-hot"> 熱 key 永不過期＋背景刷新</label>
+        <label><input type="checkbox" id="cfx-p-limit" checked> origin 限流</label>
+        <button class="btn" id="cfx-reset" style="margin-left:auto">重置</button>
       </div>
 
       <div class="legend">
-        <span><i class="dot ns-idle"></i>尚未走到</span>
-        <span><i class="dot ns-ok"></i>回源低於容量</span>
-        <span><i class="dot ns-lock"></i>接近容量</span>
-        <span><i class="dot ns-wait"></i>本步作用中</span>
-        <span><i class="dot ns-bad"></i>origin 過載</span>
+        <span><i class="dot ns-wait"></i>裸快取回源</span>
+        <span><i class="dot ns-ok"></i>防護後回源</span>
+        <span><i class="dot ns-bad"></i>超過 DB 容量門檻</span>
+        <span><i class="dot ns-lock"></i>限流丟掉的回源</span>
       </div>
 
-      <div class="cfm-actors" id="cfm-actors" aria-live="polite">
-        <div class="cfm-actor" data-role="in">
-          <div class="an">Inbound</div>
-          <div class="al">本刻讀 QPS</div>
-          <div class="av" id="cfm-in-val">—</div>
-          <div class="ah" id="cfm-in-hint">待命</div>
-        </div>
-        <div class="cfm-actor" data-role="cache">
-          <div class="an">Cache</div>
-          <div class="al">命中 / 攔截</div>
-          <div class="av" id="cfm-cache-val">—</div>
-          <div class="ah" id="cfm-cache-hint">待命</div>
-        </div>
-        <div class="cfm-actor" data-role="origin">
-          <div class="an">Origin</div>
-          <div class="al">容量 160 / tick</div>
-          <div class="av" id="cfm-origin-val">—</div>
-          <div class="ah" id="cfm-origin-hint">待命</div>
-        </div>
+      <div class="cfx-canvas">
+        <svg id="cfx-svg" viewBox="0 0 720 350" role="img" aria-live="polite">
+          <title id="cfx-svg-title">上下兩條同軸的回源負載面積圖：上為裸快取、下為防護後，中間為每秒省下的回源</title>
+        </svg>
+      </div>
+      <p class="cap">兩張面積圖都以自己的基線往上長、共用同一條秒軸與同一個刻度：上面那張越高就是 origin 吃越多。虛線是 DB 容量門檻，斜紋紅色是真的打穿的那幾秒；中間那條帶子是逐秒「省下的回源」，往上是省下、往下代表防護反而多打了。</p>
+
+      <div class="cfx-cursor">
+        <label class="cfx-knob"><span class="kn"><span>時間游標</span><span class="kv" id="cfx-v-cur">t=12s</span></span>
+          <input type="range" id="cfx-cur" min="0" max="59" step="1" value="12"></label>
+        <div class="cfx-detail" id="cfx-detail"></div>
       </div>
 
-      <div class="cfm-chart-wrap">
-        <div class="cfm-cap-line" id="cfm-cap-line">
-          <span class="cfm-cap-lab">cap 160</span>
-        </div>
-        <div class="cfm-chart" id="cfm-chart" aria-label="各時刻 origin QPS"></div>
+      <div class="tbl-wrap">
+        <table class="cfx-cmp">
+          <thead>
+            <tr><th>指標</th><th class="num">裸快取</th><th class="num">加防護</th><th class="num">差</th></tr>
+          </thead>
+          <tbody id="cfx-rows"></tbody>
+        </table>
       </div>
 
-      <div class="cfm-panels">
-        <div class="cfm-panel">
-          <div class="pt">本刻語義</div>
-          <div class="prow"><span class="pk">故障形狀</span><span class="pv" id="cfm-p-sc">—</span></div>
-          <div class="prow"><span class="pk">回源</span><span class="pv" id="cfm-p-or">—</span></div>
-          <div class="prow"><span class="pk">Bloom 攔截</span><span class="pv" id="cfm-p-bl">—</span></div>
-          <div class="prow"><span class="pk">合併省下</span><span class="pv" id="cfm-p-co">—</span></div>
-        </div>
-        <div class="cfm-panel">
-          <div class="pt">累計</div>
-          <div class="prow"><span class="pk">origin 總擊中</span><span class="pv" id="cfm-p-sum">0</span></div>
-          <div class="prow"><span class="pk">過載 tick</span><span class="pv" id="cfm-p-ot">0</span></div>
-          <div class="prow"><span class="pk">峰值 origin</span><span class="pv" id="cfm-p-pk">0</span></div>
-          <div class="prow"><span class="pk">容量利用率（本刻）</span><span class="pv" id="cfm-p-util">—</span></div>
-        </div>
-      </div>
-
-      <div class="status-line" id="cfm-status">選擇故障與防護後按「下一步」。origin 容量固定 160；柱高超過虛線即過載。</div>
-      <div class="cfm-verdict" id="cfm-verdict">判定尚未產生——走完 8 個時刻後會摘要峰值與過載。</div>
-      <div class="cfm-wire" id="cfm-wire" aria-label="事件日誌"></div>
+      <div class="status-line" id="cfx-status"></div>
+      <div class="cfx-verdict" id="cfx-verdict"></div>
     </div>
   </div>
 
   <div class="oneliner">
-    <b>一句話答法</b>對照三組旋鈕：穿透看 Bloom、擊穿看 Singleflight、雪崩看 TTL 抖動。尖峰 QPS 只是讓過載更容易發生，不是另一種故障。
+    <b>一句話答法</b>同一波流量下，防護要對症：打空看 Bloom、單點到期看 Singleflight 或熱 key 背景刷新、集體到期看 TTL 抖動。抖動降的是峰值不是總量，限流降的是 origin 負載不是失敗率。
   </div>
 </section>
 
@@ -2182,502 +2119,562 @@
 (function () {
   "use strict";
 
-  var demo = document.getElementById("demo-cfm");
-  if (!demo) return;
-
-  var TICKS = 8;
-  var CAP = 160;
-  var SCALE = 800;
-  var BAR_MAX = 100;
-  var N_KEYS = 40;
-  var FPR = 0.03;
-
-  var sc = "pen";
-  var qps = 200;
-  var ttl = "aligned";
-  var sf = false;
-  var bloom = false;
-  var step = 0;
-  var series = [];
-
-  var statusEl = document.getElementById("cfm-status");
-  var verdictEl = document.getElementById("cfm-verdict");
-  var wireEl = document.getElementById("cfm-wire");
-  var chartEl = document.getElementById("cfm-chart");
-  var capLine = document.getElementById("cfm-cap-line");
-  var hintEl = document.getElementById("cfm-mode-hint");
-  var btnNext = document.getElementById("cfm-btn-next");
-  var btnReset = document.getElementById("cfm-btn-reset");
-
-  var mT = document.getElementById("cfm-m-t");
-  var mIn = document.getElementById("cfm-m-in");
-  var mOr = document.getElementById("cfm-m-or");
-  var mCo = document.getElementById("cfm-m-co");
-  var mOv = document.getElementById("cfm-m-ov");
-
-  var inVal = document.getElementById("cfm-in-val");
-  var inHint = document.getElementById("cfm-in-hint");
-  var cacheVal = document.getElementById("cfm-cache-val");
-  var cacheHint = document.getElementById("cfm-cache-hint");
-  var originVal = document.getElementById("cfm-origin-val");
-  var originHint = document.getElementById("cfm-origin-hint");
-  var actorIn = demo.querySelector('.cfm-actor[data-role="in"]');
-  var actorCache = demo.querySelector('.cfm-actor[data-role="cache"]');
-  var actorOrigin = demo.querySelector('.cfm-actor[data-role="origin"]');
-
-  var pSc = document.getElementById("cfm-p-sc");
-  var pOr = document.getElementById("cfm-p-or");
-  var pBl = document.getElementById("cfm-p-bl");
-  var pCo = document.getElementById("cfm-p-co");
-  var pSum = document.getElementById("cfm-p-sum");
-  var pOt = document.getElementById("cfm-p-ot");
-  var pPk = document.getElementById("cfm-p-pk");
-  var pUtil = document.getElementById("cfm-p-util");
-
-  var HINTS = {
-    pen: "穿透：t=3 起大量隨機空 key。開關 Bloom 才會顯著改變回源；Singleflight 幾乎沒用。",
-    brk: "擊穿：t=3 熱 key 到期。Singleflight 把 N 次回源收成 1；TTL 抖動對單把 key 幾乎無效。",
-    ava: "雪崩：對齊時 t=3 整批到期。TTL 抖動把 K 攤開；Singleflight 只把每把的 N 收成 1。"
+  /* (1) 常數與參數表 */
+  var KEYS = 40;                  /* working set 的真實 key 數 */
+  var BLOOM_FPR = 0.02;           /* Bloom 假陽性率：擋不住的那 2% 仍會回源 */
+  var ORIGIN_CAP = 400;           /* DB 每秒可承受的回源查詢數，也是限流的 admit 上限 */
+  var LCG_SEED = 20260922;        /* TTL 抖動用固定種子，結果可重現 */
+  var LCG_A = 1664525;
+  var LCG_C = 1013904223;
+  var LCG_M = 4294967296;
+  var PROT_IDS = ["sf", "bloom", "jitter", "hot", "limit"];
+  var PROT_NAMES = {
+    sf: "Singleflight",
+    bloom: "Bloom＋空值快取",
+    jitter: "TTL 抖動",
+    hot: "熱 key 永不過期＋背景刷新",
+    limit: "origin 限流"
   };
-  var SC_LABEL = { pen: "穿透 / 打空", brk: "擊穿 / 熱 key", ava: "雪崩 / 集體到期" };
+  var SHAPE_NAMES = { pen: "穿透 · 打空", brk: "擊穿 · 熱 key 到期", ava: "雪崩 · 集體到期" };
+  var DEFAULTS = {
+    shape: "ava", qps: 900, hotPct: 25, emptyPct: 20, ttlBase: 12,
+    jitterPct: 50, windowSec: 60, cursorSec: 12,
+    pSingleflight: false, pBloom: false, pJitter: true, pHotRefresh: false, pLimit: true
+  };
 
-  function bindSeg(id, attr, apply) {
-    var root = document.getElementById(id);
-    if (!root) return;
-    root.addEventListener("click", function (ev) {
-      var btn = ev.target.closest("button");
-      if (!btn || !root.contains(btn)) return;
-      var val = btn.getAttribute(attr);
-      if (val == null) return;
-      apply(val);
-      Array.prototype.forEach.call(root.querySelectorAll("button"), function (b) {
-        b.setAttribute("aria-pressed", b === btn ? "true" : "false");
-      });
-      reset();
-    });
+  /* (2) compute* 純函式 —— 不得出現 document / getElementById / innerHTML / classList / addEventListener */
+
+  function clampNum(v, lo, hi) {
+    var n = Number(v);
+    if (isNaN(n)) n = lo;
+    if (n < lo) n = lo;
+    if (n > hi) n = hi;
+    return n;
   }
 
-  bindSeg("cfm-seg-sc", "data-sc", function (v) { sc = v; });
-  bindSeg("cfm-seg-qps", "data-qps", function (v) { qps = parseInt(v, 10); });
-  bindSeg("cfm-seg-ttl", "data-ttl", function (v) { ttl = v; });
-  bindSeg("cfm-seg-sf", "data-sf", function (v) { sf = v === "on"; });
-  bindSeg("cfm-seg-bloom", "data-bloom", function (v) { bloom = v === "on"; });
+  function fmtPct(x, digits) {
+    var d = digits === undefined ? 1 : digits;
+    var s = Math.abs(x).toFixed(d);
+    return (x < 0 ? "−" : "") + s + "%";
+  }
 
-  function buildSeries() {
-    var ticks = [];
-    var hotCached = true;
-    var coldKeys = 0;
+  function fmtSigned(x) {
+    return (x > 0 ? "+" : (x < 0 ? "−" : "")) + String(Math.abs(x));
+  }
 
-    for (var t = 0; t < TICKS; t++) {
-      var origin = 0;
-      var hits = 0;
-      var coalesced = 0;
-      var bloomReject = 0;
-      var logs = [];
-      var status = "";
+  /* key 熱度分佈：第 0 把拿走 hotPct，其餘 39 把按 Zipf(s=1) 分掉剩下的 */
+  function keyWeights(hotPct) {
+    var hot = clampNum(hotPct, 0, 90) / 100;
+    var tail = [];
+    var sum = 0;
+    var i;
+    for (i = 1; i < KEYS; i++) {
+      tail[i] = 1 / i;
+      sum += tail[i];
+    }
+    var w = [hot];
+    for (i = 1; i < KEYS; i++) w[i] = (1 - hot) * tail[i] / sum;
+    return w;
+  }
 
-      if (sc === "pen") {
-        var fakeRatio = 0.12;
-        if (t >= 3 && t <= 6) fakeRatio = 0.85;
-        if (t === 7) fakeRatio = 0.4;
-        var fake = Math.round(qps * fakeRatio);
-        var real = qps - fake;
-        hits = real;
-        if (bloom) {
-          var fp = fake === 0 ? 0 : Math.max(1, Math.round(fake * FPR));
-          if (fake === 0) fp = 0;
-          if (fp > fake) fp = fake;
-          bloomReject = fake - fp;
-          origin = fp;
-          logs.push({
-            cls: "ok", ar: "BF", tg: "drop",
-            tx: "Bloom 攔截 " + bloomReject + " 個空 key；FPR 放行 " + fp
-          });
-        } else {
-          origin = fake;
-          logs.push({
-            cls: "bad", ar: "C→O", tg: "MISS",
-            tx: fake + " 個不存在的 key 全部回源"
-          });
-        }
-        if (sf) {
-          logs.push({
-            cls: "note", ar: "·", tg: "sf",
-            tx: "Singleflight 無效：空 key 幾乎不重複，乘數 ≈ 1"
-          });
-        }
-        if (ttl === "jitter") {
-          logs.push({
-            cls: "note", ar: "·", tg: "ttl",
-            tx: "TTL 抖動不擋打空——這些 key 從來沒被快取過"
-          });
-        }
-        if (t === 3) {
-          logs.push({
-            cls: "warn", ar: "t", tg: "scan",
-            tx: "掃描開始，打空比例升到 " + Math.round(fakeRatio * 100) + "%"
-          });
-        }
-        status = bloom
-          ? "Bloom 把確定不存在的請求擋在 origin 外。假陽性仍漏打 " + origin + "。"
-          : "穿透進行中：origin 在為不存在的 key 付帳。";
-      } else if (sc === "brk") {
-        var hot = Math.round(qps * 0.72);
-        var other = qps - hot;
-        var otherMiss = Math.round(other * 0.06);
-        var otherHit = other - otherMiss;
-        if (t === 3) hotCached = false;
+  /* 固定種子 LCG：每把 key 一個 ±(jitterPct × ttlBase) 的偏移 */
+  function jitterOffsets(ttlBase, jitterPct) {
+    var span = ttlBase * clampNum(jitterPct, 0, 100) / 100;
+    var seed = LCG_SEED;
+    var out = [];
+    var i;
+    for (i = 0; i < KEYS; i++) {
+      seed = (LCG_A * seed + LCG_C) % LCG_M;
+      out[i] = Math.round((seed / LCG_M * 2 - 1) * span);
+    }
+    return out;
+  }
 
-        if (hotCached) {
-          hits = hot + otherHit;
-          origin = otherMiss;
-          logs.push({ cls: "ok", ar: "C", tg: "HIT", tx: "sku:hot × " + hot + " 命中" });
-          status = "熱 key 命中。origin 只吃背景 miss。";
-        } else if (sf) {
-          origin = 1 + otherMiss;
-          coalesced = Math.max(0, hot - 1);
-          hits = otherHit;
-          logs.push({
-            cls: "warn", ar: "lock", tg: "SF",
-            tx: "1 次重建，" + coalesced + " 個 waiter 合併"
-          });
-          if (origin <= CAP) {
-            hotCached = true;
-            logs.push({ cls: "ok", ar: "O→C", tg: "SET", tx: "重建成功，下一刻恢復命中" });
-            status = "Singleflight 把擊穿收成 1 次回源。waiter 在等，origin 活著。";
-          } else {
-            status = "合併後仍超容量。";
-            logs.push({ cls: "bad", ar: "O", tg: "OVER", tx: "超容量，熱 key 未回填" });
-          }
-        } else {
-          origin = hot + otherMiss;
-          hits = otherHit;
-          logs.push({
-            cls: "bad", ar: "C→O", tg: "HERD",
-            tx: hot + " 個併發 miss 各自回源"
-          });
-          if (origin <= CAP) {
-            hotCached = true;
-            logs.push({
-              cls: "ok", ar: "O→C", tg: "SET",
-              tx: "origin 撐住，但做了多餘的重複查詢"
-            });
-            status = "沒有合併，QPS 仍在容量內。origin 被同一把 key 重複擊中。";
-          } else {
-            logs.push({
-              cls: "bad", ar: "O", tg: "OVER",
-              tx: "超容量 " + (origin - CAP) + "，重建失敗，熱 key 仍空"
-            });
-            status = "Herd 打死 origin。熱 key 沒回填，下一刻繼續打穿。";
-          }
-        }
-        if (ttl === "jitter" && t === 0) {
-          logs.push({
-            cls: "note", ar: "·", tg: "ttl",
-            tx: "TTL 抖動對單把熱 key 的到期尖峰幾乎沒幫助"
-          });
-        }
-        if (bloom && t === 0) {
-          logs.push({
-            cls: "note", ar: "·", tg: "bf",
-            tx: "Bloom 不管擊穿：這把 key 確實存在"
-          });
-        }
-      } else {
-        var scheduled = 0;
-        if (ttl === "jitter") {
-          if (t >= 2 && t <= 6) scheduled = 8;
-        } else if (t === 3) {
-          scheduled = N_KEYS;
-        }
-        var dying = Math.min(N_KEYS, scheduled + coldKeys);
-        var perKey = qps / N_KEYS;
-        var missQps = Math.round(dying * perKey);
-        var otherMiss = Math.round(qps * 0.03);
-        var bgHit = qps - missQps - otherMiss;
-        if (bgHit < 0) bgHit = 0;
+  /* 故障形狀決定第一次到期的排程：雪崩全對齊、擊穿只有熱 key 單獨尖峰、穿透全部錯開 */
+  function baseExpiry(shape, ttlBase) {
+    var out = [];
+    var i;
+    for (i = 0; i < KEYS; i++) {
+      if (shape === "ava") out[i] = ttlBase;
+      else if (shape === "brk") out[i] = i === 0 ? ttlBase : 1 + ((i * 13) % ttlBase);
+      else out[i] = 1 + ((i * 13 + 3) % ttlBase);
+    }
+    return out;
+  }
 
-        if (dying === 0) {
-          origin = otherMiss;
-          hits = qps - otherMiss;
-          coldKeys = 0;
-          logs.push({ cls: "ok", ar: "C", tg: "HIT", tx: "working set 仍熱，無集體到期" });
-          status = "尚未集體到期。origin 只吃背景 miss。";
-        } else if (sf) {
-          origin = dying + otherMiss;
-          coalesced = Math.max(0, missQps - dying);
-          hits = bgHit;
-          logs.push({
-            cls: "warn", ar: "SF", tg: "K→1",
-            tx: dying + " 把 key 各重建 1 次，合併掉 " + coalesced
-          });
-          if (origin <= CAP) {
-            coldKeys = 0;
-            logs.push({ cls: "ok", ar: "O→C", tg: "FILL", tx: "本刻到期的 key 已回填" });
-            status = "合併把每把 N 收成 1。K=" + dying + " 仍低於容量。";
-          } else {
-            coldKeys = dying;
-            logs.push({
-              cls: "bad", ar: "O", tg: "OVER",
-              tx: "K 次重建仍超容量，這批 key 下一刻仍冷"
-            });
-            status = "Singleflight 救不了「同時死掉的 key 數」。需要 TTL 抖動把 K 攤開。";
-          }
-        } else {
-          origin = missQps + otherMiss;
-          hits = bgHit;
-          logs.push({
-            cls: "bad", ar: "C→O", tg: "MISS",
-            tx: dying + " 把 key × 每把約 " + Math.round(perKey) + " 次 → 回源 " + missQps
-          });
-          if (origin <= CAP) {
-            coldKeys = 0;
-            status = "沒合併，但本刻到期量仍在容量內。";
-          } else {
-            coldKeys = dying;
-            logs.push({
-              cls: "bad", ar: "O", tg: "OVER",
-              tx: "超容量 " + (origin - CAP) + "，冷 key 堆積"
-            });
-            status = "集體 miss 打穿 origin。對齊 TTL 把 working set 同時變冷。";
-          }
-        }
-        if (bloom && t === 0) {
-          logs.push({
-            cls: "note", ar: "·", tg: "bf",
-            tx: "Bloom 不管雪崩：這些 key 都在集合裡"
-          });
+  /* 單側（裸快取或防護後）的整條逐秒回源序列 */
+  function computeSide(p, flags) {
+    var win = Math.round(clampNum(p.windowSec, 30, 120));
+    var qps = Math.round(clampNum(p.qps, 50, 1500));
+    var ttlBase = Math.round(clampNum(p.ttlBase, 5, 60));
+    var empty = Math.round(qps * clampNum(p.emptyPct, 0, 80) / 100);
+    var real = qps - empty;
+    var w = keyWeights(p.hotPct);
+    var reqs = [];
+    var i, t;
+    for (i = 0; i < KEYS; i++) reqs[i] = Math.round(real * w[i]);
+
+    var off = flags.jitter ? jitterOffsets(ttlBase, p.jitterPct) : null;
+    var base = baseExpiry(p.shape, ttlBase);
+    var next = [];
+    var ttlEach = [];
+    for (i = 0; i < KEYS; i++) {
+      var d = off ? off[i] : 0;
+      ttlEach[i] = Math.max(1, ttlBase + d);
+      next[i] = Math.max(1, base[i] + d);
+    }
+    var refreshEvery = Math.max(1, Math.floor(ttlBase / 2));
+    var emptyOrigin = flags.bloom ? Math.round(empty * BLOOM_FPR) : empty;
+
+    var raw = [], admitted = [], expiring = [], topKey = [], topReq = [];
+    var shed = 0, rawSum = 0, total = 0, peak = 0, peakRaw = 0, overSec = 0, maxExp = 0;
+
+    for (t = 0; t < win; t++) {
+      var o = emptyOrigin;
+      var ex = 0, tk = -1, tr = 0;
+      for (i = 0; i < KEYS; i++) {
+        if (flags.hot && i === 0) continue;       /* 熱 key 永不過期 */
+        if (next[i] <= t) {
+          ex += 1;
+          if (reqs[i] > tr) { tr = reqs[i]; tk = i; }
+          o += flags.sf ? 1 : reqs[i];            /* 合併：N 個 waiter 共用 1 次重建 */
+          next[i] = t + ttlEach[i];
         }
       }
+      if (flags.hot && t > 0 && t % refreshEvery === 0) o += 1;  /* 背景刷新的固定成本 */
+      var adm = flags.limit ? Math.min(o, ORIGIN_CAP) : o;
+      shed += o - adm;
+      raw[t] = o; admitted[t] = adm; expiring[t] = ex; topKey[t] = tk; topReq[t] = tr;
+      rawSum += o; total += adm;
+      if (adm > peak) peak = adm;
+      if (o > peakRaw) peakRaw = o;
+      if (adm > ORIGIN_CAP) overSec += 1;
+      if (ex > maxExp) maxExp = ex;
+    }
 
-      var overload = Math.max(0, origin - CAP);
-      ticks.push({
-        t: t,
-        inbound: qps,
-        origin: origin,
-        hits: hits,
-        coalesced: coalesced,
-        bloomReject: bloomReject,
-        overload: overload,
-        util: Math.round((origin / CAP) * 100),
-        logs: logs,
-        status: status
+    var inboundTotal = qps * win;
+    return {
+      win: win, qps: qps, empty: empty, real: real, reqs: reqs,
+      origin: admitted, raw: raw, expiring: expiring, topKey: topKey, topReq: topReq,
+      total: total, rawSum: rawSum, peak: peak, peakRaw: peakRaw,
+      overSec: overSec, shed: shed, maxExp: maxExp, emptyOrigin: emptyOrigin,
+      avg: win > 0 ? total / win : 0,
+      absorbPct: inboundTotal > 0 ? (1 - rawSum / inboundTotal) * 100 : 0
+    };
+  }
+
+  // @probe fn       computeFailureModes
+  // @probe baseline {"shape":"ava","qps":900,"hotPct":25,"emptyPct":20,"ttlBase":12,"jitterPct":50,"windowSec":60,"cursorSec":12,"pSingleflight":false,"pBloom":false,"pJitter":true,"pHotRefresh":false,"pLimit":true}
+  // @probe sweep    {"shape":["pen","ava"],"qps":[50,1500],"hotPct":[0,90],"emptyPct":[0,80],"ttlBase":[5,60],"jitterPct":[0,100],"windowSec":[30,120],"cursorSec":[0,29],"pSingleflight":[false,true],"pBloom":[false,true],"pJitter":[false,true],"pHotRefresh":[false,true],"pLimit":[false,true]}
+  function computeFailureModes(p) {
+    var bareFlags = { sf: false, bloom: false, jitter: false, hot: false, limit: false };
+    var protFlags = {
+      sf: p.pSingleflight === true,
+      bloom: p.pBloom === true,
+      jitter: p.pJitter === true,
+      hot: p.pHotRefresh === true,
+      limit: p.pLimit === true
+    };
+    var bare = computeSide(p, bareFlags);
+    var prot = computeSide(p, protFlags);
+    var win = bare.win;
+    var i, t, k;
+
+    /* 逐秒差值：正＝防護省下的回源，負＝防護反而多打 */
+    var diff = [];
+    var diffAbs = 1;
+    for (t = 0; t < win; t++) {
+      diff[t] = bare.origin[t] - prot.origin[t];
+      if (Math.abs(diff[t]) > diffAbs) diffAbs = Math.abs(diff[t]);
+    }
+
+    var savedPct = bare.total > 0 ? (1 - prot.total / bare.total) * 100 : 0;
+    var peakDropPct = bare.peak > 0 ? (1 - prot.peak / bare.peak) * 100 : 0;
+
+    /* leave-one-out：逐一關掉某一項防護重算，看回源總量會多多少 */
+    var marginal = [];
+    for (i = 0; i < PROT_IDS.length; i++) {
+      k = PROT_IDS[i];
+      if (!protFlags[k]) continue;
+      var f = {
+        sf: protFlags.sf, bloom: protFlags.bloom, jitter: protFlags.jitter,
+        hot: protFlags.hot, limit: protFlags.limit
+      };
+      f[k] = false;
+      var without = computeSide(p, f);
+      marginal.push({
+        id: k, name: PROT_NAMES[k],
+        gain: bare.total > 0 ? (without.total - prot.total) / bare.total * 100 : 0
       });
     }
-    return ticks;
-  }
+    marginal.sort(function (a, b) { return b.gain - a.gain; });
 
-  function barClass(origin, reached) {
-    if (!reached) return "future";
-    if (origin > CAP) return "bad";
-    if (origin > CAP * 0.8) return "warn";
-    return "ok";
-  }
+    /* 時間游標：只是把已經算完的那一秒取出來看，不參與任何序列計算 */
+    var cs = Math.round(clampNum(p.cursorSec, 0, win - 1));
+    var cursor = {
+      sec: cs,
+      bare: bare.origin[cs], prot: prot.origin[cs], protRaw: prot.raw[cs],
+      expBare: bare.expiring[cs], expProt: prot.expiring[cs],
+      topKey: bare.topKey[cs], topReq: bare.topReq[cs],
+      emptyBare: bare.emptyOrigin, emptyProt: prot.emptyOrigin
+    };
 
-  function actorClass(el, name) {
-    el.classList.remove("on", "ok", "dirty", "bad");
-    if (name) el.classList.add(name);
-  }
+    var kind = prot.overSec > 0 ? "over" : (prot.peak > ORIGIN_CAP * 0.8 ? "tight" : "safe");
+    var best = marginal.length ? marginal[0] : null;
+    var shapeName = SHAPE_NAMES[p.shape] || SHAPE_NAMES.pen;
 
-  function setText(el, text) {
-    if (el) el.textContent = text;
-  }
+    var maxY = Math.max(bare.peak, prot.peakRaw, ORIGIN_CAP);
+    maxY = Math.ceil(maxY * 1.12 / 10) * 10;
 
-  function toneUtil(el, origin) {
-    el.classList.remove("good", "warn", "bad");
-    if (origin > CAP) el.classList.add("bad");
-    else if (origin > CAP * 0.8) el.classList.add("warn");
-    else el.classList.add("good");
-  }
+    var hotReq = bare.reqs[0];
+    var status = shapeName + "：每秒 " + bare.qps + " 個讀，其中 " + bare.empty +
+      " 個打空、" + bare.real + " 個落在 " + KEYS + " 把 key 上（最熱的一把每秒 " + hotReq +
+      " 次）。裸快取峰值 " + bare.peak + "／秒，防護後 " + prot.peak + "／秒，門檻 " + ORIGIN_CAP + "。";
 
-  function positionCap() {
-    if (!capLine || !chartEl) return;
-    var px = Math.round((CAP / SCALE) * BAR_MAX);
-    capLine.style.bottom = (8 + 22 + px) + "px";
-  }
-
-  function renderChart() {
-    var html = "";
-    var i;
-    for (i = 0; i < TICKS; i++) {
-      var row = series[i];
-      var reached = i < step;
-      var h = Math.max(3, Math.round((row.origin / SCALE) * BAR_MAX));
-      var n = reached ? String(row.origin) : "";
-      html += '<div class="cfm-col">';
-      html += '<div class="cfm-bar-n">' + n + "</div>";
-      html += '<div class="cfm-bar ' + barClass(row.origin, reached) + '" style="height:' + h + 'px"></div>';
-      html += '<div class="cfm-tick">t' + i + "</div>";
-      html += "</div>";
-    }
-    chartEl.innerHTML = html;
-    positionCap();
-  }
-
-  function appendLogs(logs) {
-    var i;
-    for (i = 0; i < logs.length; i++) {
-      var L = logs[i];
-      var row = document.createElement("div");
-      row.className = "cfm-row " + L.cls;
-      row.innerHTML =
-        '<span class="ar">' + L.ar + "</span>" +
-        '<span class="tg">' + L.tg + "</span>" +
-        '<span class="tx">' + L.tx + "</span>";
-      wireEl.appendChild(row);
-    }
-    wireEl.scrollTop = wireEl.scrollHeight;
-  }
-
-  function totalsTo(n) {
-    var sum = 0;
-    var overTicks = 0;
-    var peak = 0;
-    var i;
-    for (i = 0; i < n; i++) {
-      sum += series[i].origin;
-      if (series[i].overload > 0) overTicks += 1;
-      if (series[i].origin > peak) peak = series[i].origin;
-    }
-    return { sum: sum, overTicks: overTicks, peak: peak };
-  }
-
-  function paintIdle() {
-    setText(mT, "0");
-    setText(mIn, "0");
-    setText(mOr, "0");
-    setText(mCo, "0");
-    setText(mOv, "0");
-    setText(inVal, "—");
-    setText(inHint, "待命");
-    setText(cacheVal, "—");
-    setText(cacheHint, "待命");
-    setText(originVal, "—");
-    setText(originHint, "容量 " + CAP);
-    actorClass(actorIn, "");
-    actorClass(actorCache, "");
-    actorClass(actorOrigin, "");
-    setText(pSc, SC_LABEL[sc]);
-    setText(pOr, "—");
-    setText(pBl, "—");
-    setText(pCo, "—");
-    setText(pSum, "0");
-    setText(pOt, "0");
-    setText(pPk, "0");
-    setText(pUtil, "—");
-    pOr.classList.remove("good", "warn", "bad");
-    pUtil.classList.remove("good", "warn", "bad");
-    pOt.classList.remove("good", "warn", "bad");
-    pPk.classList.remove("good", "warn", "bad");
-    setText(statusEl, "選擇故障與防護後按「下一步」。origin 容量固定 " + CAP + "；柱高超過虛線即過載。");
-    verdictEl.className = "cfm-verdict";
-    setText(verdictEl, "判定尚未產生——走完 8 個時刻後會摘要峰值與過載。");
-    wireEl.innerHTML = "";
-    btnNext.disabled = false;
-  }
-
-  function finishVerdict() {
-    var tot = totalsTo(TICKS);
-    var tone = "ok";
-    var text;
-    if (tot.overTicks > 0) {
-      tone = "bad";
-      text = "判定：峰值 origin " + tot.peak + "，有 " + tot.overTicks +
-        " 個時刻超過容量 " + CAP + "。";
-    } else if (tot.peak > CAP * 0.8) {
-      tone = "lock";
-      text = "判定：勉強撐住。峰值 " + tot.peak + " 已靠近容量 " + CAP + "。";
+    var verdict;
+    if (!marginal.length) {
+      verdict = "右側一項防護都沒勾，所以兩條面積圖逐秒完全相同——這就是「什麼都不做」的基準線：峰值 " +
+        bare.peak + "／秒、" + bare.overSec + " 秒打穿門檻、" + win + " 秒內總共回源 " + bare.total + " 次。";
     } else {
-      text = "判定：origin 全程低於容量。峰值 " + tot.peak + "。";
-    }
-    if (sc === "pen") {
-      text += bloom
-        ? " Bloom 把打空從「每次回源」變成 FPR 漏打。"
-        : " 未開 Bloom，掃描的空 key 直接變成 origin 帳單。";
-    } else if (sc === "brk") {
-      text += sf
-        ? " Singleflight 把熱 key 的 N 次回源收成 1。"
-        : " 沒有合併時，熱 key 到期 = 尖峰 inbound 打同一條查詢。";
-    } else {
-      text += (ttl === "jitter" ? " TTL 抖動把 K 攤成緩坡。" : " 對齊 TTL 讓 K 把 key 同一刻重建。") +
-        (sf ? " Singleflight 只再把每把的 N 收成 1。" : " 未合併時每把還乘上併發。");
-    }
-    verdictEl.className = "cfm-verdict tone-" + tone;
-    setText(verdictEl, text);
-    btnNext.disabled = true;
-  }
+      var head;
+      if (kind === "over") head = "防護後仍有 " + prot.overSec + " 秒越過容量門檻，origin 還是被打穿了。";
+      else if (kind === "tight") head = "防護後沒有越過門檻，但峰值 " + prot.peak + " 已經吃掉容量的 " +
+        Math.round(prot.peak / ORIGIN_CAP * 100) + "%，沒有餘裕。";
+      else head = "防護後全程低於容量門檻，峰值只用掉容量的 " + Math.round(prot.peak / ORIGIN_CAP * 100) + "%。";
 
-  function paintStep() {
-    var row = series[step - 1];
-    var tot = totalsTo(step);
-    var served = row.hits + row.bloomReject;
+      verdict = head +
+        " 峰值 " + bare.peak + " → " + prot.peak +
+        "（" + (peakDropPct >= 0 ? "降 " : "升 ") + fmtPct(Math.abs(peakDropPct)) + "）；" +
+        "回源總量 " + bare.total + " → " + prot.total +
+        "（" + (savedPct >= 0 ? "省下 " : "反而多出 ") + fmtPct(Math.abs(savedPct)) + "）；" +
+        "打穿門檻的秒數 " + bare.overSec + " → " + prot.overSec + "。";
 
-    setText(mT, String(row.t));
-    setText(mIn, String(row.inbound));
-    setText(mOr, String(row.origin));
-    setText(mCo, String(row.coalesced));
-    setText(mOv, String(row.overload));
-
-    setText(inVal, String(row.inbound));
-    setText(inHint, "讀 QPS");
-    actorClass(actorIn, "on");
-
-    setText(cacheVal, String(served));
-    setText(cacheHint, row.bloomReject ? ("命中 " + row.hits + " · 攔截 " + row.bloomReject) : ("命中 " + row.hits));
-    actorClass(actorCache, row.bloomReject || row.hits > row.origin ? "ok" : "dirty");
-
-    setText(originVal, row.origin + " / " + CAP);
-    if (row.overload > 0) {
-      setText(originHint, "過載 +" + row.overload);
-      actorClass(actorOrigin, "bad");
-    } else if (row.origin > CAP * 0.8) {
-      setText(originHint, "接近容量");
-      actorClass(actorOrigin, "dirty");
-    } else {
-      setText(originHint, "低於容量");
-      actorClass(actorOrigin, "ok");
+      if (best && best.gain > 0.5) {
+        verdict += " 貢獻最大的是「" + best.name + "」：只把它關掉，回源總量就會多出相當於裸快取 " +
+          fmtPct(best.gain) + " 的量。";
+      } else {
+        verdict += " 沒有任何一項防護降低回源「總量」——它們處理的是尖刺的形狀（看峰值那一列），不是帳單的大小。";
+      }
+      if (protFlags.limit && prot.shed > 0) {
+        verdict += " 代價：限流把 " + prot.shed + " 次回源擋在門外，那些請求的使用者看到的是錯誤，不是變慢。";
+      }
+      if (protFlags.jitter && savedPct < 0) {
+        verdict += " 抖動把部分 key 的 TTL 砍短了，所以總重建次數會比對齊時更多——這正是「新鮮度不可預測」的代價。";
+      }
     }
 
-    setText(pSc, SC_LABEL[sc]);
-    setText(pOr, String(row.origin));
-    toneUtil(pOr, row.origin);
-    setText(pBl, String(row.bloomReject));
-    setText(pCo, String(row.coalesced));
-    setText(pSum, String(tot.sum));
-    setText(pOt, String(tot.overTicks));
-    pOt.classList.remove("good", "warn", "bad");
-    pOt.classList.add(tot.overTicks > 0 ? "bad" : "good");
-    setText(pPk, String(tot.peak));
-    toneUtil(pPk, tot.peak);
-    setText(pUtil, row.util + "%");
-    toneUtil(pUtil, row.origin);
-
-    setText(statusEl, "t=" + row.t + " · " + row.status);
-    appendLogs(row.logs);
-    renderChart();
-
-    if (step >= TICKS) finishVerdict();
+    return {
+      cap: ORIGIN_CAP, keys: KEYS, win: win, maxY: maxY,
+      shape: p.shape, shapeName: shapeName,
+      bareSeries: bare.origin, protSeries: prot.origin, protRawSeries: prot.raw,
+      diffSeries: diff, diffAbs: diffAbs,
+      peakBare: bare.peak, peakProt: prot.peak, peakProtRaw: prot.peakRaw,
+      totalBare: bare.total, totalProt: prot.total,
+      avgBare: bare.avg, avgProt: prot.avg,
+      overSecBare: bare.overSec, overSecProt: prot.overSec,
+      absorbBare: bare.absorbPct, absorbProt: prot.absorbPct,
+      maxExpBare: bare.maxExp, maxExpProt: prot.maxExp,
+      emptyBare: bare.emptyOrigin, emptyProt: prot.emptyOrigin,
+      shedProt: prot.shed, savedPct: savedPct, peakDropPct: peakDropPct,
+      hotReq: hotReq, emptyReq: bare.empty, realReq: bare.real,
+      marginal: marginal, cursor: cursor, kind: kind,
+      cursorSec: cursor.sec, cursorBare: cursor.bare, cursorProt: cursor.prot,
+      cursorExpBare: cursor.expBare, cursorExpProt: cursor.expProt,
+      limitOn: protFlags.limit, anyProt: marginal.length > 0,
+      bestName: best ? best.name : "—", bestGain: best ? best.gain : 0,
+      statusText: status, verdictText: verdict
+    };
   }
 
-  function reset() {
-    series = buildSeries();
-    step = 0;
-    hintEl.textContent = HINTS[sc];
-    paintIdle();
-    renderChart();
+  /* (3) DOM 參照 */
+  var demo = document.getElementById("demo-cfx");
+  if (!demo) return;
+
+  var segShape = document.getElementById("cfx-seg-shape");
+  var elQps = document.getElementById("cfx-qps");
+  var elHot = document.getElementById("cfx-hot");
+  var elEmpty = document.getElementById("cfx-empty");
+  var elTtl = document.getElementById("cfx-ttl");
+  var elJit = document.getElementById("cfx-jit");
+  var elWin = document.getElementById("cfx-win");
+  var elCur = document.getElementById("cfx-cur");
+  var chkSf = document.getElementById("cfx-p-sf");
+  var chkBloom = document.getElementById("cfx-p-bloom");
+  var chkJit = document.getElementById("cfx-p-jit");
+  var chkHot = document.getElementById("cfx-p-hot");
+  var chkLimit = document.getElementById("cfx-p-limit");
+  var btnReset = document.getElementById("cfx-reset");
+
+  var vQps = document.getElementById("cfx-v-qps");
+  var vHot = document.getElementById("cfx-v-hot");
+  var vEmpty = document.getElementById("cfx-v-empty");
+  var vTtl = document.getElementById("cfx-v-ttl");
+  var vJit = document.getElementById("cfx-v-jit");
+  var vWin = document.getElementById("cfx-v-win");
+  var vCur = document.getElementById("cfx-v-cur");
+
+  var svg = document.getElementById("cfx-svg");
+  var detailEl = document.getElementById("cfx-detail");
+  var rowsEl = document.getElementById("cfx-rows");
+  var statusEl = document.getElementById("cfx-status");
+  var verdictEl = document.getElementById("cfx-verdict");
+
+  var shape = DEFAULTS.shape;
+
+  /* 版面座標（純畫圖用） */
+  var VW = 720, PAD_L = 46, PAD_R = 12;
+  var PLOT_W = VW - PAD_L - PAD_R;
+  var A_TOP = 16, A_BASE = 136;
+  var BAND_TOP = 148, BAND_MID = 170, BAND_H = 22;
+  var B_TOP = 200, B_BASE = 320;
+  var PANEL_H = 120;
+
+  /* (4) render(state) —— 只讀 state 畫出來，不做任何判斷 */
+
+  function esc(s) {
+    return String(s).split("&").join("&amp;").split("<").join("&lt;").split(">").join("&gt;");
   }
 
-  btnNext.addEventListener("click", function () {
-    if (step >= TICKS) return;
-    step += 1;
-    paintStep();
+  function xAt(t, win) { return PAD_L + PLOT_W * t / win; }
+
+  function areaPath(series, win, baseY, maxY) {
+    var parts = ["M" + xAt(0, win).toFixed(1) + "," + baseY];
+    var t;
+    for (t = 0; t < win; t++) {
+      var y = (baseY - series[t] / maxY * PANEL_H).toFixed(1);
+      parts.push("L" + xAt(t, win).toFixed(1) + "," + y);
+      parts.push("L" + xAt(t + 1, win).toFixed(1) + "," + y);
+    }
+    parts.push("L" + xAt(win, win).toFixed(1) + "," + baseY);
+    parts.push("Z");
+    return parts.join(" ");
+  }
+
+  function stepLine(series, win, baseY, maxY) {
+    var parts = [];
+    var t;
+    for (t = 0; t < win; t++) {
+      var y = (baseY - series[t] / maxY * PANEL_H).toFixed(1);
+      parts.push((t === 0 ? "M" : "L") + xAt(t, win).toFixed(1) + "," + y);
+      parts.push("L" + xAt(t + 1, win).toFixed(1) + "," + y);
+    }
+    return parts.join(" ");
+  }
+
+  function diffPath(series, win, midY, absMax) {
+    var parts = ["M" + xAt(0, win).toFixed(1) + "," + midY];
+    var t;
+    for (t = 0; t < win; t++) {
+      var y = (midY - series[t] / absMax * BAND_H).toFixed(1);
+      parts.push("L" + xAt(t, win).toFixed(1) + "," + y);
+      parts.push("L" + xAt(t + 1, win).toFixed(1) + "," + y);
+    }
+    parts.push("L" + xAt(win, win).toFixed(1) + "," + midY);
+    parts.push("Z");
+    return parts.join(" ");
+  }
+
+  function panel(label, series, win, baseY, topY, maxY, cap, fill, stroke) {
+    var capY = baseY - cap / maxY * PANEL_H;
+    var out = [];
+    out.push('<rect x="' + PAD_L + '" y="' + topY + '" width="' + PLOT_W + '" height="' + PANEL_H +
+      '" fill="#fafaf9" stroke="var(--border)"/>');
+    out.push('<path d="' + areaPath(series, win, baseY, maxY) + '" fill="' + fill +
+      '" stroke="' + stroke + '" stroke-width="1"/>');
+    out.push('<g clip-path="url(#cfx-clip-' + label + ')"><path d="' + areaPath(series, win, baseY, maxY) +
+      '" fill="url(#cfx-hatch)" stroke="var(--bad)" stroke-width="1"/></g>');
+    out.push('<line x1="' + PAD_L + '" y1="' + capY.toFixed(1) + '" x2="' + (VW - PAD_R) +
+      '" y2="' + capY.toFixed(1) + '" stroke="var(--warn)" stroke-width="1.2" stroke-dasharray="5 4"/>');
+    out.push('<text x="' + (PAD_L - 6) + '" y="' + (capY + 4).toFixed(1) +
+      '" text-anchor="end" font-family="var(--mono)" font-size="11" fill="#a3743e">' + cap + '</text>');
+    out.push('<text x="' + (PAD_L - 6) + '" y="' + (baseY + 4) +
+      '" text-anchor="end" font-family="var(--mono)" font-size="11" fill="#6b7076">0</text>');
+    return out.join("");
+  }
+
+  function render(r) {
+    var win = r.win, maxY = r.maxY, cap = r.cap;
+    var capYA = A_BASE - cap / maxY * PANEL_H;
+    var capYB = B_BASE - cap / maxY * PANEL_H;
+    var s = [];
+
+    s.push('<title>上下兩條同軸的回源負載面積圖：上為裸快取、下為防護後，中間為每秒省下的回源</title>');
+    s.push('<defs>');
+    s.push('<pattern id="cfx-hatch" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">' +
+      '<rect width="6" height="6" fill="#f6ecea"/><line x1="0" y1="0" x2="0" y2="6" stroke="#a8554f" stroke-width="2"/></pattern>');
+    s.push('<clipPath id="cfx-clip-A"><rect x="' + PAD_L + '" y="' + A_TOP + '" width="' + PLOT_W +
+      '" height="' + Math.max(0, capYA - A_TOP).toFixed(1) + '"/></clipPath>');
+    s.push('<clipPath id="cfx-clip-B"><rect x="' + PAD_L + '" y="' + B_TOP + '" width="' + PLOT_W +
+      '" height="' + Math.max(0, capYB - B_TOP).toFixed(1) + '"/></clipPath>');
+    s.push('</defs>');
+
+    s.push(panel("A", r.bareSeries, win, A_BASE, A_TOP, maxY, cap, "#e7edf6", "#3f6188"));
+    s.push('<text x="' + (PAD_L + 6) + '" y="' + (A_TOP + 14) +
+      '" font-family="var(--mono)" font-size="11.5" fill="#3f6188">裸快取 · 峰值 ' + r.peakBare +
+      '／秒 · 打穿 ' + r.overSecBare + ' 秒</text>');
+
+    /* 中間：逐秒差值帶 */
+    s.push('<rect x="' + PAD_L + '" y="' + BAND_TOP + '" width="' + PLOT_W + '" height="' + (BAND_H * 2) +
+      '" fill="#ffffff" stroke="var(--border)"/>');
+    s.push('<path d="' + diffPath(r.diffSeries, win, BAND_MID, r.diffAbs) + '" fill="#e3efe8" stroke="#4d7d68" stroke-width="1"/>');
+    s.push('<line x1="' + PAD_L + '" y1="' + BAND_MID + '" x2="' + (VW - PAD_R) + '" y2="' + BAND_MID +
+      '" stroke="var(--border-strong)" stroke-width="1"/>');
+    s.push('<text x="' + (PAD_L - 6) + '" y="' + (BAND_MID + 4) +
+      '" text-anchor="end" font-family="var(--mono)" font-size="10.5" fill="#6b7076">差</text>');
+    s.push('<text x="' + (VW - PAD_R - 6) + '" y="' + (BAND_TOP + 12) +
+      '" text-anchor="end" font-family="var(--mono)" font-size="10.5" fill="#4d7d68">每秒省下的回源（最大 ' +
+      r.diffAbs + '）</text>');
+
+    s.push(panel("B", r.protSeries, win, B_BASE, B_TOP, maxY, cap, "#e7f0ea", "#4d7d68"));
+    if (r.limitOn) {
+      s.push('<path d="' + stepLine(r.protRawSeries, win, B_BASE, maxY) +
+        '" fill="none" stroke="#a3743e" stroke-width="1" stroke-dasharray="3 3"/>');
+    }
+    s.push('<text x="' + (PAD_L + 6) + '" y="' + (B_TOP + 14) +
+      '" font-family="var(--mono)" font-size="11.5" fill="#4d7d68">防護後 · 峰值 ' + r.peakProt +
+      '／秒 · 打穿 ' + r.overSecProt + ' 秒</text>');
+
+    /* 時間游標 */
+    var cx = (xAt(r.cursor.sec, win) + PLOT_W / win / 2).toFixed(1);
+    s.push('<line x1="' + cx + '" y1="' + A_TOP + '" x2="' + cx + '" y2="' + B_BASE +
+      '" stroke="var(--accent)" stroke-width="1.2"/>');
+    s.push('<circle cx="' + cx + '" cy="' + (A_BASE - r.cursor.bare / maxY * PANEL_H).toFixed(1) +
+      '" r="3" fill="#3f6188"/>');
+    s.push('<circle cx="' + cx + '" cy="' + (B_BASE - r.cursor.prot / maxY * PANEL_H).toFixed(1) +
+      '" r="3" fill="#4d7d68"/>');
+
+    /* x 軸刻度 */
+    var stepLab = Math.max(5, Math.round(win / 12 / 5) * 5);
+    var t;
+    for (t = 0; t <= win; t += stepLab) {
+      s.push('<text x="' + xAt(t, win).toFixed(1) + '" y="' + (B_BASE + 18) +
+        '" text-anchor="middle" font-family="var(--mono)" font-size="10.5" fill="#6b7076">' + t + '</text>');
+    }
+    s.push('<text x="' + (VW - PAD_R) + '" y="' + (B_BASE + 32) +
+      '" text-anchor="end" font-family="var(--mono)" font-size="10.5" fill="#6b7076">秒</text>');
+
+    svg.innerHTML = s.join("");
+  }
+
+  function renderTable(r) {
+    var rows = [
+      ["峰值回源（次／秒）", r.peakBare, r.peakProt, fmtSigned(r.peakProt - r.peakBare), r.peakProt < r.peakBare ? "good" : (r.peakProt > r.peakBare ? "bad" : "")],
+      ["回源總次數（整個時間窗）", r.totalBare, r.totalProt, fmtSigned(r.totalProt - r.totalBare), r.totalProt < r.totalBare ? "good" : (r.totalProt > r.totalBare ? "warn" : "")],
+      ["每秒平均回源", r.avgBare.toFixed(1), r.avgProt.toFixed(1), fmtSigned(Math.round(r.avgProt - r.avgBare)), r.avgProt < r.avgBare ? "good" : (r.avgProt > r.avgBare ? "warn" : "")],
+      ["超過容量門檻 " + r.cap + " 的秒數", r.overSecBare, r.overSecProt, fmtSigned(r.overSecProt - r.overSecBare), r.overSecProt < r.overSecBare ? "good" : (r.overSecProt > r.overSecBare ? "bad" : "")],
+      ["未抵達 origin 的請求比例", r.absorbBare.toFixed(1) + "%", r.absorbProt.toFixed(1) + "%", fmtPct(r.absorbProt - r.absorbBare), r.absorbProt > r.absorbBare ? "good" : (r.absorbProt < r.absorbBare ? "warn" : "")],
+      ["單秒最多同時到期的 key 數", r.maxExpBare, r.maxExpProt, fmtSigned(r.maxExpProt - r.maxExpBare), r.maxExpProt < r.maxExpBare ? "good" : ""],
+      ["打空造成的每秒固定回源", r.emptyBare, r.emptyProt, fmtSigned(r.emptyProt - r.emptyBare), r.emptyProt < r.emptyBare ? "good" : ""],
+      ["限流丟棄的回源次數", "—", r.shedProt, r.shedProt > 0 ? "使用者看到錯誤" : "—", r.shedProt > 0 ? "warn" : ""],
+      ["防護後省下的回源", "—", fmtPct(r.savedPct), fmtPct(r.peakDropPct) + "（峰值）", r.savedPct > 0 ? "good" : (r.savedPct < 0 ? "warn" : "")],
+      ["最有效的單一防護（關掉它會多回源）", "—", r.bestName, r.anyProt ? fmtPct(r.bestGain) : "—", r.bestGain > 0.5 ? "good" : ""]
+    ];
+    var html = [];
+    var i;
+    for (i = 0; i < rows.length; i++) {
+      var row = rows[i];
+      html.push("<tr><td>" + esc(row[0]) + '</td><td class="num">' + esc(row[1]) +
+        '</td><td class="num ' + row[4] + '">' + esc(row[2]) + '</td><td class="num">' + esc(row[3]) + "</td></tr>");
+    }
+    rowsEl.innerHTML = html.join("");
+  }
+
+  function renderDetail(r) {
+    var c = r.cursor;
+    var who = c.topKey < 0 ? "沒有 key 到期" :
+      (c.topKey === 0 ? "最熱的 key#0（每秒 " + c.topReq + " 次讀）" : "key#" + c.topKey + "（每秒 " + c.topReq + " 次讀）");
+    detailEl.innerHTML =
+      "第 <b>" + c.sec + "</b> 秒｜裸快取回源 <b>" + c.bare + "</b>，其中打空固定佔 " + c.emptyBare + "；" +
+      "到期 <b>" + c.expBare + "</b> 把 key，最大貢獻者 " + esc(who) + "。<br>" +
+      "同一秒防護後回源 <b>" + c.prot + "</b>" +
+      (r.limitOn && c.protRaw > c.prot ? "（限流前 " + c.protRaw + "）" : "") +
+      "，到期 <b>" + c.expProt + "</b> 把 key，差值 <b>" + fmtSigned(c.bare - c.prot) + "</b>。";
+  }
+
+  function paint(r) {
+    render(r);
+    renderTable(r);
+    renderDetail(r);
+    statusEl.textContent = r.statusText;
+    verdictEl.className = "cfx-verdict " + r.kind;
+    verdictEl.textContent = r.verdictText;
+  }
+
+  /* (5) 事件綁定 */
+
+  function readParams() {
+    return {
+      shape: shape,
+      qps: parseInt(elQps.value, 10),
+      hotPct: parseInt(elHot.value, 10),
+      emptyPct: parseInt(elEmpty.value, 10),
+      ttlBase: parseInt(elTtl.value, 10),
+      jitterPct: parseInt(elJit.value, 10),
+      windowSec: parseInt(elWin.value, 10),
+      cursorSec: parseInt(elCur.value, 10),
+      pSingleflight: chkSf.checked,
+      pBloom: chkBloom.checked,
+      pJitter: chkJit.checked,
+      pHotRefresh: chkHot.checked,
+      pLimit: chkLimit.checked
+    };
+  }
+
+  function syncLabels(p) {
+    vQps.textContent = p.qps;
+    vHot.textContent = p.hotPct + "%";
+    vEmpty.textContent = p.emptyPct + "%";
+    vTtl.textContent = p.ttlBase + "s";
+    vJit.textContent = p.jitterPct + "%";
+    vWin.textContent = p.windowSec + "s";
+    vCur.textContent = "t=" + p.cursorSec + "s";
+  }
+
+  function update() {
+    var max = parseInt(elWin.value, 10) - 1;
+    elCur.max = String(max);
+    if (parseInt(elCur.value, 10) > max) elCur.value = String(max);
+    var p = readParams();
+    syncLabels(p);
+    paint(computeFailureModes(p));
+  }
+
+  segShape.addEventListener("click", function (ev) {
+    var btn = ev.target.closest("button");
+    if (!btn || !segShape.contains(btn)) return;
+    shape = btn.getAttribute("data-shape");
+    Array.prototype.forEach.call(segShape.querySelectorAll("button"), function (b) {
+      b.setAttribute("aria-pressed", b === btn ? "true" : "false");
+    });
+    update();
   });
+
+  Array.prototype.forEach.call(
+    [elQps, elHot, elEmpty, elTtl, elJit, elWin, elCur, chkSf, chkBloom, chkJit, chkHot, chkLimit],
+    function (el) { el.addEventListener("input", update); el.addEventListener("change", update); }
+  );
 
   btnReset.addEventListener("click", function () {
-    reset();
+    shape = DEFAULTS.shape;
+    Array.prototype.forEach.call(segShape.querySelectorAll("button"), function (b) {
+      b.setAttribute("aria-pressed", b.getAttribute("data-shape") === DEFAULTS.shape ? "true" : "false");
+    });
+    elQps.value = String(DEFAULTS.qps);
+    elHot.value = String(DEFAULTS.hotPct);
+    elEmpty.value = String(DEFAULTS.emptyPct);
+    elTtl.value = String(DEFAULTS.ttlBase);
+    elJit.value = String(DEFAULTS.jitterPct);
+    elWin.value = String(DEFAULTS.windowSec);
+    elCur.value = String(DEFAULTS.cursorSec);
+    chkSf.checked = DEFAULTS.pSingleflight;
+    chkBloom.checked = DEFAULTS.pBloom;
+    chkJit.checked = DEFAULTS.pJitter;
+    chkHot.checked = DEFAULTS.pHotRefresh;
+    chkLimit.checked = DEFAULTS.pLimit;
+    update();
   });
 
-  reset();
+  update();
 })();
 </script>
 
