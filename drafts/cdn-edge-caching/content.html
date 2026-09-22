@@ -1,3 +1,11 @@
+<!-- demo-archetype: F｜拆解器（主，第 7 節）＋B｜參數掃描（次，第 4 節） —
+     主 demo：讀者編輯一條真實 URL 與正規化規則（忽略清單、排序 query、host 小寫、去 fragment、Cookie 是否進 key、
+     Vary 各維度的取值數），逐段拆出哪些字元進 key／被丟棄／被改寫，並算出 cache key 字串、丟棄位元組、碎片乘積，
+     以及一批樣本請求去重後的唯一 key 數、回源次數與命中率上限。選 F 是因為本篇的核心命題「這條 URL 為什麼變成這把 key」
+     本質是一個編碼與正規化結構，只有逐段攤開才說得清。
+     次 demo：讀者拖 s-maxage／stale-while-revalidate／stale-if-error 三個秒數、請求間隔、Origin 故障時刻與觀察時刻，
+     即時得到每次請求落在哪個窗、回應延遲、背景更新次數與 origin 倒下後的存活秒數。選 B 是因為那一節的公式本身
+     就是三個秒數相加出來的窗邊界，拖動任一個、邊界與命中種類立刻位移，是參數掃描而不是一段有順序的流程。 -->
 <style>
   /* 本篇專屬：cec-* 命名空間，不覆蓋全站 base 類別 */
   #cec-root {
@@ -27,7 +35,6 @@
   .cec-chip.edge { background: var(--cec-alt-soft); border-color: var(--cec-alt); color: var(--cec-alt); }
   .cec-chip.origin { background: var(--cec-s-soft); border-color: var(--cec-s); color: var(--cec-s); }
   .cec-chip.op { background: var(--bg-soft); color: var(--text-3); border-style: dashed; font-weight: 500; }
-  .cec-chip.bad { background: var(--cec-bad-soft); border-color: var(--cec-bad); color: var(--cec-bad); }
   .cec-chip.warn { background: var(--cec-w-soft); border-color: var(--cec-w); color: var(--cec-w); }
 
   .cec-split { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin: 12px 0; }
@@ -45,127 +52,73 @@
   .cec-pane .ss { font-family: var(--mono); font-size: 11px; color: var(--text-3); margin-bottom: 8px; letter-spacing: .04em; }
   .cec-pane ul { margin: 0; padding-left: 1.15em; font-size: 13px; color: var(--text-2); line-height: 1.65; }
 
-  .cec-ctrl { display: flex; flex-wrap: wrap; gap: 10px; margin: 10px 0 8px; align-items: center; }
-  .cec-metric { display: flex; flex-wrap: wrap; gap: 14px; margin: 8px 0 4px; font-size: 13px; color: var(--text-2); }
-  .cec-metric strong { color: var(--text); font-family: var(--mono); font-size: 12.5px; }
-
-  .cec-actors { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin: 12px 0 6px; }
-  @media (max-width: 640px) { .cec-actors { grid-template-columns: 1fr; } }
-  .cec-actor {
-    border: 1.5px solid var(--border-strong); border-radius: var(--radius-sm);
-    padding: 12px 12px 10px; background: #fff; text-align: center;
-    transition: background .18s, border-color .18s, box-shadow .18s;
+  /* ── 主 demo（第 7 節）：URL → Cache Key 拆解器 ── */
+  .cku-fields { display: grid; gap: 8px; margin: 10px 0 8px; }
+  .cku-field { display: block; }
+  .cku-field .fn { display: block; font-family: var(--mono); font-size: 11px; color: var(--text-3); letter-spacing: .04em; margin-bottom: 3px; }
+  .cku-field input {
+    width: 100%; box-sizing: border-box; font-family: var(--mono); font-size: 12px;
+    padding: 7px 9px; border: 1px solid var(--border-strong); border-radius: 6px;
+    background: #fff; color: var(--text);
   }
-  .cec-actor .an { font-weight: 700; font-size: 13px; letter-spacing: .03em; }
-  .cec-actor .al { font-family: var(--mono); font-size: 10.5px; color: var(--text-3); margin-top: 2px; }
-  .cec-actor .av { font-family: var(--mono); font-size: 15px; font-weight: 700; margin-top: 8px; color: var(--text); word-break: break-all; }
-  .cec-actor .ah { font-size: 11.5px; color: var(--text-2); margin-top: 4px; min-height: 1.4em; }
-  .cec-actor.on { background: var(--accent-soft); border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
-  .cec-actor.on .an { color: var(--accent); }
-  .cec-actor.ok { background: var(--ok-soft); border-color: var(--ok); }
-  .cec-actor.ok .an { color: var(--ok); }
-  .cec-actor.dirty { background: var(--warn-soft); border-color: var(--warn); }
-  .cec-actor.dirty .an { color: var(--warn); }
-  .cec-actor.bad { background: var(--bad-soft); border-color: var(--bad); }
-  .cec-actor.bad .an { color: var(--bad); }
-
-  .cec-keybox {
+  .cku-checks { display: flex; flex-wrap: wrap; gap: 8px 16px; margin: 6px 0 10px; font-size: 12.5px; color: var(--text-2); }
+  .cku-checks label { display: inline-flex; align-items: center; gap: 5px; cursor: pointer; }
+  .cku-knobs, .swin-knobs { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px 16px; margin: 6px 0 12px; }
+  @media (max-width: 640px) { .cku-knobs, .swin-knobs { grid-template-columns: 1fr 1fr; } }
+  .cku-knob, .swin-knob { display: block; }
+  .cku-knob .kn, .swin-knob .kn {
+    display: flex; justify-content: space-between; gap: 6px;
+    font-family: var(--mono); font-size: 11px; color: var(--text-3); margin-bottom: 2px;
+  }
+  .cku-knob .kv, .swin-knob .kv { color: var(--text); font-weight: 700; }
+  .cku-knob input[type="range"], .swin-knob input[type="range"] { width: 100%; }
+  .cku-knob input:disabled, .swin-knob input:disabled { opacity: .4; }
+  .cku-map, .swin-canvas { margin: 10px 0 4px; }
+  .cku-keyline {
+    font-family: var(--mono); font-size: 12px; line-height: 1.6; word-break: break-all;
+    background: var(--code-bg); border: 1px solid var(--border);
+    border-radius: var(--radius-sm); padding: 9px 11px; margin: 6px 0;
+  }
+  .cku-keyline .kl { color: var(--text-3); margin-right: 8px; }
+  .cku-nums, .swin-nums { display: flex; flex-wrap: wrap; gap: 8px; margin: 8px 0; }
+  .cku-num, .swin-num {
     border: 1px solid var(--border); border-radius: var(--radius-sm);
-    background: var(--code-bg); padding: 10px 12px; margin: 8px 0 6px;
-    font-family: var(--mono); font-size: 12px; color: var(--text); line-height: 1.55;
-    word-break: break-all;
+    background: #fff; padding: 7px 10px; min-width: 104px;
   }
-  .cec-keybox .kk { color: var(--text-3); margin-right: 8px; }
+  .cku-num .nl, .swin-num .nl { font-family: var(--mono); font-size: 10.5px; color: var(--text-3); letter-spacing: .04em; }
+  .cku-num .nv, .swin-num .nv { font-family: var(--mono); font-size: 14px; font-weight: 700; color: var(--text); margin-top: 2px; }
+  .cku-num.ok .nv, .swin-num.ok .nv { color: var(--ok); }
+  .cku-num.warn .nv, .swin-num.warn .nv { color: var(--warn); }
+  .cku-num.bad .nv, .swin-num.bad .nv { color: var(--bad); }
 
-  .cec-slots {
-    display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0 4px; min-height: 36px;
-  }
-  .cec-slot {
-    font-family: var(--mono); font-size: 11px; padding: 5px 8px;
-    border: 1px solid var(--border-strong); border-radius: 6px; background: #fff; color: var(--text-2);
-  }
-  .cec-slot.hit { background: var(--cec-s-soft); border-color: var(--cec-s); color: var(--cec-s); }
-  .cec-slot.miss { background: var(--cec-c-soft); border-color: var(--cec-c); color: var(--cec-c); }
-  .cec-slot.empty { color: var(--text-3); border-style: dashed; }
+  /* 乘法塔：每列一個 Vary 維度，格數＝取值數，列尾是累積乘積 */
+  .cku-tower { display: grid; gap: 5px; margin: 12px 0 6px; }
+  .cku-trow { display: grid; grid-template-columns: 148px 1fr 96px; gap: 10px; align-items: center; }
+  .cku-trow.off { opacity: .42; }
+  .cku-trow .tl { font-family: var(--mono); font-size: 11px; color: var(--text-2); }
+  .cku-trow .tc { font-family: var(--mono); font-size: 15px; font-weight: 700; color: var(--text); text-align: right; }
+  .cku-cells { display: flex; flex-wrap: wrap; gap: 3px; align-items: center; }
+  .cku-cell { width: 13px; height: 13px; border-radius: 3px; border: 1px solid var(--cec-c); background: var(--cec-c-soft); }
+  .cku-more { font-family: var(--mono); font-size: 10.5px; color: var(--text-3); margin-left: 2px; }
+  @media (max-width: 640px) { .cku-trow { grid-template-columns: 112px 1fr 76px; } }
 
-  .cec-ticks { display: flex; gap: 4px; margin: 10px 0 6px; }
-  .cec-ticks[hidden] { display: none; }
-  .cec-tick {
-    flex: 1; text-align: center; border: 1.5px solid var(--border-strong);
-    border-radius: 6px; padding: 8px 4px; background: #fff;
-    font-family: var(--mono); font-size: 11px; color: var(--text-3);
-    transition: background .18s, border-color .18s, color .18s;
+  /* key 熱度表 */
+  .cku-hotline { font-size: 12.5px; color: var(--text-2); line-height: 1.7; margin: 12px 0 4px; }
+  .cku-hotline strong { font-family: var(--mono); color: var(--text); }
+  .cku-hot { display: grid; gap: 2px; }
+  .cku-hrow {
+    display: grid; grid-template-columns: 1fr 108px 40px; gap: 10px; align-items: center;
+    font-family: var(--mono); font-size: 11.5px; padding: 4px 0; border-bottom: 1px dashed var(--border);
   }
-  .cec-tick .tn { font-weight: 700; font-size: 12px; color: var(--text); display: block; margin-bottom: 2px; }
-  .cec-tick.future { background: var(--bg-soft); border-style: dashed; }
-  .cec-tick.fresh { background: var(--ok-soft); border-color: var(--ok); color: var(--ok); }
-  .cec-tick.fresh .tn { color: var(--ok); }
-  .cec-tick.swr { background: var(--warn-soft); border-color: var(--warn); color: var(--warn); }
-  .cec-tick.swr .tn { color: var(--warn); }
-  .cec-tick.sie { background: var(--cec-alt-soft); border-color: var(--cec-alt); color: var(--cec-alt); }
-  .cec-tick.sie .tn { color: var(--cec-alt); }
-  .cec-tick.dead { background: var(--bad-soft); border-color: var(--bad); color: var(--bad); }
-  .cec-tick.dead .tn { color: var(--bad); }
-  .cec-tick.now { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
-  .cec-tick.now .tn { color: var(--accent); }
+  .cku-hrow:last-child { border-bottom: none; }
+  .cku-hrow .hk { color: var(--text); word-break: break-all; }
+  .cku-hrow .hb { height: 9px; border-radius: 3px; background: var(--bg-soft); border: 1px solid var(--border); overflow: hidden; }
+  .cku-hrow .hb i { display: block; height: 100%; background: var(--cec-c); }
+  .cku-hrow .hn { text-align: right; color: var(--text-2); }
+  .cku-hrow.cold .hk { color: var(--text-3); }
+  @media (max-width: 640px) { .cku-hrow { grid-template-columns: 1fr 64px 34px; } }
 
-  .cec-panels { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 12px; }
-  @media (max-width: 640px) { .cec-panels { grid-template-columns: 1fr; } }
-  .cec-panel { border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 12px; background: #fff; }
-  .cec-panel .pt {
-    font-size: 11px; color: var(--text-3); letter-spacing: .06em; text-transform: uppercase;
-    font-family: var(--mono); margin-bottom: 8px;
-  }
-  .cec-panel .prow {
-    display: flex; justify-content: space-between; gap: 8px;
-    font-family: var(--mono); font-size: 12px; padding: 4px 0;
-    border-bottom: 1px dashed var(--border);
-  }
-  .cec-panel .prow:last-child { border-bottom: none; }
-  .cec-panel .pk { color: var(--text-3); white-space: nowrap; }
-  .cec-panel .pv { color: var(--text); font-weight: 600; text-align: right; word-break: break-all; }
-  .cec-panel .pv.good { color: var(--ok); }
-  .cec-panel .pv.bad { color: var(--bad); }
-  .cec-panel .pv.warn { color: var(--warn); }
-
-  .cec-wire {
-    border: 1px solid var(--border); border-radius: var(--radius-sm);
-    background: #fff; padding: 8px 10px; margin-top: 10px; max-height: 260px; overflow-y: auto;
-  }
-  .cec-row {
-    display: flex; align-items: baseline; gap: 8px;
-    font-family: var(--mono); font-size: 11.5px; padding: 4px 0;
-    border-bottom: 1px dashed var(--border);
-  }
-  .cec-row:last-child { border-bottom: none; }
-  .cec-row .ar { width: 42px; flex: none; text-align: center; color: var(--text-3); font-weight: 700; }
-  .cec-row .tg {
-    flex: none; border-radius: 4px; padding: 2px 6px; font-size: 10.5px; font-weight: 700;
-    border: 1px solid var(--border-strong); background: var(--bg-soft); color: var(--text-3);
-  }
-  .cec-row .tx { color: var(--text-2); line-height: 1.5; }
-  .cec-row.read .tg { background: var(--cec-c-soft); border-color: var(--cec-c); color: var(--cec-c); }
-  .cec-row.ok .tg { background: var(--cec-s-soft); border-color: var(--cec-s); color: var(--cec-s); }
-  .cec-row.warn .tg { background: var(--cec-w-soft); border-color: var(--cec-w); color: var(--cec-w); }
-  .cec-row.bad .tg { background: var(--cec-bad-soft); border-color: var(--cec-bad); color: var(--cec-bad); }
-  .cec-row.bad .tx { color: var(--bad); }
-  .cec-row.note { background: var(--bg-soft); border-radius: 4px; }
-  .cec-row.note .tx { color: var(--text-3); }
-
-  .cec-verdict {
-    margin-top: 10px; padding: 10px 12px; border-radius: var(--radius-sm);
-    border: 1px solid var(--border); background: var(--bg-soft);
-    font-size: 13px; color: var(--text-2); line-height: 1.55;
-  }
-  .cec-verdict.tone-ok { border-left: 3px solid var(--ok); background: var(--ok-soft); color: var(--text); }
-  .cec-verdict.tone-lock { border-left: 3px solid var(--warn); background: var(--warn-soft); color: var(--text); }
-  .cec-verdict.tone-bad { border-left: 3px solid var(--bad); background: var(--bad-soft); color: var(--text); }
-
-  .cec-mode-hint { font-size: 12.5px; color: var(--text-2); margin: 8px 0 4px; line-height: 1.55; }
-
-  /* display 覆寫 UA hidden；切換面板必須成對寫 display:none */
-  .cec-view { display: block; }
-  .cec-view[hidden] { display: none; }
+  .cku-ctrl, .swin-ctrl { margin-top: 10px; }
 </style>
 
 <div id="cec-root">
@@ -204,15 +157,16 @@
     </div>
   </div>
 
-  <div class="cec-flow">
-    <span class="cec-chip cli">Client GET</span>
-    <span class="cec-chip op">→ 就近 PoP</span>
-    <span class="cec-chip edge">算 key · 查快取</span>
-    <span class="cec-chip op">HIT？</span>
-    <span class="cec-chip origin">回源 / Shield</span>
-    <span class="cec-chip op">→</span>
-    <span class="cec-chip cli">把表徵賣回去</span>
-  </div>
+  <pre class="mermaid">
+flowchart LR
+    C["Client GET"] --> P["就近 PoP"]
+    P --> K["算 Cache Key"]
+    K --> L["查快取"]
+    L -->|HIT| C
+    L -->|MISS| O["回源 / Shield"]
+    O --> C
+  </pre>
+  <p class="cap">看「查快取」分出的兩條邊：HIT 那條直接折返 Client，origin 完全不知道這次請求；只有 MISS 那條才往右走到回源或 Shield，而且回來之後還要寫進邊緣的 store。</p>
 
   <div class="callout accent">
     <div class="c-title"><span class="ic">座標</span>協定、DNS、應用快取都不在這篇重講</div>
@@ -259,6 +213,8 @@
       </ul>
     </div>
   </div>
+
+  <p class="cap">左右兩欄的判準只有一條：這個參數會不會改變回應的 bytes。會改變的留下（左欄），只改變觀測的丟掉（右欄）。</p>
 
   <p class="cec-sub">2 · Header 與 Cookie</p>
   <p>共用快取預設<strong>不該</strong>把 Cookie 放進 key。Session cookie 幾乎每人一把，key 基數 ≈ 活躍用戶數，命中率趨近於 0，還有把 A 的私人頁面賣給 B 的風險——後者該用 <code>Cache-Control: private</code>／<code>no-store</code> 直接禁止共用，而不是「用 cookie 當 key 假裝隔離」。</p>
@@ -321,15 +277,40 @@
 
   <p>使用者被導到哪個 PoP，只在這一步有意義：快取是<strong>地理分片</strong>的。東京 HIT 幫不到倫敦 MISS。Anycast 或 Geo-DNS 把請求送到「近」的節點，於是熱門物件在每個 PoP 各自暖機一份；冷門物件則在很多 PoP 上永遠是 miss。解析過程本身交給 DNS 篇，這裡只留下這個後果：<strong>全球命中率 ≠ 單一 PoP 命中率</strong>，purge 也必須扇出到所有分片。</p>
 
-  <div class="cec-flow">
-    <span class="cec-chip cli">同一 URL</span>
-    <span class="cec-chip op">→</span>
-    <span class="cec-chip edge">TPE PoP HIT</span>
-    <span class="cec-chip op">≠</span>
-    <span class="cec-chip warn">LHR PoP MISS</span>
-    <span class="cec-chip op">→</span>
-    <span class="cec-chip origin">LHR 仍回源</span>
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>同一條 URL、同一把 key</th>
+          <th>TPE PoP</th>
+          <th>LHR PoP</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>這個 PoP 本地有沒有這把 key</td>
+          <td class="hl">有（已被前一位使用者暖過）</td>
+          <td>沒有</td>
+        </tr>
+        <tr>
+          <td>這一次的判定</td>
+          <td>HIT，停在邊緣</td>
+          <td class="hl">MISS，仍要回源</td>
+        </tr>
+        <tr>
+          <td>origin 看到的流量</td>
+          <td>0</td>
+          <td>1 次 GET</td>
+        </tr>
+        <tr>
+          <td>一次 purge 要扇出到</td>
+          <td>這一片</td>
+          <td>這一片，兩片都收到才算作廢完成</td>
+        </tr>
+      </tbody>
+    </table>
   </div>
+  <p class="cap">兩欄是同一條 URL、同一把 key，結果卻相反——快取是地理分片的，所以全球命中率永遠低於單一 PoP 的命中率，purge 也必須扇出到每一片。</p>
 
   <p class="cec-sub">HIT / MISS / 回源</p>
   <ul>
@@ -361,6 +342,8 @@
       </ul>
     </div>
   </div>
+
+  <p class="cap">左欄是 collapsing 真正收掉的東西——單一 PoP 內併發 miss 的乘數；右欄是它的射程邊界，跨 PoP 與 key 碎片化都不在裡面。</p>
 
   <div class="callout accent">
     <div class="c-title"><span class="ic">關鍵</span>負快取在邊緣同樣存在，但契約是 HTTP</div>
@@ -408,6 +391,8 @@
     </div>
   </div>
 
+  <p class="cap">右欄第一條就是採用 SWR 的前提：產品說不出「最多舊幾秒可以接受」，這個窗口就不該開。</p>
+
   <p class="cec-sub">stale-if-error：origin 掛了仍賣舊的</p>
   <p>SWR 處理的是「過期但 origin 還活著」。SIE 處理的是「origin 5xx／連不上」。在 SIE 窗口內，邊緣可以在驗證失敗時繼續回舊表徵，而不是把 origin 的 502 轉發給全世界。</p>
   <p>這是邊緣對 origin 故障的降級，不是應用層雪崩防護的替代品。雪崩篇用 TTL 抖動與 Singleflight 保護 origin <em>自己</em>；這裡是 origin 已經倒了，邊緣決定還要不要把最後一份已知良好的 bytes 賣出去。</p>
@@ -451,6 +436,44 @@
     </table>
   </div>
   <p class="cap">三個數字要一起設：TTL 決定平常多久打一次 origin，SWR 決定過期瞬間還能不能零延遲賣，SIE 決定 origin 事故時還能撐多久。</p>
+
+  <div class="demo" id="demo-swin">
+    <div class="demo-bar">
+      <span class="label">互動 · stale 窗口掃描</span>
+      <span class="label" style="text-transform:none;font-family:var(--sans);font-size:12px;color:var(--text-2)">拖三個秒數與觀察時刻，窗的邊界與每次請求的命中種類即時重算</span>
+    </div>
+    <div class="demo-body">
+      <div class="swin-knobs">
+        <label class="swin-knob"><span class="kn">s-maxage<span class="kv" id="swin-maxage-v">10 s</span></span><input type="range" id="swin-maxage" min="1" max="60" step="1" value="10"></label>
+        <label class="swin-knob"><span class="kn">stale-while-revalidate<span class="kv" id="swin-swr-v">5 s</span></span><input type="range" id="swin-swr" min="0" max="60" step="1" value="5"></label>
+        <label class="swin-knob"><span class="kn">stale-if-error<span class="kv" id="swin-sie-v">30 s</span></span><input type="range" id="swin-sie" min="0" max="120" step="1" value="30"></label>
+        <label class="swin-knob"><span class="kn">請求間隔<span class="kv" id="swin-interval-v">3 s</span></span><input type="range" id="swin-interval" min="1" max="30" step="1" value="3"></label>
+        <label class="swin-knob"><span class="kn">Origin 故障起始時刻<span class="kv" id="swin-failat-v">40 s</span></span><input type="range" id="swin-failat" min="0" max="120" step="1" value="40"></label>
+        <label class="swin-knob"><span class="kn">觀察時刻<span class="kv" id="swin-now-v">12 s</span></span><input type="range" id="swin-now" min="0" max="120" step="1" value="12"></label>
+      </div>
+
+      <div class="seg" role="group" aria-label="Origin 狀態" id="swin-seg-origin">
+        <button data-origin="up" aria-pressed="false">Origin 正常</button>
+        <button data-origin="down" aria-pressed="true">Origin 故障</button>
+      </div>
+
+      <div class="legend">
+        <span><i class="dot ns-ok"></i>fresh 邊緣直接賣</span>
+        <span><i class="dot ns-lock"></i>SWR 先賣舊的、背景更新</span>
+        <span><i class="dot ns-wait"></i>SIE origin 掛了仍賣舊的</span>
+        <span><i class="dot ns-idle"></i>同步回源，使用者排隊</span>
+        <span><i class="dot ns-bad"></i>窗口外 + origin 失敗</span>
+      </div>
+
+      <div class="swin-canvas" id="swin-ruler"></div>
+      <div class="swin-canvas" id="swin-pops"></div>
+      <div class="swin-nums" id="swin-nums"></div>
+
+      <div class="status-line" id="swin-status">拖動 s-maxage／SWR／SIE，上面那把尺的三段寬度與下面每一次請求的命中種類會一起重算。</div>
+      <div class="swin-ctrl"><button class="btn" id="swin-reset">重置</button></div>
+    </div>
+  </div>
+  <p class="cap">上尺是 age 域：上下兩條泳道分別是 origin 正常與 origin 故障時的行為，同一個 age 在兩條泳道落在不同的窗——這就是 SWR 與 SIE 的差別。下圖是時間域：每一根棒的高度是那次請求的回應延遲，圓點顏色是它落在哪個窗，▽ 是物件被重新填入的時刻。</p>
 
   <div class="callout warn">
     <div class="c-title"><span class="ic">陷阱</span>SWR 不是「TTL 設超長」的替代寫法</div>
@@ -578,6 +601,8 @@
     </div>
   </div>
 
+  <p class="cap">右欄三條都是 purge 的隱藏成本；決定要不要 purge 之前，先看你的失效需求能不能被左欄的 tag 模型收斂。</p>
+
   <div class="tbl-wrap">
     <table>
       <thead>
@@ -639,118 +664,70 @@
 <section id="s7">
   <div class="sec-head">
     <span class="sec-num">07</span>
-    <h2>互動 Demo：Cache Key 碎片與 SWR 時間軸</h2>
+    <h2>互動 Demo：URL → Cache Key 拆解器</h2>
   </div>
-  <p class="sec-sub">兩種實驗共用一個邊緣節點。Key 實驗室看哪些欄位會把同一張圖拆成多份物件；時間軸看使用者拿到的版本與背景更新如何分叉。</p>
+  <p class="sec-sub">把一條真實 URL 攤開：每一段標「進 key／被丟棄／被正規化成什麼」，再用一批帶噪音的樣本請求，算出這組規則的唯一 key 數、回源次數與命中率上限。</p>
 
-  <div class="demo" id="demo-cec">
+  <div class="demo" id="demo-cku">
     <div class="demo-bar">
-      <span class="label">互動 · 邊緣請求生命週期</span>
-      <span class="label" style="text-transform:none;font-family:var(--sans);font-size:12px;color:var(--text-2)">切模式後按「下一步」逐步重放</span>
+      <span class="label">互動 · URL → Cache Key 拆解器</span>
+      <span class="label" style="text-transform:none;font-family:var(--sans);font-size:12px;color:var(--text-2)">改 URL、忽略清單與 Vary 維度，逐段看誰進 key、誰被丟掉</span>
     </div>
     <div class="demo-body">
-      <p class="cec-mode-hint" id="cec-mode-hint">Cache Key：同一批 8 個請求，改「utm／Cookie／Vary」組成，看唯一 key 數與命中率。</p>
-
-      <div class="seg" role="group" aria-label="實驗模式" id="cec-seg-mode">
-        <button data-mode="key" aria-pressed="true">Cache Key 實驗室</button>
-        <button data-mode="swr" aria-pressed="false">SWR 時間軸</button>
+      <div class="seg" role="group" aria-label="預設情境" id="cku-seg-preset">
+        <button data-preset="good" aria-pressed="true">良好正規化</button>
+        <button data-preset="raw" aria-pressed="false">未正規化</button>
+        <button data-preset="vary" aria-pressed="false">過度 Vary</button>
       </div>
 
-      <div id="cec-key-view" class="cec-view">
-        <div class="seg" role="group" aria-label="追蹤參數" id="cec-seg-utm" style="margin-top:8px">
-          <button data-utm="drop" aria-pressed="true">utm_* 忽略</button>
-          <button data-utm="keep" aria-pressed="false">utm_* 進 key</button>
-        </div>
-        <div class="seg" role="group" aria-label="Cookie" id="cec-seg-cookie" style="margin-top:8px">
-          <button data-cookie="drop" aria-pressed="true">Cookie 不進 key</button>
-          <button data-cookie="keep" aria-pressed="false">Cookie 進 key</button>
-        </div>
-        <div class="seg" role="group" aria-label="Vary Accept-Language" id="cec-seg-vary" style="margin-top:8px">
-          <button data-vary="off" aria-pressed="true">不 Vary 語言</button>
-          <button data-vary="on" aria-pressed="false">Vary: Accept-Language</button>
-        </div>
+      <div class="cku-fields">
+        <label class="cku-field">
+          <span class="fn">原始 URL（可整條改寫）</span>
+          <input type="text" id="cku-url" spellcheck="false" value="https://Shop.Example.com/Assets/Hero.jpg?w=800&amp;utm_source=fb&amp;Ref=mail&amp;format=webp&amp;v=7#top">
+        </label>
+        <label class="cku-field">
+          <span class="fn">忽略的 query 參數（逗號分隔）</span>
+          <input type="text" id="cku-drop" spellcheck="false" value="utm_source,utm_medium,utm_campaign,gclid,fbclid,ref,_">
+        </label>
       </div>
 
-      <div id="cec-swr-view" class="cec-view" hidden>
-        <div class="seg" role="group" aria-label="Origin 狀態" id="cec-seg-origin" style="margin-top:8px">
-          <button data-origin="up" aria-pressed="true">Origin 正常</button>
-          <button data-origin="down" aria-pressed="false">Origin 故障</button>
-        </div>
-        <p class="cec-mode-hint" style="margin-top:8px">物件標頭固定為 <code>s-maxage=3, stale-while-revalidate=2, stale-if-error=4</code>。t=0 冷 miss 填入 v1。可在走完 fresh 窗口後改切 Origin 故障，不必重置，即可看到 SIE。</p>
+      <div class="cku-checks">
+        <label><input type="checkbox" id="cku-sort" checked>排序 query</label>
+        <label><input type="checkbox" id="cku-lower" checked>host 小寫正規化</label>
+        <label><input type="checkbox" id="cku-frag" checked>去掉 #fragment</label>
+        <label><input type="checkbox" id="cku-cookie">Cookie 進 key</label>
       </div>
 
-      <div class="cec-ctrl">
-        <button class="btn primary" id="cec-btn-next">下一步</button>
-        <button class="btn" id="cec-btn-reset">重置</button>
-      </div>
-
-      <div class="cec-metric">
-        <span>步 <strong id="cec-m-step">0</strong> / <span id="cec-m-total">8</span></span>
-        <span>HIT <strong id="cec-m-hits">0</strong></span>
-        <span>MISS <strong id="cec-m-miss">0</strong></span>
-        <span>回源 <strong id="cec-m-origin">0</strong></span>
-        <span>唯一 key <strong id="cec-m-keys">0</strong></span>
+      <div class="cku-knobs">
+        <label class="cku-knob"><span class="kn">活躍使用者數<span class="kv" id="cku-users-v">40 人</span></span><input type="range" id="cku-users" min="1" max="2000" step="1" value="40"></label>
+        <label class="cku-knob"><span class="kn">Accept-Language 取值數<span class="kv" id="cku-langs-v">1 種</span></span><input type="range" id="cku-langs" min="1" max="12" step="1" value="1"></label>
+        <label class="cku-knob"><span class="kn">Accept-Encoding 取值數<span class="kv" id="cku-encs-v">1 種</span></span><input type="range" id="cku-encs" min="1" max="4" step="1" value="1"></label>
+        <label class="cku-knob"><span class="kn">Device 類別數<span class="kv" id="cku-devices-v">1 種</span></span><input type="range" id="cku-devices" min="1" max="3" step="1" value="1"></label>
+        <label class="cku-knob"><span class="kn">樣本請求數<span class="kv" id="cku-reqcount-v">36 條</span></span><input type="range" id="cku-reqcount" min="12" max="60" step="1" value="36"></label>
+        <label class="cku-knob"><span class="kn">帶追蹤參數的比例<span class="kv" id="cku-trackedpct-v">60%</span></span><input type="range" id="cku-trackedpct" min="0" max="100" step="1" value="60"></label>
       </div>
 
       <div class="legend">
-        <span><i class="dot ns-idle"></i>待命／未走到</span>
-        <span><i class="dot ns-wait"></i>本步作用中</span>
-        <span><i class="dot ns-ok"></i>HIT／新鮮</span>
-        <span><i class="dot ns-lock"></i>SWR 賣舊</span>
-        <span><i class="dot ns-bad"></i>MISS／錯誤</span>
+        <span><i class="dot ns-ok"></i>KEEP 進 key</span>
+        <span><i class="dot ns-lock"></i>NORM 被改寫後才進 key</span>
+        <span><i class="dot ns-idle"></i>DROP 被丟到丟棄槽</span>
       </div>
 
-      <div class="cec-actors" id="cec-actors" aria-live="polite">
-        <div class="cec-actor" data-role="cli">
-          <div class="an">Client</div>
-          <div class="al" id="cec-cli-al">本步請求</div>
-          <div class="av" id="cec-cli-val">—</div>
-          <div class="ah" id="cec-cli-hint">待命</div>
-        </div>
-        <div class="cec-actor" data-role="edge">
-          <div class="an">Edge PoP</div>
-          <div class="al" id="cec-edge-al">Cache Key / 狀態</div>
-          <div class="av" id="cec-edge-val">—</div>
-          <div class="ah" id="cec-edge-hint">待命</div>
-        </div>
-        <div class="cec-actor" data-role="origin">
-          <div class="an">Origin</div>
-          <div class="al" id="cec-ori-al">回源</div>
-          <div class="av" id="cec-ori-val">—</div>
-          <div class="ah" id="cec-ori-hint">待命</div>
-        </div>
-      </div>
+      <div class="cku-map" id="cku-map"></div>
+      <div class="cku-keyline" id="cku-keyline"></div>
+      <div class="cku-nums" id="cku-nums"></div>
+      <div class="cku-tower" id="cku-tower"></div>
+      <div class="cku-hotline" id="cku-hotline"></div>
+      <div class="cku-hot" id="cku-hot"></div>
 
-      <div class="cec-keybox" id="cec-keybox"><span class="kk">key</span>—</div>
-
-      <div id="cec-slots" class="cec-slots" aria-label="邊緣快取物件"></div>
-      <div id="cec-ticks" class="cec-ticks" hidden></div>
-
-      <div class="cec-panels">
-        <div class="cec-panel">
-          <div class="pt">本步語義</div>
-          <div class="prow"><span class="pk">判定</span><span class="pv" id="cec-p-verdict">—</span></div>
-          <div class="prow"><span class="pk">使用者看到</span><span class="pv" id="cec-p-see">—</span></div>
-          <div class="prow"><span class="pk">背景更新</span><span class="pv" id="cec-p-bg">—</span></div>
-          <div class="prow"><span class="pk">Cache Key</span><span class="pv" id="cec-p-key">—</span></div>
-        </div>
-        <div class="cec-panel">
-          <div class="pt">累計</div>
-          <div class="prow"><span class="pk">命中率</span><span class="pv" id="cec-p-hr">—</span></div>
-          <div class="prow"><span class="pk">唯一物件</span><span class="pv" id="cec-p-uniq">0</span></div>
-          <div class="prow"><span class="pk">origin 次數</span><span class="pv" id="cec-p-oc">0</span></div>
-          <div class="prow"><span class="pk">備註</span><span class="pv" id="cec-p-note">—</span></div>
-        </div>
-      </div>
-
-      <div class="status-line" id="cec-status">選擇模式與旋鈕後按「下一步」。Key 實驗室重放 8 個請求；時間軸走 8 個時刻。</div>
-      <div class="cec-verdict" id="cec-verdict">判定尚未產生——走完一輪後會摘要命中率或 stale 窗口。</div>
-      <div class="cec-wire" id="cec-wire" aria-label="事件日誌"></div>
+      <div class="status-line" id="cku-status">改上面任何一個欄位，下面的 key、位元組帳與唯一 key 數都會重算。</div>
+      <div class="cku-ctrl"><button class="btn" id="cku-reset">重置</button></div>
     </div>
   </div>
+  <p class="cap">上半的段位移圖看兩件事：打叉的段垂到丟棄槽（那些位元組沒進 key），以及保留段的連線是否交叉——交叉就代表排序正規化把它搬了位置。下半的乘法塔是碎片的來源，熱度表最後一列越長，代表碎片化的冷 key 尾巴越重。</p>
 
   <div class="oneliner">
-    <b>一句話答法</b>utm 與 Cookie 進 key 會把命中率打掉；Vary 語言再乘一次。SWR 讓過期當下使用者仍拿舊版，origin 故障時改看 SIE 窗口還在不在。
+    <b>一句話答法</b>命中率上限是被 key 決定的：utm 與 Cookie 進 key 會把同一份物件複製成多份，Vary 每多一個維度就再乘一次。要提高命中率，先攤開 Cache Key 把不改變 bytes 的維度刪掉，而不是先把 TTL 加長。
   </div>
 </section>
 
@@ -783,6 +760,8 @@
       </ul>
     </div>
   </div>
+
+  <p class="cap">兩欄的分界是「會不會動到權威狀態」：不動權威的正規化與門禁可以放邊緣，動權威的寫入一律留在 origin。</p>
 
   <div class="callout accent">
     <div class="c-title"><span class="ic">關鍵</span>Compute 與 Cache 搶的是同一條命中率</div>

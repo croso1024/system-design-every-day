@@ -1378,7 +1378,7 @@
         <a href="#s4"><span class="n">04</span>TTL 與 stale-while-revalidate／stale-if-error</a>
         <a href="#s5"><span class="n">05</span>Cache-Control 與條件式重新驗證</a>
         <a href="#s6"><span class="n">06</span>主動 Purge、版本化 URL 與 Origin Shield</a>
-        <a href="#s7"><span class="n">07</span>互動 Demo：Cache Key 碎片與 SWR 時間軸</a>
+        <a href="#s7"><span class="n">07</span>互動 Demo：URL → Cache Key 拆解器</a>
         <a href="#s8"><span class="n">08</span>邊緣運算邊界與面試折衷</a>
       </div>
     </nav>
@@ -1394,7 +1394,15 @@
     <!-- ===================== MAIN CONTENT ===================== -->
     <main>
       <div class="inner">
-        <style>
+        <!-- demo-archetype: F｜拆解器（主，第 7 節）＋B｜參數掃描（次，第 4 節） —
+     主 demo：讀者編輯一條真實 URL 與正規化規則（忽略清單、排序 query、host 小寫、去 fragment、Cookie 是否進 key、
+     Vary 各維度的取值數），逐段拆出哪些字元進 key／被丟棄／被改寫，並算出 cache key 字串、丟棄位元組、碎片乘積，
+     以及一批樣本請求去重後的唯一 key 數、回源次數與命中率上限。選 F 是因為本篇的核心命題「這條 URL 為什麼變成這把 key」
+     本質是一個編碼與正規化結構，只有逐段攤開才說得清。
+     次 demo：讀者拖 s-maxage／stale-while-revalidate／stale-if-error 三個秒數、請求間隔、Origin 故障時刻與觀察時刻，
+     即時得到每次請求落在哪個窗、回應延遲、背景更新次數與 origin 倒下後的存活秒數。選 B 是因為那一節的公式本身
+     就是三個秒數相加出來的窗邊界，拖動任一個、邊界與命中種類立刻位移，是參數掃描而不是一段有順序的流程。 -->
+<style>
   /* 本篇專屬：cec-* 命名空間，不覆蓋全站 base 類別 */
   #cec-root {
     --cec-c: #3f6188; --cec-c-soft: #eef2f7;
@@ -1423,7 +1431,6 @@
   .cec-chip.edge { background: var(--cec-alt-soft); border-color: var(--cec-alt); color: var(--cec-alt); }
   .cec-chip.origin { background: var(--cec-s-soft); border-color: var(--cec-s); color: var(--cec-s); }
   .cec-chip.op { background: var(--bg-soft); color: var(--text-3); border-style: dashed; font-weight: 500; }
-  .cec-chip.bad { background: var(--cec-bad-soft); border-color: var(--cec-bad); color: var(--cec-bad); }
   .cec-chip.warn { background: var(--cec-w-soft); border-color: var(--cec-w); color: var(--cec-w); }
 
   .cec-split { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin: 12px 0; }
@@ -1441,127 +1448,73 @@
   .cec-pane .ss { font-family: var(--mono); font-size: 11px; color: var(--text-3); margin-bottom: 8px; letter-spacing: .04em; }
   .cec-pane ul { margin: 0; padding-left: 1.15em; font-size: 13px; color: var(--text-2); line-height: 1.65; }
 
-  .cec-ctrl { display: flex; flex-wrap: wrap; gap: 10px; margin: 10px 0 8px; align-items: center; }
-  .cec-metric { display: flex; flex-wrap: wrap; gap: 14px; margin: 8px 0 4px; font-size: 13px; color: var(--text-2); }
-  .cec-metric strong { color: var(--text); font-family: var(--mono); font-size: 12.5px; }
-
-  .cec-actors { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin: 12px 0 6px; }
-  @media (max-width: 640px) { .cec-actors { grid-template-columns: 1fr; } }
-  .cec-actor {
-    border: 1.5px solid var(--border-strong); border-radius: var(--radius-sm);
-    padding: 12px 12px 10px; background: #fff; text-align: center;
-    transition: background .18s, border-color .18s, box-shadow .18s;
+  /* ── 主 demo（第 7 節）：URL → Cache Key 拆解器 ── */
+  .cku-fields { display: grid; gap: 8px; margin: 10px 0 8px; }
+  .cku-field { display: block; }
+  .cku-field .fn { display: block; font-family: var(--mono); font-size: 11px; color: var(--text-3); letter-spacing: .04em; margin-bottom: 3px; }
+  .cku-field input {
+    width: 100%; box-sizing: border-box; font-family: var(--mono); font-size: 12px;
+    padding: 7px 9px; border: 1px solid var(--border-strong); border-radius: 6px;
+    background: #fff; color: var(--text);
   }
-  .cec-actor .an { font-weight: 700; font-size: 13px; letter-spacing: .03em; }
-  .cec-actor .al { font-family: var(--mono); font-size: 10.5px; color: var(--text-3); margin-top: 2px; }
-  .cec-actor .av { font-family: var(--mono); font-size: 15px; font-weight: 700; margin-top: 8px; color: var(--text); word-break: break-all; }
-  .cec-actor .ah { font-size: 11.5px; color: var(--text-2); margin-top: 4px; min-height: 1.4em; }
-  .cec-actor.on { background: var(--accent-soft); border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
-  .cec-actor.on .an { color: var(--accent); }
-  .cec-actor.ok { background: var(--ok-soft); border-color: var(--ok); }
-  .cec-actor.ok .an { color: var(--ok); }
-  .cec-actor.dirty { background: var(--warn-soft); border-color: var(--warn); }
-  .cec-actor.dirty .an { color: var(--warn); }
-  .cec-actor.bad { background: var(--bad-soft); border-color: var(--bad); }
-  .cec-actor.bad .an { color: var(--bad); }
-
-  .cec-keybox {
+  .cku-checks { display: flex; flex-wrap: wrap; gap: 8px 16px; margin: 6px 0 10px; font-size: 12.5px; color: var(--text-2); }
+  .cku-checks label { display: inline-flex; align-items: center; gap: 5px; cursor: pointer; }
+  .cku-knobs, .swin-knobs { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px 16px; margin: 6px 0 12px; }
+  @media (max-width: 640px) { .cku-knobs, .swin-knobs { grid-template-columns: 1fr 1fr; } }
+  .cku-knob, .swin-knob { display: block; }
+  .cku-knob .kn, .swin-knob .kn {
+    display: flex; justify-content: space-between; gap: 6px;
+    font-family: var(--mono); font-size: 11px; color: var(--text-3); margin-bottom: 2px;
+  }
+  .cku-knob .kv, .swin-knob .kv { color: var(--text); font-weight: 700; }
+  .cku-knob input[type="range"], .swin-knob input[type="range"] { width: 100%; }
+  .cku-knob input:disabled, .swin-knob input:disabled { opacity: .4; }
+  .cku-map, .swin-canvas { margin: 10px 0 4px; }
+  .cku-keyline {
+    font-family: var(--mono); font-size: 12px; line-height: 1.6; word-break: break-all;
+    background: var(--code-bg); border: 1px solid var(--border);
+    border-radius: var(--radius-sm); padding: 9px 11px; margin: 6px 0;
+  }
+  .cku-keyline .kl { color: var(--text-3); margin-right: 8px; }
+  .cku-nums, .swin-nums { display: flex; flex-wrap: wrap; gap: 8px; margin: 8px 0; }
+  .cku-num, .swin-num {
     border: 1px solid var(--border); border-radius: var(--radius-sm);
-    background: var(--code-bg); padding: 10px 12px; margin: 8px 0 6px;
-    font-family: var(--mono); font-size: 12px; color: var(--text); line-height: 1.55;
-    word-break: break-all;
+    background: #fff; padding: 7px 10px; min-width: 104px;
   }
-  .cec-keybox .kk { color: var(--text-3); margin-right: 8px; }
+  .cku-num .nl, .swin-num .nl { font-family: var(--mono); font-size: 10.5px; color: var(--text-3); letter-spacing: .04em; }
+  .cku-num .nv, .swin-num .nv { font-family: var(--mono); font-size: 14px; font-weight: 700; color: var(--text); margin-top: 2px; }
+  .cku-num.ok .nv, .swin-num.ok .nv { color: var(--ok); }
+  .cku-num.warn .nv, .swin-num.warn .nv { color: var(--warn); }
+  .cku-num.bad .nv, .swin-num.bad .nv { color: var(--bad); }
 
-  .cec-slots {
-    display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0 4px; min-height: 36px;
-  }
-  .cec-slot {
-    font-family: var(--mono); font-size: 11px; padding: 5px 8px;
-    border: 1px solid var(--border-strong); border-radius: 6px; background: #fff; color: var(--text-2);
-  }
-  .cec-slot.hit { background: var(--cec-s-soft); border-color: var(--cec-s); color: var(--cec-s); }
-  .cec-slot.miss { background: var(--cec-c-soft); border-color: var(--cec-c); color: var(--cec-c); }
-  .cec-slot.empty { color: var(--text-3); border-style: dashed; }
+  /* 乘法塔：每列一個 Vary 維度，格數＝取值數，列尾是累積乘積 */
+  .cku-tower { display: grid; gap: 5px; margin: 12px 0 6px; }
+  .cku-trow { display: grid; grid-template-columns: 148px 1fr 96px; gap: 10px; align-items: center; }
+  .cku-trow.off { opacity: .42; }
+  .cku-trow .tl { font-family: var(--mono); font-size: 11px; color: var(--text-2); }
+  .cku-trow .tc { font-family: var(--mono); font-size: 15px; font-weight: 700; color: var(--text); text-align: right; }
+  .cku-cells { display: flex; flex-wrap: wrap; gap: 3px; align-items: center; }
+  .cku-cell { width: 13px; height: 13px; border-radius: 3px; border: 1px solid var(--cec-c); background: var(--cec-c-soft); }
+  .cku-more { font-family: var(--mono); font-size: 10.5px; color: var(--text-3); margin-left: 2px; }
+  @media (max-width: 640px) { .cku-trow { grid-template-columns: 112px 1fr 76px; } }
 
-  .cec-ticks { display: flex; gap: 4px; margin: 10px 0 6px; }
-  .cec-ticks[hidden] { display: none; }
-  .cec-tick {
-    flex: 1; text-align: center; border: 1.5px solid var(--border-strong);
-    border-radius: 6px; padding: 8px 4px; background: #fff;
-    font-family: var(--mono); font-size: 11px; color: var(--text-3);
-    transition: background .18s, border-color .18s, color .18s;
+  /* key 熱度表 */
+  .cku-hotline { font-size: 12.5px; color: var(--text-2); line-height: 1.7; margin: 12px 0 4px; }
+  .cku-hotline strong { font-family: var(--mono); color: var(--text); }
+  .cku-hot { display: grid; gap: 2px; }
+  .cku-hrow {
+    display: grid; grid-template-columns: 1fr 108px 40px; gap: 10px; align-items: center;
+    font-family: var(--mono); font-size: 11.5px; padding: 4px 0; border-bottom: 1px dashed var(--border);
   }
-  .cec-tick .tn { font-weight: 700; font-size: 12px; color: var(--text); display: block; margin-bottom: 2px; }
-  .cec-tick.future { background: var(--bg-soft); border-style: dashed; }
-  .cec-tick.fresh { background: var(--ok-soft); border-color: var(--ok); color: var(--ok); }
-  .cec-tick.fresh .tn { color: var(--ok); }
-  .cec-tick.swr { background: var(--warn-soft); border-color: var(--warn); color: var(--warn); }
-  .cec-tick.swr .tn { color: var(--warn); }
-  .cec-tick.sie { background: var(--cec-alt-soft); border-color: var(--cec-alt); color: var(--cec-alt); }
-  .cec-tick.sie .tn { color: var(--cec-alt); }
-  .cec-tick.dead { background: var(--bad-soft); border-color: var(--bad); color: var(--bad); }
-  .cec-tick.dead .tn { color: var(--bad); }
-  .cec-tick.now { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
-  .cec-tick.now .tn { color: var(--accent); }
+  .cku-hrow:last-child { border-bottom: none; }
+  .cku-hrow .hk { color: var(--text); word-break: break-all; }
+  .cku-hrow .hb { height: 9px; border-radius: 3px; background: var(--bg-soft); border: 1px solid var(--border); overflow: hidden; }
+  .cku-hrow .hb i { display: block; height: 100%; background: var(--cec-c); }
+  .cku-hrow .hn { text-align: right; color: var(--text-2); }
+  .cku-hrow.cold .hk { color: var(--text-3); }
+  @media (max-width: 640px) { .cku-hrow { grid-template-columns: 1fr 64px 34px; } }
 
-  .cec-panels { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 12px; }
-  @media (max-width: 640px) { .cec-panels { grid-template-columns: 1fr; } }
-  .cec-panel { border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 12px; background: #fff; }
-  .cec-panel .pt {
-    font-size: 11px; color: var(--text-3); letter-spacing: .06em; text-transform: uppercase;
-    font-family: var(--mono); margin-bottom: 8px;
-  }
-  .cec-panel .prow {
-    display: flex; justify-content: space-between; gap: 8px;
-    font-family: var(--mono); font-size: 12px; padding: 4px 0;
-    border-bottom: 1px dashed var(--border);
-  }
-  .cec-panel .prow:last-child { border-bottom: none; }
-  .cec-panel .pk { color: var(--text-3); white-space: nowrap; }
-  .cec-panel .pv { color: var(--text); font-weight: 600; text-align: right; word-break: break-all; }
-  .cec-panel .pv.good { color: var(--ok); }
-  .cec-panel .pv.bad { color: var(--bad); }
-  .cec-panel .pv.warn { color: var(--warn); }
-
-  .cec-wire {
-    border: 1px solid var(--border); border-radius: var(--radius-sm);
-    background: #fff; padding: 8px 10px; margin-top: 10px; max-height: 260px; overflow-y: auto;
-  }
-  .cec-row {
-    display: flex; align-items: baseline; gap: 8px;
-    font-family: var(--mono); font-size: 11.5px; padding: 4px 0;
-    border-bottom: 1px dashed var(--border);
-  }
-  .cec-row:last-child { border-bottom: none; }
-  .cec-row .ar { width: 42px; flex: none; text-align: center; color: var(--text-3); font-weight: 700; }
-  .cec-row .tg {
-    flex: none; border-radius: 4px; padding: 2px 6px; font-size: 10.5px; font-weight: 700;
-    border: 1px solid var(--border-strong); background: var(--bg-soft); color: var(--text-3);
-  }
-  .cec-row .tx { color: var(--text-2); line-height: 1.5; }
-  .cec-row.read .tg { background: var(--cec-c-soft); border-color: var(--cec-c); color: var(--cec-c); }
-  .cec-row.ok .tg { background: var(--cec-s-soft); border-color: var(--cec-s); color: var(--cec-s); }
-  .cec-row.warn .tg { background: var(--cec-w-soft); border-color: var(--cec-w); color: var(--cec-w); }
-  .cec-row.bad .tg { background: var(--cec-bad-soft); border-color: var(--cec-bad); color: var(--cec-bad); }
-  .cec-row.bad .tx { color: var(--bad); }
-  .cec-row.note { background: var(--bg-soft); border-radius: 4px; }
-  .cec-row.note .tx { color: var(--text-3); }
-
-  .cec-verdict {
-    margin-top: 10px; padding: 10px 12px; border-radius: var(--radius-sm);
-    border: 1px solid var(--border); background: var(--bg-soft);
-    font-size: 13px; color: var(--text-2); line-height: 1.55;
-  }
-  .cec-verdict.tone-ok { border-left: 3px solid var(--ok); background: var(--ok-soft); color: var(--text); }
-  .cec-verdict.tone-lock { border-left: 3px solid var(--warn); background: var(--warn-soft); color: var(--text); }
-  .cec-verdict.tone-bad { border-left: 3px solid var(--bad); background: var(--bad-soft); color: var(--text); }
-
-  .cec-mode-hint { font-size: 12.5px; color: var(--text-2); margin: 8px 0 4px; line-height: 1.55; }
-
-  /* display 覆寫 UA hidden；切換面板必須成對寫 display:none */
-  .cec-view { display: block; }
-  .cec-view[hidden] { display: none; }
+  .cku-ctrl, .swin-ctrl { margin-top: 10px; }
 </style>
 
 <div id="cec-root">
@@ -1600,15 +1553,16 @@
     </div>
   </div>
 
-  <div class="cec-flow">
-    <span class="cec-chip cli">Client GET</span>
-    <span class="cec-chip op">→ 就近 PoP</span>
-    <span class="cec-chip edge">算 key · 查快取</span>
-    <span class="cec-chip op">HIT？</span>
-    <span class="cec-chip origin">回源 / Shield</span>
-    <span class="cec-chip op">→</span>
-    <span class="cec-chip cli">把表徵賣回去</span>
-  </div>
+  <pre class="mermaid">
+flowchart LR
+    C["Client GET"] --> P["就近 PoP"]
+    P --> K["算 Cache Key"]
+    K --> L["查快取"]
+    L -->|HIT| C
+    L -->|MISS| O["回源 / Shield"]
+    O --> C
+  </pre>
+  <p class="cap">看「查快取」分出的兩條邊：HIT 那條直接折返 Client，origin 完全不知道這次請求；只有 MISS 那條才往右走到回源或 Shield，而且回來之後還要寫進邊緣的 store。</p>
 
   <div class="callout accent">
     <div class="c-title"><span class="ic">座標</span>協定、DNS、應用快取都不在這篇重講</div>
@@ -1655,6 +1609,8 @@
       </ul>
     </div>
   </div>
+
+  <p class="cap">左右兩欄的判準只有一條：這個參數會不會改變回應的 bytes。會改變的留下（左欄），只改變觀測的丟掉（右欄）。</p>
 
   <p class="cec-sub">2 · Header 與 Cookie</p>
   <p>共用快取預設<strong>不該</strong>把 Cookie 放進 key。Session cookie 幾乎每人一把，key 基數 ≈ 活躍用戶數，命中率趨近於 0，還有把 A 的私人頁面賣給 B 的風險——後者該用 <code>Cache-Control: private</code>／<code>no-store</code> 直接禁止共用，而不是「用 cookie 當 key 假裝隔離」。</p>
@@ -1717,15 +1673,40 @@
 
   <p>使用者被導到哪個 PoP，只在這一步有意義：快取是<strong>地理分片</strong>的。東京 HIT 幫不到倫敦 MISS。Anycast 或 Geo-DNS 把請求送到「近」的節點，於是熱門物件在每個 PoP 各自暖機一份；冷門物件則在很多 PoP 上永遠是 miss。解析過程本身交給 DNS 篇，這裡只留下這個後果：<strong>全球命中率 ≠ 單一 PoP 命中率</strong>，purge 也必須扇出到所有分片。</p>
 
-  <div class="cec-flow">
-    <span class="cec-chip cli">同一 URL</span>
-    <span class="cec-chip op">→</span>
-    <span class="cec-chip edge">TPE PoP HIT</span>
-    <span class="cec-chip op">≠</span>
-    <span class="cec-chip warn">LHR PoP MISS</span>
-    <span class="cec-chip op">→</span>
-    <span class="cec-chip origin">LHR 仍回源</span>
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>同一條 URL、同一把 key</th>
+          <th>TPE PoP</th>
+          <th>LHR PoP</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>這個 PoP 本地有沒有這把 key</td>
+          <td class="hl">有（已被前一位使用者暖過）</td>
+          <td>沒有</td>
+        </tr>
+        <tr>
+          <td>這一次的判定</td>
+          <td>HIT，停在邊緣</td>
+          <td class="hl">MISS，仍要回源</td>
+        </tr>
+        <tr>
+          <td>origin 看到的流量</td>
+          <td>0</td>
+          <td>1 次 GET</td>
+        </tr>
+        <tr>
+          <td>一次 purge 要扇出到</td>
+          <td>這一片</td>
+          <td>這一片，兩片都收到才算作廢完成</td>
+        </tr>
+      </tbody>
+    </table>
   </div>
+  <p class="cap">兩欄是同一條 URL、同一把 key，結果卻相反——快取是地理分片的，所以全球命中率永遠低於單一 PoP 的命中率，purge 也必須扇出到每一片。</p>
 
   <p class="cec-sub">HIT / MISS / 回源</p>
   <ul>
@@ -1757,6 +1738,8 @@
       </ul>
     </div>
   </div>
+
+  <p class="cap">左欄是 collapsing 真正收掉的東西——單一 PoP 內併發 miss 的乘數；右欄是它的射程邊界，跨 PoP 與 key 碎片化都不在裡面。</p>
 
   <div class="callout accent">
     <div class="c-title"><span class="ic">關鍵</span>負快取在邊緣同樣存在，但契約是 HTTP</div>
@@ -1804,6 +1787,8 @@
     </div>
   </div>
 
+  <p class="cap">右欄第一條就是採用 SWR 的前提：產品說不出「最多舊幾秒可以接受」，這個窗口就不該開。</p>
+
   <p class="cec-sub">stale-if-error：origin 掛了仍賣舊的</p>
   <p>SWR 處理的是「過期但 origin 還活著」。SIE 處理的是「origin 5xx／連不上」。在 SIE 窗口內，邊緣可以在驗證失敗時繼續回舊表徵，而不是把 origin 的 502 轉發給全世界。</p>
   <p>這是邊緣對 origin 故障的降級，不是應用層雪崩防護的替代品。雪崩篇用 TTL 抖動與 Singleflight 保護 origin <em>自己</em>；這裡是 origin 已經倒了，邊緣決定還要不要把最後一份已知良好的 bytes 賣出去。</p>
@@ -1847,6 +1832,44 @@
     </table>
   </div>
   <p class="cap">三個數字要一起設：TTL 決定平常多久打一次 origin，SWR 決定過期瞬間還能不能零延遲賣，SIE 決定 origin 事故時還能撐多久。</p>
+
+  <div class="demo" id="demo-swin">
+    <div class="demo-bar">
+      <span class="label">互動 · stale 窗口掃描</span>
+      <span class="label" style="text-transform:none;font-family:var(--sans);font-size:12px;color:var(--text-2)">拖三個秒數與觀察時刻，窗的邊界與每次請求的命中種類即時重算</span>
+    </div>
+    <div class="demo-body">
+      <div class="swin-knobs">
+        <label class="swin-knob"><span class="kn">s-maxage<span class="kv" id="swin-maxage-v">10 s</span></span><input type="range" id="swin-maxage" min="1" max="60" step="1" value="10"></label>
+        <label class="swin-knob"><span class="kn">stale-while-revalidate<span class="kv" id="swin-swr-v">5 s</span></span><input type="range" id="swin-swr" min="0" max="60" step="1" value="5"></label>
+        <label class="swin-knob"><span class="kn">stale-if-error<span class="kv" id="swin-sie-v">30 s</span></span><input type="range" id="swin-sie" min="0" max="120" step="1" value="30"></label>
+        <label class="swin-knob"><span class="kn">請求間隔<span class="kv" id="swin-interval-v">3 s</span></span><input type="range" id="swin-interval" min="1" max="30" step="1" value="3"></label>
+        <label class="swin-knob"><span class="kn">Origin 故障起始時刻<span class="kv" id="swin-failat-v">40 s</span></span><input type="range" id="swin-failat" min="0" max="120" step="1" value="40"></label>
+        <label class="swin-knob"><span class="kn">觀察時刻<span class="kv" id="swin-now-v">12 s</span></span><input type="range" id="swin-now" min="0" max="120" step="1" value="12"></label>
+      </div>
+
+      <div class="seg" role="group" aria-label="Origin 狀態" id="swin-seg-origin">
+        <button data-origin="up" aria-pressed="false">Origin 正常</button>
+        <button data-origin="down" aria-pressed="true">Origin 故障</button>
+      </div>
+
+      <div class="legend">
+        <span><i class="dot ns-ok"></i>fresh 邊緣直接賣</span>
+        <span><i class="dot ns-lock"></i>SWR 先賣舊的、背景更新</span>
+        <span><i class="dot ns-wait"></i>SIE origin 掛了仍賣舊的</span>
+        <span><i class="dot ns-idle"></i>同步回源，使用者排隊</span>
+        <span><i class="dot ns-bad"></i>窗口外 + origin 失敗</span>
+      </div>
+
+      <div class="swin-canvas" id="swin-ruler"></div>
+      <div class="swin-canvas" id="swin-pops"></div>
+      <div class="swin-nums" id="swin-nums"></div>
+
+      <div class="status-line" id="swin-status">拖動 s-maxage／SWR／SIE，上面那把尺的三段寬度與下面每一次請求的命中種類會一起重算。</div>
+      <div class="swin-ctrl"><button class="btn" id="swin-reset">重置</button></div>
+    </div>
+  </div>
+  <p class="cap">上尺是 age 域：上下兩條泳道分別是 origin 正常與 origin 故障時的行為，同一個 age 在兩條泳道落在不同的窗——這就是 SWR 與 SIE 的差別。下圖是時間域：每一根棒的高度是那次請求的回應延遲，圓點顏色是它落在哪個窗，▽ 是物件被重新填入的時刻。</p>
 
   <div class="callout warn">
     <div class="c-title"><span class="ic">陷阱</span>SWR 不是「TTL 設超長」的替代寫法</div>
@@ -1974,6 +1997,8 @@
     </div>
   </div>
 
+  <p class="cap">右欄三條都是 purge 的隱藏成本；決定要不要 purge 之前，先看你的失效需求能不能被左欄的 tag 模型收斂。</p>
+
   <div class="tbl-wrap">
     <table>
       <thead>
@@ -2035,118 +2060,70 @@
 <section id="s7">
   <div class="sec-head">
     <span class="sec-num">07</span>
-    <h2>互動 Demo：Cache Key 碎片與 SWR 時間軸</h2>
+    <h2>互動 Demo：URL → Cache Key 拆解器</h2>
   </div>
-  <p class="sec-sub">兩種實驗共用一個邊緣節點。Key 實驗室看哪些欄位會把同一張圖拆成多份物件；時間軸看使用者拿到的版本與背景更新如何分叉。</p>
+  <p class="sec-sub">把一條真實 URL 攤開：每一段標「進 key／被丟棄／被正規化成什麼」，再用一批帶噪音的樣本請求，算出這組規則的唯一 key 數、回源次數與命中率上限。</p>
 
-  <div class="demo" id="demo-cec">
+  <div class="demo" id="demo-cku">
     <div class="demo-bar">
-      <span class="label">互動 · 邊緣請求生命週期</span>
-      <span class="label" style="text-transform:none;font-family:var(--sans);font-size:12px;color:var(--text-2)">切模式後按「下一步」逐步重放</span>
+      <span class="label">互動 · URL → Cache Key 拆解器</span>
+      <span class="label" style="text-transform:none;font-family:var(--sans);font-size:12px;color:var(--text-2)">改 URL、忽略清單與 Vary 維度，逐段看誰進 key、誰被丟掉</span>
     </div>
     <div class="demo-body">
-      <p class="cec-mode-hint" id="cec-mode-hint">Cache Key：同一批 8 個請求，改「utm／Cookie／Vary」組成，看唯一 key 數與命中率。</p>
-
-      <div class="seg" role="group" aria-label="實驗模式" id="cec-seg-mode">
-        <button data-mode="key" aria-pressed="true">Cache Key 實驗室</button>
-        <button data-mode="swr" aria-pressed="false">SWR 時間軸</button>
+      <div class="seg" role="group" aria-label="預設情境" id="cku-seg-preset">
+        <button data-preset="good" aria-pressed="true">良好正規化</button>
+        <button data-preset="raw" aria-pressed="false">未正規化</button>
+        <button data-preset="vary" aria-pressed="false">過度 Vary</button>
       </div>
 
-      <div id="cec-key-view" class="cec-view">
-        <div class="seg" role="group" aria-label="追蹤參數" id="cec-seg-utm" style="margin-top:8px">
-          <button data-utm="drop" aria-pressed="true">utm_* 忽略</button>
-          <button data-utm="keep" aria-pressed="false">utm_* 進 key</button>
-        </div>
-        <div class="seg" role="group" aria-label="Cookie" id="cec-seg-cookie" style="margin-top:8px">
-          <button data-cookie="drop" aria-pressed="true">Cookie 不進 key</button>
-          <button data-cookie="keep" aria-pressed="false">Cookie 進 key</button>
-        </div>
-        <div class="seg" role="group" aria-label="Vary Accept-Language" id="cec-seg-vary" style="margin-top:8px">
-          <button data-vary="off" aria-pressed="true">不 Vary 語言</button>
-          <button data-vary="on" aria-pressed="false">Vary: Accept-Language</button>
-        </div>
+      <div class="cku-fields">
+        <label class="cku-field">
+          <span class="fn">原始 URL（可整條改寫）</span>
+          <input type="text" id="cku-url" spellcheck="false" value="https://Shop.Example.com/Assets/Hero.jpg?w=800&amp;utm_source=fb&amp;Ref=mail&amp;format=webp&amp;v=7#top">
+        </label>
+        <label class="cku-field">
+          <span class="fn">忽略的 query 參數（逗號分隔）</span>
+          <input type="text" id="cku-drop" spellcheck="false" value="utm_source,utm_medium,utm_campaign,gclid,fbclid,ref,_">
+        </label>
       </div>
 
-      <div id="cec-swr-view" class="cec-view" hidden>
-        <div class="seg" role="group" aria-label="Origin 狀態" id="cec-seg-origin" style="margin-top:8px">
-          <button data-origin="up" aria-pressed="true">Origin 正常</button>
-          <button data-origin="down" aria-pressed="false">Origin 故障</button>
-        </div>
-        <p class="cec-mode-hint" style="margin-top:8px">物件標頭固定為 <code>s-maxage=3, stale-while-revalidate=2, stale-if-error=4</code>。t=0 冷 miss 填入 v1。可在走完 fresh 窗口後改切 Origin 故障，不必重置，即可看到 SIE。</p>
+      <div class="cku-checks">
+        <label><input type="checkbox" id="cku-sort" checked>排序 query</label>
+        <label><input type="checkbox" id="cku-lower" checked>host 小寫正規化</label>
+        <label><input type="checkbox" id="cku-frag" checked>去掉 #fragment</label>
+        <label><input type="checkbox" id="cku-cookie">Cookie 進 key</label>
       </div>
 
-      <div class="cec-ctrl">
-        <button class="btn primary" id="cec-btn-next">下一步</button>
-        <button class="btn" id="cec-btn-reset">重置</button>
-      </div>
-
-      <div class="cec-metric">
-        <span>步 <strong id="cec-m-step">0</strong> / <span id="cec-m-total">8</span></span>
-        <span>HIT <strong id="cec-m-hits">0</strong></span>
-        <span>MISS <strong id="cec-m-miss">0</strong></span>
-        <span>回源 <strong id="cec-m-origin">0</strong></span>
-        <span>唯一 key <strong id="cec-m-keys">0</strong></span>
+      <div class="cku-knobs">
+        <label class="cku-knob"><span class="kn">活躍使用者數<span class="kv" id="cku-users-v">40 人</span></span><input type="range" id="cku-users" min="1" max="2000" step="1" value="40"></label>
+        <label class="cku-knob"><span class="kn">Accept-Language 取值數<span class="kv" id="cku-langs-v">1 種</span></span><input type="range" id="cku-langs" min="1" max="12" step="1" value="1"></label>
+        <label class="cku-knob"><span class="kn">Accept-Encoding 取值數<span class="kv" id="cku-encs-v">1 種</span></span><input type="range" id="cku-encs" min="1" max="4" step="1" value="1"></label>
+        <label class="cku-knob"><span class="kn">Device 類別數<span class="kv" id="cku-devices-v">1 種</span></span><input type="range" id="cku-devices" min="1" max="3" step="1" value="1"></label>
+        <label class="cku-knob"><span class="kn">樣本請求數<span class="kv" id="cku-reqcount-v">36 條</span></span><input type="range" id="cku-reqcount" min="12" max="60" step="1" value="36"></label>
+        <label class="cku-knob"><span class="kn">帶追蹤參數的比例<span class="kv" id="cku-trackedpct-v">60%</span></span><input type="range" id="cku-trackedpct" min="0" max="100" step="1" value="60"></label>
       </div>
 
       <div class="legend">
-        <span><i class="dot ns-idle"></i>待命／未走到</span>
-        <span><i class="dot ns-wait"></i>本步作用中</span>
-        <span><i class="dot ns-ok"></i>HIT／新鮮</span>
-        <span><i class="dot ns-lock"></i>SWR 賣舊</span>
-        <span><i class="dot ns-bad"></i>MISS／錯誤</span>
+        <span><i class="dot ns-ok"></i>KEEP 進 key</span>
+        <span><i class="dot ns-lock"></i>NORM 被改寫後才進 key</span>
+        <span><i class="dot ns-idle"></i>DROP 被丟到丟棄槽</span>
       </div>
 
-      <div class="cec-actors" id="cec-actors" aria-live="polite">
-        <div class="cec-actor" data-role="cli">
-          <div class="an">Client</div>
-          <div class="al" id="cec-cli-al">本步請求</div>
-          <div class="av" id="cec-cli-val">—</div>
-          <div class="ah" id="cec-cli-hint">待命</div>
-        </div>
-        <div class="cec-actor" data-role="edge">
-          <div class="an">Edge PoP</div>
-          <div class="al" id="cec-edge-al">Cache Key / 狀態</div>
-          <div class="av" id="cec-edge-val">—</div>
-          <div class="ah" id="cec-edge-hint">待命</div>
-        </div>
-        <div class="cec-actor" data-role="origin">
-          <div class="an">Origin</div>
-          <div class="al" id="cec-ori-al">回源</div>
-          <div class="av" id="cec-ori-val">—</div>
-          <div class="ah" id="cec-ori-hint">待命</div>
-        </div>
-      </div>
+      <div class="cku-map" id="cku-map"></div>
+      <div class="cku-keyline" id="cku-keyline"></div>
+      <div class="cku-nums" id="cku-nums"></div>
+      <div class="cku-tower" id="cku-tower"></div>
+      <div class="cku-hotline" id="cku-hotline"></div>
+      <div class="cku-hot" id="cku-hot"></div>
 
-      <div class="cec-keybox" id="cec-keybox"><span class="kk">key</span>—</div>
-
-      <div id="cec-slots" class="cec-slots" aria-label="邊緣快取物件"></div>
-      <div id="cec-ticks" class="cec-ticks" hidden></div>
-
-      <div class="cec-panels">
-        <div class="cec-panel">
-          <div class="pt">本步語義</div>
-          <div class="prow"><span class="pk">判定</span><span class="pv" id="cec-p-verdict">—</span></div>
-          <div class="prow"><span class="pk">使用者看到</span><span class="pv" id="cec-p-see">—</span></div>
-          <div class="prow"><span class="pk">背景更新</span><span class="pv" id="cec-p-bg">—</span></div>
-          <div class="prow"><span class="pk">Cache Key</span><span class="pv" id="cec-p-key">—</span></div>
-        </div>
-        <div class="cec-panel">
-          <div class="pt">累計</div>
-          <div class="prow"><span class="pk">命中率</span><span class="pv" id="cec-p-hr">—</span></div>
-          <div class="prow"><span class="pk">唯一物件</span><span class="pv" id="cec-p-uniq">0</span></div>
-          <div class="prow"><span class="pk">origin 次數</span><span class="pv" id="cec-p-oc">0</span></div>
-          <div class="prow"><span class="pk">備註</span><span class="pv" id="cec-p-note">—</span></div>
-        </div>
-      </div>
-
-      <div class="status-line" id="cec-status">選擇模式與旋鈕後按「下一步」。Key 實驗室重放 8 個請求；時間軸走 8 個時刻。</div>
-      <div class="cec-verdict" id="cec-verdict">判定尚未產生——走完一輪後會摘要命中率或 stale 窗口。</div>
-      <div class="cec-wire" id="cec-wire" aria-label="事件日誌"></div>
+      <div class="status-line" id="cku-status">改上面任何一個欄位，下面的 key、位元組帳與唯一 key 數都會重算。</div>
+      <div class="cku-ctrl"><button class="btn" id="cku-reset">重置</button></div>
     </div>
   </div>
+  <p class="cap">上半的段位移圖看兩件事：打叉的段垂到丟棄槽（那些位元組沒進 key），以及保留段的連線是否交叉——交叉就代表排序正規化把它搬了位置。下半的乘法塔是碎片的來源，熱度表最後一列越長，代表碎片化的冷 key 尾巴越重。</p>
 
   <div class="oneliner">
-    <b>一句話答法</b>utm 與 Cookie 進 key 會把命中率打掉；Vary 語言再乘一次。SWR 讓過期當下使用者仍拿舊版，origin 故障時改看 SIE 窗口還在不在。
+    <b>一句話答法</b>命中率上限是被 key 決定的：utm 與 Cookie 進 key 會把同一份物件複製成多份，Vary 每多一個維度就再乘一次。要提高命中率，先攤開 Cache Key 把不改變 bytes 的維度刪掉，而不是先把 TTL 加長。
   </div>
 </section>
 
@@ -2179,6 +2156,8 @@
       </ul>
     </div>
   </div>
+
+  <p class="cap">兩欄的分界是「會不會動到權威狀態」：不動權威的正規化與門禁可以放邊緣，動權威的寫入一律留在 origin。</p>
 
   <div class="callout accent">
     <div class="c-title"><span class="ic">關鍵</span>Compute 與 Cache 搶的是同一條命中率</div>
@@ -2315,639 +2294,889 @@
 (function () {
   "use strict";
 
-  var demo = document.getElementById("demo-cec");
-  if (!demo) return;
-
-  var mode = "key";
-  var utm = "drop";
-  var cookieInKey = "drop";
-  var varyLang = "off";
-  var originUp = true;
-  var step = 0;
-
-  var statusEl = document.getElementById("cec-status");
-  var verdictEl = document.getElementById("cec-verdict");
-  var wireEl = document.getElementById("cec-wire");
-  var btnNext = document.getElementById("cec-btn-next");
-  var btnReset = document.getElementById("cec-btn-reset");
-  var hintEl = document.getElementById("cec-mode-hint");
-  var keyView = document.getElementById("cec-key-view");
-  var swrView = document.getElementById("cec-swr-view");
-  var slotsEl = document.getElementById("cec-slots");
-  var ticksEl = document.getElementById("cec-ticks");
-  var keybox = document.getElementById("cec-keybox");
-
-  var mStep = document.getElementById("cec-m-step");
-  var mTotal = document.getElementById("cec-m-total");
-  var mHits = document.getElementById("cec-m-hits");
-  var mMiss = document.getElementById("cec-m-miss");
-  var mOrigin = document.getElementById("cec-m-origin");
-  var mKeys = document.getElementById("cec-m-keys");
-
-  var cliVal = document.getElementById("cec-cli-val");
-  var cliHint = document.getElementById("cec-cli-hint");
-  var cliAl = document.getElementById("cec-cli-al");
-  var edgeVal = document.getElementById("cec-edge-val");
-  var edgeHint = document.getElementById("cec-edge-hint");
-  var edgeAl = document.getElementById("cec-edge-al");
-  var oriVal = document.getElementById("cec-ori-val");
-  var oriHint = document.getElementById("cec-ori-hint");
-  var oriAl = document.getElementById("cec-ori-al");
-  var actorCli = demo.querySelector('.cec-actor[data-role="cli"]');
-  var actorEdge = demo.querySelector('.cec-actor[data-role="edge"]');
-  var actorOri = demo.querySelector('.cec-actor[data-role="origin"]');
-
-  var pVerdict = document.getElementById("cec-p-verdict");
-  var pSee = document.getElementById("cec-p-see");
-  var pBg = document.getElementById("cec-p-bg");
-  var pKey = document.getElementById("cec-p-key");
-  var pHr = document.getElementById("cec-p-hr");
-  var pUniq = document.getElementById("cec-p-uniq");
-  var pOc = document.getElementById("cec-p-oc");
-  var pNote = document.getElementById("cec-p-note");
-
-  var MAX_AGE = 3;
-  var SWR = 2;
-  var SIE = 4;
-  var TICKS = 8;
-
-  var KEY_REQS = [
-    { path: "/app.js", query: { v: "7" }, cookie: "", lang: "en", label: "app.js?v=7" },
-    { path: "/app.js", query: { v: "7" }, cookie: "", lang: "en", label: "app.js?v=7 再打" },
-    { path: "/app.js", query: { v: "7", utm_source: "ad" }, cookie: "", lang: "en", label: "app.js?v=7&utm=ad" },
-    { path: "/app.js", query: { v: "7" }, cookie: "", lang: "zh", label: "app.js?v=7 lang=zh" },
-    { path: "/hero.jpg", query: {}, cookie: "sid=A", lang: "en", label: "hero.jpg cookie=A" },
-    { path: "/hero.jpg", query: {}, cookie: "sid=B", lang: "en", label: "hero.jpg cookie=B" },
-    { path: "/feed", query: { locale: "en" }, cookie: "", lang: "en", label: "feed?locale=en" },
-    { path: "/feed", query: { locale: "en", utm_source: "x" }, cookie: "", lang: "en", label: "feed?locale=en&utm=x" }
+  /* (1) 常數與參數表 */
+  var TRACK_POOL = [
+    "utm_source=fb", "utm_medium=cpc", "utm_campaign=spring",
+    "gclid=Cj0aQx", "fbclid=IwAR9k", "_=1717"
   ];
+  var LANG_POOL = [
+    "en-US", "zh-TW", "ja-JP", "de-DE", "fr-FR", "es-ES",
+    "ko-KR", "pt-BR", "it-IT", "nl-NL", "ru-RU", "th-TH"
+  ];
+  var ENC_POOL = ["br", "gzip", "zstd", "identity"];
+  var DEVICE_POOL = ["desktop", "mobile", "tablet"];
 
-  var HINTS = {
-    key: "Cache Key：同一批 8 個請求，改「utm／Cookie／Vary」組成，看唯一 key 數與命中率。",
-    swr: "時間軸：s-maxage=3、SWR=2、SIE=4。過期後先賣舊的；origin 故障時看 SIE 窗口。"
+  var LCG_MUL = 48271;
+  var LCG_MOD = 2147483647;
+  var LCG_SEED = 20260922;
+
+  var EDGE_MS = 15;
+  var ORIGIN_RTT_MS = 180;
+  var ORIGIN_FAIL_MS = 220;
+  var HORIZON = 120;
+  var WARM_AT = 0;
+
+  var DEFAULT_URL = "https://Shop.Example.com/Assets/Hero.jpg?w=800&utm_source=fb&Ref=mail&format=webp&v=7#top";
+  var DEFAULT_DROP = "utm_source,utm_medium,utm_campaign,gclid,fbclid,ref,_";
+
+  var PRESETS = {
+    good: { urlRaw: DEFAULT_URL, dropList: DEFAULT_DROP, sortQuery: 1, lowerHost: 1, stripFragment: 1,
+            cookieInKey: 0, users: 40, langs: 1, encs: 1, devices: 1, reqCount: 36, trackedPct: 60 },
+    raw:  { urlRaw: DEFAULT_URL, dropList: "", sortQuery: 0, lowerHost: 0, stripFragment: 0,
+            cookieInKey: 0, users: 40, langs: 4, encs: 1, devices: 1, reqCount: 36, trackedPct: 60 },
+    vary: { urlRaw: DEFAULT_URL, dropList: DEFAULT_DROP, sortQuery: 1, lowerHost: 1, stripFragment: 1,
+            cookieInKey: 1, users: 2000, langs: 12, encs: 4, devices: 3, reqCount: 36, trackedPct: 60 }
   };
 
-  var store = {};
-  var hits = 0;
-  var misses = 0;
-  var originCount = 0;
-  var lastKey = "";
-  var obj = null;
-  var logs = [];
-  var tickHist = [];
+  /* (2) compute* 純函式 —— 只吃參數、只回傳物件 */
 
-  function bindSeg(id, attr, apply) {
-    var root = document.getElementById(id);
-    if (!root) return;
-    root.addEventListener("click", function (ev) {
-      var btn = ev.target.closest("button");
-      if (!btn || !root.contains(btn)) return;
-      var val = btn.getAttribute(attr);
-      if (val == null) return;
-      apply(val);
-      Array.prototype.forEach.call(root.querySelectorAll("button"), function (b) {
-        b.setAttribute("aria-pressed", b === btn ? "true" : "false");
-      });
-      reset();
-    });
+  function clampInt(v, lo, hi) {
+    var n = parseInt(v, 10);
+    if (isNaN(n)) n = lo;
+    if (n < lo) n = lo;
+    if (n > hi) n = hi;
+    return n;
   }
 
-  bindSeg("cec-seg-mode", "data-mode", function (v) { mode = v; });
-  bindSeg("cec-seg-utm", "data-utm", function (v) { utm = v; });
-  bindSeg("cec-seg-cookie", "data-cookie", function (v) { cookieInKey = v; });
-  bindSeg("cec-seg-vary", "data-vary", function (v) { varyLang = v; });
-  (function bindOrigin() {
-    var root = document.getElementById("cec-seg-origin");
-    if (!root) return;
-    root.addEventListener("click", function (ev) {
-      var btn = ev.target.closest("button");
-      if (!btn || !root.contains(btn)) return;
-      var val = btn.getAttribute("data-origin");
-      if (val == null) return;
-      originUp = val === "up";
-      Array.prototype.forEach.call(root.querySelectorAll("button"), function (b) {
-        b.setAttribute("aria-pressed", b === btn ? "true" : "false");
-      });
-      oriAl.textContent = originUp ? "Origin 正常" : "Origin 故障";
+  function trimStr(s) {
+    var a = 0, b = s.length, ch;
+    while (a < b) { ch = s.charAt(a); if (ch === " " || ch === "\t" || ch === "\n") a++; else break; }
+    while (b > a) { ch = s.charAt(b - 1); if (ch === " " || ch === "\t" || ch === "\n") b--; else break; }
+    return s.slice(a, b);
+  }
+
+  /* UTF-8 位元組數手算（沒有 TextEncoder／encodeURIComponent 可用） */
+  function utf8Len(s) {
+    var n = 0, i, c;
+    for (i = 0; i < s.length; i++) {
+      c = s.charCodeAt(i);
+      if (c < 0x80) n += 1;
+      else if (c < 0x800) n += 2;
+      else if (c >= 0xD800 && c <= 0xDBFF) { n += 4; i++; }
+      else n += 3;
+    }
+    return n;
+  }
+
+  /* 逗號分隔清單，不使用 RegExp */
+  function splitList(s) {
+    var out = [], cur = "", i, ch, t;
+    for (i = 0; i <= s.length; i++) {
+      ch = i < s.length ? s.charAt(i) : ",";
+      if (ch === ",") { t = trimStr(cur).toLowerCase(); if (t !== "") out.push(t); cur = ""; }
+      else cur += ch;
+    }
+    return out;
+  }
+
+  function inList(list, name) {
+    var i, n = name.toLowerCase();
+    for (i = 0; i < list.length; i++) { if (list[i] === n) return true; }
+    return false;
+  }
+
+  /* 手寫 URL 拆解：indexOf / slice，不使用 RegExp */
+  function splitUrl(raw) {
+    var s = trimStr(raw);
+    var scheme = "", rest = s, frag = "", query = "", host = "", path = "";
+    var i = s.indexOf("://");
+    if (i > 0) { scheme = s.slice(0, i); rest = s.slice(i + 3); }
+    var h = rest.indexOf("#");
+    if (h >= 0) { frag = rest.slice(h + 1); rest = rest.slice(0, h); }
+    var q = rest.indexOf("?");
+    if (q >= 0) { query = rest.slice(q + 1); rest = rest.slice(0, q); }
+    if (scheme !== "") {
+      var p = rest.indexOf("/");
+      if (p >= 0) { host = rest.slice(0, p); path = rest.slice(p); }
+      else { host = rest; path = "/"; }
+    } else { host = ""; path = rest; }
+    var pairs = [], cur = "", j, ch, eq;
+    for (j = 0; j <= query.length; j++) {
+      ch = j < query.length ? query.charAt(j) : "&";
+      if (ch === "&") {
+        if (cur !== "") {
+          eq = cur.indexOf("=");
+          pairs.push({ name: eq >= 0 ? cur.slice(0, eq) : cur, value: eq >= 0 ? cur.slice(eq + 1) : "", raw: cur });
+        }
+        cur = "";
+      } else cur += ch;
+    }
+    return { scheme: scheme, host: host, path: path === "" ? "/" : path, pairs: pairs, frag: frag, hasScheme: scheme !== "" };
+  }
+
+  function sortPairs(pairs) {
+    var copy = pairs.slice(0);
+    copy.sort(function (a, b) {
+      if (a.name < b.name) return -1;
+      if (a.name > b.name) return 1;
+      if (a.value < b.value) return -1;
+      if (a.value > b.value) return 1;
+      return 0;
     });
+    return copy;
+  }
+
+  /* 一條請求 → 一把 key（同一支規則，樣本流量與展示用 URL 共用） */
+  function buildKey(u, rules, dims) {
+    var host = u.host;
+    if (rules.lowerHost) host = host.toLowerCase();
+    var kept = [], i, pr;
+    for (i = 0; i < u.pairs.length; i++) {
+      pr = u.pairs[i];
+      if (inList(rules.dropList, pr.name)) continue;
+      kept.push(pr);
+    }
+    if (rules.sortQuery) kept = sortPairs(kept);
+    var key = host + u.path;
+    if (kept.length) {
+      var qs = [];
+      for (i = 0; i < kept.length; i++) qs.push(kept[i].name + "=" + kept[i].value);
+      key += "?" + qs.join("&");
+    }
+    if (!rules.stripFragment && u.frag !== "") key += "#" + u.frag;
+    if (dims.langs > 1) key += "|al=" + dims.lang;
+    if (dims.encs > 1) key += "|ae=" + dims.enc;
+    if (dims.devices > 1) key += "|dev=" + dims.device;
+    if (rules.cookieInKey) key += "|ck=u" + dims.user;
+    return key;
+  }
+
+  /* 逐段拆解，供段位移圖與位元組帳用 */
+  function segmentUrl(u, rules, dims) {
+    var segs = [], i, pr, low;
+    if (u.hasScheme) {
+      segs.push({ kind: "scheme", label: u.scheme + "://", after: "", fate: "drop",
+                  bytes: utf8Len(u.scheme + "://"), why: "共用快取只服務同一個 origin，scheme 不進 key" });
+    }
+    if (u.host !== "") {
+      low = u.host.toLowerCase();
+      if (rules.lowerHost && low !== u.host) {
+        segs.push({ kind: "host", label: u.host, after: low, fate: "norm",
+                    bytes: utf8Len(low), why: "主機名不分大小寫，正規化成小寫才不會裂成兩把" });
+      } else {
+        segs.push({ kind: "host", label: u.host, after: u.host, fate: "keep",
+                    bytes: utf8Len(u.host), why: "host 決定這是誰家的物件" });
+      }
+    }
+    segs.push({ kind: "path", label: u.path, after: u.path, fate: "keep",
+                bytes: utf8Len(u.path), why: "path 大小寫敏感，不做小寫正規化" });
+    for (i = 0; i < u.pairs.length; i++) {
+      pr = u.pairs[i];
+      if (inList(rules.dropList, pr.name)) {
+        segs.push({ kind: "query", label: pr.raw, after: "", fate: "drop",
+                    bytes: utf8Len(pr.raw) + 1, why: "在忽略清單裡，不改變回應的 bytes" });
+      } else {
+        segs.push({ kind: "query", label: pr.raw, after: pr.name + "=" + pr.value, fate: "keep",
+                    bytes: utf8Len(pr.raw) + 1, why: "會改變回應的 bytes，必須進 key" });
+      }
+    }
+    if (u.frag !== "") {
+      if (rules.stripFragment) {
+        segs.push({ kind: "frag", label: "#" + u.frag, after: "", fate: "drop",
+                    bytes: utf8Len("#" + u.frag), why: "fragment 根本不會送到伺服器" });
+      } else {
+        segs.push({ kind: "frag", label: "#" + u.frag, after: "#" + u.frag, fate: "keep",
+                    bytes: utf8Len("#" + u.frag), why: "沒去掉，於是同一份物件被錨點切成多把" });
+      }
+    }
+    if (dims.langs > 1) {
+      segs.push({ kind: "vary", label: "Vary: Accept-Language", after: "|al=" + dims.lang, fate: "keep",
+                  bytes: utf8Len("|al=" + dims.lang), why: "Vary 的維度直接接在 key 後面" });
+    }
+    if (dims.encs > 1) {
+      segs.push({ kind: "vary", label: "Vary: Accept-Encoding", after: "|ae=" + dims.enc, fate: "keep",
+                  bytes: utf8Len("|ae=" + dims.enc), why: "Vary 的維度直接接在 key 後面" });
+    }
+    if (dims.devices > 1) {
+      segs.push({ kind: "vary", label: "Vary: Device", after: "|dev=" + dims.device, fate: "keep",
+                  bytes: utf8Len("|dev=" + dims.device), why: "裝置類別要先正規化成低基數再進 key" });
+    }
+    if (rules.cookieInKey) {
+      segs.push({ kind: "cookie", label: "Cookie: sid=…", after: "|ck=u" + dims.user, fate: "keep",
+                  bytes: utf8Len("|ck=u" + dims.user), why: "Cookie 進 key＝每個使用者一份物件" });
+    }
+    return segs;
+  }
+
+  function nextRand(state) { return (state * LCG_MUL) % LCG_MOD; }
+
+  // @probe fn       computeKeyBreakdown
+  // @probe baseline {"urlRaw":"https://Shop.Example.com/Assets/Hero.jpg?w=800&utm_source=fb&Ref=mail&format=webp&v=7#top","dropList":"utm_source,gclid,ref,_","sortQuery":1,"lowerHost":1,"stripFragment":1,"cookieInKey":1,"users":6,"langs":2,"encs":2,"devices":2,"reqCount":36,"trackedPct":60}
+  // @probe sweep    {"urlRaw":["https://a.example.com/x?b=2&a=1","http://CDN.Example.org/v2/Feed.json?locale=zh-TW&_=1717&page=3#sec"],"dropList":["","utm_source,gclid,ref,_,format,w"],"sortQuery":[0,1],"lowerHost":[0,1],"stripFragment":[0,1],"cookieInKey":[0,1],"users":[1,2000],"langs":[1,12],"encs":[1,4],"devices":[1,3],"reqCount":[12,60],"trackedPct":[0,100]}
+  function computeKeyBreakdown(p) {
+    var rules = {
+      dropList: splitList(String(p.dropList)),
+      sortQuery: p.sortQuery ? 1 : 0,
+      lowerHost: p.lowerHost ? 1 : 0,
+      stripFragment: p.stripFragment ? 1 : 0,
+      cookieInKey: p.cookieInKey ? 1 : 0
+    };
+    var langs = clampInt(p.langs, 1, 12);
+    var encs = clampInt(p.encs, 1, 4);
+    var devices = clampInt(p.devices, 1, 3);
+    var users = clampInt(p.users, 1, 2000);
+    var reqCount = clampInt(p.reqCount, 12, 60);
+    var trackedPct = clampInt(p.trackedPct, 0, 100);
+
+    var base = splitUrl(String(p.urlRaw));
+    var showDims = { langs: langs, encs: encs, devices: devices,
+                     lang: LANG_POOL[0], enc: ENC_POOL[0], device: DEVICE_POOL[0], user: 0 };
+
+    /* 展示用的那一條請求：逐段拆解 + 位元組帳 */
+    var segs = segmentUrl(base, rules, showDims);
+    var keptBytes = 0, droppedBytes = 0, i;
+    for (i = 0; i < segs.length; i++) {
+      if (segs[i].fate === "drop") droppedBytes += segs[i].bytes;
+      else keptBytes += segs[i].bytes;
+    }
+    var totalBytes = keptBytes + droppedBytes;
+    var dropRatio = totalBytes > 0 ? Math.round((droppedBytes / totalBytes) * 1000) / 10 : 0;
+    var normalizedKey = buildKey(base, rules, showDims);
+
+    /* 碎片乘積：Vary 各維度取值數的乘積（Cookie 進 key 時再乘使用者數） */
+    var ladder = [], cum = 1;
+    cum = cum * langs;   ladder.push({ name: "Vary: Accept-Language", count: langs, cum: cum, on: 1 });
+    cum = cum * encs;    ladder.push({ name: "Vary: Accept-Encoding", count: encs, cum: cum, on: 1 });
+    cum = cum * devices; ladder.push({ name: "Vary: Device", count: devices, cum: cum, on: 1 });
+    if (rules.cookieInKey) { cum = cum * users; ladder.push({ name: "Cookie 進 key", count: users, cum: cum, on: 1 }); }
+    else { ladder.push({ name: "Cookie 進 key", count: users, cum: cum, on: 0 }); }
+    var fragments = cum;
+
+    /* 樣本流量：真的逐條套同一支 buildKey 再去重 */
+    var counts = {}, order = [], uniqueKeys = 0, batchDroppedBytes = 0;
+    var st = LCG_SEED % LCG_MOD;
+    var tracked, trackIdx, langIdx, encIdx, devIdx, userIdx, shuffled, upperHost;
+    var j, req, k, rs, eq, rsegs, rdims;
+    for (j = 0; j < reqCount; j++) {
+      st = nextRand(st); tracked = (st % 100) < trackedPct ? 1 : 0;
+      st = nextRand(st); trackIdx = st % TRACK_POOL.length;
+      st = nextRand(st); langIdx = st % langs;
+      st = nextRand(st); encIdx = st % encs;
+      st = nextRand(st); devIdx = st % devices;
+      st = nextRand(st); userIdx = st % users;
+      st = nextRand(st); shuffled = (st % 2) === 1 ? 1 : 0;
+      st = nextRand(st); upperHost = (st % 5) === 0 ? 1 : 0;
+
+      req = { scheme: base.scheme, hasScheme: base.hasScheme, path: base.path, frag: base.frag,
+              host: upperHost ? base.host.toUpperCase() : base.host.toLowerCase(),
+              pairs: base.pairs.slice(0) };
+      if (tracked) {
+        rs = TRACK_POOL[trackIdx];
+        eq = rs.indexOf("=");
+        req.pairs.push({ name: rs.slice(0, eq), value: rs.slice(eq + 1), raw: rs });
+      }
+      if (shuffled) req.pairs.reverse();
+
+      rdims = { langs: langs, encs: encs, devices: devices, lang: LANG_POOL[langIdx],
+                enc: ENC_POOL[encIdx], device: DEVICE_POOL[devIdx], user: userIdx };
+      k = buildKey(req, rules, rdims);
+      if (Object.prototype.hasOwnProperty.call(counts, k)) counts[k] += 1;
+      else { counts[k] = 1; order.push(k); uniqueKeys += 1; }
+
+      rsegs = segmentUrl(req, rules, rdims);
+      for (i = 0; i < rsegs.length; i++) { if (rsegs[i].fate === "drop") batchDroppedBytes += rsegs[i].bytes; }
+    }
+
+    var rows = [], hottestKeyHits = 0, coldKeys = 0;
+    for (i = 0; i < order.length; i++) {
+      rows.push({ key: order[i], hits: counts[order[i]] });
+      if (counts[order[i]] > hottestKeyHits) hottestKeyHits = counts[order[i]];
+      if (counts[order[i]] === 1) coldKeys += 1;
+    }
+    rows.sort(function (a, b) {
+      if (b.hits !== a.hits) return b.hits - a.hits;
+      if (a.key < b.key) return -1;
+      if (a.key > b.key) return 1;
+      return 0;
+    });
+    var topKeys = rows.slice(0, 8);
+    var tailKeys = rows.length > 8 ? rows.length - 8 : 0;
+    var tailHits = 0;
+    for (i = 8; i < rows.length; i++) tailHits += rows[i].hits;
+
+    var maxHitRate = Math.round((1 - uniqueKeys / reqCount) * 1000) / 10;
+    if (maxHitRate < 0) maxHitRate = 0;
+
+    return {
+      normalizedKey: normalizedKey,
+      segs: segs,
+      keptBytes: keptBytes,
+      droppedBytes: droppedBytes,
+      dropRatio: dropRatio,
+      fragments: fragments,
+      ladder: ladder,
+      totalRequests: reqCount,
+      uniqueKeys: uniqueKeys,
+      originFetches: uniqueKeys,
+      maxHitRate: maxHitRate,
+      avgReqPerKey: Math.round((reqCount / uniqueKeys) * 100) / 100,
+      hottestKeyHits: hottestKeyHits,
+      coldKeys: coldKeys,
+      batchDroppedBytes: batchDroppedBytes,
+      topKeys: topKeys,
+      tailKeys: tailKeys,
+      tailHits: tailHits
+    };
+  }
+
+  // @probe fn       computeStaleWindows
+  // @probe baseline {"maxAge":10,"swr":5,"sie":30,"intervalSec":20,"originFails":1,"failAt":40,"nowSec":12}
+  // @probe sweep    {"maxAge":[1,60],"swr":[0,60],"sie":[0,120],"intervalSec":[1,30],"originFails":[0,1],"failAt":[0,120],"nowSec":[0,120]}
+  function computeStaleWindows(p) {
+    var maxAge = clampInt(p.maxAge, 1, 60);
+    var swr = clampInt(p.swr, 0, 60);
+    var sie = clampInt(p.sie, 0, 120);
+    var interval = clampInt(p.intervalSec, 1, 30);
+    var fails = p.originFails ? 1 : 0;
+    var failAt = clampInt(p.failAt, 0, HORIZON);
+    var nowSec = clampInt(p.nowSec, 0, HORIZON);
+
+    var lastFill = WARM_AT, haveObj = 0;
+    var fills = [], events = [];
+    var hits = 0, syncOrigins = 0, bgRevals = 0, errors = 0, sumLat = 0, maxStaleServed = 0;
+    var t, down, age, kind, lat;
+
+    for (t = 0; t <= HORIZON; t += interval) {
+      down = (fails === 1 && t >= failAt) ? 1 : 0;
+      if (!haveObj) {
+        age = -1;
+        if (down) { kind = "error"; lat = EDGE_MS + ORIGIN_FAIL_MS; errors += 1; }
+        else { kind = "sync"; lat = EDGE_MS + ORIGIN_RTT_MS; syncOrigins += 1; haveObj = 1; lastFill = t; fills.push(t); }
+      } else {
+        age = t - lastFill;
+        if (age < maxAge) { kind = "fresh"; lat = EDGE_MS; hits += 1; }
+        else if (down) {
+          if (age < maxAge + sie) { kind = "sie"; lat = EDGE_MS; hits += 1; }
+          else { kind = "error"; lat = EDGE_MS + ORIGIN_FAIL_MS; errors += 1; }
+        } else if (age < maxAge + swr) {
+          kind = "swr"; lat = EDGE_MS; hits += 1; bgRevals += 1; lastFill = t; fills.push(t);
+        } else {
+          kind = "sync"; lat = EDGE_MS + ORIGIN_RTT_MS; syncOrigins += 1; lastFill = t; fills.push(t);
+        }
+        if ((kind === "swr" || kind === "sie") && age > maxStaleServed) maxStaleServed = age;
+      }
+      sumLat += lat;
+      events.push({ t: t, kind: kind, lat: lat, age: age });
+    }
+
+    var i, fillBeforeFail = -1, fillAtNow = -1;
+    for (i = 0; i < fills.length; i++) {
+      if (fills[i] <= failAt) fillBeforeFail = fills[i];
+      if (fills[i] < nowSec) fillAtNow = fills[i];
+    }
+    var survivalSec = -1;
+    if (fails === 1) {
+      survivalSec = (fillBeforeFail < 0) ? 0 : ((fillBeforeFail + maxAge + sie) - failAt);
+      if (survivalSec < 0) survivalSec = 0;
+    }
+
+    var nowDown = (fails === 1 && nowSec >= failAt) ? 1 : 0;
+    var nowAge, nowWindow, nowLatencyMs;
+    if (fillAtNow < 0) {
+      nowAge = -1;
+      nowWindow = nowDown ? "error" : "sync";
+      nowLatencyMs = nowDown ? (EDGE_MS + ORIGIN_FAIL_MS) : (EDGE_MS + ORIGIN_RTT_MS);
+    } else {
+      nowAge = nowSec - fillAtNow;
+      if (nowAge < maxAge) { nowWindow = "fresh"; nowLatencyMs = EDGE_MS; }
+      else if (nowDown) {
+        if (nowAge < maxAge + sie) { nowWindow = "sie"; nowLatencyMs = EDGE_MS; }
+        else { nowWindow = "error"; nowLatencyMs = EDGE_MS + ORIGIN_FAIL_MS; }
+      } else if (nowAge < maxAge + swr) { nowWindow = "swr"; nowLatencyMs = EDGE_MS; }
+      else { nowWindow = "sync"; nowLatencyMs = EDGE_MS + ORIGIN_RTT_MS; }
+    }
+
+    return {
+      maxAge: maxAge, swr: swr, sie: sie, failAt: failAt, originFails: fails, nowSec: nowSec,
+      nowAge: nowAge,
+      nowWindow: nowWindow,
+      nowLatencyMs: nowLatencyMs,
+      totalRequests: events.length,
+      hits: hits,
+      syncOrigins: syncOrigins,
+      bgRevals: bgRevals,
+      errors: errors,
+      avgLatencyMs: Math.round(sumLat / events.length),
+      survivalSec: survivalSec,
+      maxStaleServed: maxStaleServed,
+      events: events,
+      fills: fills
+    };
+  }
+
+  /* (3) DOM 參照 */
+  var ckuRoot = document.getElementById("demo-cku");
+  var swinRoot = document.getElementById("demo-swin");
+  if (!ckuRoot || !swinRoot) return;
+
+  var ckuUrl = document.getElementById("cku-url");
+  var ckuDrop = document.getElementById("cku-drop");
+  var ckuSort = document.getElementById("cku-sort");
+  var ckuLower = document.getElementById("cku-lower");
+  var ckuFrag = document.getElementById("cku-frag");
+  var ckuCookie = document.getElementById("cku-cookie");
+  var ckuSegPreset = document.getElementById("cku-seg-preset");
+  var ckuMap = document.getElementById("cku-map");
+  var ckuKeyline = document.getElementById("cku-keyline");
+  var ckuNums = document.getElementById("cku-nums");
+  var ckuTower = document.getElementById("cku-tower");
+  var ckuHotline = document.getElementById("cku-hotline");
+  var ckuHot = document.getElementById("cku-hot");
+  var ckuStatus = document.getElementById("cku-status");
+  var ckuReset = document.getElementById("cku-reset");
+
+  var swinSegOrigin = document.getElementById("swin-seg-origin");
+  var swinRuler = document.getElementById("swin-ruler");
+  var swinPops = document.getElementById("swin-pops");
+  var swinNums = document.getElementById("swin-nums");
+  var swinStatus = document.getElementById("swin-status");
+  var swinReset = document.getElementById("swin-reset");
+
+  var CKU_RANGES = ["users", "langs", "encs", "devices", "reqcount", "trackedpct"];
+  var SWIN_RANGES = ["maxage", "swr", "sie", "interval", "failat", "now"];
+  var ckuRange = {}, ckuOut = {}, swinRange = {}, swinOut = {};
+  (function grab() {
+    var i, k;
+    for (i = 0; i < CKU_RANGES.length; i++) {
+      k = CKU_RANGES[i];
+      ckuRange[k] = document.getElementById("cku-" + k);
+      ckuOut[k] = document.getElementById("cku-" + k + "-v");
+    }
+    for (i = 0; i < SWIN_RANGES.length; i++) {
+      k = SWIN_RANGES[i];
+      swinRange[k] = document.getElementById("swin-" + k);
+      swinOut[k] = document.getElementById("swin-" + k + "-v");
+    }
   })();
 
-  function setActor(el, cls) {
-    el.className = "cec-actor" + (cls ? " " + cls : "");
+  var swinOriginFails = 1;
+
+  /* (4) render(state) —— 只讀 state 畫出來 */
+
+  function esc(s) {
+    return String(s).split("&").join("&amp;").split("<").join("&lt;")
+      .split(">").join("&gt;").split('"').join("&quot;");
   }
 
-  function qs(query) {
-    var keys = Object.keys(query).sort();
-    var out = [];
-    var i;
-    for (i = 0; i < keys.length; i++) {
-      var k = keys[i];
-      if (utm === "drop" && k.indexOf("utm_") === 0) continue;
-      out.push(k + "=" + query[k]);
+  function shorten(s, n) {
+    if (s.length <= n) return s;
+    return s.slice(0, n - 1) + "…";
+  }
+
+  var FATE_COLOR = { keep: "var(--ok)", norm: "var(--warn)", drop: "#a1a5aa" };
+  var FATE_FILL = { keep: "var(--ok-soft)", norm: "var(--warn-soft)", drop: "#f6f6f5" };
+  var FATE_TXT = { keep: "KEEP", norm: "NORM", drop: "DROP" };
+
+  function layoutRow(labels, width, x0) {
+    var i, w = [], total = 0, ww;
+    for (i = 0; i < labels.length; i++) {
+      ww = labels[i].length * 6.6 + 18;
+      if (ww < 54) ww = 54;
+      if (ww > 190) ww = 190;
+      w.push(ww); total += ww + 6;
     }
-    return out.join("&");
-  }
-
-  function cacheKey(req) {
-    var parts = [req.path];
-    var q = qs(req.query);
-    if (q) parts.push("?" + q);
-    if (cookieInKey === "keep" && req.cookie) parts.push("|ck=" + req.cookie);
-    if (varyLang === "on") parts.push("|lang=" + req.lang);
-    return parts.join("");
-  }
-
-  function uniqueCount() {
-    return Object.keys(store).length;
-  }
-
-  function renderSlots(activeKey) {
-    var keys = Object.keys(store);
-    if (!keys.length) {
-      slotsEl.innerHTML = '<span class="cec-slot empty">邊緣 store 為空</span>';
-      return;
+    var scale = total > width ? (width / total) : 1;
+    var out = [], x = x0, sw;
+    for (i = 0; i < w.length; i++) {
+      sw = w[i] * scale;
+      out.push({ x: x, w: sw });
+      x += sw + 6 * scale;
     }
-    slotsEl.innerHTML = keys.map(function (k) {
-      var cls = k === activeKey ? " hit" : "";
-      return '<span class="cec-slot' + cls + '">' + escapeHtml(k) + "</span>";
-    }).join("");
+    return out;
   }
 
-  function escapeHtml(s) {
-    return String(s)
-      .replace(/&/g, "&amp;")
-      .replace(/</g, "&lt;")
-      .replace(/>/g, "&gt;")
-      .replace(/"/g, "&quot;");
-  }
-
-  function windowForAge(age) {
-    if (age < MAX_AGE) return "fresh";
-    if (age < MAX_AGE + SWR) return "swr";
-    if (age < MAX_AGE + SIE) return "sie";
-    return "dead";
-  }
-
-  function ageAt(t) {
-    if (!obj) return t;
-    return t - obj.filledAt;
-  }
-
-  function renderTicks(now) {
-    var html = "";
-    var t;
-    for (t = 0; t < TICKS; t++) {
-      var w;
-      if (t < tickHist.length) w = tickHist[t];
-      else w = windowForAge(obj ? Math.max(0, t - obj.filledAt) : t);
-      var cls = "cec-tick " + w;
-      if (t === now) cls += " now";
-      else if (t > now) cls += " future";
-      var lab = w === "fresh" ? "fresh" : w === "swr" ? "SWR" : w === "sie" ? "SIE" : "過期";
-      html += '<div class="' + cls + '"><span class="tn">t=' + t + "</span>" + lab + "</div>";
+  function renderCkuMap(r) {
+    var top = [], bottom = [], i, s;
+    for (i = 0; i < r.segs.length; i++) {
+      s = r.segs[i];
+      top.push(s.label);
+      if (s.fate !== "drop") bottom.push({ label: s.after, from: i });
     }
-    ticksEl.innerHTML = html;
-  }
+    var bLabels = [];
+    for (i = 0; i < bottom.length; i++) bLabels.push(bottom[i].label);
+    var tp = layoutRow(top, 690, 15);
+    var bp = layoutRow(bLabels, 690, 15);
 
-  function pushLog(cls, ar, tg, tx) {
-    logs.push({ cls: cls, ar: ar, tg: tg, tx: tx });
-    var html = logs.map(function (row) {
-      return '<div class="cec-row ' + row.cls + '"><span class="ar">' + escapeHtml(row.ar) +
-        '</span><span class="tg">' + escapeHtml(row.tg) + '</span><span class="tx">' +
-        escapeHtml(row.tx) + "</span></div>";
-    }).join("");
-    wireEl.innerHTML = html;
-    wireEl.scrollTop = wireEl.scrollHeight;
-  }
+    var out = '<svg viewBox="0 0 720 224" role="img" style="width:100%;height:auto;background:#fff">';
+    out += '<title>URL 逐段位移圖：哪一段進 key、哪一段被丟棄、哪一段被搬到新位置</title>';
+    out += '<text x="15" y="14" font-family="var(--mono)" font-size="11" fill="#6b7076">原始請求 · 逐段</text>';
+    out += '<text x="15" y="131" font-family="var(--mono)" font-size="11" fill="#6b7076">正規化後的 cache key · 逐段（排序後的新位置）</text>';
 
-  function setVerdict(tone, text) {
-    verdictEl.className = "cec-verdict" + (tone ? " tone-" + tone : "");
-    verdictEl.textContent = text;
-  }
-
-  function hrText() {
-    var n = hits + misses;
-    if (!n) return "—";
-    return Math.round((hits / n) * 100) + "% (" + hits + "/" + n + ")";
-  }
-
-  function finishKey() {
-    var uniq = uniqueCount();
-    var tone = "ok";
-    var msg = "8 個請求結束。命中率 " + hrText() + "，唯一物件 " + uniq + "，回源 " + originCount + " 次。";
-    if (cookieInKey === "keep") {
-      tone = "bad";
-      msg += " Cookie 進 key，hero.jpg 被拆成每人一份。";
-    } else if (utm === "keep" || varyLang === "on") {
-      tone = "lock";
-      if (utm === "keep") msg += " utm 進 key，帶追蹤參數的請求各自 miss。";
-      if (varyLang === "on") msg += " Vary 語言讓 en／zh 變成兩份 app.js。";
-    } else {
-      msg += " 忽略 utm、Cookie 不進 key、不 Vary 語言——這是這批流量該有的組成。";
+    var bi = 0, cx, bx;
+    for (i = 0; i < r.segs.length; i++) {
+      s = r.segs[i];
+      cx = tp[i].x + tp[i].w / 2;
+      if (s.fate === "drop") {
+        out += '<path d="M' + cx.toFixed(1) + ' 58 C' + cx.toFixed(1) + ' 130,' + cx.toFixed(1) +
+               ' 130,' + cx.toFixed(1) + ' 186" fill="none" stroke="#c9ccd0" stroke-width="1" stroke-dasharray="3 3"/>';
+      } else {
+        bx = bp[bi].x + bp[bi].w / 2;
+        out += '<path d="M' + cx.toFixed(1) + ' 58 C' + cx.toFixed(1) + ' 98,' + bx.toFixed(1) +
+               ' 104,' + bx.toFixed(1) + ' 139" fill="none" stroke="' + FATE_COLOR[s.fate] + '" stroke-width="1.2" opacity="0.7"/>';
+        bi += 1;
+      }
     }
-    setVerdict(tone, msg);
-    btnNext.disabled = true;
+
+    var x, w, chars;
+    for (i = 0; i < r.segs.length; i++) {
+      s = r.segs[i];
+      x = tp[i].x; w = tp[i].w;
+      chars = Math.floor((w - 12) / 6.2);
+      if (chars < 4) chars = 4;
+      out += '<rect x="' + x.toFixed(1) + '" y="22" width="' + w.toFixed(1) + '" height="36" rx="6" fill="' +
+             FATE_FILL[s.fate] + '" stroke="' + FATE_COLOR[s.fate] + '" stroke-width="1.2"/>';
+      out += '<text x="' + (x + w / 2).toFixed(1) + '" y="40" text-anchor="middle" font-family="var(--mono)" font-size="11" fill="#262a2f"' +
+             (s.fate === "drop" ? ' text-decoration="line-through" opacity="0.6"' : '') + '>' +
+             esc(shorten(s.label, chars)) + '</text>';
+      out += '<text x="' + (x + w / 2).toFixed(1) + '" y="52" text-anchor="middle" font-family="var(--mono)" font-size="9.5" fill="' +
+             FATE_COLOR[s.fate] + '">' + FATE_TXT[s.fate] + ' · ' + s.bytes + 'B</text>';
+    }
+
+    var src;
+    for (i = 0; i < bottom.length; i++) {
+      x = bp[i].x; w = bp[i].w;
+      src = r.segs[bottom[i].from];
+      chars = Math.floor((w - 12) / 6.2);
+      if (chars < 4) chars = 4;
+      out += '<rect x="' + x.toFixed(1) + '" y="139" width="' + w.toFixed(1) + '" height="30" rx="6" fill="#fff" stroke="' +
+             FATE_COLOR[src.fate] + '" stroke-width="1.2"/>';
+      out += '<text x="' + (x + w / 2).toFixed(1) + '" y="158" text-anchor="middle" font-family="var(--mono)" font-size="11" fill="#262a2f">' +
+             esc(shorten(bottom[i].label, chars)) + '</text>';
+    }
+
+    out += '<rect x="15" y="186" width="690" height="16" rx="4" fill="#f6f6f5" stroke="#e3e4e6" stroke-width="1"/>';
+    out += '<text x="21" y="198" font-family="var(--mono)" font-size="10.5" fill="#a1a5aa">丟棄槽 · 這些位元組不進 key</text>';
+    out += '<text x="699" y="198" text-anchor="end" font-family="var(--mono)" font-size="10.5" fill="#a1a5aa">' +
+           r.droppedBytes + ' bytes</text>';
+    out += '<text x="15" y="218" font-family="var(--mono)" font-size="10" fill="#a1a5aa">連線交叉＝排序正規化把這一段搬了位置</text>';
+    out += "</svg>";
+    ckuMap.innerHTML = out;
   }
 
-  function finishSwr() {
-    var tone = originUp ? "ok" : "lock";
+  function ckuCard(label, value, tone) {
+    return '<div class="cku-num' + (tone ? " " + tone : "") + '"><div class="nl">' + esc(label) +
+           '</div><div class="nv">' + esc(value) + "</div></div>";
+  }
+
+  function renderCku(r) {
+    renderCkuMap(r);
+    ckuKeyline.innerHTML = '<span class="kl">cache key</span>' + esc(r.normalizedKey);
+
+    var tone = r.maxHitRate >= 60 ? "ok" : (r.maxHitRate >= 30 ? "warn" : "bad");
+    ckuNums.innerHTML =
+      ckuCard("進 key 位元組", r.keptBytes + " B") +
+      ckuCard("被丟棄位元組", r.droppedBytes + " B（" + r.dropRatio + "%）") +
+      ckuCard("碎片數（各維度取值數乘積）", String(r.fragments), r.fragments > 24 ? "bad" : "") +
+      ckuCard("命中率上限", r.maxHitRate + "%", tone) +
+      ckuCard("整批被丟棄位元組", r.batchDroppedBytes + " B");
+
+    var i, j, row, cells, n, html = "";
+    for (i = 0; i < r.ladder.length; i++) {
+      row = r.ladder[i];
+      cells = "";
+      n = row.count > 12 ? 12 : row.count;
+      for (j = 0; j < n; j++) cells += '<span class="cku-cell"></span>';
+      if (row.count > 12) cells += '<span class="cku-more">+' + (row.count - 12) + "</span>";
+      html += '<div class="cku-trow' + (row.on ? "" : " off") + '"><span class="tl">' + esc(row.name) +
+              " ×" + row.count + '</span><span class="cku-cells">' + cells + '</span><span class="tc">' +
+              (row.on ? "= " + row.cum : "未進 key") + "</span></div>";
+    }
+    ckuTower.innerHTML = html;
+
+    ckuHotline.innerHTML = "唯一 key 數 <strong>" + r.uniqueKeys + "</strong> ＝ 回源次數 <strong>" +
+      r.originFetches + "</strong>／請求 <strong>" + r.totalRequests + "</strong>，命中率上限 <strong>" +
+      r.maxHitRate + "%</strong>，平均每把 key 被請求 <strong>" + r.avgReqPerKey + "</strong> 次。";
+
+    var maxHits = r.topKeys.length ? r.topKeys[0].hits : 1;
+    html = "";
+    for (i = 0; i < r.topKeys.length; i++) {
+      html += '<div class="cku-hrow"><span class="hk">' + esc(shorten(r.topKeys[i].key, 62)) +
+              '</span><span class="hb"><i style="width:' + Math.round((r.topKeys[i].hits / maxHits) * 100) +
+              '%"></i></span><span class="hn">' + r.topKeys[i].hits + "</span></div>";
+    }
+    if (r.tailKeys > 0) {
+      html += '<div class="cku-hrow cold"><span class="hk">其餘 ' + r.tailKeys + " 把 key（其中 " +
+              r.coldKeys + ' 把只被請求 1 次）</span><span class="hb"><i style="width:' +
+              Math.round((1 / maxHits) * 100) + '%"></i></span><span class="hn">' + r.tailHits + "</span></div>";
+    }
+    ckuHot.innerHTML = html;
+
+    var msg = "這條 URL 被拆成 " + r.segs.length + " 段，" + r.droppedBytes + " 個位元組沒進 key。";
+    if (r.fragments > 1) msg += "Vary 與 Cookie 把同一份物件乘成 " + r.fragments + " 份。";
+    if (r.maxHitRate < 30) msg += "命中率上限只剩 " + r.maxHitRate + "%——先攤開 key，不是先把 TTL 加長。";
+    else msg += "命中率上限 " + r.maxHitRate + "%，這批流量會回源 " + r.originFetches + " 次。";
+    ckuStatus.textContent = msg;
+  }
+
+  var KIND_COLOR = { fresh: "var(--ok)", swr: "var(--warn)", sie: "var(--accent)",
+                     sync: "#6b7076", error: "var(--bad)" };
+  var KIND_NAME = { fresh: "fresh（邊緣直接賣）", swr: "SWR（先賣舊的、背景更新）",
+                    sie: "SIE（origin 掛了仍賣舊的）", sync: "同步回源（使用者排隊）",
+                    error: "錯誤（窗口外 + origin 失敗）" };
+
+  function renderSwinRuler(r) {
+    var span = r.maxAge + (r.swr > r.sie ? r.swr : r.sie);
+    if (span < 1) span = 1;
+    var x0 = 46, w = 646;
+    var px = function (sec) { return x0 + (sec / span) * w; };
+    var out = '<svg viewBox="0 0 720 122" role="img" style="width:100%;height:auto;background:#fff">';
+    out += '<title>age 窗口尺：同一個 age 在 origin 正常與 origin 故障下落在不同的窗</title>';
+    out += '<defs><pattern id="swinHatch" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">' +
+           '<rect width="6" height="6" fill="var(--warn-soft)"/><line x1="0" y1="0" x2="0" y2="6" stroke="var(--warn)" stroke-width="1.8"/></pattern>' +
+           '<pattern id="swinDots" width="7" height="7" patternUnits="userSpaceOnUse">' +
+           '<rect width="7" height="7" fill="var(--accent-soft)"/><circle cx="3.5" cy="3.5" r="1.4" fill="var(--accent)"/></pattern></defs>';
+    out += '<text x="4" y="34" font-family="var(--mono)" font-size="10" fill="#6b7076">origin</text>';
+    out += '<text x="4" y="45" font-family="var(--mono)" font-size="10" fill="#6b7076">正常</text>';
+    out += '<text x="4" y="66" font-family="var(--mono)" font-size="10" fill="#6b7076">origin</text>';
+    out += '<text x="4" y="77" font-family="var(--mono)" font-size="10" fill="#6b7076">故障</text>';
+
+    out += '<rect x="' + px(0).toFixed(1) + '" y="24" width="' + (px(r.maxAge) - px(0)).toFixed(1) +
+           '" height="26" fill="var(--ok-soft)" stroke="var(--ok)" stroke-width="1"/>';
+    if (r.swr > 0) {
+      out += '<rect x="' + px(r.maxAge).toFixed(1) + '" y="24" width="' + (px(r.maxAge + r.swr) - px(r.maxAge)).toFixed(1) +
+             '" height="26" fill="url(#swinHatch)" stroke="var(--warn)" stroke-width="1"/>';
+    }
+    if (r.maxAge + r.swr < span) {
+      out += '<rect x="' + px(r.maxAge + r.swr).toFixed(1) + '" y="24" width="' + (px(span) - px(r.maxAge + r.swr)).toFixed(1) +
+             '" height="26" fill="#f6f6f5" stroke="#c9ccd0" stroke-width="1"/>';
+    }
+    out += '<rect x="' + px(0).toFixed(1) + '" y="52" width="' + (px(r.maxAge) - px(0)).toFixed(1) +
+           '" height="26" fill="var(--ok-soft)" stroke="var(--ok)" stroke-width="1"/>';
+    if (r.sie > 0) {
+      out += '<rect x="' + px(r.maxAge).toFixed(1) + '" y="52" width="' + (px(r.maxAge + r.sie) - px(r.maxAge)).toFixed(1) +
+             '" height="26" fill="url(#swinDots)" stroke="var(--accent)" stroke-width="1"/>';
+    }
+    if (r.maxAge + r.sie < span) {
+      out += '<rect x="' + px(r.maxAge + r.sie).toFixed(1) + '" y="52" width="' + (px(span) - px(r.maxAge + r.sie)).toFixed(1) +
+             '" height="26" fill="var(--bad-soft)" stroke="var(--bad)" stroke-width="1"/>';
+    }
+
+    var marks = [0, r.maxAge, r.maxAge + r.swr, r.maxAge + r.sie, span], seen = {}, i, m;
+    for (i = 0; i < marks.length; i++) {
+      m = marks[i];
+      if (m > span || Object.prototype.hasOwnProperty.call(seen, String(m))) continue;
+      seen[String(m)] = 1;
+      out += '<line x1="' + px(m).toFixed(1) + '" y1="78" x2="' + px(m).toFixed(1) + '" y2="86" stroke="#c9ccd0" stroke-width="1"/>';
+      out += '<text x="' + px(m).toFixed(1) + '" y="98" text-anchor="middle" font-family="var(--mono)" font-size="10.5" fill="#6b7076">age ' + m + 's</text>';
+    }
+
+    if (r.nowAge >= 0 && r.nowAge <= span) {
+      var nx = px(r.nowAge);
+      out += '<polygon points="' + (nx - 5).toFixed(1) + ',8 ' + (nx + 5).toFixed(1) + ',8 ' + nx.toFixed(1) + ',18" fill="var(--accent)"/>';
+      out += '<line x1="' + nx.toFixed(1) + '" y1="18" x2="' + nx.toFixed(1) + '" y2="78" stroke="var(--accent)" stroke-width="1.4"/>';
+      out += '<text x="' + nx.toFixed(1) + '" y="116" text-anchor="middle" font-family="var(--mono)" font-size="10.5" fill="var(--accent)">此刻 age ' + r.nowAge + 's</text>';
+    }
+    out += "</svg>";
+    swinRuler.innerHTML = out;
+  }
+
+  function renderSwinPops(r) {
+    var x0 = 46, w = 648, base = 118, maxLat = EDGE_MS + ORIGIN_FAIL_MS;
+    var px = function (sec) { return x0 + (sec / HORIZON) * w; };
+    var out = '<svg viewBox="0 0 720 158" role="img" style="width:100%;height:auto;background:#fff">';
+    out += '<title>每個請求的延遲棒棒糖圖：棒高是回應延遲，圓點顏色是命中種類</title>';
+    out += '<defs><pattern id="swinFail" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">' +
+           '<rect width="6" height="6" fill="#f6f6f5"/><line x1="0" y1="0" x2="0" y2="6" stroke="#c9ccd0" stroke-width="1.6"/></pattern></defs>';
+    out += '<line x1="' + x0 + '" y1="' + base + '" x2="' + (x0 + w) + '" y2="' + base + '" stroke="#c9ccd0" stroke-width="1"/>';
+    out += '<text x="4" y="30" font-family="var(--mono)" font-size="10" fill="#6b7076">' + maxLat + 'ms</text>';
+    out += '<text x="4" y="' + (base + 4) + '" font-family="var(--mono)" font-size="10" fill="#6b7076">0ms</text>';
+
+    if (r.originFails === 1) {
+      out += '<rect x="' + px(r.failAt).toFixed(1) + '" y="' + (base + 5) + '" width="' + (px(HORIZON) - px(r.failAt)).toFixed(1) +
+             '" height="11" fill="url(#swinFail)" stroke="#c9ccd0" stroke-width="1"/>';
+      out += '<text x="' + px(r.failAt).toFixed(1) + '" y="' + (base + 30) + '" font-family="var(--mono)" font-size="10.5" fill="var(--bad)">origin 故障 t=' +
+             r.failAt + 's</text>';
+    }
+
+    var i, e, hpx, fx;
+    for (i = 0; i < r.events.length; i++) {
+      e = r.events[i];
+      hpx = (e.lat / maxLat) * 92;
+      out += '<line x1="' + px(e.t).toFixed(1) + '" y1="' + base + '" x2="' + px(e.t).toFixed(1) + '" y2="' +
+             (base - hpx).toFixed(1) + '" stroke="' + KIND_COLOR[e.kind] + '" stroke-width="1"/>';
+      out += '<circle cx="' + px(e.t).toFixed(1) + '" cy="' + (base - hpx).toFixed(1) + '" r="2.8" fill="' + KIND_COLOR[e.kind] + '"/>';
+    }
+    for (i = 0; i < r.fills.length; i++) {
+      fx = px(r.fills[i]);
+      out += '<polygon points="' + (fx - 4).toFixed(1) + ',' + (base + 1) + ' ' + (fx + 4).toFixed(1) + ',' +
+             (base + 1) + ' ' + fx.toFixed(1) + ',' + (base + 8) + '" fill="#6b7076"/>';
+    }
+    var nx = px(r.nowSec);
+    out += '<line x1="' + nx.toFixed(1) + '" y1="16" x2="' + nx.toFixed(1) + '" y2="' + base +
+           '" stroke="var(--accent)" stroke-width="1.2" stroke-dasharray="3 3"/>';
+    out += '<text x="' + nx.toFixed(1) + '" y="12" text-anchor="middle" font-family="var(--mono)" font-size="10.5" fill="var(--accent)">t=' + r.nowSec + 's</text>';
+    out += '<text x="' + (x0 + w) + '" y="154" text-anchor="end" font-family="var(--mono)" font-size="10" fill="#a1a5aa">▽ = 物件被重新填入的時刻</text>';
+    out += "</svg>";
+    swinPops.innerHTML = out;
+  }
+
+  function swinCard(label, value, tone) {
+    return '<div class="swin-num' + (tone ? " " + tone : "") + '"><div class="nl">' + esc(label) +
+           '</div><div class="nv">' + esc(value) + "</div></div>";
+  }
+
+  function renderSwin(r) {
+    renderSwinRuler(r);
+    renderSwinPops(r);
+    var tone = (r.nowWindow === "fresh" || r.nowWindow === "swr") ? "ok"
+             : (r.nowWindow === "sie" ? "warn" : (r.nowWindow === "error" ? "bad" : ""));
+    swinNums.innerHTML =
+      swinCard("t=" + r.nowSec + "s 這次請求的 age", (r.nowAge < 0 ? "冷 miss" : r.nowAge + " s")) +
+      swinCard("落在哪個窗", KIND_NAME[r.nowWindow], tone) +
+      swinCard("這次的回應延遲", r.nowLatencyMs + " ms", tone) +
+      swinCard("命中（fresh+SWR+SIE）", r.hits + " / " + r.totalRequests) +
+      swinCard("同步回源", String(r.syncOrigins)) +
+      swinCard("背景 revalidate", String(r.bgRevals)) +
+      swinCard("錯誤回應", String(r.errors), r.errors > 0 ? "bad" : "") +
+      swinCard("平均使用者延遲", r.avgLatencyMs + " ms") +
+      swinCard("賣出過最舊的內容", r.maxStaleServed + " s") +
+      swinCard("origin 倒下後還能撐", (r.survivalSec < 0 ? "origin 正常" : r.survivalSec + " s"));
+
     var msg;
-    if (originUp) {
-      msg = "Origin 正常：fresh 窗口直接賣，t=3 起 SWR 先賣舊的再換成 v2。使用者路徑沒有排隊打 origin。";
+    if (r.nowAge < 0) {
+      msg = "t=" + r.nowSec + "s 時邊緣還沒有這份物件，";
+      msg += r.nowWindow === "error" ? "而 origin 已經倒了，只能回錯誤。" : "所以必須同步回源，使用者付一次 RTT。";
     } else {
-      msg = "Origin 故障：SWR 與 SIE 窗口內仍賣 v1；t≥7 窗口外，請求變成錯誤。SIE 是降級不是備份。";
-      tone = "bad";
+      msg = "t=" + r.nowSec + "s 的請求看到的 age 是 " + r.nowAge + "s，落在「" + KIND_NAME[r.nowWindow] +
+            "」，延遲 " + r.nowLatencyMs + " ms。";
     }
-    setVerdict(tone, msg);
-    btnNext.disabled = true;
+    msg += " 整段 " + HORIZON + " 秒裡命中 " + r.hits + " 次、同步回源 " + r.syncOrigins + " 次、背景更新 " +
+           r.bgRevals + " 次、錯誤 " + r.errors + " 次。";
+    if (r.errors > 0) msg += " 窗口撐不住的部分要靠告警，不是靠把 stale-if-error 再加大。";
+    swinStatus.textContent = msg;
   }
 
-  function playKey() {
-    var req = KEY_REQS[step];
-    var key = cacheKey(req);
-    lastKey = key;
-    var hit = Object.prototype.hasOwnProperty.call(store, key);
-    var decision;
-    var see;
-    var bg = "無";
-    var note;
-    var originThis = false;
+  /* (5) 事件綁定 */
 
-    if (hit) {
-      hits += 1;
-      decision = "HIT";
-      see = "快取表徵";
-      note = "同一把 key 已在本 PoP";
-      setActor(actorCli, "ok");
-      setActor(actorEdge, "ok");
-      setActor(actorOri, "");
-      cliVal.textContent = req.label;
-      cliHint.textContent = "命中";
-      edgeVal.textContent = "HIT";
-      edgeHint.textContent = key;
-      oriVal.textContent = "—";
-      oriHint.textContent = "不參與";
-      pushLog("ok", "C→E", "HIT", req.label + " → " + key);
-    } else {
-      misses += 1;
-      originCount += 1;
-      originThis = true;
-      store[key] = { v: "v1" };
-      decision = "MISS";
-      see = "origin 200";
-      note = "新 key，本 PoP 回源一次後寫入";
-      setActor(actorCli, "on");
-      setActor(actorEdge, "on");
-      setActor(actorOri, "ok");
-      cliVal.textContent = req.label;
-      cliHint.textContent = "等待 origin";
-      edgeVal.textContent = "MISS";
-      edgeHint.textContent = key;
-      oriVal.textContent = "200";
-      oriHint.textContent = "填入 " + key;
-      pushLog("read", "C→E", "MISS", req.label + " → " + key);
-      pushLog("ok", "E→O", "GET", "回源寫入 " + key);
+  var CKU_UNIT = { users: " 人", langs: " 種", encs: " 種", devices: " 種", reqcount: " 條", trackedpct: "%" };
+  var SWIN_UNIT = { maxage: " s", swr: " s", sie: " s", interval: " s", failat: " s", now: " s" };
+
+  function readCku() {
+    return {
+      urlRaw: ckuUrl.value,
+      dropList: ckuDrop.value,
+      sortQuery: ckuSort.checked ? 1 : 0,
+      lowerHost: ckuLower.checked ? 1 : 0,
+      stripFragment: ckuFrag.checked ? 1 : 0,
+      cookieInKey: ckuCookie.checked ? 1 : 0,
+      users: ckuRange.users.value,
+      langs: ckuRange.langs.value,
+      encs: ckuRange.encs.value,
+      devices: ckuRange.devices.value,
+      reqCount: ckuRange.reqcount.value,
+      trackedPct: ckuRange.trackedpct.value
+    };
+  }
+
+  function syncCku() {
+    var i, k;
+    for (i = 0; i < CKU_RANGES.length; i++) {
+      k = CKU_RANGES[i];
+      if (ckuOut[k]) ckuOut[k].textContent = ckuRange[k].value + CKU_UNIT[k];
     }
-
-    mStep.textContent = String(step + 1);
-    mHits.textContent = String(hits);
-    mMiss.textContent = String(misses);
-    mOrigin.textContent = String(originCount);
-    mKeys.textContent = String(uniqueCount());
-    keybox.innerHTML = '<span class="kk">key</span>' + escapeHtml(key);
-    renderSlots(key);
-
-    pVerdict.textContent = decision;
-    pVerdict.className = "pv " + (hit ? "good" : "bad");
-    pSee.textContent = see;
-    pBg.textContent = bg;
-    pKey.textContent = key;
-    pHr.textContent = hrText();
-    pUniq.textContent = String(uniqueCount());
-    pOc.textContent = String(originCount);
-    pNote.textContent = note;
-
-    statusEl.textContent = (hit ? "HIT：" : "MISS：") + req.label + "。key = " + key +
-      (originThis ? "。本步打了 origin。" : "。origin 沒動。");
-
-    if (step + 1 >= KEY_REQS.length) finishKey();
+    ckuRange.users.disabled = !ckuCookie.checked;
+    renderCku(computeKeyBreakdown(readCku()));
   }
 
-  function playSwr() {
-    var t = step;
-    var ageBefore = ageAt(t);
-    var w = windowForAge(ageBefore);
-    var decision;
-    var see;
-    var bg = "無";
-    var note;
-    var key = "/feed.json";
-    lastKey = key;
-
-    if (t === 0) {
-      if (!originUp) {
-        misses += 1;
-        decision = "MISS · origin 失敗";
-        see = "錯誤";
-        note = "冷快取且 origin 掛了，沒有舊物件可賣";
-        obj = null;
-        setActor(actorCli, "bad");
-        setActor(actorEdge, "bad");
-        setActor(actorOri, "bad");
-        cliVal.textContent = "GET " + key;
-        cliHint.textContent = "失敗";
-        edgeVal.textContent = "empty";
-        edgeHint.textContent = "無可賣物件";
-        oriVal.textContent = "DOWN";
-        oriHint.textContent = "5xx / timeout";
-        pushLog("bad", "C→E", "MISS", "t=" + t + " 冷 miss，origin 不可達");
-      } else {
-        misses += 1;
-        originCount += 1;
-        obj = { v: 1, filledAt: 0 };
-        store[key] = obj;
-        decision = "MISS · 填入 v1";
-        see = "v1";
-        note = "Age=0，進入 fresh 窗口";
-        setActor(actorCli, "on");
-        setActor(actorEdge, "on");
-        setActor(actorOri, "ok");
-        cliVal.textContent = "GET " + key;
-        cliHint.textContent = "拿到 v1";
-        edgeVal.textContent = "v1 · fresh";
-        edgeHint.textContent = "Age 0 / TTL 3";
-        oriVal.textContent = "200 v1";
-        oriHint.textContent = "寫入邊緣";
-        pushLog("read", "C→E", "MISS", "t=" + t + " 冷 miss");
-        pushLog("ok", "E→O", "200", "origin 回 v1，Age=0");
-      }
-    } else if (!obj) {
-      misses += 1;
-      decision = "仍無物件";
-      see = originUp ? "本應可回源" : "錯誤";
-      note = "t=0 沒填成功，後續沒有 stale 可賣";
-      if (originUp) {
-        originCount += 1;
-        obj = { v: 1, filledAt: t };
-        store[key] = obj;
-        see = "v1";
-        decision = "晚到的填入";
-        setActor(actorCli, "on");
-        setActor(actorEdge, "on");
-        setActor(actorOri, "ok");
-        cliVal.textContent = "GET " + key;
-        cliHint.textContent = "拿到 v1";
-        edgeVal.textContent = "v1";
-        edgeHint.textContent = "本步才寫入";
-        oriVal.textContent = "200 v1";
-        oriHint.textContent = "補填";
-        pushLog("ok", "E→O", "200", "t=" + t + " 補填 v1");
-      } else {
-        setActor(actorCli, "bad");
-        setActor(actorEdge, "bad");
-        setActor(actorOri, "bad");
-        cliVal.textContent = "GET " + key;
-        cliHint.textContent = "失敗";
-        edgeVal.textContent = "empty";
-        edgeHint.textContent = "仍空";
-        oriVal.textContent = "DOWN";
-        oriHint.textContent = "不可達";
-        pushLog("bad", "C→E", "ERR", "t=" + t + " 仍無快取、origin 故障");
-      }
-    } else if (w === "fresh") {
-      hits += 1;
-      decision = "HIT · fresh";
-      see = "v" + obj.v;
-      note = "Age=" + t + " < s-maxage=3，origin 不參與";
-      setActor(actorCli, "ok");
-      setActor(actorEdge, "ok");
-      setActor(actorOri, "");
-      cliVal.textContent = "看到 v" + obj.v;
-      cliHint.textContent = "零回源";
-      edgeVal.textContent = "v" + obj.v + " · fresh";
-      edgeHint.textContent = "Age " + t;
-      oriVal.textContent = "—";
-      oriHint.textContent = "不參與";
-      pushLog("ok", "C→E", "HIT", "t=" + t + " fresh，賣 v" + obj.v);
-    } else if (w === "swr") {
-      hits += 1;
-      decision = "SWR · 先賣舊的";
-      see = "v" + obj.v + "（stale）";
-      if (originUp) {
-        originCount += 1;
-        obj.v += 1;
-        obj.filledAt = t;
-        bg = "條件式 GET → 200 v" + obj.v;
-        note = "使用者已拿到舊版；背景換成 v" + obj.v;
-        setActor(actorCli, "ok");
-        setActor(actorEdge, "dirty");
-        setActor(actorOri, "ok");
-        cliVal.textContent = "先看到 v" + (obj.v - 1);
-        cliHint.textContent = "不等待 origin";
-        edgeVal.textContent = "賣舊 → 寫 v" + obj.v;
-        edgeHint.textContent = "SWR 窗口 Age " + t;
-        oriVal.textContent = "200 v" + obj.v;
-        oriHint.textContent = "背景更新";
-        pushLog("warn", "C→E", "SWR", "t=" + t + " 立刻賣 v" + (obj.v - 1));
-        pushLog("ok", "E→O", "BG", "背景更新成功，store = v" + obj.v);
-      } else {
-        bg = "背景更新失敗，保留 v" + obj.v;
-        note = "仍在 SWR 窗口，origin 失敗不影響這次回應";
-        setActor(actorCli, "ok");
-        setActor(actorEdge, "dirty");
-        setActor(actorOri, "bad");
-        cliVal.textContent = "看到 v" + obj.v;
-        cliHint.textContent = "舊的但成功";
-        edgeVal.textContent = "v" + obj.v + " · stale";
-        edgeHint.textContent = "SWR，origin 失敗被吞";
-        oriVal.textContent = "DOWN";
-        oriHint.textContent = "背景失敗";
-        pushLog("warn", "C→E", "SWR", "t=" + t + " 賣 v" + obj.v + "（stale）");
-        pushLog("bad", "E→O", "BG", "背景更新失敗，繼續持有舊物件");
-      }
-    } else if (w === "sie") {
-      if (originUp) {
-        misses += 1;
-        originCount += 1;
-        obj.v += 1;
-        obj.filledAt = t;
-        decision = "已過 SWR · 驗證後賣新";
-        see = "v" + obj.v;
-        bg = "使用者路徑上的條件式 GET";
-        note = "SWR 結束，必須驗證；origin 正常所以換成新版";
-        setActor(actorCli, "on");
-        setActor(actorEdge, "on");
-        setActor(actorOri, "ok");
-        cliVal.textContent = "等到 v" + obj.v;
-        cliHint.textContent = "付了一次 RTT";
-        edgeVal.textContent = "revalidate";
-        edgeHint.textContent = "Age " + t + " 已出 SWR";
-        oriVal.textContent = "200 v" + obj.v;
-        oriHint.textContent = "同步更新";
-        pushLog("read", "C→E", "REVAL", "t=" + t + " SWR 結束，同步問 origin");
-        pushLog("ok", "E→O", "200", "換成 v" + obj.v);
-      } else {
-        hits += 1;
-        decision = "SIE · origin 失敗仍賣舊";
-        see = "v" + obj.v + "（stale）";
-        bg = "驗證失敗，SIE 允許繼續賣";
-        note = "Age=" + t + " < TTL+SIE=7，錯誤被降級成舊表徵";
-        setActor(actorCli, "ok");
-        setActor(actorEdge, "dirty");
-        setActor(actorOri, "bad");
-        cliVal.textContent = "看到 v" + obj.v;
-        cliHint.textContent = "降級成功";
-        edgeVal.textContent = "v" + obj.v + " · SIE";
-        edgeHint.textContent = "origin 5xx 被吞";
-        oriVal.textContent = "DOWN";
-        oriHint.textContent = "失敗不上浮";
-        pushLog("warn", "C→E", "SIE", "t=" + t + " origin 故障，仍賣 v" + obj.v);
-      }
-    } else {
-      if (originUp) {
-        misses += 1;
-        originCount += 1;
-        obj.v += 1;
-        obj.filledAt = t;
-        decision = "窗口外 · 必須回源";
-        see = "v" + obj.v;
-        note = "SWR 與 SIE 都過了，沒有合法 stale";
-        setActor(actorCli, "on");
-        setActor(actorEdge, "on");
-        setActor(actorOri, "ok");
-        cliVal.textContent = "等到 v" + obj.v;
-        cliHint.textContent = "同步回源";
-        edgeVal.textContent = "expired";
-        edgeHint.textContent = "Age " + t;
-        oriVal.textContent = "200 v" + obj.v;
-        oriHint.textContent = "強制更新";
-        pushLog("read", "C→E", "EXP", "t=" + t + " 窗口外，同步回源");
-      } else {
-        misses += 1;
-        decision = "窗口外 · 錯誤上浮";
-        see = "錯誤";
-        bg = "無舊可賣";
-        note = "SIE 已過（TTL+SIE=7），不能再賣 v" + obj.v;
-        setActor(actorCli, "bad");
-        setActor(actorEdge, "bad");
-        setActor(actorOri, "bad");
-        cliVal.textContent = "錯誤頁";
-        cliHint.textContent = "降級結束";
-        edgeVal.textContent = "expired";
-        edgeHint.textContent = "不准賣 stale";
-        oriVal.textContent = "DOWN";
-        oriHint.textContent = "5xx 上浮";
-        pushLog("bad", "C→E", "ERR", "t=" + t + " SIE 窗口外，origin 故障上浮");
-      }
-    }
-
-    mStep.textContent = String(t + 1);
-    mHits.textContent = String(hits);
-    mMiss.textContent = String(misses);
-    mOrigin.textContent = String(originCount);
-    mKeys.textContent = obj ? "1" : "0";
-    keybox.innerHTML = '<span class="kk">object</span>' + (obj ? ("v" + obj.v + " · Age " + ageBefore + " → window " + w) : "empty");
-    tickHist[t] = see === "錯誤" ? "dead" : w;
-    renderTicks(t);
-    renderSlots(obj ? key : "");
-
-    pVerdict.textContent = decision;
-    pVerdict.className = "pv " + (see === "錯誤" ? "bad" : (w === "swr" || w === "sie" ? "warn" : "good"));
-    pSee.textContent = see;
-    pBg.textContent = bg;
-    pKey.textContent = key;
-    pHr.textContent = hrText();
-    pUniq.textContent = obj ? "1" : "0";
-    pOc.textContent = String(originCount);
-    pNote.textContent = note;
-
-    statusEl.textContent = "t=" + t + " · " + decision + " · 使用者看到 " + see + "。";
-
-    if (t + 1 >= TICKS) finishSwr();
+  function applyPreset(name) {
+    var p = PRESETS[name];
+    ckuUrl.value = p.urlRaw;
+    ckuDrop.value = p.dropList;
+    ckuSort.checked = !!p.sortQuery;
+    ckuLower.checked = !!p.lowerHost;
+    ckuFrag.checked = !!p.stripFragment;
+    ckuCookie.checked = !!p.cookieInKey;
+    ckuRange.users.value = p.users;
+    ckuRange.langs.value = p.langs;
+    ckuRange.encs.value = p.encs;
+    ckuRange.devices.value = p.devices;
+    ckuRange.reqcount.value = p.reqCount;
+    ckuRange.trackedpct.value = p.trackedPct;
+    syncCku();
   }
 
-  function applyChrome() {
-    var isKey = mode === "key";
-    keyView.hidden = !isKey;
-    swrView.hidden = isKey;
-    ticksEl.hidden = isKey;
-    slotsEl.hidden = false;
-    hintEl.textContent = HINTS[mode];
-    mTotal.textContent = isKey ? String(KEY_REQS.length) : String(TICKS);
-    cliAl.textContent = isKey ? "本步請求" : "使用者看到";
-    edgeAl.textContent = isKey ? "Cache Key / 狀態" : "新鮮度窗口";
-    oriAl.textContent = isKey ? "回源" : (originUp ? "Origin 正常" : "Origin 故障");
+  function pressOnly(root, attr, want) {
+    Array.prototype.forEach.call(root.querySelectorAll("button"), function (b) {
+      b.setAttribute("aria-pressed", b.getAttribute(attr) === want ? "true" : "false");
+    });
   }
 
-  function idleActors() {
-    setActor(actorCli, "");
-    setActor(actorEdge, "");
-    setActor(actorOri, "");
-    cliVal.textContent = "—";
-    cliHint.textContent = "待命";
-    edgeVal.textContent = "—";
-    edgeHint.textContent = "待命";
-    oriVal.textContent = "—";
-    oriHint.textContent = "待命";
-  }
-
-  function reset() {
-    step = 0;
-    store = {};
-    hits = 0;
-    misses = 0;
-    originCount = 0;
-    lastKey = "";
-    obj = null;
-    logs = [];
-    tickHist = [];
-    btnNext.disabled = false;
-    applyChrome();
-    idleActors();
-    mStep.textContent = "0";
-    mHits.textContent = "0";
-    mMiss.textContent = "0";
-    mOrigin.textContent = "0";
-    mKeys.textContent = "0";
-    pVerdict.textContent = "—";
-    pVerdict.className = "pv";
-    pSee.textContent = "—";
-    pBg.textContent = "—";
-    pKey.textContent = "—";
-    pHr.textContent = "—";
-    pUniq.textContent = "0";
-    pOc.textContent = "0";
-    pNote.textContent = "—";
-    keybox.innerHTML = '<span class="kk">key</span>—';
-    wireEl.innerHTML = "";
-    if (mode === "key") {
-      ticksEl.innerHTML = "";
-      renderSlots("");
-      statusEl.textContent = "Cache Key 實驗室：按「下一步」重放請求。改旋鈕會重置。";
-      setVerdict("", "判定尚未產生——走完 8 個請求後會摘要命中率與唯一物件數。");
-    } else {
-      renderTicks(-1);
-      renderSlots("");
-      statusEl.textContent = "SWR 時間軸：按「下一步」從 t=0 冷 miss 開始。可中途改 Origin 狀態（會重置）。";
-      setVerdict("", "判定尚未產生——走完 8 個時刻後會摘要 fresh／SWR／SIE。");
-    }
-  }
-
-  btnNext.addEventListener("click", function () {
-    if (mode === "key") {
-      if (step >= KEY_REQS.length) return;
-      playKey();
-      step += 1;
-    } else {
-      if (step >= TICKS) return;
-      playSwr();
-      step += 1;
-    }
+  ckuSegPreset.addEventListener("click", function (ev) {
+    var btn = ev.target.closest("button");
+    if (!btn || !ckuSegPreset.contains(btn)) return;
+    var name = btn.getAttribute("data-preset");
+    if (!name || !Object.prototype.hasOwnProperty.call(PRESETS, name)) return;
+    pressOnly(ckuSegPreset, "data-preset", name);
+    applyPreset(name);
   });
 
-  btnReset.addEventListener("click", reset);
+  (function bindCku() {
+    var i;
+    for (i = 0; i < CKU_RANGES.length; i++) ckuRange[CKU_RANGES[i]].addEventListener("input", syncCku);
+    ckuUrl.addEventListener("input", syncCku);
+    ckuDrop.addEventListener("input", syncCku);
+    ckuSort.addEventListener("change", syncCku);
+    ckuLower.addEventListener("change", syncCku);
+    ckuFrag.addEventListener("change", syncCku);
+    ckuCookie.addEventListener("change", syncCku);
+  })();
 
-  reset();
+  ckuReset.addEventListener("click", function () {
+    pressOnly(ckuSegPreset, "data-preset", "good");
+    applyPreset("good");
+  });
+
+  function readSwin() {
+    return {
+      maxAge: swinRange.maxage.value,
+      swr: swinRange.swr.value,
+      sie: swinRange.sie.value,
+      intervalSec: swinRange.interval.value,
+      originFails: swinOriginFails,
+      failAt: swinRange.failat.value,
+      nowSec: swinRange.now.value
+    };
+  }
+
+  function syncSwin() {
+    var i, k;
+    for (i = 0; i < SWIN_RANGES.length; i++) {
+      k = SWIN_RANGES[i];
+      if (swinOut[k]) swinOut[k].textContent = swinRange[k].value + SWIN_UNIT[k];
+    }
+    swinRange.failat.disabled = swinOriginFails !== 1;
+    renderSwin(computeStaleWindows(readSwin()));
+  }
+
+  swinSegOrigin.addEventListener("click", function (ev) {
+    var btn = ev.target.closest("button");
+    if (!btn || !swinSegOrigin.contains(btn)) return;
+    var v = btn.getAttribute("data-origin");
+    if (v == null) return;
+    swinOriginFails = v === "down" ? 1 : 0;
+    pressOnly(swinSegOrigin, "data-origin", v);
+    syncSwin();
+  });
+
+  (function bindSwin() {
+    var i;
+    for (i = 0; i < SWIN_RANGES.length; i++) swinRange[SWIN_RANGES[i]].addEventListener("input", syncSwin);
+  })();
+
+  swinReset.addEventListener("click", function () {
+    swinRange.maxage.value = 10;
+    swinRange.swr.value = 5;
+    swinRange.sie.value = 30;
+    swinRange.interval.value = 3;
+    swinRange.failat.value = 40;
+    swinRange.now.value = 12;
+    swinOriginFails = 1;
+    pressOnly(swinSegOrigin, "data-origin", "down");
+    syncSwin();
+  });
+
+  syncCku();
+  syncSwin();
 })();
 </script>
 
