@@ -1425,14 +1425,6 @@
   .cec-card .cl { font-family: var(--mono); font-size: 11px; color: var(--text-3); margin-bottom: 6px; letter-spacing: .04em; }
   .cec-card .cs { font-size: 12.5px; color: var(--text-2); line-height: 1.55; }
 
-  .cec-flow { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin: 10px 0 4px; font-family: var(--mono); font-size: 12px; }
-  .cec-chip { border: 1px solid var(--border-strong); border-radius: 6px; padding: 6px 10px; background: #fff; font-weight: 600; color: var(--text); }
-  .cec-chip.cli { background: var(--cec-c-soft); border-color: var(--cec-c); color: var(--cec-c); }
-  .cec-chip.edge { background: var(--cec-alt-soft); border-color: var(--cec-alt); color: var(--cec-alt); }
-  .cec-chip.origin { background: var(--cec-s-soft); border-color: var(--cec-s); color: var(--cec-s); }
-  .cec-chip.op { background: var(--bg-soft); color: var(--text-3); border-style: dashed; font-weight: 500; }
-  .cec-chip.warn { background: var(--cec-w-soft); border-color: var(--cec-w); color: var(--cec-w); }
-
   .cec-split { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin: 12px 0; }
   @media (max-width: 640px) { .cec-split { grid-template-columns: 1fr; } }
   .cec-pane {
@@ -1937,14 +1929,34 @@ flowchart LR
   <p class="cap">一條經驗：HTML 入口短 TTL 或 no-cache；雜湊資產 <code>s-maxage</code> 一年 + <code>immutable</code>；帶身分的回應不要進 CDN。</p>
 
   <p class="cec-sub">ETag 在邊緣是「origin 的驗證器」</p>
-  <p>物件過期後，邊緣向 origin 送：</p>
-  <div class="cec-flow">
-    <span class="cec-chip edge">If-None-Match: "v7"</span>
-    <span class="cec-chip op">→ origin</span>
-    <span class="cec-chip origin">304 無 body</span>
-    <span class="cec-chip op">或</span>
-    <span class="cec-chip warn">200 新表徵 + 新 ETag</span>
+  <p>物件過期後，邊緣帶著手上那份的 ETag 向 origin 送 <code>If-None-Match: "v7"</code>，origin 只會有兩種回答：</p>
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>origin 判定</th>
+          <th>回應</th>
+          <th>邊緣接著做</th>
+          <th>省下什麼</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td class="hl">內容沒變（ETag 仍是 <code>"v7"</code>）</td>
+          <td><code>304 Not Modified</code>，無 body</td>
+          <td>沿用手上的物件，依新標頭重算新鮮期</td>
+          <td>origin 出口頻寬與產生成本；RTT 照付</td>
+        </tr>
+        <tr>
+          <td>內容已變</td>
+          <td><code>200</code> + 新表徵 + 新 ETag</td>
+          <td>換掉物件，記下新 ETag 供下次驗證</td>
+          <td>什麼都沒省，等同一次完整回源</td>
+        </tr>
+      </tbody>
+    </table>
   </div>
+  <p class="cap">該看「省下什麼」欄：驗證成功時省的是 body，不是往返；兩列付出的 RTT 相同。</p>
   <p>304 的意義是<strong>省 origin 出口頻寬與產生成本，不省 RTT</strong>。邊緣到 origin 往往已經在骨幹上，RTT 不是零；所以能靠 SWR 讓使用者不排隊的，就不要讓使用者路徑去等 304。304 適合「必須確認新舊、但內容十次有九次沒變」的 API 與 HTML。</p>
   <p>瀏覽器對 CDN 也可以再做一次同樣的對話。那是另一跳：CDN HIT 時，瀏覽器的 <code>If-None-Match</code> 由邊緣回答 304，origin 仍不參與。兩段驗證不要畫成一條。</p>
 
@@ -2037,13 +2049,35 @@ flowchart LR
   <p class="cec-sub">3 · Origin Shield 與分層快取</p>
   <p>每個 PoP 都是獨立的葉子快取。一個新資產、一次全球 purge、一個短 TTL 的熱 JSON，會讓<strong>每個未命中的 PoP 各打 origin 一次</strong>。Origin Shield 是靠近 origin 的父快取：葉子 miss 先問 Shield，Shield HIT 就結束，Shield MISS 才真正進 origin。</p>
 
-  <div class="cec-flow">
-    <span class="cec-chip cli">全球 PoPs</span>
-    <span class="cec-chip op">MISS</span>
-    <span class="cec-chip edge">Origin Shield</span>
-    <span class="cec-chip op">HIT？結束</span>
-    <span class="cec-chip origin">Shield MISS → Origin × 1</span>
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>請求落在哪</th>
+          <th>經過的跳</th>
+          <th>origin 收到的請求</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>葉子 PoP HIT</td>
+          <td>葉子直接回，不經過 Shield</td>
+          <td>0</td>
+        </tr>
+        <tr>
+          <td>葉子 MISS、Shield HIT</td>
+          <td>葉子 → Shield</td>
+          <td>0</td>
+        </tr>
+        <tr>
+          <td class="hl">葉子 MISS、Shield MISS</td>
+          <td>葉子 → Shield → origin</td>
+          <td>同一物件全球合計 1 次（沒有 Shield 時是每個未命中的 PoP 各 1 次）</td>
+        </tr>
+      </tbody>
+    </table>
   </div>
+  <p class="cap">該看最後一欄：Shield 把「每個 PoP 各打一次」收斂成「全球打一次」，多出的那一跳只出現在 miss 的兩列。</p>
 
   <p>這是跨 PoP 的 collapsing。單一 PoP 內的 in-flight 合併處理「這一棟樓的電梯」；Shield 處理「整座城市只派一輛卡車去倉庫」。多一跳的代價發生在 miss 路徑上：HIT 仍由葉子直接回，不經過 Shield。</p>
 
