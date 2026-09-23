@@ -61,6 +61,9 @@
    > **圖表形式與 Demo 互動模型必須多樣**。本專案曾因混淆這兩者而發生嚴重同質化
    > （連續 10 篇共用同一套 demo 骨架、相鄰兩篇 CSS 逐字相同率 96%）。
    > 反覆複製上一篇的 demo 骨架或 `.X-flow` chip row，是**明確違規**，見 style-guide「嚴格禁止的作法」。
+> Demo 的多樣性與真實性由 `scripts/quality/` 三支唯讀腳本機械把關（style-guide §0.6）：新寫或重做 demo 時，
+> generate 之前必須通過 `demo-audit.js`、`compute-probe.js` 與 `archetype-window.js --topic <id>`。
+> archetype 一律從各篇 `content.html` 開頭的宣告推導，不另外維護對照表。
 4. **不要從零撰寫 HTML 外殼**（header/footer 等），由 `templates/base.html` + `generate.js` 自動組裝。
 5. **`drafts/` 是內容原始碼**：draft (`content.html` / `script.html`) 是產物頁面的內容真相來源，隨產物一起 commit。內容改動改 draft、模板改動改 `templates/base.html`，兩者都靠重跑 `generate.js` 產頁；不要直接手改 `books/`。
 
@@ -91,7 +94,9 @@
 | `docs/todo.json` | 待辦主題池（可含 optional `brief` 撰文指引） | 由 `topic-explorer` skill 維護（`add-topic.js --brief` 寫入；發佈後由 author 收尾移除） |
 | `docs/mindmap.json` | 全站心智圖 (DAG) | 記錄 Prerequisites / Related 關係；經 `add-topic.js` 寫入，勿手拼 |
 | `docs/completed.json` | 已完成主題 metadata | **自動維護**：發佈由 `generate.js` 寫入、**撤回**用 `remove-completed.js`；**仍禁止手動編輯本檔** |
-| `guidelines/style-guide.md` | 視覺、**圖表選型**與互動元件（**Demo Archetype**）風格規範 | 撰稿前嚴格閱讀遵循 |
+| `guidelines/style-guide.md` | 視覺、**圖表選型**與互動元件（**Demo Archetype**、compute／render 與 `@probe`）風格規範 | 撰稿前嚴格閱讀遵循 |
+| `guidelines/demo-agent-brief.md` | 派 Sub-Agent 實作 demo 時的共用 brief（約束、兩階段、11 欄設計說明） | 派工時逐字附在指派之後 |
+| `docs/tech-debt.md` | 已知、尚未處理的全站問題與處理狀態 | 人工維護；處理完一項就更新該列 |
 | `templates/base.html` | 全站 HTML 外殼範本 (Notion 淺色版) | 嚴格讀取，不建議手動更改 |
 | `drafts/{topic-id}/` | **撰稿主要工作區（內容原始碼）** | AI 建立與寫入 content.html 和 script.html，隨產物一起提交 |
 | `books/{topic-id}/index.html` | 發佈後的最終主題網頁 | **自動生成**（由 `generate.js` 產出，勿手動編輯） |
@@ -103,6 +108,9 @@
 | `node scripts/remove-todo.js` | 從 todo.json 移除已完成主題的 CLI 腳本 | **自動化執行** |
 | `node scripts/remove-completed.js` | 從 completed.json 撤回主題並重繪索引（三檔交易式寫入 + 回滾） | **自動化執行**（撤回/重做用） |
 | `node scripts/validate.js` | 狀態檔一致性驗證（含todo<->completed互斥 + prerequisite 環偵測 + books/index 學習地圖 payload <-> completed/mindmap 同步） | **改完 JSON 必跑** |
+| `node scripts/quality/demo-audit.js <id>` | Demo L1：11 項機械檢查（archetype 宣告、`.seg`、三件組、舊骨架、語法、id 綁定、cap、compute 分離…） | **唯讀**；新寫／重做 demo 時 generate 前必過 |
+| `node scripts/quality/compute-probe.js <id>` | Demo L2：依 `@probe` 在無 DOM sandbox 推參數兩端，判定模擬器 vs 播放器 | **唯讀**；同上 |
+| `node scripts/quality/archetype-window.js [--topic <id>]` | 發佈序 × 主 archetype 撞形檢查（最近 3 篇）；`--topic` 為閘門模式 | **唯讀**；選型時與 generate 前各跑一次 |
 
 ---
 
@@ -110,14 +118,14 @@
 
 本專案是**零依賴的純 Node.js 靜態網站產生器**——沒有 `package.json`、沒有 `node_modules`，所有腳本只用 Node 內建模組（`fs`、`path`）。因此**不需要任何套件安裝步驟**（startup update script 為 no-op 的 `node --version` 健檢即可），有 Node 18+ 即可運作（CI 用 Node 24，本機驗證過 v22）。
 
-- **Lint / Test 檢查（唯一品質閘門）**：靜態檢查用 ReadLints 掃產出的 `books/<id>/index.html`；狀態一致性用 `node scripts/validate.js`。專案沒有單元測試框架、也沒有獨立 linter；CI（`.github/workflows/deploy.yml`）每次 push 到 `main` 都只跑 `validate.js`，通過後才部署。改完任何 `docs/*.json` 必跑。**瀏覽器點測不是品質閘門。**
+- **Lint / Test 檢查（唯一品質閘門）**：靜態檢查用 ReadLints 掃產出的 `books/<id>/index.html`；狀態一致性用 `node scripts/validate.js`；demo 品質用 `scripts/quality/` 的 `demo-audit.js`、`compute-probe.js`、`archetype-window.js --topic <id>`（新寫／重做 demo 時 generate 前必過，見 style-guide §0.6）。專案沒有單元測試框架、也沒有獨立 linter；CI（`.github/workflows/deploy.yml`）每次 push 到 `main` 都只跑 `validate.js`，通過後才部署（demo 閘門尚未進 CI：舊篇有既有失敗，登錄於 `docs/tech-debt.md`）。改完任何 `docs/*.json` 必跑 `validate.js`。改了 `scripts/quality/compute-probe.js` 本身時，另跑 `SDED_ROOT=scripts/quality/fixtures node scripts/quality/compute-probe.js --all` 回歸（good-sim、two-demos 應 PASS，fake-player 應 FAIL）。**瀏覽器點測不是品質閘門。**
 - **Build（產頁）**：先建立 `drafts/<topic-id>/content.html`（內容須含合法 `<section id="..."><h2>...</h2>` 結構，否則 `generate.js` 會零副作用 exit 1），再跑 `node scripts/generate.js --topic <id> --title "..." --category "..."`。draft 是產物的內容原始碼，`generate.js` 只讀不刪，隨產物一起提交。
 - **Run（沒有 dev server；給人看的預覽說明，不是 Agent QA）**：產物是 `books/` 下的純靜態 HTML，無後端、無打包。人在本機可用任意靜態伺服器預覽，例如 `python3 -m http.server 8080 --directory books`，再開 `http://localhost:8080/index.html`。Cloud Agent **不得**把本段當成「必須開瀏覽器 / 啟動 Sub-Agent 點測」的收尾步驟。注意首頁的可點擊學習地圖是用 **CDN 載入的 Cytoscape** 繪製，故互動渲染需要對外網路；若 CDN 失效或瀏覽器停用 JavaScript，首頁會自動退回 server-rendered 的純文字已完成文章清單（連結仍可用）。
 - **副作用提醒**：`generate.js` 會異動受版控的 `docs/completed.json`、`books/index.html` 與 `books/<id>/index.html`。若只是臨時測試流程，請事後用 git 還原這些檔案，避免把試打的主題誤留進手冊。
 
 ### Cloud Agent：禁止以 Sub-Agent / 瀏覽器做產文 QA
 
-產文與選題的驗證**只走專案腳本與靜態檢查**（ReadLints + `validate.js`）。這不是建議，是約束：
+產文與選題的驗證**只走專案腳本與靜態檢查**（ReadLints + `validate.js` + `scripts/quality/` demo 閘門）。這不是建議，是約束：
 
 - **禁止**為了檢查產出頁面而啟動 Sub-Agent、browser tool、computer-use worker，或對 `books/` 做瀏覽器點測 / screenshot 驗收。
 - 不要把「改了 HTML / Demo」解讀成必須開瀏覽器才能收工；本專案的完成條件是腳本閘門通過，以及（本節下方）直推 `main`。
@@ -127,7 +135,7 @@
 
 1. 模型必須 **inherit parent**（目前 Cloud Agent 設為 **Grok 4.6**），或顯式指定 Grok 4.6。
 2. **禁止**改用 Claude / Sonnet（含 Sonnet 4.5）或其他非 parent 模型。
-3. 若請求的模型在該 Sub-Agent 不可用：**不要啟動**，也不准退回 Sonnet；改走 ReadLints + `validate.js` 收工並在回報中註明「browser Sub-Agent skipped」。
+3. 若請求的模型在該 Sub-Agent 不可用：**不要啟動**，也不准退回 Sonnet；改走 ReadLints + `validate.js` + `scripts/quality/` demo 閘門收工並在回報中註明「browser Sub-Agent skipped」。
 
 ## 🚀 Remote Sync Strategy（Only for Cursor Cloud Automation / Headless mode）
 

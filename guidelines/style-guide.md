@@ -7,8 +7,9 @@
 > - **要一致**：配色、字體、`.callout` / `.oneliner` / `.tbl-wrap` / `.demo` 外殼等元件樣式。
 > - **要多樣**：圖表形式（見「圖表與示意圖規範」）與 Demo 互動模型（見「Demo Archetype」）。
 >
-> 理想參考標的 `DistributedTransactions.html` 本身就有 **6 個 demo、6 種不同互動形式**。
-> 把它當成「視覺基準」，**不要**把它的某一個 demo 當成所有主題的模板。
+> 多 demo 結構的參考標的 `drafts/distributed-transactions-handbook` 一頁有 **6 個 demo、6 種不同互動形式**。
+> 借它的**結構**（拆小、各司其職、就近擺放），**不要**把它的某一個 demo 當成所有主題的模板；
+> 其中 4 個 demo 的輸出仍是字面常數，**不可作為實作參考**（見 §0.3）。
 
 ---
 
@@ -399,7 +400,7 @@ sequenceDiagram
 | **B** | **參數掃描**<br>Parameter sweep | 拖 slider / 改數值，結果**即時重算** | 有可調參數、且參數會改變結果的機制（watermark 延遲、W+R>N、TTL、acks、chunk size） | `drafts/stream-processing`（視窗×水位）、`drafts/nat-port-forwarding`（自由輸入→四元組比對→改寫或 DROP） |
 | **C** | **並排對照**<br>Side-by-side | 同一組輸入同時餵給兩個面板（「天真 vs 正確」，或兩種都合法的相反設計） | 有明確錯誤解法、或有兩種對立取捨的主題（dual-write vs Outbox、B-Tree vs LSM-Tree） | `drafts/embedded-database`（SQLite vs RocksDB，MemTable／L0 stall／write amp 真算） |
 | **D** | **空間視覺化**<br>Spatial | 在幾何／座標空間上點選、拖曳、增刪節點 | 有空間語意的主題（hash ring、向量空間、分區環、子網位址空間） | `drafts/consistent-hashing-handbook`（successor rule 與 remap% 真算）、`drafts/vector-database-fundamentals`（canvas，IVF／HNSW 真的只掃被 probe 的部分） |
-| **E** | **決策器**<br>Decision | 回答數個問題 → 導出選型建議與理由 | 選型類、trade-off 類、「什麼時候該用哪個」 | `DistributedTransactions.html`「選型決策器」（三題 → `decide()` 推導，含衝突需求的特例） |
+| **E** | **決策器**<br>Decision | 回答數個問題 → 導出選型建議與理由 | 選型類、trade-off 類、「什麼時候該用哪個」 | `drafts/distributed-transactions-handbook`「選型決策器」（三題 → `decide()` 推導，含衝突需求的特例） |
 | **F** | **拆解器**<br>Decomposer | 輸入一筆真實資料 → 逐層 / 逐 byte 拆解標註 | 有格式或編碼結構的主題（protobuf wire format、封包標頭、子網遮罩、JWT、URL） | `drafts/ip-addressing-subnetting`（逐 bit 切 net／host，含 /31 /32 邊界）、`drafts/search-analytics-engine`（分詞→posting→合併→BM25 逐階段攤開） |
 
 同一個主題常常有不只一種可行選型。**若 A 與 B 都說得通，優先選 B**——能被使用者擾動的 demo 幾乎總是資訊量更大。
@@ -407,6 +408,9 @@ sequenceDiagram
 > **這張表的「站內範本」欄只列經過逐行查核、確認輸出真的由輸入算出來的篇。**
 > 不要拿其他篇當範本——全站曾有近半數的 demo 是把預寫敘事播一遍的播放器（見 §0.2 鐵律 4 的假 demo 判準），
 > 照著抄只會複製那個錯誤。每一格括號裡註明的就是「它真的算了什麼」，那是你該對齊的水準。
+>
+> 範本示範的是**計算深度**，不是程式結構：表中多數篇早於 §0.5 的 compute／render 約定。
+> 新寫或重做 demo 時，程式結構一律以 §0.5 為準。
 
 #### 0.2 選型鐵律
 
@@ -419,22 +423,55 @@ sequenceDiagram
 
 註解需包含：**archetype 代號 + 一句話說明使用者能操作什麼 + 為何這個形式最適合這個概念**。
 
-**2. 不得與最近 3 篇撞形。** 開工前跑 `node scripts/completed-ledger.js --action get-recent --limit 3`，
-逐篇打開 `drafts/<id>/content.html` 第一行看它的 archetype 宣告。**若你想用的形式已在最近 3 篇出現過，換一個。**
+代號一律寫成「`X｜名稱`」（全形 `｜`，工具靠它抓代號）。一篇有主、次 demo 時依序列出，
+**第一個代號就是主 archetype**，撞形檢查只看它：
+
+```html
+<!-- demo-archetype: E｜決策器（主，第 6 節）＋B｜參數掃描（次，第 5 節） — 讀者調 acks／min.isr／RF
+     與「幾台掛掉」，即時算出可否寫入、會不會遺失，並導出建議設定。選 E 是因為核心命題是一個判定問題。 -->
+```
+
+這則宣告是全站 archetype 的**唯一真相來源**，不另外維護對照表。
+
+**2. 不得與最近 3 篇撞形。** 開工前跑：
+
+```bash
+node scripts/quality/archetype-window.js            # 列出全站發佈序 × 主 archetype，與「下一篇不可用的主 archetype」
+```
+
+寫好宣告後再跑一次閘門模式，未通過不得 generate：
+
+```bash
+node scripts/quality/archetype-window.js --topic <id>   # 尚未發佈的篇視為下一篇；只判定牽涉 <id> 的視窗
+```
+
+**若你想用的形式已在最近 3 篇出現過，換一個。**
 撞形時的處理順序：先回 §0.1 找第二適合的 archetype；真的只有一種形式可行，就把 demo 拆小、換切入角度（例如同樣是 A，改成從失敗路徑倒著走）。
 
 **3. Archetype A 是受限選項。** 只有在概念本質就是「一組固定且有順序的步驟」時才可用。
 自我檢查：**如果你正在寫 `if (step === 1) ... else if (step === 5)` 的巨型 dispatch，而且每個情境各抄一份敘事——
 你做的是投影片，不是模擬器。** 回到 §0.1 換一種。
 
-**4. 至少要有一個真自由度。** 使用者的操作必須改變**計算結果**，而不是切換到另一段預先寫好的旁白。
+選了 A 也必須是**真 A**：
+
+- **禁止** `SCENARIOS = { normal: [frame, frame, …] }` 這類 frames 陣列；每一步的狀態必須由**讀者設定的參數 ＋ 規則函式**算出來
+  （例：DNS 每一步問哪一層，由各層快取的 TTL 剩餘量決定；task 的下一個狀態，由讀者注入的事件套用轉移表決定）。
+- compute 函式簽名建議 `computeX(params, step)` 或回傳整條 `timeline[]`；`@probe sweep` 要把 `step`（或 `tick`）也列為參數。
+- 每一步的說明句可以由狀態拼出（模板 ＋ 算出來的數字），不得是預寫的整段文案。
+
+**4. 至少三個算出來的輸出。** 使用者的操作必須改變**計算結果**，而不是切換到另一段預先寫好的旁白。
+門檻訂在三個，是因為一個太容易用「總步數」「計數器 +1」這類無教學意義的算術交差；
+§0.5 的 L2 閘門會機械檢查這一條。
 
 > **假 demo 判準**：把所有情境的輸出字串列出來。如果它們全部都是程式碼裡的字面常數，
-> 這個 demo 就是一台播放器，不是模擬器。至少要有一個輸出是**算出來的**。
+> 這個 demo 就是一台播放器，不是模擬器。
+>
+> 「算出來」指**由使用者的輸入經過運算推導**。以下**不算**：從預寫的 `SC = { normal: {...}, crash: {...} }`
+> 取出對應文案；`step` 遞增、`total` 常數、印出陣列長度；只換了顏色 class、數字沒換。
 
 #### 0.3 一篇可以有多個小 demo
 
-理想參考標的 `DistributedTransactions.html` 有 **6 個 demo、6 種不同 archetype**（光譜、流程、時序實驗室、補償鏈、並排對照、決策器）。
+結構參考標的 `drafts/distributed-transactions-handbook` 有 **6 個 demo、6 種不同 archetype**（光譜、流程、時序實驗室、補償鏈、並排對照、決策器）。
 
 - **兩三個各司其職的小 demo，遠優於一個塞滿多層 `.seg` 的巨型 demo。**
 - 經驗法則：**若單一 demo 需要 3 組以上 `.seg` 才講得完，那是在提示你該拆成 2 個 demo。**
@@ -456,6 +493,65 @@ sequenceDiagram
 | `.X-wire` 事件日誌捲軸 | 僅當「訊息往返順序」本身就是教學重點時 |
 
 > **三者同時出現 = 進度條 + 旁白 + 字幕捲軸 = 播放器。** 這正是本專案要避免的觀感。
+
+#### 0.5 compute／render 分離與 `@probe`（必填）
+
+本專案禁止以瀏覽器做 demo 驗收，因此 demo 的計算必須能在**沒有 DOM** 的環境下被機械驗證。
+`script.html` 的 IIFE 內**依序**排列五段：
+
+```js
+<script>
+(function () {
+  "use strict";
+
+  /* (1) 常數與參數表 */
+  var MAX_CONN = 60000;
+
+  /* (2) compute* 純函式 —— 不得出現 document / getElementById / innerHTML / classList / addEventListener */
+  // @probe fn       computeDrain
+  // @probe baseline {"nodes":4,"batchSize":1,"budgetSec":30,"jitterPct":20}
+  // @probe sweep    {"nodes":[2,16],"batchSize":[1,8],"budgetSec":[5,300],"jitterPct":[0,100]}
+  function computeDrain(p) {
+    /* 只吃 p、只回傳物件。所有教學上重要的數字都在這裡算出來。 */
+    return { perNode: …, waves: …, reconnectPeak: …, skew: [...], safe: … };
+  }
+
+  /* (3) DOM 參照 */
+  /* (4) render(state) —— 只讀 state 畫出來，不做任何判斷 */
+  /* (5) 事件綁定 */
+})();
+</script>
+```
+
+每個 compute 進入點上方的**三行 `@probe` 註解是必填的**（一頁多個 demo 就寫多組）：
+
+| 指令 | 意義 |
+| :--- | :--- |
+| `@probe fn <name>` | 斷言的進入點函式名 |
+| `@probe baseline {...}` | 一組預設參數（JSON 單行） |
+| `@probe sweep {...}` | 每個參數要被推到的兩端值（JSON 單行，值為陣列） |
+
+L2 閘門會在完全沒有 `document` 的 vm sandbox 裡求值 (1)+(2)，逐一把 sweep 的每個參數推到兩端、比對輸出。
+判定標準：**每個參數都必須至少改變一個輸出，且會變動的輸出總數 ≥ 3**。
+所以 (2) 不能依賴 (3) 之後才宣告的任何變數，也不能碰 DOM——碰了會直接 ReferenceError。
+
+> 這是**架構約定，不是 UI 骨架**，不違反「禁止複製上一篇 demo 骨架」：
+> 互動模型與畫面仍須為每一篇從頭設計，只是把「算」和「畫」分開放。
+
+#### 0.6 Demo 品質閘門（generate 之前必過）
+
+```bash
+node scripts/quality/demo-audit.js <id>             # L1：11 項機械檢查（宣告、.seg、三件組、舊骨架、語法、id 綁定、cap…）
+node scripts/quality/compute-probe.js <id>          # L2：依 @probe 證明它是模擬器而非播放器
+node scripts/quality/archetype-window.js --topic <id>   # 撞形檢查（§0.2 鐵律 2）
+```
+
+三者皆 exit 0 才可 generate。L1 的第 6 項（id 綁定）與第 9 項（cap）是啟發式：
+動態組出 id 再 `getElementById` 會被誤報為死控制項、cap 位置判斷只看容器後 4000 字。
+逐一確認屬誤報後可放行，並在回報中註明。
+
+早於本約定的舊篇會在 L1 第 11 項或 L2 失敗，清單登錄於 `docs/tech-debt.md`；
+**只改論述、不動 demo** 的修訂不受這些既有失敗阻擋，動到 demo 就必須讓它通過。
 
 ---
 
@@ -552,6 +648,14 @@ sequenceDiagram
 
 9. **禁止未宣告 archetype 就動手寫 demo**（`content.html` 第一行的 `<!-- demo-archetype: ... -->` 註解為必填）。
 10. **禁止與最近 3 篇使用相同的 archetype。**
-11. **禁止「腳本重播型」demo**——整個 demo 的輸出全是程式碼裡的字面常數、使用者操作只是切換播放哪一段預寫敘事。至少要有一個輸出是**算出來的**。
+11. **禁止「腳本重播型」demo**——整個 demo 的輸出全是程式碼裡的字面常數、使用者操作只是切換播放哪一段預寫敘事。至少要有三個輸出是**算出來的**（§0.2 鐵律 4）。
 12. **禁止複製上一篇的 demo 骨架再改 class 前綴。** Demo 的 CSS/JS 骨架**不是**共享資產（與圖表 CSS 相反）；每篇的互動模型必須從 §0 重新選型。
 13. **禁止把 `.X-metric`（步 N/M）、`.X-verdict`、`.X-wire` 當成必備 chrome**；三者同時出現即為「播放器」，見 §0.4。
+14. **禁止缺 `@probe` 或未過 §0.6 品質閘門就 generate。**
+
+### 內容
+
+15. **禁止編號式跨篇引用**：手冊是單篇閱讀的，讀者不會記得發佈順序。不得寫「前一篇」「第一篇」「篇 3」「第 5 篇的 s8」「（s7 選型階梯）」；
+    一律用**短稱＋內容描述**，例如「WebSocket 篇談保活的那一節」「TCP/UDP 篇那張 backpressure 策略表」。
+    本篇內的章節自引用寫「第 N 節」（頁面章節有可見編號）並視空間補短標題；「上一篇／下一篇」只有同一句已點名目標時才可保留。
+    demo 的旁白字串也是讀者可見文字，同樣適用。

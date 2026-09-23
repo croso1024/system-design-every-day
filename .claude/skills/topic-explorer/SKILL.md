@@ -39,7 +39,12 @@ node scripts/completed-ledger.js --action status            # 全站完成度統
 node scripts/completed-ledger.js --action get-recent --limit 5   # 最近完成主題
 node scripts/mindmap.js --action next                       # 依 DAG 推薦下一個主題
 node scripts/mindmap.js --action next --last-topic <id>     # 指定基準主題的鄰接推薦
+node scripts/quality/archetype-window.js                    # 全站 demo archetype 分佈與「下一篇不可用的主 archetype」
 ```
+
+寫 `--brief` 的 `Demo 方向` 若要指定呈現形式，先看 `archetype-window.js` 的「下一篇不可用」與全站分佈：
+避免指定一個在發佈時大概率撞形、或全站已明顯過多的 archetype。brief 指定的形式若在發佈時撞形，
+`topic-author` 會以撞形規則為準改選，所以寫 brief 時可以附上第二選擇。
 
 ## 工作流程 A：推薦「下一個主題」
 

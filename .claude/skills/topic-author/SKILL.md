@@ -25,8 +25,9 @@ description: >-
 
 ```
 - [ ] 1. 選定主題：completed-ledger + mindmap.js --action next，挑一個（優先 prerequisites_satisfied=true）
-- [ ] 2a. 選型：查最近 3 篇的 demo-archetype，替本篇選一個「不撞形」的 archetype 與圖表形式
-- [ ] 2b. 撰寫草稿：drafts/<id>/content.html (必填) 與 script.html (互動 JS，可選)
+- [ ] 2a. 選型：archetype-window.js 查「下一篇不可用的主 archetype」，替本篇選一個不撞形的 archetype 與圖表形式
+- [ ] 2b. 撰寫草稿：drafts/<id>/content.html (必填) 與 script.html (互動 JS，compute/render 分離 + @probe)
+- [ ] 2c. 品質閘門：demo-audit.js / compute-probe.js / archetype-window.js --topic 皆 exit 0，未過不得 generate
 - [ ] 3. 組裝發佈：node scripts/generate.js --topic <id> --title "..." --category "..."
 - [ ] 4. 品質檢查：用 ReadLints 檢查產出的 books/<id>/index.html 有無 HTML/CSS 錯誤
 - [ ] 5. 收尾（順序不可顛倒）：remove-todo.js 移除 todo -> validate.js 驗證 -> git commit（單行規範）-> push origin main（僅 Cursor 自動化環境）
@@ -80,14 +81,15 @@ node scripts/completed-ledger.js --action get-todo --topic <id>    # 選定後�
 **1. 查最近 3 篇用了什麼形式**
 
 ```bash
-node scripts/completed-ledger.js --action get-recent --limit 3
-# 再逐篇看 drafts/<id>/content.html 的第一行 <!-- demo-archetype: ... --> 註解
-head -3 drafts/<id>/content.html
+node scripts/quality/archetype-window.js
+# 輸出的「下一篇不可用的主 archetype」就是被最近 3 篇封死的代號
+# （archetype 直接從各篇 drafts/<id>/content.html 開頭的宣告推導，沒有另外的對照表要維護）
 ```
 
 **2. 依 `style-guide.md` 的「Demo Archetype」選一個沒撞形的**
 A 時序推進 / B 參數掃描 / C 並排對照 / D 空間視覺化 / E 決策器 / F 拆解器。
-brief 的 `Demo 方向` 若已指定形式，**直接照它選**。A、B 皆可行時**優先選 B**。
+brief 的 `Demo 方向` 若已指定形式，**照它選**；但若該形式正好被最近 3 篇封死，撞形規則優先：
+改選第二適合的 archetype，並在回報中註明「brief 指定 X，因撞形改為 Y」。A、B 皆可行時**優先選 B**。
 
 **3. 依「圖表與示意圖規範」的選型表決定本篇圖表形式**
 時序 / 因果 → Mermaid `sequenceDiagram` 或 grid swimlane（**禁止** chip row）；
@@ -97,8 +99,12 @@ brief 的 `Demo 方向` 若已指定形式，**直接照它選**。A、B 皆可�
 
 ```html
 <!-- demo-archetype: B｜參數掃描 — 讀者可拖動 X 與 Y，即時觀察 Z 的變化。
-     選 B 是因為本篇核心是「參數如何改變判定」；最近 3 篇為 A/C/A，未撞形。 -->
+     選 B 是因為本篇核心是「參數如何改變判定」；最近 3 篇為 A/C/F，未撞形。 -->
 ```
+
+代號格式 `X｜名稱`（全形 `｜`）；有主、次 demo 時**第一個代號是主 archetype**（見 style-guide §0.2 鐵律 1）。
+
+#### Step 2b — 撰寫草稿
 
 每個一級章節**必須**用此黃金公式包裝，否則左側 Auto-TOC 完全無法渲染
 （`generate.js` 以 regex 掃描 `<section id>` + `.sec-num` + `<h2>` 抽取 TOC）：
@@ -119,7 +125,21 @@ brief 的 `Demo 方向` 若已指定形式，**直接照它選**。A、B 皆可�
 - 互動 demo 的 JS 放 `script.html`（會**原封不動**注入 `SCRIPT_PLACEHOLDER`，`generate.js` **不會**自動補標籤）。
   ⚠️ **因此你在 `script.html` 寫的每一段 JavaScript，都必須自己用 `<script> … </script>` 標籤對包起來**。
   漏掉標籤時，那段 JS 會被瀏覽器當**純文字**印在頁面最下方，且互動 demo 完全不會執行（兩個症狀同一根因）。
-- 理想參考標的：`DistributedTransactions.html`。
+- `script.html` 的 IIFE 依 style-guide §0.5 分五段（常數 → `compute*` 純函式 → DOM 參照 → render → 事件綁定），
+  每個 compute 進入點上方寫 `@probe fn／baseline／sweep` 三行。
+- 多 demo 結構參考：`drafts/distributed-transactions-handbook`（借它的拆小與就近擺放；其中 4 個 demo 仍是播放器，**不可作為實作參考**）。
+- 若把 demo 實作派給 Sub-Agent，把 `guidelines/demo-agent-brief.md` 逐字附在指派之後。
+
+#### Step 2c — 品質閘門（generate 之前，未過不得進 Step 3）
+
+```bash
+node scripts/quality/demo-audit.js <id>                 # L1：11 項機械檢查
+node scripts/quality/compute-probe.js <id>              # L2：依 @probe 證明是模擬器而非播放器
+node scripts/quality/archetype-window.js --topic <id>   # 本篇尚未發佈，會被視為下一篇做撞形判定
+```
+
+三者皆須 exit 0。L1 第 6 項（id 綁定）與第 9 項（cap）是啟發式，確認為誤報才可放行，並在回報中註明（見 style-guide §0.6）。
+這些腳本是唯讀的，可在 Step 2b 反覆跑。
 
 ### Step 3：組裝發佈
 
@@ -203,7 +223,8 @@ node scripts/remove-completed.js --topic <id> --dry-run       # 先預覽將發�
    - **每張圖都要有 `<p class="cap">`** 說明「該看哪裡」。
 5. **互動 Demo 高品質 Vanilla JS**：
    - **先選型再寫 code**：見 Step 2a 與 style-guide §0 Demo Archetype。`content.html` 第一行必須有 `<!-- demo-archetype: ... -->` 宣告，且**不得與最近 3 篇相同**。
-   - **至少一個真自由度**：使用者的操作必須改變**計算結果**。若所有輸出都是程式碼裡的字面常數，那是投影片不是模擬器。
+   - **至少三個算出來的輸出**：使用者的操作必須改變**計算結果**。若所有輸出都是程式碼裡的字面常數，那是投影片不是模擬器（L2 閘門機械檢查）。
+   - **compute／render 分離 + `@probe`**：見 style-guide §0.5；缺 `@probe` 過不了 Step 2c。
    - **不得複製上一篇的 demo 骨架改前綴**。Demo 的 CSS/JS **不是**共享資產（圖表 CSS 才是）。
    - `.X-metric`（步 N/M）、`.X-verdict`、`.X-wire` **不是必備元件**，非必要不得加；三者同時出現即為「播放器」。
    - 自包含：DOM/CSS/JS 完整放在 `content.html` + `script.html`，不跨主題共用。
@@ -212,6 +233,7 @@ node scripts/remove-completed.js --topic <id> --dry-run       # 先預覽將發�
    - 統一狀態色 `.ns-*`：`.ns-idle` 閒置、`.ns-lock` 預留、`.ns-ok` 成功、`.ns-bad` 異常、`.ns-wait` 等待。
    - 必含一鍵 Reset。
 6. **禁止引入大型前端框架**（React/Vue/Svelte）與高對比配色。
+7. **跨篇引用一律名稱式**：不得寫「前一篇」「篇 3」「s7」這類靠發佈順序才看得懂的指涉，見 style-guide「嚴格禁止的作法」第 15 條。
 
 ## 與前段流程的銜接
 
@@ -221,3 +243,5 @@ node scripts/remove-completed.js --topic <id> --dry-run       # 先預覽將發�
 ## 補充資源
 
 - 視覺與互動元件完整規範與範例：`guidelines/style-guide.md`
+- 派 Sub-Agent 實作 demo 時的共用 brief：`guidelines/demo-agent-brief.md`
+- 已知、尚未處理的全站問題：`docs/tech-debt.md`
