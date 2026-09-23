@@ -58,16 +58,21 @@ topic-reviser   →  修訂既有「已發佈」文件      （更新）← 你�
 | **④ 互動元件健康度** | 能否**實際跑**（見「元件實測」）？每個控制項是否**有意義**且對齊章節敘事（別留無用/會誤導的模式）？是否遵守 style-guide 外殼規格（`.demo`/`.seg`/`.btn`/`.status-line`/`.legend`/`.ns-*`、IIFE、一鍵 Reset）？<br>**更要問互動模型本身**：這篇的 archetype 是什麼、有宣告嗎、與鄰近幾篇撞形嗎？是否為「腳本重播型」——所有輸出都是字面常數、使用者只是切換播放哪一段預寫敘事？`.X-metric`（步 N/M）+ `.X-verdict` + `.X-wire` 是否三者俱全而讓 demo 變成「播放器」？ |
 | **⑤ 表達與結構品質** | `<section>` 黃金公式完整（TOC 可抽取）、`.callout`/`.oneliner`/`.tbl-wrap` 使用得當、錯字/語意、資訊密度是否恰當。 |
 
-> 📌 **Mode B 體檢時，③ 與 ④ 是目前全站最需要被盤點的兩項**——已知 28/48 篇含 chip row（其中 8 篇連箭頭都沒有），
-> 且 8 月中起有連續 10 篇共用同一套 demo 骨架。做開放式體檢時請優先掃這兩項。
+> 📌 **Mode B 體檢時，③ 與 ④ 仍是最常出問題的兩項**（全站曾有過半數篇含時序 chip row、連續 10 篇共用同一套 demo 骨架，
+> 已經過數輪校訂）。體檢前先看 `docs/tech-debt.md`：該篇若已有登錄的待處理項，直接納入觀察報告，不必重新發現。
 
 **觀察報告格式**：每一項標明「**位置**（`sXX` 章節 / 哪個元件）+ **為什麼是問題** + **建議方向**」。
 不要在報告階段直接動手改。
 
-#### 元件實測（④ 的具體手段）
-- JS：`node --check` 驗證 `script.html`（先去掉外層 `<script>` 標籤再檢）。
-- 逐一核對每個控制項的事件綁定與 render 邏輯，找「永遠 0 命中」「無實際作用」「與敘事脫節」的死控制項。
-- 必要時走完整管線 generate 出頁面後，`open books/<id>/index.html` 在瀏覽器實際點測。
+#### 元件實測（④ 的具體手段，不開瀏覽器）
+```bash
+node scripts/quality/demo-audit.js <id>                 # L1：宣告、.seg、三件組、舊骨架、語法、id 綁定、cap…
+node scripts/quality/compute-probe.js <id>              # L2：依 @probe 判定模擬器 vs 播放器（找死參數）
+node scripts/quality/archetype-window.js --topic <id>   # 與發佈序上相鄰 3 篇是否撞形
+```
+- 再逐一核對每個控制項的事件綁定與 render 邏輯，找「永遠 0 命中」「無實際作用」「與敘事脫節」的死控制項。
+- 早於 compute／render 約定的舊篇在 L1 第 11 項或 L2 會失敗，這些已登錄於 `docs/tech-debt.md`，報告中引用即可。
+- 瀏覽器點測**不是** Agent 的驗收手段（見 `AGENTS.md`）；Step 4 的預覽是給使用者看的。
 
 ## 討論 Gate（兩模式共同的必經關卡）
 
@@ -80,7 +85,9 @@ topic-reviser   →  修訂既有「已發佈」文件      （更新）← 你�
 
 ```
 - [ ] 1. 改草稿：drafts/<id>/content.html 與/或 script.html（禁止手改 books/<id>/index.html）
-- [ ] 2. 落地前驗證：JS 跑 node --check；HTML 檢查 <div>/<section> 標籤平衡
+- [ ] 2. 落地前驗證：demo-audit.js / compute-probe.js / archetype-window.js --topic <id>
+         動到 demo → 三者皆須 exit 0（L1 第 6、9 項確認為誤報可放行，見 style-guide §0.6）
+         只改論述 → demo-audit.js 不得出現本次新增的失敗；tech-debt.md 已登錄的既有失敗不阻擋
 - [ ] 3. 重新發佈（務必帶 --keep-date + 沿用既有 title/category）：
          node scripts/generate.js --topic <id> --title "<既有 title>" --category "<既有 category>" --keep-date
 - [ ] 4. 使用者審核：提供 open books/<id>/index.html 預覽，等待確認（可反覆回 Step 1 修正）
@@ -98,6 +105,11 @@ topic-reviser   →  修訂既有「已發佈」文件      （更新）← 你�
 3. **不動 `todo.json` / `mindmap.json`、不跑 `remove-todo.js`**：主題早已完成、不在 todo，
    純內容更新與選題/圖譜無關。（這正是與 `topic-author` 收尾流程最大的不同——沒有 remove-todo 步驟。）
 4. `completed.json` 與 `books/index.html` 皆為 `generate.js` 自動產物，**勿手動編輯**。
+5. **改 archetype 等於改撞形版圖**：宣告的主 archetype 一變，發佈序上前後各 3 篇的視窗都要重判；
+   以 `archetype-window.js --topic <id>` 的結果為準。
+6. **重做 demo 時沿用新約定**：依 style-guide §0.5 改成五段結構並補 `@probe`，讓該篇脫離 tech-debt 的舊篇清單；
+   處理完一項 tech-debt 就更新 `docs/tech-debt.md` 那一列的狀態與處理 commit。
+7. **大批次校訂派 Sub-Agent 時**，把 `guidelines/demo-agent-brief.md` 逐字附在指派之後（含第 6 節修訂附則）。
 
 ### Step 6：Git 提交（單行 `[docs]` 規範）
 
@@ -124,3 +136,4 @@ git commit -m "[docs] refine <id>: <一句話說明本次修訂重點>"
 - 缺先備主題、要擴充後續主題 → `topic-explorer`（維護 `mindmap.json` / `todo.json`）。
 - 要寫全新主題 → `topic-author`。
 - 視覺與互動元件完整規範 → `guidelines/style-guide.md`。
+- 已知、尚未處理的全站問題與處理狀態 → `docs/tech-debt.md`。
