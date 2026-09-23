@@ -11,36 +11,15 @@
 
 | # | 篇 | 問題 | 影響 | 預估 | 狀態 |
 | :-: | :--- | :--- | :--- | :--- | :--- |
-| 1 | `agent-runtime-backend` | 論述層約 20 處編號式跨篇／章節引用 | 可讀性 | 中 | 待處理 |
-| 2 | `mcp-protocol` | 論述層約 17 處編號式跨篇／章節引用，第 7 節表格有一整欄「第 N 篇 · 標題」 | 可讀性 | 中 | 待處理 |
 | 3 | `distributed-transactions-handbook` | 6 個 demo 中 4 個仍是常數播放器 | demo 品質、結構範本可信度 | 重 | 待處理 |
 | 6 | 全站 | 兩組接受的主 archetype B 撞形 | 多樣性 | 重 | 接受 |
-| 7 | `agent-tool-gateway-security`、`cache-failure-modes` | 各一處未點名的「前一篇」 | 可讀性 | 輕 | 待處理 |
 | 8 | 12 篇舊 demo | 早於 compute／render 約定，L1 第 11 項或 L2 失敗 | demo 閘門無法進 CI | 重（逐篇） | 待處理 |
 | 9 | `scripts/quality/demo-audit.js` | L1 第 6、9 項為啟發式，有已知誤報 | 閘門可信度 | 中 | 待處理 |
+| 10 | 9 篇（見說明） | 未點名目標的「上一篇／下一篇」共 10 處，另有 4 處「上一章／下一章」 | 可讀性 | 中 | 待處理 |
 
 ---
 
 ## 各項說明
-
-### 1、2、7　編號式引用
-
-**問題**：「前一篇」「第一篇」「前三篇」「（s7 選型階梯）」這類指涉要靠發佈順序或他篇章節編號才看得懂，
-單篇閱讀時無法跟隨。規則見 `guidelines/style-guide.md`「嚴格禁止的作法」第 15 條。
-
-**定位**（結果含合規的寫法，例如同句已點名的「前一篇《LLM 應用編排與 Agent 模式》」，以及 `<section id="sN">` 與 CSS 註解，須逐條人工判讀）：
-
-```bash
-grep -nE '前一篇|上一篇|下一篇|第[一二三四五六七八九十]+篇|前[一二三四五六七八九十]篇|篇 ?[0-9]+|[（(]s[0-9]+|[^a-z"#-]s[0-9]+[^0-9a-z"]' \
-  drafts/<id>/content.html drafts/<id>/script.html
-```
-
-- **#1** `agent-runtime-backend`：以「第一篇」指 LLM 應用編排那篇為主，另有第 1 節導覽卡片的「（sN）」與第 2 節 cap 的「s7 選型階梯」等本篇章節自引用。
-- **#2** `mcp-protocol`：「第一／二／三篇」「前三篇」與「（sN）」；第 7 節表格三列的列標題整欄是「第 N 篇 · 標題」，要連表頭語意一起改寫。
-- **#7** `agent-tool-gateway-security` 第 1 節 sec-sub「前一篇的 runtime…」、`cache-failure-modes` 第 1 節 sec-sub「前一篇把 Cache-Aside 的讀寫路徑講完了」。
-
-**做法**：跨篇改成「短稱＋內容描述」（例：「Agent Runtime 篇的狀態機那一節」）；本篇自引用改「第 N 節」並視空間補短標題。
-改 draft 後 `generate.js --keep-date`（沿用既有 title／category）重產。#1、#2、#7 可合為一批。
 
 ### 3　distributed-transactions-handbook 的 4 個常數播放器
 
@@ -93,3 +72,34 @@ grep -nE '前一篇|上一篇|下一篇|第[一二三四五六七八九十]+篇|
 
 **做法**：第 6 項可以改成辨識 `getElementById(prefix + name)` 這類模式並回報「無法靜態判定」，不要直接判死；
 第 9 項可以改成找容器閉合標籤後的下一個兄弟元素。改完對全站跑 `demo-audit.js --all`，確認除上述誤報外結果不變。
+
+### 10　其餘篇的編號式引用
+
+**問題**：與 style-guide「嚴格禁止的作法」第 15 條相同——「上一篇把 Kafka 講成…」這類句子描述了內容，卻沒點名是哪一篇，單篇閱讀時仍要靠發佈順序才找得到。
+
+| 篇 | 位置 | 原文開頭 |
+| :--- | :--- | :--- |
+| `a2a-protocol` | 第 1 節 sec-sub | 上一篇把「Agent 怎麼接工具」講清楚了 |
+| `a2a-protocol` | 第 7 節 sec-sub | 接上下一篇協定對照時才站得穩 |
+| `advanced-replication-consistency-handbook` | 第 1 節 | 上一篇已介紹 Single-Leader / Multi-Leader / Leaderless |
+| `ip-addressing-subnetting` | 第 1 節 | 上一篇我們建立了 TCP/IP 分層心智模型 |
+| `kafka-architecture` | 第 1 節 | 上一篇把訊息骨幹拆成 Queue 與 Log 兩種模型 |
+| `kafka-architecture` | 第 4 節清單 | 冪等——定義見上一篇 |
+| `nat-port-forwarding` | 第 1 節 | 上一篇我們學會解讀 IPv4 與子網路遮罩 |
+| `stream-processing` | 第 1 節 | 上一篇把 Kafka 講成可重放的分散式日誌 |
+| `tls-https-fundamentals` | 第 8 節（最後一節） | 下一篇進入 HTTP/1.1 與 HTTP/2 |
+| `llm-orchestration-agents` | 第 6 節 callout 標題 | 本篇只給動機，細節在後續三篇 |
+
+本篇內的相對章節指涉「上一章／下一章」另有 4 處，一併改成「第 N 節」：`a2a-protocol` 第 4 節（「下一章 Demo」）、`vector-database-fundamentals` 第 3 節 sec-sub（「上一章的點」）、`wide-column-store` 第 2 節（「產品細節下一章再說」）、`redis-architecture` 第 5 節（「用 Cluster（下一章）」）。
+
+**待裁決**：`realtime-connection-scaling` 的「前六篇」、`websocket-realtime-communication` 的「前四篇」屬計數式範圍指涉，2026-08 網路系列清理時被當作合規寫法保留；
+但它和已改寫的 `mcp-protocol`「前三篇」是同一種依賴發佈順序的寫法。動手前先決定計數式是否也要改成點名。
+
+**定位**（結果含合規寫法——同句已點名目標的「前一篇《…》」「前一篇的 TLS 篇」——以及 CSS／HTML 註解，須逐條判讀）：
+
+```bash
+grep -nE '前一篇|上一篇|下一篇|第[一二三四五六七八九十]+篇|前[一二三四五六七八九十]篇|篇 ?[0-9]+|[（(]s[0-9]+|上一章|下一章|前兩篇|後續[一二三四五六七八九十]篇'   drafts/*/content.html drafts/*/script.html
+```
+
+**做法**：跨篇改成「短稱＋內容描述」，本篇相對章節改「第 N 節」；改 draft 後 `generate.js --keep-date`（沿用既有 title／category）重產。
+短稱沿用站內既有寫法：網路系列為「TCP/UDP 篇、TLS 篇、HTTP 篇、QUIC 篇、WebSocket 篇、NAT 篇、DNS 篇」等；Agent 系列為「Agent 編排篇、Agent Runtime 篇、Tool Gateway 篇、MCP 篇、A2A 篇、ACP 互通篇」。
