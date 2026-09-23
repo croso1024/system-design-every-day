@@ -1,25 +1,23 @@
 # 技術債追蹤
 
-已知、尚未處理的全站問題。**處理完一項就更新該列的「狀態」與「處理 commit」**，不要刪列；
-全部處理完的項目留在表中作為紀錄。新發現的問題追加在表尾，編號不重用。
+已知、尚未處理的全站問題。**處理完一項就把它從總表與各項說明中直接刪除**，不留「已處理」紀錄
+（處理經過看 git log 即可），避免本檔膨脹。新發現的問題追加在表尾，編號不重用。
 
-狀態：`待處理` → `進行中` → `已處理`（或 `接受`：評估後決定不處理，須寫理由）。
+狀態：`待處理`、`進行中`，或 `接受`（評估後決定不處理，須在說明中寫理由）。
 
 ---
 
 ## 總表
 
-| # | 篇 | 問題 | 影響 | 預估 | 狀態 | 處理 commit |
-| :-: | :--- | :--- | :--- | :--- | :--- | :--- |
-| 1 | `agent-runtime-backend` | 論述層約 20 處編號式跨篇／章節引用 | 可讀性 | 中 | 待處理 | |
-| 2 | `mcp-protocol` | 論述層約 17 處編號式跨篇／章節引用，第 7 節表格有一整欄「第 N 篇 · 標題」 | 可讀性 | 中 | 待處理 | |
-| 3 | `distributed-transactions-handbook` | 6 個 demo 中 4 個仍是常數播放器 | demo 品質、結構範本可信度 | 重 | 待處理 | |
-| 4 | `advanced-replication-consistency-handbook` | 第 2、4、6、7 節各一張表格缺 `<p class="cap">` | 規範一致性 | 輕 | 待處理 | |
-| 5 | `cdn-edge-caching` | 第 5、6 節各一列非時序的 `.cec-flow` chip row | 規範一致性 | 輕 | 待處理 | |
-| 6 | 全站 | 兩組接受的主 archetype B 撞形 | 多樣性 | 重 | 接受 | |
-| 7 | `agent-tool-gateway-security`、`cache-failure-modes` | 各一處未點名的「前一篇」 | 可讀性 | 輕 | 待處理 | |
-| 8 | 12 篇舊 demo | 早於 compute／render 約定，L1 第 11 項或 L2 失敗 | demo 閘門無法進 CI | 重（逐篇） | 待處理 | |
-| 9 | `scripts/quality/demo-audit.js` | L1 第 6、9 項為啟發式，有已知誤報 | 閘門可信度 | 中 | 待處理 | |
+| # | 篇 | 問題 | 影響 | 預估 | 狀態 |
+| :-: | :--- | :--- | :--- | :--- | :--- |
+| 1 | `agent-runtime-backend` | 論述層約 20 處編號式跨篇／章節引用 | 可讀性 | 中 | 待處理 |
+| 2 | `mcp-protocol` | 論述層約 17 處編號式跨篇／章節引用，第 7 節表格有一整欄「第 N 篇 · 標題」 | 可讀性 | 中 | 待處理 |
+| 3 | `distributed-transactions-handbook` | 6 個 demo 中 4 個仍是常數播放器 | demo 品質、結構範本可信度 | 重 | 待處理 |
+| 6 | 全站 | 兩組接受的主 archetype B 撞形 | 多樣性 | 重 | 接受 |
+| 7 | `agent-tool-gateway-security`、`cache-failure-modes` | 各一處未點名的「前一篇」 | 可讀性 | 輕 | 待處理 |
+| 8 | 12 篇舊 demo | 早於 compute／render 約定，L1 第 11 項或 L2 失敗 | demo 閘門無法進 CI | 重（逐篇） | 待處理 |
+| 9 | `scripts/quality/demo-audit.js` | L1 第 6、9 項為啟發式，有已知誤報 | 閘門可信度 | 中 | 待處理 |
 
 ---
 
@@ -53,18 +51,6 @@ grep -nE '前一篇|上一篇|下一篇|第[一二三四五六七八九十]+篇|
 先跑 `node scripts/quality/archetype-window.js --topic distributed-transactions-handbook` 看相鄰視窗封死哪些型。
 依 `topic-reviser` 的兩階段 Sub-Agent 流程，brief 用 `guidelines/demo-agent-brief.md`。
 完成後同步處理 #8 的這一篇，並把 style-guide 裡「不可作為實作參考」的註記拿掉。
-
-### 4　advanced-replication-consistency-handbook 缺 cap 的表格
-
-**做法**：在 draft 第 2、4、6、7 節的 `.tbl-wrap` 後各補一句 `<p class="cap">`（一句話說明「該看哪裡」），
-`generate.js --keep-date` 重產。
-
-### 5　cdn-edge-caching 的非時序 chip row
-
-**問題**：第 5、6 節各一列 5-chip 的 `.cec-flow`，是關鍵字並列、不是時序，因此不違反「時序禁用 chip row」，
-但仍是 style-guide 不建議的藥丸列。
-
-**做法**：換成 `.tbl-wrap` 表格；若下方已有表格涵蓋同樣內容就直接刪除。補 cap，並連帶刪掉不再被引用的 `.cec-flow`／`.cec-chip` CSS。
 
 ### 6　接受的 B 撞形
 

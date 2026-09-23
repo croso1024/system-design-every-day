@@ -61,9 +61,9 @@
    > **圖表形式與 Demo 互動模型必須多樣**。本專案曾因混淆這兩者而發生嚴重同質化
    > （連續 10 篇共用同一套 demo 骨架、相鄰兩篇 CSS 逐字相同率 96%）。
    > 反覆複製上一篇的 demo 骨架或 `.X-flow` chip row，是**明確違規**，見 style-guide「嚴格禁止的作法」。
-> Demo 的多樣性與真實性由 `scripts/quality/` 三支唯讀腳本機械把關（style-guide §0.6）：新寫或重做 demo 時，
-> generate 之前必須通過 `demo-audit.js`、`compute-probe.js` 與 `archetype-window.js --topic <id>`。
-> archetype 一律從各篇 `content.html` 開頭的宣告推導，不另外維護對照表。
+   > Demo 的多樣性與真實性由 `scripts/quality/` 三支唯讀腳本機械把關（style-guide §0.6）：新寫或重做 demo 時，
+   > generate 之前必須通過 `demo-audit.js`、`compute-probe.js` 與 `archetype-window.js --topic <id>`。
+   > archetype 一律從各篇 `content.html` 開頭的宣告推導，不另外維護對照表。
 4. **不要從零撰寫 HTML 外殼**（header/footer 等），由 `templates/base.html` + `generate.js` 自動組裝。
 5. **`drafts/` 是內容原始碼**：draft (`content.html` / `script.html`) 是產物頁面的內容真相來源，隨產物一起 commit。內容改動改 draft、模板改動改 `templates/base.html`，兩者都靠重跑 `generate.js` 產頁；不要直接手改 `books/`。
 
@@ -96,7 +96,7 @@
 | `docs/completed.json` | 已完成主題 metadata | **自動維護**：發佈由 `generate.js` 寫入、**撤回**用 `remove-completed.js`；**仍禁止手動編輯本檔** |
 | `guidelines/style-guide.md` | 視覺、**圖表選型**與互動元件（**Demo Archetype**、compute／render 與 `@probe`）風格規範 | 撰稿前嚴格閱讀遵循 |
 | `guidelines/demo-agent-brief.md` | 派 Sub-Agent 實作 demo 時的共用 brief（約束、兩階段、11 欄設計說明） | 派工時逐字附在指派之後 |
-| `docs/tech-debt.md` | 已知、尚未處理的全站問題與處理狀態 | 人工維護；處理完一項就更新該列 |
+| `docs/tech-debt.md` | 已知、尚未處理的全站問題 | 人工維護；處理完一項就直接刪除該項，不留紀錄 |
 | `templates/base.html` | 全站 HTML 外殼範本 (Notion 淺色版) | 嚴格讀取，不建議手動更改 |
 | `drafts/{topic-id}/` | **撰稿主要工作區（內容原始碼）** | AI 建立與寫入 content.html 和 script.html，隨產物一起提交 |
 | `books/{topic-id}/index.html` | 發佈後的最終主題網頁 | **自動生成**（由 `generate.js` 產出，勿手動編輯） |

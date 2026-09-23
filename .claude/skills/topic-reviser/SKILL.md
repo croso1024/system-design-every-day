@@ -108,7 +108,7 @@ node scripts/quality/archetype-window.js --topic <id>   # 與發佈序上相鄰 
 5. **改 archetype 等於改撞形版圖**：宣告的主 archetype 一變，發佈序上前後各 3 篇的視窗都要重判；
    以 `archetype-window.js --topic <id>` 的結果為準。
 6. **重做 demo 時沿用新約定**：依 style-guide §0.5 改成五段結構並補 `@probe`，讓該篇脫離 tech-debt 的舊篇清單；
-   處理完一項 tech-debt 就更新 `docs/tech-debt.md` 那一列的狀態與處理 commit。
+   處理完一項 tech-debt 就把它從 `docs/tech-debt.md` 直接刪除（總表列與說明段都刪，不留「已處理」紀錄）。
 7. **大批次校訂派 Sub-Agent 時**，把 `guidelines/demo-agent-brief.md` 逐字附在指派之後（含第 6 節修訂附則）。
 
 ### Step 6：Git 提交（單行 `[docs]` 規範）
@@ -136,4 +136,4 @@ git commit -m "[docs] refine <id>: <一句話說明本次修訂重點>"
 - 缺先備主題、要擴充後續主題 → `topic-explorer`（維護 `mindmap.json` / `todo.json`）。
 - 要寫全新主題 → `topic-author`。
 - 視覺與互動元件完整規範 → `guidelines/style-guide.md`。
-- 已知、尚未處理的全站問題與處理狀態 → `docs/tech-debt.md`。
+- 已知、尚未處理的全站問題 → `docs/tech-debt.md`。
