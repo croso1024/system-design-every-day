@@ -11,25 +11,14 @@
 
 | # | 篇 | 問題 | 影響 | 預估 | 狀態 |
 | :-: | :--- | :--- | :--- | :--- | :--- |
-| 3 | `distributed-transactions-handbook` | 6 個 demo 中 4 個仍是常數播放器 | demo 品質、結構範本可信度 | 重 | 待處理 |
 | 6 | 全站 | 兩組接受的主 archetype B 撞形 | 多樣性 | 重 | 接受 |
-| 8 | 12 篇舊 demo | 早於 compute／render 約定，L1 第 11 項或 L2 失敗 | demo 閘門無法進 CI | 重（逐篇） | 待處理 |
+| 8 | 11 篇舊 demo | 早於 compute／render 約定，L1 第 11 項或 L2 失敗 | demo 閘門無法進 CI | 重（逐篇） | 待處理 |
 | 9 | `scripts/quality/demo-audit.js` | L1 第 6、9 項為啟發式，有已知誤報 | 閘門可信度 | 中 | 待處理 |
 | 10 | 9 篇（見說明） | 未點名目標的「上一篇／下一篇」共 10 處，另有 4 處「上一章／下一章」 | 可讀性 | 中 | 待處理 |
 
 ---
 
 ## 各項說明
-
-### 3　distributed-transactions-handbook 的 4 個常數播放器
-
-**問題**：光譜、流程、時序實驗室、並排對照四個 demo 的輸出是寫死字串，只有補償鏈與決策器真算。
-它是 style-guide 引用的多 demo 結構範本（已註明「不可作為實作參考」）。
-
-**做法**：等同一篇重量級重做。4 個 demo 各自選 archetype，且主 archetype 不得與發佈序相鄰篇撞形——
-先跑 `node scripts/quality/archetype-window.js --topic distributed-transactions-handbook` 看相鄰視窗封死哪些型。
-依 `topic-reviser` 的兩階段 Sub-Agent 流程，brief 用 `guidelines/demo-agent-brief.md`。
-完成後同步處理 #8 的這一篇，並把 style-guide 裡「不可作為實作參考」的註記拿掉。
 
 ### 6　接受的 B 撞形
 
@@ -43,14 +32,13 @@
 
 ### 8　早於 compute／render 約定的舊 demo
 
-以下 12 篇的 demo 是真算的，但沒有依 style-guide §0.5 分出 `compute*` 純函式或沒有 `@probe`：
+以下 11 篇的 demo 是真算的，但沒有依 style-guide §0.5 分出 `compute*` 純函式或沒有 `@probe`：
 
 | 篇 | 失敗項 |
 | :--- | :--- |
 | `advanced-replication-consistency-handbook` | L1 #11、L2 |
 | `consistent-hashing-handbook` | L1 #11、L2 |
 | `data-sharding-basics` | L1 #11、L2 |
-| `distributed-transactions-handbook` | L1 #11、L2（見 #3） |
 | `embedded-database` | L1 #11、L2 |
 | `http-1-1-and-http-2` | L1 #11、L2 |
 | `ip-addressing-subnetting` | L1 #11、L2 |

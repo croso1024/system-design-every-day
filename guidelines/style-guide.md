@@ -7,9 +7,8 @@
 > - **要一致**：配色、字體、`.callout` / `.oneliner` / `.tbl-wrap` / `.demo` 外殼等元件樣式。
 > - **要多樣**：圖表形式（見「圖表與示意圖規範」）與 Demo 互動模型（見「Demo Archetype」）。
 >
-> 多 demo 結構的參考標的 `drafts/distributed-transactions-handbook` 一頁有 **6 個 demo、6 種不同互動形式**。
-> 借它的**結構**（拆小、各司其職、就近擺放），**不要**把它的某一個 demo 當成所有主題的模板；
-> 其中 4 個 demo 的輸出仍是字面常數，**不可作為實作參考**（見 §0.3）。
+> 多 demo 結構的參考標的 `drafts/distributed-transactions-handbook` 一頁有 **6 個 demo，各依所教的概念選型**（見 §0.3）。
+> 借它的**結構**（拆小、各司其職、就近擺放），**不要**把它的某一個 demo 當成所有主題的模板。
 
 ---
 
@@ -400,7 +399,7 @@ sequenceDiagram
 | **B** | **參數掃描**<br>Parameter sweep | 拖 slider / 改數值，結果**即時重算** | 有可調參數、且參數會改變結果的機制（watermark 延遲、W+R>N、TTL、acks、chunk size） | `drafts/stream-processing`（視窗×水位）、`drafts/nat-port-forwarding`（自由輸入→四元組比對→改寫或 DROP） |
 | **C** | **並排對照**<br>Side-by-side | 同一組輸入同時餵給兩個面板（「天真 vs 正確」，或兩種都合法的相反設計） | 有明確錯誤解法、或有兩種對立取捨的主題（dual-write vs Outbox、B-Tree vs LSM-Tree） | `drafts/embedded-database`（SQLite vs RocksDB，MemTable／L0 stall／write amp 真算） |
 | **D** | **空間視覺化**<br>Spatial | 在幾何／座標空間上點選、拖曳、增刪節點 | 有空間語意的主題（hash ring、向量空間、分區環、子網位址空間） | `drafts/consistent-hashing-handbook`（successor rule 與 remap% 真算）、`drafts/vector-database-fundamentals`（canvas，IVF／HNSW 真的只掃被 probe 的部分） |
-| **E** | **決策器**<br>Decision | 回答數個問題 → 導出選型建議與理由 | 選型類、trade-off 類、「什麼時候該用哪個」 | `drafts/distributed-transactions-handbook`「選型決策器」（三題 → `decide()` 推導，含衝突需求的特例） |
+| **E** | **決策器**<br>Decision | 回答數個問題 → 導出選型建議與理由 | 選型類、trade-off 類、「什麼時候該用哪個」 | `drafts/distributed-transactions-handbook`「選型決策器」（三題 → `computeDecision()` 推導建議、判斷路徑與未參考的題目，含衝突需求的特例） |
 | **F** | **拆解器**<br>Decomposer | 輸入一筆真實資料 → 逐層 / 逐 byte 拆解標註 | 有格式或編碼結構的主題（protobuf wire format、封包標頭、子網遮罩、JWT、URL） | `drafts/ip-addressing-subnetting`（逐 bit 切 net／host，含 /31 /32 邊界）、`drafts/search-analytics-engine`（分詞→posting→合併→BM25 逐階段攤開） |
 
 同一個主題常常有不只一種可行選型。**若 A 與 B 都說得通，優先選 B**——能被使用者擾動的 demo 幾乎總是資訊量更大。
@@ -471,16 +470,15 @@ node scripts/quality/archetype-window.js --topic <id>   # 尚未發佈的篇視�
 
 #### 0.3 一篇可以有多個小 demo
 
-結構參考標的 `drafts/distributed-transactions-handbook` 有 **6 個 demo、6 種不同 archetype**（光譜、流程、時序實驗室、補償鏈、並排對照、決策器）。
+結構參考標的 `drafts/distributed-transactions-handbook` 有 **6 個 demo**，主 archetype 是第 7 節的決策器（E），其餘依各節概念選型：一致性光譜與崩潰點枚舉（B）、2PC 狀態機與 Saga 補償鏈（A）、TCC 抵達順序實驗室（C）。
 
 - **兩三個各司其職的小 demo，遠優於一個塞滿多層 `.seg` 的巨型 demo。**
 - 經驗法則：**若單一 demo 需要 3 組以上 `.seg` 才講得完，那是在提示你該拆成 2 個 demo。**
   注意這條規則的單位是**單一 demo**：一頁有 6 個 demo、每個各 1 組 `.seg`，完全合規。
 - 小 demo 可以就近放在它所解釋的那個章節，不必全部堆到文末。
 
-> 借它的**結構**（拆小、各司其職、就近擺放），不要以為它每個 demo 的深度都夠：
-> 6 個之中只有「補償鏈」與「決策器」兩個有真自由度，另外 4 個的輸出仍是字面常數。
-> 結構對了還要過 §0.2 鐵律 4。
+> 借它的**結構**（拆小、各司其職、就近擺放）：6 個 demo 各有一個 `compute*` 進入點與一組 `@probe`，集中排在 script 的第 (2) 段。
+> 同一頁出現兩個同 archetype 的次 demo 是允許的，不要為了湊齊 6 種而把不適合的模型套上去。
 
 #### 0.4 非必備 chrome — 不要因為「上一篇有」就加
 

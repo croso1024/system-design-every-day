@@ -1,450 +1,1073 @@
 <script>
-"use strict";
-document.addEventListener("DOMContentLoaded", function(){
+(function () {
+  "use strict";
 
-  /* ===== 02 spectrum ===== */
-  (function(){
-    var DATA = {
-      "2pc":{ name:"2PC 兩階段提交", meta:"偏 CP · 協調者主導 · 同步阻塞",
-        bars:{ "一致性":[95,"強一致"], "可用性":[35,"低"], "資源鎖定":[90,"長/鎖死"], "吞吐":[30,"低"] } },
-      "tcc":{ name:"TCC", meta:"準強一致 · 業務層資源預留",
-        bars:{ "一致性":[78,"較強"], "可用性":[62,"中"], "資源鎖定":[45,"短/軟凍結"], "吞吐":[60,"中"] } },
-      "saga":{ name:"Saga", meta:"偏 AP · 本地交易 + 補償 · 無鎖",
-        bars:{ "一致性":[40,"最終一致"], "可用性":[90,"高"], "資源鎖定":[8,"無"], "吞吐":[88,"高"] } }
-    };
-    var marks = document.querySelectorAll("#demo-spec .spec-mark");
-    var nameEl = document.getElementById("sp-name");
-    var metaEl = document.getElementById("sp-meta");
-    var barsEl = document.getElementById("sp-bars");
-    function render(key){
-      var d = DATA[key];
-      marks.forEach(function(m){ m.setAttribute("aria-pressed", m.dataset.key===key ? "true":"false"); });
-      nameEl.textContent = d.name;
-      metaEl.textContent = d.meta;
-      barsEl.innerHTML = "";
-      Object.keys(d.bars).forEach(function(k){
-        var v = d.bars[k];
-        var label = document.createElement("div"); label.className="blabel"; label.textContent=k;
-        var track = document.createElement("div"); track.className="btrack";
-        var fill = document.createElement("div"); fill.className="bfill"; fill.style.width="0%";
-        track.appendChild(fill);
-        var val = document.createElement("div"); val.className="bval"; val.textContent=v[1];
-        barsEl.appendChild(label); barsEl.appendChild(track); barsEl.appendChild(val);
-        requestAnimationFrame(function(){ fill.style.width = v[0] + "%"; });
-      });
-    }
-    marks.forEach(function(m){ m.addEventListener("click", function(){ render(m.dataset.key); }); });
-    render("2pc");
-  })();
+  /* ================================================================
+   * (1) 常數與參數表
+   * ================================================================ */
 
-  /* ===== 03 2PC flow ===== */
-  (function(){
-    var root = document.getElementById("demo-2pc");
-    var stateEls = {
-      tc: root.querySelector('[data-id="tc"] [data-state]'),
-      p1: root.querySelector('[data-id="p1"] [data-state]'),
-      p2: root.querySelector('[data-id="p2"] [data-state]')
-    };
-    var actorEls = {
-      tc: root.querySelector('[data-id="tc"]'),
-      p1: root.querySelector('[data-id="p1"]'),
-      p2: root.querySelector('[data-id="p2"]')
-    };
-    var stepsEl = document.getElementById("p2-steps");
-    var statusEl = document.getElementById("p2-status");
-    var nextBtn = document.getElementById("p2-next");
-    var resetBtn = document.getElementById("p2-reset");
-    var segBtns = root.querySelectorAll(".seg button");
-    var scenario = "ok";
-    var idx = 0;
+  /* 第 2 節：一致性光譜（刻意簡化的延遲模型） */
+  var SPEC_FSYNC_MS = 2;                              // 協調者把決議強制寫入日誌的時間
+  var SPEC_AVAIL = [99, 99.5, 99.9, 99.95, 99.99];    // slider 索引 → 單一服務可用性（%）
+  var SPEC_KEYS = ["2pc", "tcc", "saga"];
+  var SPEC_NAME = { "2pc": "2PC", tcc: "TCC", saga: "Saga" };
+  var SPEC_X_MAX = 2000;                              // 中間態可見時間軸上限（ms）
+  var SPEC_Y_DECADES = 3;                             // 吞吐軸 1 ~ 1000 tps
 
-    // each step: {label, status, apply()}
-    function scenarioSteps(){
-      if(scenario==="ok"){
-        return [
-          {sx:"1", label:"Prepare：TC 詢問所有參與者是否可提交",
-           apply:function(){ cls("tc","ns-wait","詢問中"); cls("p1","ns-lock","已鎖定·回 Yes"); cls("p2","ns-lock","已鎖定·回 Yes");
-             status("<b>Prepare 階段</b>：兩個參與者都執行了操作、鎖住資源但<b>尚未提交</b>，回覆 Yes。"); }},
-          {sx:"2", label:"全部回 Yes → TC 決議 Commit",
-           apply:function(){ cls("tc","ns-wait","下令 Commit"); status("所有參與者皆同意，TC 把「Commit」決議持久化後，下令全體提交。"); }},
-          {sx:"3", label:"Commit：參與者提交並釋放資源",
-           apply:function(){ cls("tc","ns-ok","完成"); cls("p1","ns-ok","已提交·解鎖"); cls("p2","ns-ok","已提交·解鎖");
-             status("<b>Commit 階段</b>：兩者皆提交、釋放鎖，全域交易成功。這是 2PC 順利時的強一致結果。"); }}
-        ];
-      } else {
-        return [
-          {sx:"1", label:"Prepare：TC 詢問，參與者鎖定並回 Yes",
-           apply:function(){ cls("tc","ns-wait","詢問中"); cls("p1","ns-lock","已鎖定·回 Yes"); cls("p2","ns-lock","已鎖定·回 Yes");
-             status("<b>Prepare 階段</b>：參與者鎖住資源、回 Yes，等待 TC 的最終指令。"); }},
-          {sx:"2", label:"TC 在送出 Commit 前崩潰 ✕",
-           apply:function(){ cls("tc","ns-bad","✕ 崩潰"); status("<b>協調者單點故障</b>：TC 在下達 Commit 前掛掉，指令沒送出。"); }},
-          {sx:"3", label:"參與者阻塞：鎖死、無法決定 Commit / Rollback",
-           apply:function(){ cls("p1","ns-bad","阻塞·鎖死"); cls("p2","ns-bad","阻塞·鎖死");
-             status("<b>同步阻塞</b>：參與者已鎖定卻收不到指令，既不敢提交也不敢回滾，資源持續鎖死直到 TC 恢復。這正是 2PC 最致命的缺陷。"); }}
-        ];
-      }
-    }
-    var steps = scenarioSteps();
+  /* 第 3 節：2PC 狀態機（1 則訊息走 1 tick） */
+  var TPC_TMAX = 20;
+  var TPC_TIMEOUT = 5;                                // 正常情況 t = 4 就該收到決議；t = 5 仍沒收到才互詢
+  var TPC_CRASH_AT = { none: -1, afterPrepare: 0, afterLog: 2, partial: 3 };
+  var TPC_PARTS = ["p1", "p2"];
+  var TPC_NAME = { tc: "協調者", p1: "帳務", p2: "庫存" };
+  var TPC_MSG = {
+    prepare: "PREPARE", yes: "YES", no: "NO", commit: "COMMIT", abort: "ABORT", ack: "ACK",
+    query: "問：結果？", "ans-commit": "答：COMMIT", "ans-abort": "答：ABORT", "ans-unknown": "答：不知道"
+  };
+  var TPC_ST = { idle: "待命", prepared: "已鎖定・等決議", committed: "已提交", aborted: "已中止" };
+  var TPC_VIA = {
+    tc: "收到協調者的決議", recovery: "等協調者恢復後重送", peer: "向對方互詢得知", self: "自己投 No、單方面中止"
+  };
 
-    function cls(id, klass, text){
-      var el = actorEls[id];
-      el.classList.remove("ns-idle","ns-lock","ns-ok","ns-bad","ns-wait");
-      // keep base border via inline class on actor
-      el.style.borderColor = ""; 
-      el.classList.add(klass);
-      // map class to actor bg colors using same palette
-      var bg = {"ns-idle":"#fff","ns-lock":"var(--warn-soft)","ns-ok":"var(--ok-soft)","ns-bad":"var(--bad-soft)","ns-wait":"var(--accent-soft)"}[klass];
-      var bc = {"ns-idle":"var(--border-strong)","ns-lock":"var(--warn)","ns-ok":"var(--ok)","ns-bad":"var(--bad)","ns-wait":"var(--accent)"}[klass];
-      el.style.background = bg; el.style.borderColor = bc;
-      stateEls[id].textContent = text;
-    }
-    function status(html){ statusEl.innerHTML = html; }
-    function renderSteps(){
-      stepsEl.innerHTML = "";
-      steps.forEach(function(s,i){
-        var d = document.createElement("div");
-        d.className = "stepitem" + (i<idx?" done":"") + (i===idx-1?" cur":"");
-        d.innerHTML = '<span class="sx">'+s.sx+'</span><span>'+s.label+'</span>';
-        stepsEl.appendChild(d);
-      });
-    }
-    function reset(){
-      idx = 0;
-      steps = scenarioSteps();
-      cls("tc","ns-idle","待命");
-      cls("p1","ns-idle","idle");
-      cls("p2","ns-idle","idle");
-      status(scenario==="ok" ? "按「下一步」開始走兩階段流程。" : "情境：協調者將在 Commit 前崩潰。按「下一步」觀察阻塞如何發生。");
-      nextBtn.disabled = false;
-      renderSteps();
-    }
-    nextBtn.addEventListener("click", function(){
-      if(idx >= steps.length) return;
-      steps[idx].apply();
-      idx++;
-      renderSteps();
-      if(idx >= steps.length){ nextBtn.disabled = true; }
+  /* 第 4 節：TCC 單一參與者（帳務）的帳本 */
+  var TCC_BALANCE = 1000;
+  var TCC_MAX_SEQ = 6;
+  var TCC_MSG = { try: "Try", confirm: "Confirm", cancel: "Cancel" };
+
+  /* 第 5 節：Saga 步驟與補償 */
+  var SAGA_STEPS = [
+    { n: "建立訂單", comp: "取消訂單" },
+    { n: "扣款", comp: "退款" },
+    { n: "扣庫存", comp: "回補庫存" },
+    { n: "安排出貨", comp: "取消出貨" }
+  ];
+
+  /* 第 6 節：三種寫入策略的寫入路徑 */
+  var OB_PATHS = {
+    "db-first": [
+      { op: "txWrite", what: ["order"], label: "本地交易寫入 order（未提交）" },
+      { op: "commit", label: "COMMIT" },
+      { op: "publish", label: "publish 事件到 MQ" }
+    ],
+    "mq-first": [
+      { op: "publish", label: "publish 事件到 MQ" },
+      { op: "txWrite", what: ["order"], label: "本地交易寫入 order（未提交）" },
+      { op: "commit", label: "COMMIT" }
+    ],
+    outbox: [
+      { op: "txWrite", what: ["order", "outbox"], label: "同一交易寫入 order＋outbox 列（未提交）" },
+      { op: "commit", label: "COMMIT（兩筆一起落地）" },
+      { op: "relayRead", label: "Relay 讀出未送的 outbox 列" },
+      { op: "publish", label: "Relay publish 到 MQ" },
+      { op: "markSent", label: "Relay 把 outbox 列標為已送" }
+    ]
+  };
+  var OB_SAFE = { abort: true, ok: true, delayed: true, absorbed: true };
+  var OB_CLS = {
+    abort: "一致：整筆沒發生", ok: "一致", delayed: "一致：延遲送達", absorbed: "重複投遞，已被去重吸收",
+    lost: "訊息遺失", ghost: "幽靈訊息", doubled: "重複套用"
+  };
+
+  /* 第 7 節：決策器 */
+  var WIZ_Q = { length: "第 1 題（流程長度）", consistency: "第 2 題（一致性要求）", scope: "第 3 題（範圍與性質）" };
+  var WIZ_SCOPE = { "same-org": "同組織、跨庫、可用 XA", payment: "支付／帳務扣款", "cross-svc": "跨多個微服務" };
+  var WIZ_WHY = {
+    payment: "支付 / 帳務扣款需要較強一致又不能忍受 2PC 長鎖，TCC 的 Try 資源預留正是為這類場景設計。記得處理冪等、空回滾、懸掛。",
+    crossStrong: "跨多服務又堅持強一致，Saga 的可見中間態不符需求；可考慮 TCC 在業務層做預留。但要評估三介面的開發成本，多數團隊會重新審視「是否真的需要強一致」。",
+    crossEventual: "跨多微服務的長流程、可接受最終一致——Saga（建議 Orchestration）負責流程與補償，Outbox 確保事件可靠發出。這是微服務下最平衡的主流組合。",
+    sameStrongShort: "同組織、跨庫、可用 XA，且流程短又要求強一致——2PC 對業務無侵入、行為最接近單庫 commit。前提是併發量不大，能容忍同步阻塞。",
+    sameStrongLong: "流程長又堅持強一致是天生衝突的需求：2PC 的長鎖在長流程上代價過重，純 Saga 又只有最終一致、不符強一致。較務實是用 TCC 在業務層做資源預留，但 TCC 本身偏短～中流程，若流程真的很長，建議重新評估「是否每一步都需要強一致」。",
+    sameEventual: "同組織但可接受最終一致時，2PC 的同步阻塞代價不划算，改用 Saga（+ Outbox 確保事件可靠）在可用性與吞吐上更好。"
+  };
+
+  /* ================================================================
+   * (2) compute* 純函式（與它們共用的純輔助函式）
+   *     不得出現任何 DOM 存取；L2 閘門在無 document 的 sandbox 裡求值本段
+   * ================================================================ */
+
+  function round1(x) { return Math.round(x * 10) / 10; }
+  function round3(x) { return Math.round(x * 1000) / 1000; }
+
+  /* ---------- 第 2 節：一致性光譜 ---------- */
+
+  // @probe fn       computeSpectrum
+  // @probe baseline {"n":4,"rtt":20,"work":5,"avail":99.9}
+  // @probe sweep    {"n":[2,8],"rtt":[1,200],"work":[1,50],"avail":[99,99.99]}
+  function computeSpectrum(p) {
+    var a = p.avail / 100;
+    var f = SPEC_FSYNC_MS;
+    // 熱點資料列被鎖住的時間：2PC 從 Prepare 的本地執行鎖到收到 Commit；TCC 是 Try、Confirm 兩次本地交易；Saga 一次
+    var hold = { "2pc": p.work + p.rtt + f, tcc: 2 * p.work, saga: p.work };
+    // 外部讀者可能看到「一半」的時間：2PC 讀者被鎖擋住；TCC 看得到凍結；Saga 從第一步提交到最後一步提交
+    var visible = { "2pc": 0, tcc: p.work + p.rtt + f, saga: (p.n - 1) * (p.rtt + p.work) };
+    // 端到端延遲：2PC、TCC 並行兩輪往返；Saga 逐步串行
+    var latency = { "2pc": 2 * p.rtt + p.work + f, tcc: 2 * p.rtt + 2 * p.work + f, saga: p.n * (p.rtt + p.work) };
+    // 交易當下必須同時在線的角色數：2PC、TCC 是協調者＋全部參與者；Saga 只要協調器收下請求，其餘可非同步重試
+    var parties = { "2pc": p.n + 1, tcc: p.n + 1, saga: 1 };
+
+    var schemes = {};
+    SPEC_KEYS.forEach(function (k) {
+      schemes[k] = {
+        holdMs: hold[k],
+        tps: Math.round(1000 / hold[k]),
+        visibleMs: visible[k],
+        latencyMs: latency[k],
+        availPct: round3(Math.pow(a, parties[k]) * 100),
+        parties: parties[k]
+      };
     });
-    resetBtn.addEventListener("click", reset);
-    segBtns.forEach(function(b){
-      b.addEventListener("click", function(){
-        segBtns.forEach(function(x){ x.setAttribute("aria-pressed","false"); });
-        b.setAttribute("aria-pressed","true");
-        scenario = b.dataset.sc;
-        reset();
-      });
-    });
-    reset();
-  })();
-
-  /* ===== 04 TCC timeline lab ===== */
-  (function(){
-    var SC = {
-      normal:{
-        naive:{ steps:["Try 抵達：凍結資源 ✓","Cancel 抵達：釋放凍結 ✓"], verdict:"資源正確釋放（此情形天真版剛好沒事）", ok:true },
-        fixed:{ steps:["Try：寫入控制表 tried，凍結資源","Cancel：查表見 tried → 釋放，標記 cancelled"], verdict:"正確且可重入", ok:true }
-      },
-      empty:{
-        naive:{ steps:["（Try 在網路上遺失，從未抵達）","Cancel 抵達：嘗試釋放一筆不存在的凍結 ✕"], verdict:"空回滾未處理：誤動作 / 報錯，狀態混亂", ok:false },
-        fixed:{ steps:["（無 Try 紀錄）","Cancel：查表查無 tried → 判定空回滾，直接標記 cancelled、什麼都不做"], verdict:"空回滾被正確攔下", ok:true }
-      },
-      hang:{
-        naive:{ steps:["Cancel 先抵達：以為要回滾（其實無事可回）","延遲的 Try 後到：照樣凍結資源 ✕"], verdict:"懸掛：凍結了一筆永遠不會被收尾的資源", ok:false },
-        fixed:{ steps:["Cancel 先到：標記 cancelled（空回滾）","延遲 Try 後到：查表見已 cancelled → 拒絕凍結"], verdict:"懸掛被正確防止", ok:true }
+    return {
+      schemes: schemes,
+      twoPcBeatsTcc: hold["2pc"] < hold.tcc,
+      lockRatio: round1(hold["2pc"] / hold.saga),
+      sagaLatencyRatio: round1(latency.saga / latency["2pc"]),
+      downtimeMinPerDay: {
+        "2pc": Math.round((1 - Math.pow(a, parties["2pc"])) * 1440),
+        saga: Math.round((1 - a) * 1440)
       }
     };
-    var opts = document.querySelectorAll("#tl-scenarios .tl-opt");
-    var nb = document.getElementById("tl-naive-body");
-    var nv = document.getElementById("tl-naive-verdict");
-    var fb = document.getElementById("tl-fixed-body");
-    var fv = document.getElementById("tl-fixed-verdict");
-    function list(arr){
-      return "<ol style='margin:0;padding-left:18px'>"+arr.map(function(s){return "<li style='margin:4px 0'>"+s+"</li>";}).join("")+"</ol>";
-    }
-    function render(key){
-      var d = SC[key];
-      opts.forEach(function(o){ o.setAttribute("aria-pressed", o.dataset.sc===key?"true":"false"); });
-      nb.innerHTML = list(d.naive.steps); nv.textContent = (d.naive.ok?"✓ ":"✕ ")+d.naive.verdict;
-      fb.innerHTML = list(d.fixed.steps); fv.textContent = (d.fixed.ok?"✓ ":"✕ ")+d.fixed.verdict;
-    }
-    opts.forEach(function(o){ o.addEventListener("click", function(){ render(o.dataset.sc); }); });
-    render("normal");
-  })();
+  }
 
-  /* ===== 05 Saga chain ===== */
-  (function(){
-    var STEPS = [
-      {n:"建立訂單", comp:"取消訂單"},
-      {n:"扣款", comp:"退款"},
-      {n:"扣庫存", comp:"回補庫存"},
-      {n:"安排出貨", comp:"取消出貨"}
-    ];
-    var chainEl = document.getElementById("saga-chain");
-    var statusEl = document.getElementById("saga-status");
-    var modeNote = document.getElementById("saga-mode-note");
-    var failSel = document.getElementById("saga-fail");
-    var runBtn = document.getElementById("saga-run");
-    var resetBtn = document.getElementById("saga-reset");
-    var segBtns = document.querySelectorAll("#demo-saga .seg button");
-    var mode = "orch";
-    var boxes = [];
+  /* ---------- 第 3 節：2PC 狀態機 ---------- */
 
-    function build(){
-      chainEl.innerHTML = ""; boxes = [];
-      STEPS.forEach(function(s,i){
-        var row = document.createElement("div"); row.className="saga-step";
-        var box = document.createElement("div"); box.className="saga-box";
-        box.innerHTML = '<span class="sgn">'+(i+1)+'. '+s.n+'</span><span class="sgs" data-s>未執行</span>';
-        row.appendChild(box); chainEl.appendChild(row);
-        boxes.push(box);
-        if(i<STEPS.length-1){ var ar=document.createElement("div"); ar.className="saga-arrow"; chainEl.appendChild(ar); }
-      });
-      setModeNote();
-    }
-    function setBox(i, klass, text){
-      var b = boxes[i];
-      b.classList.remove("ns-idle","ns-lock","ns-ok","ns-bad");
-      var bg={"ns-idle":"#fff","ns-lock":"var(--warn-soft)","ns-ok":"var(--ok-soft)","ns-bad":"var(--bad-soft)"}[klass];
-      var bc={"ns-idle":"var(--border-strong)","ns-lock":"var(--warn)","ns-ok":"var(--ok)","ns-bad":"var(--bad)"}[klass];
-      b.style.background=bg; b.style.borderColor=bc;
-      b.querySelector("[data-s]").textContent = text;
-    }
-    function setModeNote(){
-      modeNote.innerHTML = mode==="orch"
-        ? "<b>Orchestration（編排）</b>：一個中央協調器逐步呼叫每個服務、並在失敗時主導補償。流程集中、好追蹤與監控。"
-        : "<b>Choreography（編舞）</b>：無中央協調器，每個服務完成後發出事件、下一個服務監聽接手；失敗時靠補償事件反向傳遞。耦合低，但流程分散、較難追蹤。";
-    }
-    function reset(){
-      build();
-      STEPS.forEach(function(_,i){ setBox(i,"ns-idle","未執行"); });
-      statusEl.textContent = "選好失敗點後按「執行」，觀看正向推進與反向補償。";
-      runBtn.disabled = false;
-    }
-    function delay(ms){ return new Promise(function(r){ setTimeout(r,ms); }); }
-    var reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-    var gap = reduce ? 0 : 520;
+  // @probe fn       computeTwoPC
+  // @probe baseline {"v1":"yes","v2":"yes","crash":"partial","recover":8,"coop":false,"step":20}
+  // @probe sweep    {"v1":["no"],"v2":["no"],"crash":["none","afterLog"],"recover":[2,12],"coop":[true],"step":[0,6]}
+  function computeTwoPC(p) {
+    var crashAt = TPC_CRASH_AT[p.crash];
+    var recoverAt = crashAt < 0 ? -1 : crashAt + p.recover;
+    var vote = { p1: p.v1, p2: p.v2 };
+    var tc = { down: false, decision: null, logged: false, votes: {}, acks: {}, sendAt: -1 };
+    var ps = {};
+    TPC_PARTS.forEach(function (id) {
+      ps[id] = { st: "idle", lockFrom: -1, lockTo: -1, via: null, asked: false };
+    });
+    var msgs = [];
+    var events = [];
+    var snaps = [];
 
-    async function run(){
-      runBtn.disabled = true;
-      reset(); runBtn.disabled = true;
-      var failAt = parseInt(failSel.value,10); // 0-based index, -1 = none
-      var committed = [];
-      var driver = mode==="orch" ? "協調器" : "事件鏈";
-      for(var i=0;i<STEPS.length;i++){
-        await delay(gap);
-        if(i===failAt){
-          setBox(i,"ns-bad","失敗 ✕");
-          statusEl.innerHTML = "<b>第 "+(i+1)+" 步「"+STEPS[i].n+"」失敗</b>（本地已回滾）。"+driver+"開始<b>反向補償</b>已提交的步驟…";
-          // compensate committed in reverse
-          for(var j=committed.length-1;j>=0;j--){
-            await delay(gap);
-            var k = committed[j];
-            setBox(k,"ns-lock","已補償·"+STEPS[k].comp);
-          }
-          await delay(gap);
-          statusEl.innerHTML = "<b>Saga 回滾完成</b>：失敗步自身本地回滾，先前已提交的 "+committed.length+" 步依<b>反向順序</b>補償撤銷，系統回到最終一致。";
-          return;
+    function send(t, from, to, kind) {
+      msgs.push({ from: from, to: to, kind: kind, sendT: t, recvT: t + 1, lost: false });
+    }
+    function note(t, text, tone) { events.push({ t: t, text: text, tone: tone || "" }); }
+    function peerOf(id) { return id === "p1" ? "p2" : "p1"; }
+    function settle(t, id, outcome, via) {
+      var s = ps[id];
+      if (s.st === "committed" || s.st === "aborted") return false;
+      if (s.st === "prepared") s.lockTo = t;
+      s.st = outcome === "commit" ? "committed" : "aborted";
+      s.via = via;
+      return true;
+    }
+    function tcLabel() {
+      if (tc.down) return "崩潰（不在線）";
+      if (tc.logged && tc.acks.p1 && tc.acks.p2) return "完成：" + TPC_MSG[tc.decision];
+      if (tc.logged) return "已決議 " + TPC_MSG[tc.decision];
+      return "等待投票";
+    }
+
+    for (var t = 0; t <= TPC_TMAX; t++) {
+      /* ① 協調者恢復：日誌有決議就重送，沒有就推定中止 */
+      if (t === recoverAt) {
+        tc.down = false;
+        if (tc.logged) {
+          note(t, "協調者恢復，從日誌讀到決議 " + TPC_MSG[tc.decision] + "，重送給尚未回 ACK 的參與者", "ok");
+        } else {
+          tc.decision = "abort";
+          tc.logged = true;
+          note(t, "協調者恢復，日誌裡沒有決議 → 推定中止（presumed abort），送出 ABORT", "warn");
         }
-        setBox(i,"ns-ok","已提交 ✓");
-        committed.push(i);
+        TPC_PARTS.forEach(function (id) { if (!tc.acks[id]) send(t, "tc", id, tc.decision); });
       }
-      statusEl.innerHTML = "<b>全部成功</b>：四個本地交易依序提交，無需補償。";
-    }
-    runBtn.addEventListener("click", run);
-    resetBtn.addEventListener("click", reset);
-    segBtns.forEach(function(b){
-      b.addEventListener("click", function(){
-        segBtns.forEach(function(x){ x.setAttribute("aria-pressed","false"); });
-        b.setAttribute("aria-pressed","true");
-        mode = b.dataset.mode; reset();
-      });
-    });
-    reset();
-  })();
 
-  /* ===== 06 Outbox ===== */
-  (function(){
-    var stage = document.getElementById("ob-stage");
-    var statusEl = document.getElementById("ob-status");
-    var runBtn = document.getElementById("ob-run");
-    var crashBtn = document.getElementById("ob-crash");
-    var resetBtn = document.getElementById("ob-reset");
-    var segBtns = document.querySelectorAll("#demo-outbox .seg button");
-    var mode = "naive";
-    var reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-    var gap = reduce ? 0 : 600;
-    function delay(ms){ return new Promise(function(r){ setTimeout(r,ms); }); }
-
-    function chips(){
-      if(mode==="naive"){
-        return [
-          {id:"db", t:"業務 DB", s:"UPDATE order ..."},
-          {id:"mq", t:"訊息佇列 MQ", s:"publish(event)"},
-          {id:"down", t:"下游服務", s:"consume(event)"}
-        ];
+      /* ② 送達本 tick 的訊息 */
+      for (var i = 0; i < msgs.length; i++) {
+        var m = msgs[i];
+        if (m.recvT !== t) continue;
+        if (m.to === "tc") {
+          if (tc.down) {
+            m.lost = true;
+            note(t, TPC_NAME[m.from] + " 的 " + TPC_MSG[m.kind] + " 抵達時協調者不在線，遺失", "bad");
+          } else if (m.kind === "yes" || m.kind === "no") {
+            tc.votes[m.from] = m.kind;
+          } else if (m.kind === "ack") {
+            tc.acks[m.from] = true;
+          }
+          continue;
+        }
+        var who = TPC_NAME[m.to];
+        var s = ps[m.to];
+        if (m.kind === "prepare") {
+          if (vote[m.to] === "yes") {
+            s.st = "prepared";
+            s.lockFrom = t;
+            note(t, who + " 執行本地操作、鎖住資料列、投 YES——從這一刻起它不能自行決定結果", "warn");
+            send(t, m.to, "tc", "yes");
+          } else {
+            s.st = "aborted";
+            s.via = "self";
+            note(t, who + " 無法提交，投 NO 並立即本地回滾（投 NO 的一方可以單方面中止）");
+            send(t, m.to, "tc", "no");
+          }
+        } else if (m.kind === "commit" || m.kind === "abort") {
+          var via = recoverAt >= 0 && m.sendT >= recoverAt ? "recovery" : "tc";
+          var lockedFor = s.st === "prepared" ? t - s.lockFrom : 0;
+          if (settle(t, m.to, m.kind, via)) {
+            note(t, who + " 收到 " + TPC_MSG[m.kind] + "，" + (m.kind === "commit" ? "提交" : "回滾") +
+              (lockedFor ? "並釋放鎖（持鎖 " + lockedFor + " tick）" : ""), m.kind === "commit" ? "ok" : "");
+          } else {
+            note(t, who + " 收到重送的 " + TPC_MSG[m.kind] + "，已是終態，冪等回 ACK");
+          }
+          send(t, m.to, "tc", "ack");
+        } else if (m.kind === "query") {
+          var known = s.st === "committed" ? "commit" : s.st === "aborted" ? "abort" : "unknown";
+          note(t, who + " 被問到結果，回覆「" + TPC_MSG["ans-" + known].slice(2) + "」", known === "unknown" ? "bad" : "");
+          send(t, m.to, m.from, "ans-" + known);
+        } else if (m.kind.indexOf("ans-") === 0) {
+          var ans = m.kind.slice(4);
+          if (ans === "unknown") {
+            note(t, who + " 問不到答案：兩邊都投了 YES、都沒收到決議，誰也不能自行決定，只能鎖著等協調者", "bad");
+          } else if (settle(t, m.to, ans, "peer")) {
+            note(t, who + " 從對方得知結果是 " + TPC_MSG[ans] + "，照做並釋放鎖（持鎖 " + (s.lockTo - s.lockFrom) + " tick）", "ok");
+          }
+        }
       }
-      return [
-        {id:"db", t:"業務 DB + Outbox 表", s:"同一交易寫入 order + outbox"},
-        {id:"relay", t:"背景 Relay", s:"poll outbox → publish"},
-        {id:"mq", t:"訊息佇列 MQ", s:""},
-        {id:"down", t:"下游服務", s:"consume(event)"}
-      ];
-    }
-    var els = {};
-    function build(){
-      stage.innerHTML = ""; els = {};
-      var cs = chips();
-      cs.forEach(function(c,i){
-        var row = document.createElement("div"); row.className="ob-row";
-        var chip = document.createElement("div"); chip.className="ob-chip";
-        chip.innerHTML = '<div class="obt">'+c.t+'</div>'+(c.s?'<div class="obs">'+c.s+'</div>':'');
-        chip.style.borderColor="var(--border-strong)"; chip.style.background="#fff";
-        row.appendChild(chip);
-        if(i<cs.length-1){ var f=document.createElement("span"); f.className="ob-flow"; f.textContent="→"; row.appendChild(f); }
-        stage.appendChild(row);
-        els[c.id]=chip;
-      });
-    }
-    function paint(id,klass){
-      var bg={"ok":"var(--ok-soft)","bad":"var(--bad-soft)","wait":"var(--accent-soft)","idle":"#fff"}[klass];
-      var bc={"ok":"var(--ok)","bad":"var(--bad)","wait":"var(--accent)","idle":"var(--border-strong)"}[klass];
-      els[id].style.background=bg; els[id].style.borderColor=bc;
-    }
-    function reset(){
-      build();
-      statusEl.textContent = mode==="naive"
-        ? "天真版：DB 與 MQ 是兩個獨立動作。按「執行」看正常流程，或按崩潰按鈕看雙寫問題。"
-        : "Outbox 版：訊息與業務資料寫進同一交易。按崩潰按鈕，看訊息為何不會遺失。";
-      runBtn.disabled=false; crashBtn.disabled=false;
-    }
-    async function run(){
-      reset(); runBtn.disabled=true; crashBtn.disabled=true;
-      if(mode==="naive"){
-        await delay(gap); paint("db","ok"); statusEl.textContent="① 業務 DB 已提交。";
-        await delay(gap); paint("mq","ok"); statusEl.textContent="② 訊息已發到 MQ。";
-        await delay(gap); paint("down","ok"); statusEl.innerHTML="③ 下游消費成功。<b>順利時兩者都成功</b>——但這依賴「中間不崩潰」的運氣。";
-      } else {
-        await delay(gap); paint("db","ok"); statusEl.textContent="① 業務資料 + outbox 紀錄寫進「同一個本地交易」並提交。";
-        await delay(gap); paint("relay","wait"); statusEl.textContent="② 背景 Relay 輪詢 outbox，取出待發訊息。";
-        await delay(gap); paint("mq","ok"); statusEl.textContent="③ Relay 投遞到 MQ。";
-        await delay(gap); paint("down","ok"); statusEl.innerHTML="④ 下游消費成功，Relay 標記 outbox 該筆已發送。<b>最終一致達成</b>。";
+
+      /* ③ 協調者的動作（崩潰點插在動作之間） */
+      if (!tc.down) {
+        if (t === 0) {
+          send(t, "tc", "p1", "prepare");
+          send(t, "tc", "p2", "prepare");
+          note(t, "協調者送出 PREPARE 給帳務與庫存");
+        }
+        if (t === 2 && !tc.logged) {
+          tc.decision = tc.votes.p1 === "yes" && tc.votes.p2 === "yes" ? "commit" : "abort";
+          tc.logged = true;
+          tc.sendAt = 3;
+          note(t, "協調者收齊投票（帳務 " + TPC_MSG[tc.votes.p1] + "、庫存 " + TPC_MSG[tc.votes.p2] + "），把決議 " +
+            TPC_MSG[tc.decision] + " 強制寫入日誌");
+        }
+        if (t === tc.sendAt) {
+          var targets = t === crashAt && p.crash === "partial" ? ["p1"] : TPC_PARTS;
+          targets.forEach(function (id) { send(t, "tc", id, tc.decision); });
+          note(t, "協調者送出 " + TPC_MSG[tc.decision] + " 給" + targets.map(function (id) { return TPC_NAME[id]; }).join("與"));
+        }
+        if (t === crashAt) {
+          tc.down = true;
+          note(t, "✕ 協調者崩潰" + (p.crash === "afterPrepare" ? "：PREPARE 已送出，還沒收到投票" :
+            p.crash === "afterLog" ? "：決議已寫進日誌，但一則都還沒送出" : "：決議只送到帳務，庫存那份沒送出"), "bad");
+        }
       }
-      runBtn.disabled=false; crashBtn.disabled=false;
-    }
-    async function crash(){
-      reset(); runBtn.disabled=true; crashBtn.disabled=true;
-      if(mode==="naive"){
-        await delay(gap); paint("db","ok"); statusEl.textContent="① 業務 DB 已提交…";
-        await delay(gap); paint("db","ok"); statusEl.innerHTML="② <b>進程在發 MQ 之前崩潰 ✕</b>";
-        await delay(gap); paint("mq","bad"); paint("down","bad");
-        statusEl.innerHTML="<b>雙寫問題</b>：DB 已改、訊息卻永遠遺失，下游收不到通知 → 資料不一致。問題根源是「寫 DB」與「發 MQ」不是原子的。";
-      } else {
-        await delay(gap); paint("db","ok"); statusEl.textContent="① 業務資料 + outbox 在同一交易提交…";
-        await delay(gap); paint("relay","bad"); statusEl.innerHTML="② <b>進程在 Relay 投遞前崩潰 ✕</b>——但 outbox 紀錄已隨業務交易落地。";
-        await delay(gap); paint("relay","wait"); statusEl.textContent="③ 服務重啟，Relay 重新輪詢，發現未發送的 outbox 紀錄。";
-        await delay(gap); paint("mq","ok"); paint("down","ok");
-        statusEl.innerHTML="④ 訊息補投成功。<b>崩潰也不丟訊息</b>——因為它和業務資料同生共死於一個交易。";
-      }
-      runBtn.disabled=false; crashBtn.disabled=false;
-    }
-    runBtn.addEventListener("click", run);
-    crashBtn.addEventListener("click", crash);
-    resetBtn.addEventListener("click", reset);
-    segBtns.forEach(function(b){
-      b.addEventListener("click", function(){
-        segBtns.forEach(function(x){ x.setAttribute("aria-pressed","false"); });
-        b.setAttribute("aria-pressed","true");
-        mode=b.dataset.mode; reset();
-      });
-    });
-    reset();
-  })();
 
-  /* ===== 07 comparison hover + wizard ===== */
-  (function(){
-    var table = document.getElementById("cmp-table");
-    var cells = table.querySelectorAll("td, th");
-    function colIndex(cell){ return cell.cellIndex; }
-    table.addEventListener("mouseover", function(e){
-      var c = e.target.closest("td,th"); if(!c) return;
-      var ci = colIndex(c); if(ci===0) { clear(); return; }
-      clear();
-      table.querySelectorAll("tr").forEach(function(tr){
-        var cell = tr.children[ci]; if(cell && cell.tagName==="TD") cell.classList.add("hl");
-      });
-    });
-    table.addEventListener("mouseleave", clear);
-    function clear(){ table.querySelectorAll(".hl").forEach(function(x){ x.classList.remove("hl"); }); }
-  })();
-
-  (function(){
-    var answers = { length:null, consistency:null, scope:null };
-    var qs = document.querySelectorAll("#demo-wiz .wiz-q");
-    var resBox = document.getElementById("wiz-result");
-    var pickEl = document.getElementById("wiz-pick");
-    var whyEl = document.getElementById("wiz-why");
-
-    qs.forEach(function(q){
-      var key = q.dataset.q;
-      q.querySelectorAll(".wiz-opts button").forEach(function(b){
-        b.addEventListener("click", function(){
-          q.querySelectorAll(".wiz-opts button").forEach(function(x){ x.setAttribute("aria-pressed","false"); });
-          b.setAttribute("aria-pressed","true");
-          answers[key] = b.dataset.v;
-          evaluate();
+      /* ④ 參與者逾時互詢（cooperative termination） */
+      if (p.coop) {
+        TPC_PARTS.forEach(function (id) {
+          if (ps[id].st === "prepared" && !ps[id].asked && t >= TPC_TIMEOUT) {
+            ps[id].asked = true;
+            send(t, id, peerOf(id), "query");
+            note(t, TPC_NAME[id] + " 等不到決議，改問" + TPC_NAME[peerOf(id)] + "：「你知道結果嗎？」", "warn");
+          }
         });
-      });
+      }
+
+      snaps.push({ tc: tcLabel(), p1: ps.p1.st, p2: ps.p2.st });
+    }
+
+    var endT = 0;
+    events.forEach(function (e) { if (e.t > endT) endT = e.t; });
+    msgs.forEach(function (m) { if (m.recvT > endT && m.recvT <= TPC_TMAX) endT = m.recvT; });
+
+    var parts = {};
+    var maxLock = 0;
+    var maxBlocked = 0;
+    TPC_PARTS.forEach(function (id) {
+      var s = ps[id];
+      var lockEnd = s.lockFrom < 0 ? -1 : (s.lockTo < 0 ? TPC_TMAX : s.lockTo);
+      var lockTicks = s.lockFrom < 0 ? 0 : lockEnd - s.lockFrom;
+      var blocked = 0;
+      for (var k = s.lockFrom; s.lockFrom >= 0 && k < lockEnd; k++) {
+        if (crashAt >= 0 && k > crashAt && k < recoverAt) blocked += 1;
+      }
+      parts[id] = {
+        vote: vote[id], outcome: s.st, via: s.via, lockFrom: s.lockFrom, lockTo: lockEnd,
+        lockTicks: lockTicks, blockedTicks: blocked
+      };
+      if (lockTicks > maxLock) maxLock = lockTicks;
+      if (blocked > maxBlocked) maxBlocked = blocked;
     });
 
-    function decide(a){
-      // returns {pick, why}
-      if(!a.length || !a.consistency || !a.scope) return null;
+    var finalSame = ps.p1.st === ps.p2.st;
+    var step = Math.max(0, Math.min(p.step, endT));
+    var diverged = [];
+    snaps.forEach(function (sn, k) {
+      if ((sn.p1 === "committed" && sn.p2 === "prepared") || (sn.p2 === "committed" && sn.p1 === "prepared")) diverged.push(k);
+    });
 
-      // payment/account is the canonical TCC case
-      if(a.scope==="payment"){
-        return { pick:"TCC",
-          why:"支付 / 帳務扣款需要較強一致又不能忍受 2PC 長鎖，TCC 的 Try 資源預留正是為這類場景設計。記得處理冪等、空回滾、懸掛。" };
+    return {
+      endT: endT,
+      crashAt: crashAt,
+      recoverAt: recoverAt,
+      decision: tc.decision,
+      parts: parts,
+      msgs: msgs,
+      events: events,
+      totalMsgs: msgs.filter(function (m) { return m.sendT <= endT; }).length,
+      lostMsgs: msgs.filter(function (m) { return m.lost; }).length,
+      maxLock: maxLock,
+      maxBlocked: maxBlocked,
+      divergedTicks: diverged.length,
+      consistent: finalSame && (ps.p1.st === "committed" ? tc.decision === "commit" : tc.decision === "abort"),
+      view: {
+        step: step,
+        state: snaps[step],
+        now: events.filter(function (e) { return e.t === step; })
       }
-      // cross-service + eventual + long => Saga
-      if(a.scope==="cross-svc"){
-        if(a.consistency==="strong"){
-          return { pick:"TCC（跨服務若仍要求強一致）",
-            why:"跨多服務又堅持強一致，Saga 的可見中間態不符需求；可考慮 TCC 在業務層做預留。但要評估三介面的開發成本，多數團隊會重新審視「是否真的需要強一致」。" };
+    };
+  }
+
+  /* ---------- 第 4 節：TCC 抵達序列 ---------- */
+
+  function tccRunNaive(seq, amt) {
+    // 只看金額欄位、不看交易狀態：金額不夠就報錯
+    var b = { avail: TCC_BALANCE, frozen: 0, spent: 0 };
+    var errors = 0;
+    var rows = seq.map(function (msg) {
+      var act, kind = "ok";
+      if (msg === "try") {
+        if (b.avail >= amt) { b.avail -= amt; b.frozen += amt; act = "凍結 " + amt; }
+        else { act = "可用餘額不足，Try 失敗"; kind = "err"; errors += 1; }
+      } else if (msg === "confirm") {
+        if (b.frozen >= amt) { b.frozen -= amt; b.spent += amt; act = "扣掉凍結的 " + amt; }
+        else { act = "凍結不足 " + amt + "，報錯"; kind = "err"; errors += 1; }
+      } else {
+        if (b.frozen >= amt) { b.frozen -= amt; b.avail += amt; act = "釋放凍結的 " + amt; }
+        else { act = "沒有可釋放的凍結，報錯"; kind = "err"; errors += 1; }
+      }
+      return { msg: msg, act: act, kind: kind, avail: b.avail, frozen: b.frozen, spent: b.spent };
+    });
+    return { rows: rows, final: { avail: b.avail, frozen: b.frozen, spent: b.spent }, errors: errors };
+  }
+
+  function tccRunGuarded(seq, amt) {
+    // 事務控制表：每則訊息先查這筆全域交易的狀態，再決定動作
+    var b = { avail: TCC_BALANCE, frozen: 0, spent: 0 };
+    var st = "none";
+    var errors = 0;
+    var rows = seq.map(function (msg) {
+      var act, kind = "ok";
+      if (msg === "try") {
+        if (st === "cancelled") { act = "已是 cancelled → 拒絕凍結（防懸掛）"; kind = "guard"; }
+        else if (st === "tried" || st === "confirmed") { act = "已是 " + st + " → 重複 Try，冪等略過"; kind = "noop"; }
+        else if (b.avail < amt) { act = "可用餘額不足，Try 失敗"; kind = "err"; errors += 1; }
+        else { b.avail -= amt; b.frozen += amt; st = "tried"; act = "凍結 " + amt + "，記為 tried"; }
+      } else if (msg === "confirm") {
+        if (st === "tried") { b.frozen -= amt; b.spent += amt; st = "confirmed"; act = "扣掉凍結的 " + amt + "，記為 confirmed"; }
+        else if (st === "confirmed") { act = "已是 confirmed → 冪等略過"; kind = "noop"; }
+        else { act = "狀態 " + st + " 不能 Confirm → 拒絕並告警"; kind = "guard"; }
+      } else {
+        if (st === "none") { st = "cancelled"; act = "查無 tried → 空回滾：只記 cancelled，不動資源"; kind = "guard"; }
+        else if (st === "tried") { b.frozen -= amt; b.avail += amt; st = "cancelled"; act = "釋放凍結的 " + amt + "，記為 cancelled"; }
+        else if (st === "cancelled") { act = "已是 cancelled → 冪等略過"; kind = "noop"; }
+        else { act = "已是 confirmed → 拒絕 Cancel 並告警"; kind = "guard"; }
+      }
+      return { msg: msg, act: act, kind: kind, avail: b.avail, frozen: b.frozen, spent: b.spent, st: st };
+    });
+    return { rows: rows, final: { avail: b.avail, frozen: b.frozen, spent: b.spent }, errors: errors, st: st };
+  }
+
+  function tccJudge(run, expect, decision) {
+    var issues = [];
+    if (run.errors > 0) issues.push(run.errors + " 則指令回報失敗：協調者會持續重試同一指令，這筆交易收不了尾");
+    if (expect) {
+      var extraFrozen = run.final.frozen - expect.frozen;
+      if (extraFrozen > 0) {
+        issues.push("殘留凍結 " + extraFrozen + "：" + (decision === "cancel"
+          ? "交易已取消，這筆錢卻被凍著、不會再有人來收尾（懸掛）"
+          : "重複的 Try 被當成新的一筆凍結"));
+      }
+      if (run.final.spent > expect.spent) issues.push("重複扣款：多扣了 " + (run.final.spent - expect.spent));
+      if (run.final.spent < expect.spent) issues.push("少扣了 " + (expect.spent - run.final.spent));
+    }
+    return { ok: !!expect && issues.length === 0, issues: issues };
+  }
+
+  // @probe fn       computeTcc
+  // @probe baseline {"seq":["cancel","try"],"amount":100}
+  // @probe sweep    {"seq":[["try","confirm"],["try","confirm","confirm"]],"amount":[50,500]}
+  function computeTcc(p) {
+    var seq = p.seq.slice(0, TCC_MAX_SEQ);
+    var amt = p.amount;
+    var firstTry = seq.indexOf("try");
+    var firstConfirm = seq.indexOf("confirm");
+    var hasCancel = seq.indexOf("cancel") !== -1;
+
+    // 由序列推導全域決議：協調者只會在 Try 成功後發 Confirm，否則發 Cancel，兩者不會同時出現
+    var decision, outside = "";
+    if (hasCancel && firstConfirm !== -1) { decision = "conflict"; outside = "序列同時含 Confirm 與 Cancel：協調者的決議是二元的，不會兩個都發"; }
+    else if (firstConfirm !== -1 && (firstTry === -1 || firstConfirm < firstTry)) { decision = "conflict"; outside = "Confirm 出現在任何 Try 之前：協調者只在 Try 成功後才發 Confirm"; }
+    else if (hasCancel) decision = "cancel";
+    else if (firstConfirm !== -1) decision = "confirm";
+    else if (firstTry !== -1) decision = "pending";
+    else decision = "none";
+
+    var expect = null;
+    if (decision === "confirm") expect = { avail: TCC_BALANCE - amt, frozen: 0, spent: amt };
+    else if (decision === "pending") expect = { avail: TCC_BALANCE - amt, frozen: amt, spent: 0 };
+    else if (decision === "cancel" || decision === "none") expect = { avail: TCC_BALANCE, frozen: 0, spent: 0 };
+
+    var naive = tccRunNaive(seq, amt);
+    var guarded = tccRunGuarded(seq, amt);
+    return {
+      seq: seq,
+      decision: decision,
+      outside: outside,
+      expect: expect,
+      naive: naive,
+      guarded: guarded,
+      naiveJudge: tccJudge(naive, expect, decision),
+      guardedJudge: tccJudge(guarded, expect, decision)
+    };
+  }
+
+  /* ---------- 第 5 節：Saga 補償鏈 ---------- */
+
+  // @probe fn       computeSaga
+  // @probe baseline {"failAt":2,"mode":"orch"}
+  // @probe sweep    {"failAt":[-1,1],"mode":["chor"]}
+  function computeSaga(p) {
+    var n = SAGA_STEPS.length;
+    var failed = p.failAt >= 0 && p.failAt < n;
+    var states = SAGA_STEPS.map(function () { return "idle"; });
+    var timeline = [];
+    var committed = [];
+    for (var i = 0; i < n; i++) {
+      if (i === p.failAt) { states[i] = "failed"; timeline.push({ kind: "fail", step: i }); break; }
+      states[i] = "committed";
+      committed.push(i);
+      timeline.push({ kind: "forward", step: i });
+    }
+    var order = [];
+    if (failed) {
+      for (var j = committed.length - 1; j >= 0; j--) {
+        states[committed[j]] = "compensated";
+        order.push(committed[j]);
+        timeline.push({ kind: "compensate", step: committed[j] });
+      }
+    }
+    var executed = committed.length + (failed ? 1 : 0);
+    // 編排：協調器對每個服務是一來一回（command＋reply）；編舞：每個服務做完只發一則事件
+    var perHop = p.mode === "orch" ? 2 : 1;
+    return {
+      states: states,
+      timeline: timeline,
+      failed: failed,
+      committed: committed.length,
+      compensations: order.length,
+      compensationOrder: order.map(function (k) { return SAGA_STEPS[k].comp; }),
+      messages: perHop * (executed + order.length),
+      stateHolders: p.mode === "orch" ? 1 : executed
+    };
+  }
+
+  /* ---------- 第 6 節：雙寫 vs Outbox 崩潰點枚舉 ---------- */
+
+  function obRun(path, doneSteps, idem) {
+    // 做完前 doneSteps 步後崩潰（doneSteps === path.length 表示不崩潰）
+    var pending = [];
+    var db = { order: false, outbox: null };
+    var published = 0;
+    for (var i = 0; i < doneSteps; i++) {
+      var s = path[i];
+      if (s.op === "txWrite") pending = pending.concat(s.what);
+      else if (s.op === "commit") {
+        pending.forEach(function (w) {
+          if (w === "order") db.order = true;
+          if (w === "outbox") db.outbox = { sent: false };
+        });
+        pending = [];
+      } else if (s.op === "publish") published += 1;
+      else if (s.op === "markSent" && db.outbox) db.outbox.sent = true;
+    }
+    var crashed = doneSteps < path.length;
+    var beforeCrash = published;
+    var republished = false;
+    if (crashed && db.outbox && !db.outbox.sent) {
+      // 未提交的寫入隨崩潰消失；重啟後 Relay 把還沒標記已送的 outbox 列再發一次
+      published += 1;
+      db.outbox.sent = true;
+      republished = true;
+    }
+    var applied = idem ? Math.min(published, 1) : published;
+    var cls;
+    if (!db.order && published === 0) cls = "abort";
+    else if (!db.order) cls = "ghost";
+    else if (published === 0) cls = "lost";
+    else if (applied > 1) cls = "doubled";
+    else if (published > 1) cls = "absorbed";
+    else cls = republished ? "delayed" : "ok";
+    return {
+      crashed: crashed, orderInDb: db.order, delivered: published, applied: applied,
+      beforeCrash: beforeCrash, republished: republished, cls: cls
+    };
+  }
+
+  // @probe fn       computeOutbox
+  // @probe baseline {"strategy":"outbox","idem":false,"pollMs":500,"restartMs":3000}
+  // @probe sweep    {"strategy":["db-first","mq-first"],"idem":[true],"pollMs":[100,5000],"restartMs":[1000,30000]}
+  function computeOutbox(p) {
+    var path = OB_PATHS[p.strategy];
+    var relayWait = p.strategy === "outbox" ? p.pollMs / 2 : 0;   // 事件寫進 outbox 後，平均等半個輪詢間隔才被 Relay 撿走
+    var counts = { abort: 0, ok: 0, delayed: 0, absorbed: 0, lost: 0, ghost: 0, doubled: 0 };
+    var rows = [];
+    var safe = 0;
+    var worstLatency = 0;
+    for (var k = 1; k <= path.length; k++) {
+      var r = obRun(path, k, p.idem);
+      var latency = null;
+      if (r.beforeCrash > 0) latency = relayWait;
+      else if (r.republished) latency = p.restartMs + relayWait;
+      if (latency !== null && latency > worstLatency) worstLatency = latency;
+      counts[r.cls] += 1;
+      if (OB_SAFE[r.cls]) safe += 1;
+      rows.push({
+        after: path[k - 1].label, crashed: r.crashed, orderInDb: r.orderInDb, delivered: r.delivered,
+        applied: r.applied, cls: r.cls, safe: !!OB_SAFE[r.cls], latencyMs: latency,
+        dupLatencyMs: r.delivered > 1 ? p.restartMs + relayWait : null
+      });
+    }
+    return { rows: rows, counts: counts, safe: safe, total: rows.length, worstLatencyMs: worstLatency };
+  }
+
+  /* ---------- 第 7 節：選型決策器 ---------- */
+
+  // @probe fn       computeDecision
+  // @probe baseline {"length":"short","consistency":"strong","scope":"same-org"}
+  // @probe sweep    {"length":["long"],"consistency":["eventual"],"scope":["payment","cross-svc"]}
+  function computeDecision(a) {
+    var missing = ["length", "consistency", "scope"].filter(function (k) { return !a[k]; });
+    if (missing.length) return { ready: false, missing: missing };
+
+    var path = ["範圍＝" + WIZ_SCOPE[a.scope]];
+    var used = { scope: true };
+    var pick, why;
+    if (a.scope === "payment") {
+      path.push("支付／帳務是 TCC 的典型場景");
+      pick = "TCC"; why = WIZ_WHY.payment;
+    } else if (a.scope === "cross-svc") {
+      used.consistency = true;
+      if (a.consistency === "strong") {
+        path.push("強一致 → Saga 的可見中間態出局");
+        pick = "TCC（跨服務若仍要求強一致）"; why = WIZ_WHY.crossStrong;
+      } else {
+        path.push("可接受最終一致 → Saga 家族");
+        pick = "Saga + Transactional Outbox"; why = WIZ_WHY.crossEventual;
+      }
+    } else {
+      used.consistency = true;
+      if (a.consistency === "strong") {
+        path.push("強一致 → 不能導向 Saga");
+        used.length = true;
+        if (a.length === "short") {
+          path.push("短流程 → 2PC 的鎖撐得住");
+          pick = "2PC（XA）"; why = WIZ_WHY.sameStrongShort;
+        } else {
+          path.push("長流程 → 2PC 的鎖撐不住，撞上衝突");
+          pick = "TCC（並重新審視「長 + 強一致」的張力）"; why = WIZ_WHY.sameStrongLong;
         }
-        return { pick:"Saga + Transactional Outbox",
-          why:"跨多微服務的長流程、可接受最終一致——Saga（建議 Orchestration）負責流程與補償，Outbox 確保事件可靠發出。這是微服務下最平衡的主流組合。" };
+      } else {
+        path.push("可接受最終一致 → 2PC 的阻塞不划算");
+        pick = "Saga + Outbox"; why = WIZ_WHY.sameEventual;
       }
-      // same-org / XA —— 強一致絕不導向 Saga（避免與「必須強一致」矛盾）
-      if(a.scope==="same-org"){
-        if(a.consistency==="strong"){
-          if(a.length==="short"){
-            return { pick:"2PC（XA）",
-              why:"同組織、跨庫、可用 XA，且流程短又要求強一致——2PC 對業務無侵入、行為最接近單庫 commit。前提是併發量不大，能容忍同步阻塞。" };
-          }
-          // long + strong：本質上是衝突的需求，誠實點出張力
-          return { pick:"TCC（並重新審視「長 + 強一致」的張力）",
-            why:"流程長又堅持強一致是天生衝突的需求：2PC 的長鎖在長流程上代價過重，純 Saga 又只有最終一致、不符強一致。較務實是用 TCC 在業務層做資源預留，但 TCC 本身偏短～中流程，若流程真的很長，建議重新評估「是否每一步都需要強一致」。" };
-        }
-        // same-org + eventual
-        return { pick:"Saga + Outbox",
-          why:"同組織但可接受最終一致時，2PC 的同步阻塞代價不划算，改用 Saga（+ Outbox 確保事件可靠）在可用性與吞吐上更好。" };
-      }
-      // fallback（理論上不會走到，保底傾向最終一致家族）
-      return { pick:"Saga + Outbox（預設傾向）",
-        why:"在沒有強一致硬需求時，微服務通常傾向最終一致家族：Saga 負責流程與補償、Outbox 負責可靠事件，兼顧可用性與可維護性。" };
+    }
+    return {
+      ready: true,
+      pick: pick,
+      why: why,
+      path: path,
+      conflict: a.length === "long" && a.consistency === "strong",
+      ignored: ["length", "consistency", "scope"].filter(function (k) { return !used[k]; })
+    };
+  }
+
+  /* ================================================================
+   * (3) DOM 參照
+   * ================================================================ */
+
+  var reduceMotion = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  function $(id) { return document.getElementById(id); }
+  function fmtMs(ms) { return ms >= 1000 ? round1(ms / 1000) + " s" : Math.round(ms) + " ms"; }
+
+  var sp = {
+    n: $("dtx-sp-n"), rtt: $("dtx-sp-rtt"), work: $("dtx-sp-work"), avail: $("dtx-sp-avail"),
+    nV: $("dtx-sp-n-v"), rttV: $("dtx-sp-rtt-v"), workV: $("dtx-sp-work-v"), availV: $("dtx-sp-avail-v"),
+    plot: $("dtx-sp-plot"), nums: $("dtx-sp-nums"), say: $("dtx-sp-say")
+  };
+  var tp = {
+    v1: $("dtx-tpc-v1"), v2: $("dtx-tpc-v2"), crash: $("dtx-tpc-crash"), rec: $("dtx-tpc-rec"), recV: $("dtx-tpc-rec-v"),
+    coop: $("dtx-tpc-coop"), plot: $("dtx-tpc-plot"), now: $("dtx-tpc-now"), sum: $("dtx-tpc-sum"),
+    next: $("dtx-tpc-next"), end: $("dtx-tpc-end"), reset: $("dtx-tpc-reset")
+  };
+  var tx = {
+    addTry: $("dtx-tcc-add-try"), addConfirm: $("dtx-tcc-add-confirm"), addCancel: $("dtx-tcc-add-cancel"),
+    undo: $("dtx-tcc-undo"), clear: $("dtx-tcc-clear"), amt: $("dtx-tcc-amt"), amtV: $("dtx-tcc-amt-v"),
+    seq: $("dtx-tcc-seq"), head: $("dtx-tcc-head"), ledger: $("dtx-tcc-ledger"),
+    presets: document.querySelectorAll("#demo-tcc [data-preset]")
+  };
+  var sg = {
+    chain: $("saga-chain"), status: $("saga-status"), modeNote: $("saga-mode-note"),
+    fail: $("saga-fail"), run: $("saga-run"), reset: $("saga-reset"),
+    segBtns: document.querySelectorAll("#demo-saga .seg button")
+  };
+  var ob = {
+    poll: $("dtx-ob-poll"), pollV: $("dtx-ob-poll-v"), restart: $("dtx-ob-restart"), restartV: $("dtx-ob-restart-v"),
+    idem: $("dtx-ob-idem"), grid: $("dtx-ob-grid"), detail: $("dtx-ob-detail"), sum: $("dtx-ob-sum"),
+    segBtns: document.querySelectorAll("#demo-outbox .seg button")
+  };
+  var wz = {
+    qs: document.querySelectorAll("#demo-wiz .wiz-q"),
+    box: $("wiz-result"), pick: $("wiz-pick"), why: $("wiz-why"), path: $("wiz-path"), note: $("wiz-note")
+  };
+  var cmpTable = $("cmp-table");
+
+  /* ================================================================
+   * (4) render —— 只讀 compute 的結果畫出來
+   * ================================================================ */
+
+  /* ---------- 第 2 節 ---------- */
+  var SP_W = 640, SP_H = 300, SP_L = 60, SP_R = 24, SP_T = 20, SP_B = 46;
+  function spX(ms) { return SP_L + Math.log(1 + ms) / Math.log(1 + SPEC_X_MAX) * (SP_W - SP_L - SP_R); }
+  function spY(tps) {
+    var v = Math.max(1, Math.min(1000, tps));
+    return SP_H - SP_B - Math.log(v) / Math.LN10 / SPEC_Y_DECADES * (SP_H - SP_T - SP_B);
+  }
+
+  function renderSpectrum(p, r) {
+    sp.nV.textContent = p.n + " 個";
+    sp.rttV.textContent = p.rtt + " ms";
+    sp.workV.textContent = p.work + " ms";
+    sp.availV.textContent = p.avail + "%";
+
+    var g = [];
+    g.push('<svg viewBox="0 0 ' + SP_W + ' ' + SP_H + '" role="img" aria-label="三個方案在中間態可見時間與熱點吞吐平面上的位置">');
+    [0, 10, 100, 1000].forEach(function (ms) {
+      var x = spX(ms);
+      g.push('<line x1="' + x + '" y1="' + SP_T + '" x2="' + x + '" y2="' + (SP_H - SP_B) + '" stroke="var(--border)" />');
+      g.push('<text x="' + x + '" y="' + (SP_H - SP_B + 16) + '" text-anchor="middle" class="dtx-ax">' + (ms >= 1000 ? "1 s" : ms + " ms") + '</text>');
+    });
+    [1, 10, 100, 1000].forEach(function (tps) {
+      var y = spY(tps);
+      g.push('<line x1="' + SP_L + '" y1="' + y + '" x2="' + (SP_W - SP_R) + '" y2="' + y + '" stroke="var(--border)" />');
+      g.push('<text x="' + (SP_L - 8) + '" y="' + (y + 4) + '" text-anchor="end" class="dtx-ax">' + tps + '</text>');
+    });
+    g.push('<text x="' + ((SP_L + SP_W - SP_R) / 2) + '" y="' + (SP_H - 8) + '" text-anchor="middle" class="dtx-axt">中間態可見時間（對數軸，愈左愈不會被讀到一半）</text>');
+    g.push('<text x="14" y="' + ((SP_T + SP_H - SP_B) / 2) + '" text-anchor="middle" class="dtx-axt" transform="rotate(-90 14 ' + ((SP_T + SP_H - SP_B) / 2) + ')">熱點列吞吐 tps（對數軸）</text>');
+    g.push('<text x="' + (SP_L + 8) + '" y="' + (SP_T + 14) + '" class="dtx-ideal">↖ 理想角：不暴露中間態、吞吐又高——沒有方案到得了</text>');
+
+    var dy = { "2pc": -14, tcc: -14, saga: 22 };
+    var dx = { "2pc": 12, tcc: 0, saga: 0 };
+    SPEC_KEYS.forEach(function (k) {
+      var s = r.schemes[k];
+      var x = spX(s.visibleMs), y = spY(s.tps);
+      g.push('<circle cx="' + x + '" cy="' + y + '" r="7" class="dtx-pt dtx-pt-' + k + '" />');
+      g.push('<text x="' + (x + dx[k]) + '" y="' + (y + dy[k]) + '" text-anchor="' + (k === "2pc" ? "start" : "middle") +
+        '" class="dtx-ptl dtx-sw-' + k + '">' + SPEC_NAME[k] + '</text>');
+    });
+    g.push('</svg>');
+    sp.plot.innerHTML = g.join("");
+
+    var rowsDef = [
+      { k: "鎖住熱點列", f: function (s) { return s.holdMs + " ms"; }, v: function (s) { return s.holdMs; }, low: true },
+      { k: "熱點列吞吐", f: function (s) { return s.tps + " tps"; }, v: function (s) { return s.tps; }, low: false },
+      { k: "中間態可見", f: function (s) { return s.visibleMs ? s.visibleMs + " ms" : "0（讀者被鎖擋住）"; }, v: function (s) { return s.visibleMs; }, low: true },
+      { k: "端到端延遲", f: function (s) { return s.latencyMs + " ms"; }, v: function (s) { return s.latencyMs; }, low: true },
+      { k: "同步可用性", f: function (s) { return s.availPct + "%（" + s.parties + " 方同時在線）"; }, v: function (s) { return s.availPct; }, low: false }
+    ];
+    var h = ['<div class="h">每筆交易</div>'];
+    SPEC_KEYS.forEach(function (k) { h.push('<div class="h dtx-sw-' + k + '">' + SPEC_NAME[k] + '</div>'); });
+    rowsDef.forEach(function (row) {
+      var vals = SPEC_KEYS.map(function (k) { return row.v(r.schemes[k]); });
+      var best = row.low ? Math.min.apply(null, vals) : Math.max.apply(null, vals);
+      var worst = row.low ? Math.max.apply(null, vals) : Math.min.apply(null, vals);
+      h.push('<div class="k">' + row.k + '</div>');
+      SPEC_KEYS.forEach(function (k, i) {
+        var cls = best === worst ? "" : vals[i] === best ? " best" : vals[i] === worst ? " worst" : "";
+        h.push('<div class="v' + cls + '">' + row.f(r.schemes[k]) + '</div>');
+      });
+    });
+    sp.nums.innerHTML = h.join("");
+
+    var s2 = r.schemes["2pc"], st = r.schemes.tcc, ss = r.schemes.saga;
+    sp.say.innerHTML = r.twoPcBeatsTcc
+      ? "RTT + 寫日誌（" + (p.rtt + SPEC_FSYNC_MS) + " ms）已經比一次本地交易（" + p.work + " ms）短：2PC 鎖住熱點列 <b>" + s2.holdMs +
+        " ms</b>，反而比 TCC 兩次本地交易的 <b>" + st.holdMs + " ms</b> 還短。同機房、短流程時，2PC 並不是壞選擇。"
+      : "2PC 每筆鎖住熱點列 <b>" + s2.holdMs + " ms</b>，是 Saga 的 <b>" + r.lockRatio + " 倍</b>；Saga 換來的代價是 <b>" +
+        ss.visibleMs + " ms</b> 的中間態可見時間，端到端延遲也是 2PC 的 <b>" + r.sagaLatencyRatio + " 倍</b>。" +
+        "同步可用性換算成停機時間：2PC 每天約 <b>" + r.downtimeMinPerDay["2pc"] + " 分鐘</b>收不了單，Saga 約 <b>" + r.downtimeMinPerDay.saga + " 分鐘</b>。";
+  }
+
+  /* ---------- 第 3 節 ---------- */
+  var TP_W = 640, TP_Y0 = 62, TP_ROW = 22;
+  var TP_X = { tc: 150, p1: 380, p2: 580 };
+  function tpY(t) { return TP_Y0 + t * TP_ROW; }
+
+  function renderTwoPC(p, r) {
+    tp.recV.textContent = "崩潰後 " + p.recover + " tick";
+    tp.rec.disabled = p.crash === "none";
+    var step = r.view.step;
+    var H = tpY(r.endT) + 24;
+    var g = [];
+    g.push('<svg viewBox="0 0 ' + TP_W + ' ' + H + '" role="img" aria-label="2PC 時空圖：三條泳道、訊息箭頭與鎖持有條">');
+    g.push('<defs><marker id="dtx-arr" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="var(--text-2)"/></marker>' +
+      '<marker id="dtx-arr-bad" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="var(--bad)"/></marker></defs>');
+
+    for (var t = 0; t <= r.endT; t++) {
+      g.push('<text x="30" y="' + (tpY(t) + 4) + '" text-anchor="middle" class="dtx-ax' + (t > step ? ' dtx-dim' : '') + '">t=' + t + '</text>');
+    }
+    g.push('<line x1="52" y1="' + tpY(step) + '" x2="' + (TP_W - 8) + '" y2="' + tpY(step) + '" class="dtx-now" />');
+
+    ["tc", "p1", "p2"].forEach(function (id) {
+      var x = TP_X[id];
+      var label = id === "tc" ? r.view.state.tc : TPC_ST[r.view.state[id]];
+      g.push('<text x="' + x + '" y="18" text-anchor="middle" class="dtx-lane-n">' + TPC_NAME[id] + '</text>');
+      g.push('<text x="' + x + '" y="36" text-anchor="middle" class="dtx-lane-s">' + label + '</text>');
+      g.push('<line x1="' + x + '" y1="' + (TP_Y0 - 10) + '" x2="' + x + '" y2="' + (H - 8) + '" stroke="var(--border-strong)" />');
+    });
+
+    if (r.crashAt >= 0 && step >= r.crashAt) {
+      var downEnd = Math.min(r.recoverAt, step);
+      g.push('<rect x="' + (TP_X.tc - 6) + '" y="' + tpY(r.crashAt) + '" width="12" height="' + Math.max(2, tpY(downEnd) - tpY(r.crashAt)) + '" class="dtx-down" />');
+      g.push('<text x="' + (TP_X.tc - 14) + '" y="' + (tpY(r.crashAt) + 5) + '" text-anchor="end" class="dtx-x">✕ 崩潰</text>');
     }
 
-    function evaluate(){
-      var r = decide(answers);
-      if(!r){ resBox.classList.remove("show"); return; }
-      pickEl.textContent = "建議：" + r.pick;
-      whyEl.textContent = r.why;
-      resBox.classList.add("show");
+    TPC_PARTS.forEach(function (id) {
+      var pt = r.parts[id];
+      if (pt.lockFrom < 0 || step < pt.lockFrom) return;
+      var x = TP_X[id] - 5;
+      var to = Math.min(pt.lockTo, step);
+      g.push('<rect x="' + x + '" y="' + tpY(pt.lockFrom) + '" width="10" height="' + Math.max(3, tpY(to) - tpY(pt.lockFrom)) + '" class="dtx-lock" />');
+      if (r.crashAt >= 0) {
+        var bFrom = Math.max(pt.lockFrom, r.crashAt), bTo = Math.min(to, r.recoverAt);
+        if (bTo > bFrom) g.push('<rect x="' + x + '" y="' + tpY(bFrom) + '" width="10" height="' + (tpY(bTo) - tpY(bFrom)) + '" class="dtx-lock-bad" />');
+      }
+    });
+
+    r.msgs.forEach(function (m) {
+      if (m.sendT > step || m.sendT > r.endT) return;
+      var x1 = TP_X[m.from], y1 = tpY(m.sendT), x2 = TP_X[m.to], y2 = tpY(m.recvT);
+      var inFlight = m.recvT > step;
+      var inset = x2 > x1 ? -8 : 8;
+      var cls = m.lost ? "dtx-msg dtx-msg-lost" : "dtx-msg" + (inFlight ? " dtx-msg-fly" : "");
+      g.push('<line x1="' + x1 + '" y1="' + y1 + '" x2="' + (x2 + inset) + '" y2="' + y2 + '" class="' + cls +
+        '" marker-end="url(#' + (m.lost ? "dtx-arr-bad" : "dtx-arr") + ')" />');
+      g.push('<text x="' + ((x1 + x2) / 2) + '" y="' + ((y1 + y2) / 2 - 3) + '" text-anchor="middle" class="dtx-msg-t' +
+        (m.lost ? " bad" : "") + (inFlight ? " dtx-dim" : "") + '">' + TPC_MSG[m.kind] + (m.lost ? " ✕" : "") + '</text>');
+    });
+    g.push('</svg>');
+    tp.plot.innerHTML = g.join("");
+
+    var now = r.view.now;
+    tp.now.innerHTML = "<b>t = " + step + "</b>（全程到 t = " + r.endT + "）　" +
+      (now.length ? now.map(function (e) { return '<span class="dtx-tone-' + (e.tone || "n") + '">' + e.text + '</span>'; }).join("；") : "這一 tick 沒有訊息抵達，持鎖的一方繼續等。");
+    tp.next.disabled = step >= r.endT;
+    tp.end.disabled = step >= r.endT;
+
+    var partTxt = TPC_PARTS.map(function (id) {
+      var pt = r.parts[id];
+      return TPC_NAME[id] + "：投 " + pt.vote.toUpperCase() + " → " + TPC_ST[pt.outcome] +
+        (pt.lockTicks ? "，持鎖 <b>" + pt.lockTicks + " tick</b>" + (pt.blockedTicks ? "（其中 <b>" + pt.blockedTicks + "</b> tick 協調者不在線）" : "") : "，沒有持鎖") +
+        "，" + TPC_VIA[pt.via];
+    });
+    tp.sum.innerHTML = "<b>全程結果</b>　決議 " + TPC_MSG[r.decision] + "<br>" + partTxt.join("<br>") +
+      "<br>共 " + r.totalMsgs + " 則訊息，" + r.lostMsgs + " 則遺失" +
+      (r.divergedTicks ? "；有 <b>" + r.divergedTicks + " tick</b> 一邊已提交、一邊還懸著，外界讀得到不一致的中間狀態" : "") +
+      "；" + (r.consistent ? "結束時兩邊一致。" : "結束時仍不一致。");
+  }
+
+  /* ---------- 第 4 節 ---------- */
+  function tccBar(row) {
+    var pa = row.avail / TCC_BALANCE * 100, pf = row.frozen / TCC_BALANCE * 100, ps = row.spent / TCC_BALANCE * 100;
+    return '<div class="dtx-bal"><span class="a" style="width:' + pa + '%"></span><span class="f" style="width:' + pf +
+      '%"></span><span class="s" style="width:' + ps + '%"></span></div>' +
+      '<div class="dtx-bn">可用 ' + row.avail + ' · 凍結 ' + row.frozen + ' · 已扣 ' + row.spent + '</div>';
+  }
+  function tccJudgeHtml(j, fin) {
+    var txt = j.ok ? "✓ 終態符合預期" : j.issues.length ? "✕ " + j.issues.join("；") : "協定外序列，無預期終態可比對";
+    return '<div class="dtx-end ' + (j.ok ? "ok" : j.issues.length ? "bad" : "") + '">' +
+      tccBar({ avail: fin.avail, frozen: fin.frozen, spent: fin.spent }) + '<div class="dtx-end-t">' + txt + '</div></div>';
+  }
+
+  function renderTcc(p, r) {
+    tx.amtV.textContent = p.amount;
+    tx.seq.innerHTML = r.seq.length
+      ? r.seq.map(function (m, i) { return '<span class="dtx-msgchip ' + m + '">' + (i + 1) + '. ' + TCC_MSG[m] + '</span>'; }).join("")
+      : '<span class="dtx-empty">（序列是空的：用上方按鈕加入抵達的訊息）</span>';
+    [tx.addTry, tx.addConfirm, tx.addCancel].forEach(function (b) { b.disabled = r.seq.length >= TCC_MAX_SEQ; });
+
+    var decTxt = { cancel: "Cancel", confirm: "Confirm", pending: "尚未下決議（只有 Try）", none: "尚無任何訊息", conflict: "協定外" }[r.decision];
+    tx.head.innerHTML = "由序列推導的全域決議：<b>" + decTxt + "</b>" +
+      (r.expect ? "　→ 預期終態：可用 " + r.expect.avail + "、凍結 " + r.expect.frozen + "、已扣 " + r.expect.spent : "") +
+      (r.outside ? '<br><span class="dtx-tone-warn">' + r.outside + '</span>' : "");
+
+    var h = ['<div class="h">抵達</div><div class="h">天真版：只看金額欄位</div><div class="h">正解：先查事務控制表</div>'];
+    r.seq.forEach(function (m, i) {
+      var a = r.naive.rows[i], b = r.guarded.rows[i];
+      h.push('<div class="dtx-lg-m"><span class="dtx-msgchip ' + m + '">' + (i + 1) + '. ' + TCC_MSG[m] + '</span></div>');
+      h.push('<div><div class="dtx-act ' + a.kind + '">' + a.act + '</div>' + tccBar(a) + '</div>');
+      h.push('<div><div class="dtx-act ' + b.kind + '">' + b.act + ' <span class="dtx-st">' + b.st + '</span></div>' + tccBar(b) + '</div>');
+    });
+    h.push('<div class="dtx-lg-m"><b>終態</b></div>');
+    h.push('<div>' + tccJudgeHtml(r.naiveJudge, r.naive.final) + '</div>');
+    h.push('<div>' + tccJudgeHtml(r.guardedJudge, r.guarded.final) + '</div>');
+    tx.ledger.innerHTML = h.join("");
+  }
+
+  /* ---------- 第 5 節 ---------- */
+  var sagaBoxes = [];
+  var sagaRunId = 0;
+  function sagaPaint(i, klass, text) {
+    var b = sagaBoxes[i];
+    var bg = { "ns-idle": "#fff", "ns-lock": "var(--warn-soft)", "ns-ok": "var(--ok-soft)", "ns-bad": "var(--bad-soft)" }[klass];
+    var bc = { "ns-idle": "var(--border-strong)", "ns-lock": "var(--warn)", "ns-ok": "var(--ok)", "ns-bad": "var(--bad)" }[klass];
+    b.style.background = bg;
+    b.style.borderColor = bc;
+    b.querySelector("[data-s]").textContent = text;
+  }
+  function renderSagaIdle(p, r) {
+    sg.chain.innerHTML = "";
+    sagaBoxes = [];
+    SAGA_STEPS.forEach(function (s, i) {
+      var row = document.createElement("div");
+      row.className = "saga-step";
+      var box = document.createElement("div");
+      box.className = "saga-box";
+      box.innerHTML = '<span class="sgn">' + (i + 1) + '. ' + s.n + '</span><span class="sgs" data-s>未執行</span>';
+      row.appendChild(box);
+      sg.chain.appendChild(row);
+      sagaBoxes.push(box);
+      if (i < SAGA_STEPS.length - 1) {
+        var ar = document.createElement("div");
+        ar.className = "saga-arrow";
+        sg.chain.appendChild(ar);
+      }
+      sagaPaint(i, "ns-idle", "未執行");
+    });
+    sg.status.textContent = "選好失敗點後按「執行」，觀看正向推進與反向補償。";
+    sg.modeNote.innerHTML = p.mode === "orch"
+      ? "<b>Orchestration（編排）</b>：中央協調器逐步呼叫每個服務、失敗時主導補償。這次流程會產生 <b>" + r.messages +
+        " 則訊息</b>（每一跳 command＋reply），流程狀態集中在協調器的 saga log 這 <b>1 處</b>，好追蹤與監控。"
+      : "<b>Choreography（編舞）</b>：沒有中央協調器，每個服務做完發出事件、下一個服務監聽接手。這次流程只要 <b>" + r.messages +
+        " 則事件</b>，但流程狀態分散在 <b>" + r.stateHolders + " 個服務</b>裡，要拼湊全貌得跨服務追事件。";
+  }
+  function renderSagaStep(r, k) {
+    var ev = r.timeline[k];
+    var s = SAGA_STEPS[ev.step];
+    if (ev.kind === "forward") sagaPaint(ev.step, "ns-ok", "已提交 ✓");
+    else if (ev.kind === "fail") {
+      sagaPaint(ev.step, "ns-bad", "失敗 ✕");
+      sg.status.innerHTML = "<b>第 " + (ev.step + 1) + " 步「" + s.n + "」失敗</b>（本地已回滾）。要反向補償已提交的 <b>" + r.committed + " 步</b>…";
+    } else sagaPaint(ev.step, "ns-lock", "已補償・" + s.comp);
+  }
+  function renderSagaDone(r) {
+    sg.status.innerHTML = r.failed
+      ? "<b>Saga 回滾完成</b>：失敗步自身本地回滾，先前已提交的 " + r.committed + " 步依反向順序補償（" +
+        (r.compensationOrder.length ? r.compensationOrder.join(" → ") : "無需補償") + "），系統回到最終一致。"
+      : "<b>全部成功</b>：" + r.committed + " 個本地交易依序提交，無需補償。";
+  }
+
+  /* ---------- 第 6 節 ---------- */
+  var obSel = -1;
+  function renderOutbox(p, r) {
+    ob.pollV.textContent = fmtMs(p.pollMs);
+    ob.restartV.textContent = fmtMs(p.restartMs);
+    ob.poll.disabled = p.strategy !== "outbox";
+    if (obSel >= r.rows.length) obSel = -1;
+
+    var h = ['<div class="h">做完這一步就崩潰</div><div class="h">業務 DB</div><div class="h">MQ 投遞</div><div class="h">下游套用</div><div class="h">判定</div><div class="h">送達延遲</div>'];
+    r.rows.forEach(function (row, i) {
+      var sel = i === obSel ? " sel" : "";
+      var tone = row.safe ? (row.cls === "absorbed" || row.cls === "delayed" ? "warn" : "ok") : "bad";
+      var cells = [
+        (i + 1) + ". " + row.after + (row.crashed ? "" : "（不崩潰）"),
+        row.orderInDb ? "有 order" : "無",
+        row.delivered + " 次",
+        row.applied + " 次",
+        '<span class="dtx-tone-' + tone + '">' + OB_CLS[row.cls] + '</span>',
+        row.latencyMs === null ? "—" : fmtMs(row.latencyMs) + (row.dupLatencyMs !== null ? "（第二份 " + fmtMs(row.dupLatencyMs) + "）" : "")
+      ];
+      cells.forEach(function (c) { h.push('<div class="dtx-cr' + sel + '" data-row="' + i + '">' + c + '</div>'); });
+    });
+    ob.grid.innerHTML = h.join("");
+
+    var bad = [];
+    if (r.counts.lost) bad.push(r.counts.lost + " 個會遺失訊息");
+    if (r.counts.ghost) bad.push(r.counts.ghost + " 個會送出幽靈訊息");
+    if (r.counts.doubled) bad.push(r.counts.doubled + " 個會被下游重複套用");
+    ob.sum.innerHTML = "<b>" + r.total + " 個崩潰點中 " + r.safe + " 個安全</b>" + (bad.length ? "；" + bad.join("、") : "") +
+      (r.counts.absorbed ? "；" + r.counts.absorbed + " 個重複投遞靠消費端去重吸收" : "") +
+      (r.worstLatencyMs ? "。最慢送達 " + fmtMs(r.worstLatencyMs) + "。" : "。");
+
+    if (obSel < 0) {
+      ob.detail.textContent = "點矩陣裡任一列，看那個崩潰點發生了什麼。";
+      return;
     }
-    // expose for self-test
-    window.__wizDecide = decide;
-  })();
+    var row = r.rows[obSel];
+    var why = {
+      abort: "崩潰時交易還沒提交，業務寫入和訊息都隨之消失；呼叫端收到錯誤，可以整筆重試。",
+      ok: "沒有崩潰，DB 與訊息都各就各位。",
+      delayed: "outbox 列已隨業務交易落地；重啟後 Relay 撿到這筆還沒標記已送的列，補發一次，只是晚了 " + fmtMs(row.latencyMs) + "。",
+      absorbed: "Relay 已經發出，卻在標記已送之前崩潰；重啟後又發了一次。消費端用事件 ID 去重，第二份被丟掉。",
+      lost: "DB 已提交，但發 MQ 這一步還沒做就崩潰；沒有任何東西記得「還欠一則訊息」，下游永遠不會知道。",
+      ghost: "訊息已經發出，但業務交易沒提交就崩潰；下游收到一筆資料庫裡根本不存在的訂單。",
+      doubled: "Relay 已經發出，卻在標記已送之前崩潰；重啟後又發了一次，消費端不冪等，同一個事件被套用兩次。"
+    }[row.cls];
+    ob.detail.innerHTML = "<b>第 " + (obSel + 1) + " 列</b>：" + why;
+  }
 
+  /* ---------- 第 7 節 ---------- */
+  function renderDecision(r) {
+    if (!r.ready) { wz.box.classList.remove("show"); return; }
+    wz.pick.textContent = "建議：" + r.pick;
+    wz.why.textContent = r.why;
+    wz.path.innerHTML = "<b>推導路徑</b>　" + r.path.join(" → ");
+    var notes = [];
+    if (r.ignored.length) notes.push("這條路徑沒有參考" + r.ignored.map(function (k) { return WIZ_Q[k]; }).join("、") + "——改它的答案不會改變建議。");
+    if (r.conflict) notes.push("你選了「長流程＋強一致」：這組需求本身就互相拉扯，任何方案都只能緩解、不能兩全。");
+    wz.note.textContent = notes.join(" ");
+    wz.note.style.display = notes.length ? "" : "none";
+    wz.box.classList.add("show");
+  }
 
-});
+  /* ================================================================
+   * (5) 事件綁定
+   * ================================================================ */
+
+  /* 第 2 節 */
+  function spParams() {
+    return { n: +sp.n.value, rtt: +sp.rtt.value, work: +sp.work.value, avail: SPEC_AVAIL[+sp.avail.value] };
+  }
+  function spUpdate() { var p = spParams(); renderSpectrum(p, computeSpectrum(p)); }
+  [sp.n, sp.rtt, sp.work, sp.avail].forEach(function (el) { el.addEventListener("input", spUpdate); });
+  spUpdate();
+
+  /* 第 3 節 */
+  var tpStep = 0;
+  function tpParams() {
+    return { v1: tp.v1.value, v2: tp.v2.value, crash: tp.crash.value, recover: +tp.rec.value, coop: tp.coop.checked, step: tpStep };
+  }
+  function tpUpdate() {
+    var p = tpParams();
+    var r = computeTwoPC(p);
+    tpStep = r.view.step;
+    renderTwoPC(p, r);
+    return r;
+  }
+  [tp.v1, tp.v2, tp.crash, tp.coop].forEach(function (el) { el.addEventListener("change", tpUpdate); });
+  tp.rec.addEventListener("input", tpUpdate);
+  tp.next.addEventListener("click", function () { tpStep += 1; tpUpdate(); });
+  tp.end.addEventListener("click", function () { tpStep = TPC_TMAX; tpUpdate(); });
+  tp.reset.addEventListener("click", function () { tpStep = 0; tpUpdate(); });
+  tpUpdate();
+
+  /* 第 4 節 */
+  var tcSeq = ["cancel", "try"];
+  function tcUpdate() {
+    var p = { seq: tcSeq, amount: +tx.amt.value };
+    renderTcc(p, computeTcc(p));
+  }
+  function tcAdd(msg) { if (tcSeq.length < TCC_MAX_SEQ) { tcSeq = tcSeq.concat([msg]); tcUpdate(); } }
+  tx.addTry.addEventListener("click", function () { tcAdd("try"); });
+  tx.addConfirm.addEventListener("click", function () { tcAdd("confirm"); });
+  tx.addCancel.addEventListener("click", function () { tcAdd("cancel"); });
+  tx.undo.addEventListener("click", function () { tcSeq = tcSeq.slice(0, -1); tcUpdate(); });
+  tx.clear.addEventListener("click", function () { tcSeq = []; tcUpdate(); });
+  tx.amt.addEventListener("input", tcUpdate);
+  tx.presets.forEach(function (b) {
+    b.addEventListener("click", function () { tcSeq = b.dataset.preset.split(","); tcUpdate(); });
+  });
+  tcUpdate();
+
+  /* 第 5 節 */
+  var sagaMode = "orch";
+  function sagaParams() { return { failAt: parseInt(sg.fail.value, 10), mode: sagaMode }; }
+  function sagaReset() {
+    sagaRunId += 1;
+    var p = sagaParams();
+    renderSagaIdle(p, computeSaga(p));
+    sg.run.disabled = false;
+  }
+  function sagaRun() {
+    sagaReset();
+    var r = computeSaga(sagaParams());
+    var id = sagaRunId;
+    var gap = reduceMotion ? 0 : 520;
+    sg.run.disabled = true;
+    sg.status.textContent = "正向推進中…";
+    r.timeline.forEach(function (ev, k) {
+      setTimeout(function () { if (id === sagaRunId) renderSagaStep(r, k); }, gap * (k + 1));
+    });
+    setTimeout(function () { if (id === sagaRunId) { renderSagaDone(r); sg.run.disabled = false; } }, gap * (r.timeline.length + 1));
+  }
+  sg.run.addEventListener("click", sagaRun);
+  sg.reset.addEventListener("click", sagaReset);
+  sg.fail.addEventListener("change", sagaReset);
+  sg.segBtns.forEach(function (b) {
+    b.addEventListener("click", function () {
+      sg.segBtns.forEach(function (x) { x.setAttribute("aria-pressed", x === b ? "true" : "false"); });
+      sagaMode = b.dataset.mode;
+      sagaReset();
+    });
+  });
+  sagaReset();
+
+  /* 第 6 節 */
+  var obStrategy = "db-first";
+  function obUpdate() {
+    var p = { strategy: obStrategy, idem: ob.idem.checked, pollMs: +ob.poll.value, restartMs: +ob.restart.value * 1000 };
+    renderOutbox(p, computeOutbox(p));
+  }
+  ob.segBtns.forEach(function (b) {
+    b.addEventListener("click", function () {
+      ob.segBtns.forEach(function (x) { x.setAttribute("aria-pressed", x === b ? "true" : "false"); });
+      obStrategy = b.dataset.strategy;
+      obSel = -1;
+      obUpdate();
+    });
+  });
+  [ob.poll, ob.restart].forEach(function (el) { el.addEventListener("input", obUpdate); });
+  ob.idem.addEventListener("change", obUpdate);
+  ob.grid.addEventListener("click", function (e) {
+    var cell = e.target.closest("[data-row]");
+    if (!cell) return;
+    obSel = +cell.dataset.row;
+    obUpdate();
+  });
+  obUpdate();
+
+  /* 第 7 節：決策器 */
+  var wzAnswers = { length: null, consistency: null, scope: null };
+  wz.qs.forEach(function (q) {
+    var key = q.dataset.q;
+    q.querySelectorAll(".wiz-opts button").forEach(function (b) {
+      b.addEventListener("click", function () {
+        q.querySelectorAll(".wiz-opts button").forEach(function (x) { x.setAttribute("aria-pressed", x === b ? "true" : "false"); });
+        wzAnswers[key] = b.dataset.v;
+        renderDecision(computeDecision(wzAnswers));
+      });
+    });
+  });
+
+  /* 第 7 節：對照表滑過整欄高亮 */
+  function cmpClear() { cmpTable.querySelectorAll(".hl").forEach(function (x) { x.classList.remove("hl"); }); }
+  cmpTable.addEventListener("mouseover", function (e) {
+    var c = e.target.closest("td,th");
+    if (!c) return;
+    cmpClear();
+    if (c.cellIndex === 0) return;
+    cmpTable.querySelectorAll("tr").forEach(function (tr) {
+      var cell = tr.children[c.cellIndex];
+      if (cell && cell.tagName === "TD") cell.classList.add("hl");
+    });
+  });
+  cmpTable.addEventListener("mouseleave", cmpClear);
+})();
 </script>
