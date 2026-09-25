@@ -1,9 +1,141 @@
-<!-- demo-archetype: E｜決策器（主，第 7 節「比較與選型」） — 讀者回答「流程多長／一致性要求／範圍與性質」
-     三題，decide() 依規則逐條推導出建議方案與理由，包含「長流程 + 必須強一致」這種本質衝突需求的誠實回答。
-     選 E 是因為本篇的命題本身就是選型問題：2PC／TCC／Saga／Outbox 不是並列三選一，而是一路在強一致與
-     最終一致之間放手的取捨史，讀者真正要學會的是「什麼條件下該落到哪一格」，那是判定而不是流程。
-     附註：第 5 節 Saga 補償鏈的補償集合、反向順序與補償步數由讀者選定的失敗點推導；其餘各節
-     （一致性光譜、2PC 流程、TCC 時序、雙寫 vs Outbox）為示意用小 demo，輸出為預寫文案，不列入 archetype 判讀。 -->
+<!-- demo-archetype: E｜決策器（主，第 7 節「比較與選型」）＋B｜參數掃描（次，第 2 節、第 6 節）＋A｜時序推進（次，第 3 節、第 5 節）＋C｜並排對照（次，第 4 節） —
+     主 demo 讓讀者回答流程長度、一致性要求、範圍與性質三題，computeDecision() 依規則推導建議方案、實際走過的判斷路徑、
+     是否撞上「長流程＋強一致」的天生衝突，以及哪幾題在這條路徑上不影響結論。選 E 是因為本篇的命題本身就是選型問題：
+     2PC／TCC／Saga／Outbox 不是並列三選一，而是一路在強一致與最終一致之間放手的取捨史，讀者要學會的是「什麼條件下落到哪一格」。
+     次 demo：第 2 節調參與者數、RTT、本地交易耗時與服務可用性，算出三方案的鎖持有、熱點吞吐、中間態可見時間、延遲與同步可用性；
+     第 3 節設定兩個參與者的投票、協調者崩潰點、恢復時間與能否互詢，逐 tick 推進 2PC 狀態機；第 4 節自組 Try／Confirm／Cancel
+     的抵達序列，同時餵給天真版與事務控制表版；第 5 節選失敗點與協調模式，推導補償集合、反向順序與訊息數；第 6 節選寫入策略與
+     消費端冪等，枚舉每個崩潰點的後果與送達延遲。 -->
+<style>
+  /* 本篇專屬：dtx-* 命名空間（第 2、3、4、6 節的 demo 與第 7 節決策器的補充列）；
+     第 5 節 Saga 與第 7 節決策器本體沿用全站既有的 saga-*／wiz-* 樣式 */
+  .dtx-knobs { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px 16px; margin-bottom: 12px; }
+  .dtx-knob { display: flex; flex-direction: column; gap: 4px; font-size: 12.5px; color: var(--text-2); }
+  .dtx-knob .kl { font-weight: 600; color: var(--text); }
+  .dtx-knob .kv { font-family: var(--mono); font-size: 12px; color: var(--accent); }
+  .dtx-knob input[type="range"] { width: 100%; margin: 0; accent-color: var(--accent); }
+  .dtx-knob input[type="range"]:disabled { opacity: .4; }
+  .dtx-knob select {
+    font: inherit; font-size: 12.5px; padding: 4px 6px; color: var(--text);
+    border: 1px solid var(--border-strong); border-radius: 6px; background: #fff;
+  }
+  .dtx-check { display: flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--text); margin: 2px 0 12px; }
+  .dtx-check input { accent-color: var(--accent); }
+  .dtx-btns { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
+
+  /* SVG 圖面（第 2 節取捨平面、第 3 節時空圖） */
+  .dtx-plot { border: 1px solid var(--border); border-radius: var(--radius-sm); background: #fff; padding: 6px; }
+  .dtx-plot svg { display: block; width: 100%; height: auto; font-family: var(--sans); }
+  .dtx-ax { font-family: var(--mono); font-size: 10.5px; fill: var(--text-3); }
+  .dtx-axt { font-size: 11px; fill: var(--text-2); }
+  .dtx-ideal { font-size: 11px; fill: var(--text-3); }
+  .dtx-dim { opacity: .35; }
+  .dtx-pt { stroke: #fff; stroke-width: 2; }
+  .dtx-pt-2pc { fill: var(--accent); }
+  .dtx-pt-tcc { fill: var(--warn); }
+  .dtx-pt-saga { fill: var(--ok); }
+  .dtx-ptl { font-size: 12.5px; font-weight: 700; }
+  text.dtx-sw-2pc { fill: var(--accent); }
+  text.dtx-sw-tcc { fill: var(--warn); }
+  text.dtx-sw-saga { fill: var(--ok); }
+  .dtx-sw-2pc { color: var(--accent); }
+  .dtx-sw-tcc { color: var(--warn); }
+  .dtx-sw-saga { color: var(--ok); }
+  .dtx-lane-n { font-size: 13px; font-weight: 700; fill: var(--text); }
+  .dtx-lane-s { font-size: 11.5px; fill: var(--text-2); }
+  .dtx-now { stroke: var(--accent-line); stroke-width: 1.5; stroke-dasharray: 4 3; }
+  .dtx-down { fill: var(--bad-soft); stroke: var(--bad); stroke-dasharray: 3 2; }
+  .dtx-x { font-size: 11px; font-weight: 700; fill: var(--bad); }
+  .dtx-lock { fill: var(--warn-soft); stroke: var(--warn); }
+  .dtx-lock-bad { fill: var(--bad-soft); stroke: var(--bad); }
+  .dtx-msg { stroke: var(--text-2); stroke-width: 1.2; }
+  .dtx-msg-fly { stroke-dasharray: 4 3; opacity: .45; }
+  .dtx-msg-lost { stroke: var(--bad); stroke-dasharray: 4 3; }
+  .dtx-msg-t { font-family: var(--mono); font-size: 10px; fill: var(--text-2); }
+  .dtx-msg-t.bad { fill: var(--bad); }
+
+  /* 數字對照格（第 2 節） */
+  .dtx-nums {
+    display: grid; grid-template-columns: minmax(88px, 1.1fr) repeat(3, minmax(0, 1fr));
+    border: 1px solid var(--border); border-radius: var(--radius-sm); overflow: hidden; margin-top: 10px; font-size: 12.5px;
+  }
+  .dtx-nums > div { padding: 6px 10px; border-top: 1px solid var(--border); }
+  .dtx-nums > .h { background: var(--bg-soft); font-weight: 700; border-top: 0; }
+  .dtx-nums .k { color: var(--text-2); }
+  .dtx-nums .v { font-family: var(--mono); font-size: 12px; }
+  .dtx-nums .best { color: var(--ok); font-weight: 700; }
+  .dtx-nums .worst { color: var(--bad); }
+
+  .dtx-sum { margin-top: 10px; font-size: 12.5px; line-height: 1.7; color: var(--text-2); }
+  .dtx-tone-ok { color: var(--ok); }
+  .dtx-tone-warn { color: var(--warn); }
+  .dtx-tone-bad { color: var(--bad); }
+  .dtx-tone-n { color: var(--text); }
+
+  /* 第 4 節：TCC 抵達序列與雙欄帳本 */
+  .dtx-tcc-editor { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; font-size: 12.5px; color: var(--text-2); }
+  .dtx-presets { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin: 10px 0; font-size: 12.5px; color: var(--text-2); }
+  .dtx-presets button {
+    font: inherit; font-size: 12px; padding: 3px 10px; cursor: pointer; color: var(--text);
+    border: 1px dashed var(--border-strong); border-radius: 6px; background: #fff;
+  }
+  .dtx-presets button:hover { border-color: var(--accent); color: var(--accent); }
+  .dtx-seqline { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin: 4px 0 10px; min-height: 26px; }
+  .dtx-msgchip { font-family: var(--mono); font-size: 11.5px; padding: 2px 8px; border-radius: 5px; border: 1px solid; white-space: nowrap; }
+  .dtx-msgchip.try { color: var(--warn); border-color: var(--warn); background: var(--warn-soft); }
+  .dtx-msgchip.confirm { color: var(--ok); border-color: var(--ok); background: var(--ok-soft); }
+  .dtx-msgchip.cancel { color: var(--accent); border-color: var(--accent); background: var(--accent-soft); }
+  .dtx-empty { font-size: 12px; color: var(--text-3); }
+  .dtx-tcc-head { font-size: 12.5px; color: var(--text-2); margin-bottom: 8px; line-height: 1.6; }
+  .dtx-ledger {
+    display: grid; grid-template-columns: 96px minmax(0, 1fr) minmax(0, 1fr);
+    border: 1px solid var(--border); border-radius: var(--radius-sm); overflow: hidden; font-size: 12px;
+  }
+  .dtx-ledger > div { padding: 7px 10px; border-top: 1px solid var(--border); }
+  .dtx-ledger > .h { background: var(--bg-soft); font-weight: 700; border-top: 0; }
+  .dtx-lg-m { display: flex; align-items: flex-start; }
+  .dtx-act { margin-bottom: 5px; line-height: 1.45; }
+  .dtx-act.err { color: var(--bad); font-weight: 600; }
+  .dtx-act.guard { color: var(--accent); }
+  .dtx-act.noop { color: var(--text-3); }
+  .dtx-st { font-family: var(--mono); font-size: 10.5px; padding: 0 5px; border-radius: 4px; background: var(--code-bg); color: var(--text-2); }
+  .dtx-bal { display: flex; height: 8px; border-radius: 4px; overflow: hidden; background: var(--code-bg); }
+  .dtx-bal span { display: block; height: 100%; }
+  .dtx-bal .a { background: var(--accent-line); }
+  .dtx-bal .f { background: var(--warn); }
+  .dtx-bal .s { background: var(--ok); }
+  .dtx-bn { font-family: var(--mono); font-size: 10.5px; color: var(--text-3); margin-top: 3px; }
+  .dtx-end { border-left: 3px solid var(--border-strong); padding-left: 8px; }
+  .dtx-end.ok { border-left-color: var(--ok); }
+  .dtx-end.bad { border-left-color: var(--bad); }
+  .dtx-end-t { margin-top: 5px; line-height: 1.5; }
+  .dtx-end.ok .dtx-end-t { color: var(--ok); font-weight: 600; }
+  .dtx-end.bad .dtx-end-t { color: var(--bad); }
+  .dot.dtx-d-a { background: var(--accent-line); border-color: var(--accent-line); }
+  .dot.dtx-d-f { background: var(--warn); border-color: var(--warn); }
+  .dot.dtx-d-s { background: var(--ok); border-color: var(--ok); }
+
+  /* 第 6 節：崩潰點矩陣 */
+  .dtx-scroll { overflow-x: auto; }
+  .dtx-crash {
+    display: grid; grid-template-columns: minmax(200px, 2.4fr) repeat(3, minmax(64px, .8fr)) minmax(110px, 1.4fr) minmax(90px, 1.1fr);
+    min-width: 620px; border: 1px solid var(--border); border-radius: var(--radius-sm); overflow: hidden; font-size: 12px;
+  }
+  .dtx-crash > div { padding: 7px 10px; border-top: 1px solid var(--border); }
+  .dtx-crash > .h { background: var(--bg-soft); font-weight: 700; border-top: 0; }
+  .dtx-cr { cursor: pointer; }
+  .dtx-cr.sel { background: var(--accent-soft); }
+  .dtx-crash > .dtx-cr:nth-child(6n+1) { border-left: 3px solid var(--accent-line); }
+
+  /* 第 7 節：決策器的推導路徑 */
+  .dtx-wz-path { margin-top: 10px; font-size: 12.5px; color: var(--text-2); }
+  .dtx-wz-note { margin-top: 6px; font-size: 12.5px; color: var(--warn); }
+
+  @media (max-width: 640px) {
+    .dtx-ledger { grid-template-columns: 72px minmax(0, 1fr) minmax(0, 1fr); font-size: 11.5px; }
+    .dtx-ledger > div { padding: 6px 6px; }
+  }
+</style>
     <!-- HERO -->
     <header class="hero">
       <div class="eyebrow">系統設計 · 田野手冊</div>
@@ -57,35 +189,35 @@ COMMIT;   -- 兩個 UPDATE 一起成功，或一起失敗</code></pre>
 
       <p>這背後是 <em>CAP</em> 的現實：當網路可能分區（P 無可避免），你只能在一致性（C）與可用性（A）之間偏向一邊。2PC 偏 CP，Saga 偏 AP，TCC 在中間。</p>
 
+      <p>光譜上的位置不是形容詞，而是可以估出來的成本。下面的 demo 只用四個參數，套一組刻意簡化的延遲模型，算出三個方案各自付出什麼——你會看到它們在「會不會被讀到一半」與「熱點資料列撐得住多少併發」這兩軸上此消彼長，而且落點會隨網路延遲與參與者數量移動。</p>
+
       <!-- INTERACTIVE: spectrum -->
       <div class="demo" id="demo-spec">
         <div class="demo-bar">
           <span class="label">互動 · 一致性光譜</span>
-          <span class="label" style="text-transform:none;font-family:var(--sans);font-size:12px;color:var(--text-2)">點選方案，看它的取捨落點</span>
+          <span class="label" style="text-transform:none;font-family:var(--sans);font-size:12px;color:var(--text-2)">調參數，看三個方案的取捨落點怎麼移動</span>
         </div>
         <div class="demo-body">
-          <div class="spectrum">
-            <div class="spec-track"></div>
-            <button class="spec-mark" data-key="2pc" style="left:6%" aria-pressed="false" aria-label="2PC">
-              <span class="pin"></span><span class="pn">2PC</span>
-            </button>
-            <button class="spec-mark" data-key="tcc" style="left:44%" aria-pressed="false" aria-label="TCC">
-              <span class="pin"></span><span class="pn">TCC</span>
-            </button>
-            <button class="spec-mark" data-key="saga" style="left:90%" aria-pressed="false" aria-label="Saga">
-              <span class="pin"></span><span class="pn">Saga</span>
-            </button>
+          <div class="dtx-knobs">
+            <label class="dtx-knob"><span class="kl">參與者數 N</span>
+              <input type="range" id="dtx-sp-n" min="2" max="8" step="1" value="4" aria-label="參與交易的服務數">
+              <span class="kv" id="dtx-sp-n-v">4 個</span></label>
+            <label class="dtx-knob"><span class="kl">服務間往返 RTT</span>
+              <input type="range" id="dtx-sp-rtt" min="1" max="200" step="1" value="20" aria-label="服務間往返延遲毫秒">
+              <span class="kv" id="dtx-sp-rtt-v">20 ms</span></label>
+            <label class="dtx-knob"><span class="kl">本地交易耗時 w</span>
+              <input type="range" id="dtx-sp-work" min="1" max="50" step="1" value="5" aria-label="單次本地交易耗時毫秒">
+              <span class="kv" id="dtx-sp-work-v">5 ms</span></label>
+            <label class="dtx-knob"><span class="kl">單一服務可用性</span>
+              <input type="range" id="dtx-sp-avail" min="0" max="4" step="1" value="2" aria-label="單一服務可用性">
+              <span class="kv" id="dtx-sp-avail-v">99.9%</span></label>
           </div>
-          <div class="spec-ends"><span>← 強一致 / 偏 CP</span><span>偏 AP / 最終一致 →</span></div>
-
-          <div class="spec-panel" id="spec-panel">
-            <h4 id="sp-name">點上方任一方案</h4>
-            <div class="pmeta" id="sp-meta">四個維度會同步顯示此消彼長的取捨</div>
-            <div class="bars" id="sp-bars"></div>
-          </div>
+          <div class="dtx-plot" id="dtx-sp-plot"></div>
+          <div class="dtx-nums" id="dtx-sp-nums"></div>
+          <div class="status-line" id="dtx-sp-say"></div>
         </div>
       </div>
-      <p class="cap">拉桿洞察：四項指標幾乎是「翹翹板」——把一致性與鎖定往上推，吞吐與可用性必然往下掉。</p>
+      <p class="cap">模型刻意簡化（f 為協調者寫決議日誌，固定 2 ms）：2PC 從 Prepare 的本地執行一路鎖到收到 Commit，熱點列被鎖 <var>w</var> + RTT + f；TCC 的 Try 與 Confirm 是兩次各自提交的本地交易，熱點列只被鎖 2<var>w</var>，但「凍結」狀態會被看見約 <var>w</var> + RTT + f；Saga 每步立刻提交，只鎖 <var>w</var>，代價是從第一步到最後一步提交之間 (<var>N</var>−1)(RTT + <var>w</var>) 的中間態。同步可用性是「交易當下必須同時在線的角色」的可用性相乘。試著把 RTT 拉到 1 ms：當 RTT + f 小於 <var>w</var>，2PC 的鎖反而比 TCC 短。</p>
 
       <div class="oneliner">
         <b>一句話答法</b>沒有銀彈，只有取捨：選方案等於選你願意在「強一致 ↔ 高可用」這條軸上站哪裡。
@@ -106,43 +238,53 @@ COMMIT;   -- 兩個 UPDATE 一起成功，或一起失敗</code></pre>
         <li><strong>Commit（提交）</strong>：若全部回 Yes，協調者下令全體 Commit；只要有一個 No，就全體 Rollback。</li>
       </ul>
 
-      <!-- INTERACTIVE: 2PC flow -->
+      <!-- INTERACTIVE: 2PC state machine -->
       <div class="demo" id="demo-2pc">
         <div class="demo-bar">
-          <span class="label">互動 · 2PC 流程</span>
-          <div class="seg" role="group" aria-label="情境切換">
-            <button data-sc="ok" aria-pressed="true">正常提交</button>
-            <button data-sc="crash" aria-pressed="false">協調者掛掉</button>
-          </div>
+          <span class="label">互動 · 2PC 狀態機</span>
+          <span class="label" style="text-transform:none;font-family:var(--sans);font-size:12px;color:var(--text-2)">設定投票與崩潰點，逐 tick 推進（1 則訊息走 1 tick）</span>
         </div>
         <div class="demo-body">
-          <div class="actors" id="p2-actors">
-            <div class="actor coordinator" data-id="tc"><div class="aname">協調者 TC</div><div class="arole">coordinator</div><div class="astate" data-state>待命</div></div>
-            <div class="actor" data-id="p1"><div class="aname">帳務服務</div><div class="arole">participant</div><div class="astate" data-state>idle</div></div>
-            <div class="actor" data-id="p2"><div class="aname">庫存服務</div><div class="arole">participant</div><div class="astate" data-state>idle</div></div>
+          <div class="dtx-knobs">
+            <label class="dtx-knob"><span class="kl">帳務投票</span>
+              <select id="dtx-tpc-v1"><option value="yes" selected>YES（可以提交）</option><option value="no">NO（無法提交）</option></select></label>
+            <label class="dtx-knob"><span class="kl">庫存投票</span>
+              <select id="dtx-tpc-v2"><option value="yes" selected>YES（可以提交）</option><option value="no">NO（無法提交）</option></select></label>
+            <label class="dtx-knob"><span class="kl">協調者崩潰點</span>
+              <select id="dtx-tpc-crash">
+                <option value="none" selected>不崩潰</option>
+                <option value="afterPrepare">送出 PREPARE 後</option>
+                <option value="afterLog">決議寫入日誌後、送出前</option>
+                <option value="partial">決議只送到帳務</option>
+              </select></label>
+            <label class="dtx-knob"><span class="kl">協調者恢復</span>
+              <input type="range" id="dtx-tpc-rec" min="1" max="12" step="1" value="8" aria-label="協調者崩潰後幾個 tick 恢復">
+              <span class="kv" id="dtx-tpc-rec-v">崩潰後 8 tick</span></label>
           </div>
-          <div class="flowsteps" id="p2-steps"></div>
-          <div class="status-line" id="p2-status">按「下一步」開始走兩階段流程。</div>
-          <div style="margin-top:14px;display:flex;gap:8px;">
-            <button class="btn primary" id="p2-next">下一步</button>
-            <button class="btn" id="p2-reset">重置</button>
+          <label class="dtx-check"><input type="checkbox" id="dtx-tpc-coop">參與者等不到決議時，互相詢問結果（cooperative termination）</label>
+          <div class="dtx-plot" id="dtx-tpc-plot"></div>
+          <div class="status-line" id="dtx-tpc-now"></div>
+          <div class="dtx-btns">
+            <button class="btn primary" id="dtx-tpc-next">下一 tick</button>
+            <button class="btn" id="dtx-tpc-end">跳到結束</button>
+            <button class="btn" id="dtx-tpc-reset">回到 t = 0</button>
           </div>
+          <div class="dtx-sum" id="dtx-tpc-sum"></div>
           <div class="legend">
-            <span><i class="dot ns-idle"></i>idle</span>
-            <span><i class="dot ns-lock"></i>已鎖定待命</span>
-            <span><i class="dot ns-ok"></i>已提交</span>
-            <span><i class="dot ns-bad"></i>阻塞 / 異常</span>
+            <span><i class="dot ns-lock"></i>參與者持鎖（已投 YES、等決議）</span>
+            <span><i class="dot ns-bad"></i>協調者不在線時仍持鎖／遺失的訊息</span>
+            <span><i class="dot ns-idle"></i>虛線箭頭：傳送中</span>
           </div>
         </div>
       </div>
-      <p class="cap">把情境切到「協調者掛掉」，會看到參與者 Prepare 後鎖死資源、卻收不到 Commit 指令，永遠卡在待命——這就是 2PC 最痛的同步阻塞與單點故障。</p>
+      <p class="cap">先用預設值走一次正常流程：鎖從參與者執行 PREPARE 開始，到收到 COMMIT 才釋放。再把崩潰點切到「決議寫入日誌後、送出前」：兩個參與者都投了 YES、都沒收到決議，打開互詢也沒用——誰都不知道結果，只能鎖著等協調者回來，這就是 2PC 被稱為阻塞協定的原因。改成「決議只送到帳務」再打開互詢，庫存就能從帳務問到答案、提早解鎖；把任一方的投票改成 NO，崩潰也不再造成長時間阻塞，因為投 NO 的一方可以單方面中止，也答得出別人的詢問。</p>
 
       <h3>天真版 → 問題</h3>
       <p>2PC 的直覺很美：行為跟單庫的 commit 幾乎一樣，對業務透明（資料庫層用 XA 協議就能跑）。但它有三個致命缺陷：</p>
       <ul>
         <li><strong>同步阻塞</strong>：Prepare 後資源被鎖住，得等所有人回應才能釋放，併發吞吐極低。</li>
-        <li><strong>協調者單點故障</strong>：協調者在 Commit 階段掛掉，參與者卡在「不知該 Commit 還是 Rollback」的懸置狀態。</li>
-        <li><strong>資料不一致風險</strong>：Commit 指令只送達部分參與者時網路斷掉，仍可能不一致。</li>
+        <li><strong>協調者單點故障</strong>：協調者在 Commit 階段掛掉，參與者卡在「不知該 Commit 還是 Rollback」的懸置狀態。參與者之間互相詢問只在「還有人知道結果」時有用；全員投了 Yes 之後協調者消失，誰也不能自行決定。</li>
+        <li><strong>資料不一致風險</strong>：Commit 指令只送達部分參與者時協調者崩潰或網路斷掉，在恢復之前一邊已提交、一邊仍懸而未決，外界會讀到不一致的中間狀態。</li>
       </ul>
 
       <div class="callout warn">
@@ -187,43 +329,45 @@ COMMIT;   -- 兩個 UPDATE 一起成功，或一起失敗</code></pre>
         <li><strong>Confirm / Cancel 必須冪等</strong>：因為有重試，同一指令可能被呼叫多次，必須執行幾次結果都一樣。</li>
       </ul>
 
-      <!-- INTERACTIVE: TCC timeline lab -->
+      <!-- INTERACTIVE: TCC arrival-order lab -->
       <div class="demo" id="demo-tcc">
         <div class="demo-bar">
-          <span class="label">互動 · TCC 時序實驗室</span>
-          <span class="label" style="text-transform:none;font-family:var(--sans);font-size:12px;color:var(--text-2)">改變 Try / Cancel 的抵達順序，親手製造經典坑</span>
+          <span class="label">互動 · TCC 抵達順序實驗室</span>
+          <span class="label" style="text-transform:none;font-family:var(--sans);font-size:12px;color:var(--text-2)">自組抵達帳務服務的訊息序列，同時餵給兩種實作</span>
         </div>
         <div class="demo-body">
-          <div class="tl-scenarios" id="tl-scenarios">
-            <button class="tl-opt" data-sc="normal" aria-pressed="true">
-              <span style="flex:1"><span class="tlname">正常：Try → Cancel</span><span class="tldesc">先凍結，後釋放。教科書情形。</span></span>
-              <span class="tlbadge">baseline</span>
-            </button>
-            <button class="tl-opt" data-sc="empty" aria-pressed="false">
-              <span style="flex:1"><span class="tlname">空回滾：只有 Cancel（沒 Try）</span><span class="tldesc">Try 在網路上丟失，協調者超時直接發 Cancel。</span></span>
-              <span class="tlbadge">empty rollback</span>
-            </button>
-            <button class="tl-opt" data-sc="hang" aria-pressed="false">
-              <span style="flex:1"><span class="tlname">懸掛：Cancel → Try（亂序）</span><span class="tldesc">Cancel 先到、延遲的 Try 後到。</span></span>
-              <span class="tlbadge">hanging</span>
-            </button>
+          <div class="dtx-tcc-editor">
+            <span>加入抵達的訊息：</span>
+            <button class="btn" id="dtx-tcc-add-try">+ Try</button>
+            <button class="btn" id="dtx-tcc-add-confirm">+ Confirm</button>
+            <button class="btn" id="dtx-tcc-add-cancel">+ Cancel</button>
+            <button class="btn" id="dtx-tcc-undo">退格</button>
+            <button class="btn" id="dtx-tcc-clear">清空</button>
           </div>
-
-          <div class="tl-result">
-            <div class="tl-card naive">
-              <div class="tch">天真版（不查事務狀態）</div>
-              <div id="tl-naive-body"></div>
-              <div class="verdict" id="tl-naive-verdict"></div>
-            </div>
-            <div class="tl-card fixed">
-              <div class="tch">正解（維護事務控制表）</div>
-              <div id="tl-fixed-body"></div>
-              <div class="verdict" id="tl-fixed-verdict"></div>
-            </div>
+          <div class="dtx-presets">
+            <span>快速填入：</span>
+            <button data-preset="try,confirm">正常 Try → Confirm</button>
+            <button data-preset="cancel">空回滾：只有 Cancel</button>
+            <button data-preset="cancel,try">懸掛：Cancel → 遲到的 Try</button>
+            <button data-preset="try,confirm,confirm">重試：Confirm 兩次</button>
+            <button data-preset="try,try,confirm,confirm">重試：整組重送</button>
+          </div>
+          <div class="dtx-seqline" id="dtx-tcc-seq"></div>
+          <div class="dtx-knobs" style="max-width:280px">
+            <label class="dtx-knob"><span class="kl">每次凍結金額（可用餘額 1000）</span>
+              <input type="range" id="dtx-tcc-amt" min="50" max="500" step="50" value="100" aria-label="Try 要凍結的金額">
+              <span class="kv" id="dtx-tcc-amt-v">100</span></label>
+          </div>
+          <div class="dtx-tcc-head" id="dtx-tcc-head"></div>
+          <div class="dtx-ledger" id="dtx-tcc-ledger"></div>
+          <div class="legend">
+            <span><i class="dot dtx-d-a"></i>可用</span>
+            <span><i class="dot dtx-d-f"></i>凍結</span>
+            <span><i class="dot dtx-d-s"></i>已扣</span>
           </div>
         </div>
       </div>
-      <p class="cap">同樣是 Try 與 Cancel 兩個操作，只是抵達順序不同，就能炸出「空回滾」與「懸掛」兩個坑——而解法都是同一招：每個服務維護<strong>事務控制表</strong>，動作前先查狀態。</p>
+      <p class="cap">天真版只看金額欄位：「空回滾」的 Cancel 找不到可釋放的凍結而報錯，協調者只能不斷重試；「懸掛」多一則遲到的 Try，錢被凍住後再也沒有人來收尾；「整組重送」會被扣兩次款。右欄每則訊息都先查<strong>事務控制表</strong>的狀態（none／tried／confirmed／cancelled）再動作——空回滾、冪等、懸掛三個坑，用的是同一招。預期終態由序列推導：出現過 Cancel 就該全額退回，只有 Confirm 就該恰好扣一次。</p>
 
       <h3>三個魔鬼細節</h3>
       <ul>
@@ -286,7 +430,7 @@ COMMIT;   -- 兩個 UPDATE 一起成功，或一起失敗</code></pre>
           <div class="status-line" id="saga-mode-note" style="margin-top:10px"></div>
         </div>
       </div>
-      <p class="cap">注意失敗時補償鏈是<strong>反向</strong>跑的，且只補償「已成功提交」的步驟；切換編排／編舞，差別在「有沒有中央協調器」與流程的可追蹤性。</p>
+      <p class="cap">注意失敗時補償鏈是<strong>反向</strong>跑的，且只補償「已成功提交」的步驟。切換編排／編舞，補償集合與順序完全不變，變的是協調成本：編排的每一跳是 command＋reply 兩則訊息、流程狀態集中在協調器一處；編舞每一跳只有一則事件，但狀態分散在每個被觸及的服務裡。</p>
 
       <h3>兩種協調模式</h3>
       <ul>
@@ -322,32 +466,39 @@ COMMIT;   -- 兩個 UPDATE 一起成功，或一起失敗</code></pre>
       <p class="sec-sub">Outbox / 可靠訊息 / AT 模式——補上實務拼圖，回答「還有沒有其他做法」。</p>
 
       <h3>先看痛點：雙寫問題（Dual Write）</h3>
-      <p>微服務常見需求是「改完自己的 DB，還要發一則訊息通知別人」。天真寫法是「先 commit DB，再發 MQ」——但這兩個動作不是原子的：若在中間崩潰，<strong>DB 改了、訊息卻沒發出去</strong>，下游永遠不知道，資料就不一致了。</p>
+      <p>微服務常見需求是「改完自己的 DB，還要發一則訊息通知別人」。天真寫法是「先 commit DB，再發 MQ」——但這兩個動作不是原子的：若在中間崩潰，<strong>DB 改了、訊息卻沒發出去</strong>，下游永遠不知道，資料就不一致了。反過來「先發 MQ 再 commit DB」也不行：訊息發出後交易若失敗或崩潰，下游會收到一筆資料庫裡根本不存在的訂單——幽靈訊息。</p>
 
-      <!-- INTERACTIVE: outbox -->
+      <!-- INTERACTIVE: outbox crash-point sweep -->
       <div class="demo" id="demo-outbox">
         <div class="demo-bar">
-          <span class="label">互動 · 雙寫問題 vs Outbox</span>
-          <div class="seg" role="group" aria-label="做法切換">
-            <button data-mode="naive" aria-pressed="true">天真版：先寫DB再發MQ</button>
-            <button data-mode="outbox" aria-pressed="false">正解：Outbox</button>
+          <span class="label">互動 · 崩潰點枚舉</span>
+          <div class="seg" role="group" aria-label="寫入策略">
+            <button data-strategy="db-first" aria-pressed="true">先寫 DB 再發 MQ</button>
+            <button data-strategy="mq-first" aria-pressed="false">先發 MQ 再寫 DB</button>
+            <button data-strategy="outbox" aria-pressed="false">Outbox + Relay</button>
           </div>
         </div>
         <div class="demo-body">
-          <div class="ob-stage" id="ob-stage"></div>
-          <div class="status-line" id="ob-status"></div>
-          <div style="margin-top:14px;display:flex;gap:8px;">
-            <button class="btn primary" id="ob-run">執行</button>
-            <button class="btn" id="ob-crash">在「DB 已提交、訊息未發出」處崩潰</button>
-            <button class="btn" id="ob-reset">重置</button>
+          <div class="dtx-knobs">
+            <label class="dtx-knob"><span class="kl">Relay 輪詢間隔（僅 Outbox）</span>
+              <input type="range" id="dtx-ob-poll" min="100" max="5000" step="100" value="500" aria-label="Relay 輪詢 outbox 表的間隔毫秒">
+              <span class="kv" id="dtx-ob-poll-v">500 ms</span></label>
+            <label class="dtx-knob"><span class="kl">服務崩潰後重啟</span>
+              <input type="range" id="dtx-ob-restart" min="1" max="30" step="1" value="3" aria-label="服務崩潰到重啟完成的秒數">
+              <span class="kv" id="dtx-ob-restart-v">3 s</span></label>
           </div>
+          <label class="dtx-check"><input type="checkbox" id="dtx-ob-idem">消費端冪等（以事件 ID 建去重表）</label>
+          <div class="dtx-scroll"><div class="dtx-crash" id="dtx-ob-grid"></div></div>
+          <div class="dtx-sum" id="dtx-ob-sum"></div>
+          <div class="status-line" id="dtx-ob-detail"></div>
         </div>
       </div>
-      <p class="cap">在天真版按「崩潰」會看到 DB 已改、訊息遺失 → 不一致；Outbox 版同樣崩潰，訊息因為和業務資料寫在同一交易而留在 outbox 表，重啟後被投遞補回，最終一致。</p>
+      <p class="cap">每一列是「做完這一步就崩潰」的後果，全部由同一套規則推導：崩潰時未提交的寫入全部消失，重啟後 Relay 會把還沒標為已送的 outbox 列再發一次。先寫 DB 的策略會在 COMMIT 之後遺失訊息，先發 MQ 的策略會送出幽靈訊息；切到 Outbox，這兩種都消失了，但「已發出、未標記」那一列會重複投遞——沒開消費端冪等，同一個事件就會被套用兩次。</p>
 
       <h3>三種常見做法</h3>
       <h4>① Transactional Outbox（事務型發件匣）</h4>
       <p>把「業務寫入」和「要發送的訊息」放進<strong>同一個本地交易</strong>、寫進同一個 DB（多一張 outbox 表）；再由背景 relay 程序輪詢 outbox，把訊息可靠投遞出去。這是解雙寫問題的主流做法，常配 Saga。</p>
+      <p>要注意 Relay 是 <em>at-least-once</em>：它把訊息發出去之後、還沒把 outbox 列標成已送就崩潰，重啟後會再發一次。所以 Outbox 並沒有消滅失敗，而是把「訊息遺失」換成「訊息重複」——消費端必須冪等（例如以事件 ID 建去重表）才吸收得掉。上面的 demo 切到 Outbox、關掉冪等，就能看到這一列。</p>
       <h4>② 可靠訊息最終一致（基於 MQ）</h4>
       <p>靠訊息佇列達成最終一致——例如 RocketMQ 的事務訊息，或 Kafka + 消費端冪等。本質上是 Outbox / Saga 思路的訊息化實作。</p>
       <h4>③ AT 模式（如 Seata Automatic Transaction）</h4>
@@ -414,9 +565,13 @@ COMMIT;   -- 兩個 UPDATE 一起成功，或一起失敗</code></pre>
           <div class="wiz-result" id="wiz-result">
             <div class="wr-pick" id="wiz-pick"></div>
             <div class="wr-why" id="wiz-why"></div>
+            <div class="dtx-wz-path" id="wiz-path"></div>
+            <div class="dtx-wz-note" id="wiz-note"></div>
           </div>
         </div>
       </div>
+
+      <p class="cap">決策器會顯示這次實際走過的判斷路徑：選「支付／帳務扣款」時，前兩題不影響結論；選同組織＋長流程＋強一致，會撞上本質衝突的需求，它會誠實點出來，而不是硬給一個完美答案。</p>
 
       <div class="callout accent">
         <div class="c-title"><span class="ic">直覺</span>選型心法</div>

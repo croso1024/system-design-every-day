@@ -127,7 +127,7 @@ brief 的 `Demo 方向` 若已指定形式，**照它選**；但若該形式正�
   漏掉標籤時，那段 JS 會被瀏覽器當**純文字**印在頁面最下方，且互動 demo 完全不會執行（兩個症狀同一根因）。
 - `script.html` 的 IIFE 依 style-guide §0.5 分五段（常數 → `compute*` 純函式 → DOM 參照 → render → 事件綁定），
   每個 compute 進入點上方寫 `@probe fn／baseline／sweep` 三行。
-- 多 demo 結構參考：`drafts/distributed-transactions-handbook`（借它的拆小與就近擺放；其中 4 個 demo 仍是播放器，**不可作為實作參考**）。
+- 多 demo 結構參考：`drafts/distributed-transactions-handbook`（借它的拆小、就近擺放，以及一頁多組 `compute*`／`@probe` 的排法）。
 - 若把 demo 實作派給 Sub-Agent，把 `guidelines/demo-agent-brief.md` 逐字附在指派之後。
 
 #### Step 2c — 品質閘門（generate 之前，未過不得進 Step 3）
