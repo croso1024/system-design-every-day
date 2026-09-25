@@ -30,7 +30,9 @@
    - 「嚴格禁止的作法」
 2. 你負責的每一篇的 `drafts/<id>/content.html`（全篇，要懂論述才能設計 demo）與 `drafts/<id>/script.html`（全篇）。
 3. 程式結構的參考（讀來理解水準，**不是**拿來複製骨架）：`scripts/quality/fixtures/drafts/good-sim/script.html`
-   是最小的五段結構範例；計算深度的參考見 style-guide §0.1 表格的「站內範本」欄。
+   是最小的五段結構範例；`drafts/distributed-transactions-handbook/script.html` 是完整規模的範例
+   （一頁 6 個 demo，6 組 `compute*`／`@probe` 集中在第 (2) 段，demo 樣式全部放在該篇自己的 `<style>`）。
+   計算深度的參考見 style-guide §0.1 表格的「站內範本」欄。
 
 ---
 

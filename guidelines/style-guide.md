@@ -395,9 +395,9 @@ sequenceDiagram
 
 | # | Archetype | 核心互動 | 適合的概念 | 站內範本 |
 | :---: | :--- | :--- | :--- | :--- |
-| **A** | **時序推進**<br>Step-through | 按「下一步」走過一組固定步驟 | 本質**就是**固定順序協定的主題（2PC、TLS handshake、ICE、TCP 三向交握） | `drafts/tcp-udp-and-socket-programming`（點選封包注入丟包，cwnd／ssthresh／累積 ACK 真算） |
-| **B** | **參數掃描**<br>Parameter sweep | 拖 slider / 改數值，結果**即時重算** | 有可調參數、且參數會改變結果的機制（watermark 延遲、W+R>N、TTL、acks、chunk size） | `drafts/stream-processing`（視窗×水位）、`drafts/nat-port-forwarding`（自由輸入→四元組比對→改寫或 DROP） |
-| **C** | **並排對照**<br>Side-by-side | 同一組輸入同時餵給兩個面板（「天真 vs 正確」，或兩種都合法的相反設計） | 有明確錯誤解法、或有兩種對立取捨的主題（dual-write vs Outbox、B-Tree vs LSM-Tree） | `drafts/embedded-database`（SQLite vs RocksDB，MemTable／L0 stall／write amp 真算） |
+| **A** | **時序推進**<br>Step-through | 按「下一步」走過一組固定步驟 | 本質**就是**固定順序協定的主題（2PC、TLS handshake、ICE、TCP 三向交握） | `drafts/tcp-udp-and-socket-programming`（點選封包注入丟包，cwnd／ssthresh／累積 ACK 真算）、`drafts/distributed-transactions-handbook`「2PC 狀態機」（投票、崩潰點、恢復時間與互詢逐 tick 套規則，持鎖與阻塞 tick 真算） |
+| **B** | **參數掃描**<br>Parameter sweep | 拖 slider / 改數值，結果**即時重算** | 有可調參數、且參數會改變結果的機制（watermark 延遲、W+R>N、TTL、acks、chunk size） | `drafts/stream-processing`（視窗×水位）、`drafts/nat-port-forwarding`（自由輸入→四元組比對→改寫或 DROP）、`drafts/distributed-transactions-handbook`「崩潰點枚舉」（每個崩潰點的遺失／幽靈／重複由寫入路徑推導） |
+| **C** | **並排對照**<br>Side-by-side | 同一組輸入同時餵給兩個面板（「天真 vs 正確」，或兩種都合法的相反設計） | 有明確錯誤解法、或有兩種對立取捨的主題（dual-write vs Outbox、B-Tree vs LSM-Tree） | `drafts/embedded-database`（SQLite vs RocksDB，MemTable／L0 stall／write amp 真算）、`drafts/distributed-transactions-handbook`「TCC 抵達順序實驗室」（讀者自組的序列同時跑天真版與事務控制表狀態機） |
 | **D** | **空間視覺化**<br>Spatial | 在幾何／座標空間上點選、拖曳、增刪節點 | 有空間語意的主題（hash ring、向量空間、分區環、子網位址空間） | `drafts/consistent-hashing-handbook`（successor rule 與 remap% 真算）、`drafts/vector-database-fundamentals`（canvas，IVF／HNSW 真的只掃被 probe 的部分） |
 | **E** | **決策器**<br>Decision | 回答數個問題 → 導出選型建議與理由 | 選型類、trade-off 類、「什麼時候該用哪個」 | `drafts/distributed-transactions-handbook`「選型決策器」（三題 → `computeDecision()` 推導建議、判斷路徑與未參考的題目，含衝突需求的特例） |
 | **F** | **拆解器**<br>Decomposer | 輸入一筆真實資料 → 逐層 / 逐 byte 拆解標註 | 有格式或編碼結構的主題（protobuf wire format、封包標頭、子網遮罩、JWT、URL） | `drafts/ip-addressing-subnetting`（逐 bit 切 net／host，含 /31 /32 邊界）、`drafts/search-analytics-engine`（分詞→posting→合併→BM25 逐階段攤開） |
@@ -409,7 +409,8 @@ sequenceDiagram
 > 照著抄只會複製那個錯誤。每一格括號裡註明的就是「它真的算了什麼」，那是你該對齊的水準。
 >
 > 範本示範的是**計算深度**，不是程式結構：表中多數篇早於 §0.5 的 compute／render 約定。
-> 新寫或重做 demo 時，程式結構一律以 §0.5 為準。
+> 新寫或重做 demo 時，程式結構一律以 §0.5 為準；表中已符合 §0.5 的是 `drafts/stream-processing` 與
+> `drafts/distributed-transactions-handbook`，後者是一頁多 demo（6 組 `compute*`／`@probe`）的完整結構範例。
 
 #### 0.2 選型鐵律
 

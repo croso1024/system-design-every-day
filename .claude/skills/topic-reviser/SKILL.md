@@ -107,7 +107,7 @@ node scripts/quality/archetype-window.js --topic <id>   # 與發佈序上相鄰 
 4. `completed.json` 與 `books/index.html` 皆為 `generate.js` 自動產物，**勿手動編輯**。
 5. **改 archetype 等於改撞形版圖**：宣告的主 archetype 一變，發佈序上前後各 3 篇的視窗都要重判；
    以 `archetype-window.js --topic <id>` 的結果為準。
-6. **重做 demo 時沿用新約定**：依 style-guide §0.5 改成五段結構並補 `@probe`，讓該篇脫離 tech-debt 的舊篇清單；
+6. **重做 demo 時沿用新約定**：依 style-guide §0.5 改成五段結構並補 `@probe`（一頁多 demo 的完整重做範例見 `drafts/distributed-transactions-handbook`），讓該篇脫離 tech-debt 的舊篇清單；
    處理完一項 tech-debt 就把它從 `docs/tech-debt.md` 直接刪除（總表列與說明段都刪，不留「已處理」紀錄）。
 7. **大批次校訂派 Sub-Agent 時**，把 `guidelines/demo-agent-brief.md` 逐字附在指派之後（含第 6 節修訂附則）。
 
