@@ -97,6 +97,7 @@ node scripts/add-topic.js \
 與使用者討論選題後，若決定提供 `brief`，請將討論中**內容取向**的重點濃縮為 2-3 句，透過 `--brief` 寫入：
 
 - **應寫入**：希望強調的概念、必須涵蓋的場景、Demo 方向、與相鄰主題的差異化、面試考點偏好等**內容層面**指示。
+- **跨主題邊界**：寫「哪一段交給哪個主題、本篇不要重講什麼」時，用 **topic id 或短稱**（例如「不要重講 HTTP/2 的 frame 格式，由 `http-1-1-and-http-2` 負責」）。學習依賴仍用 `--prereq` / `--related` 表達。**禁止**在 brief 裡寫「上一篇」「下一篇」「第 N 篇」「前幾篇」「後續幾篇」這類靠發佈順序才看得懂的代名詞——brief 會被後段原樣當成撰文指示，序號代名詞進了文章就違反 style-guide 第 15 條。
 - **嚴禁寫入**：任何會破壞全站版面或違反 `guidelines/style-guide.md` 的要求——例如 Dark Mode、自訂 HTML 外殼、跳過 `<section>` 結構、引入 React/Vue、變更 TOC 規則、非 Notion 淺色配色等。**brief 是內容 overlay，不是格式 override。**
 - 若使用者未提出特別內容要求，**省略 `--brief`** 即可（欄位為 optional）。
 
