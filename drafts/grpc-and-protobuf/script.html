@@ -1,0 +1,320 @@
+<script>
+(function () {
+  "use strict";
+
+  /* (1) 常數與參數表 —— 軸上的座標只給畫面用，計算不依賴它們 */
+
+  function uVarint(n) {
+    n = Math.floor(Number(n));
+    if (!(n > 0)) return [0];
+    var out = [];
+    while (n > 127) {
+      out.push((n % 128) + 128);
+      n = Math.floor(n / 128);
+    }
+    out.push(n);
+    return out;
+  }
+
+  function int32Varint(n) {
+    n = Math.floor(Number(n));
+    if (n >= 0) return uVarint(n);
+    var low = n >>> 0;
+    var bytes = [];
+    var i, b, group, bitIndex, bit;
+    for (i = 0; i < 10; i++) {
+      group = 0;
+      for (b = 0; b < 7; b++) {
+        bitIndex = i * 7 + b;
+        bit = 0;
+        if (bitIndex < 32) bit = (low >>> bitIndex) & 1;
+        else if (bitIndex < 64) bit = 1;
+        group |= bit << b;
+      }
+      if (i < 9) group |= 128;
+      bytes.push(group);
+    }
+    return bytes;
+  }
+
+  function zigzag32(n) {
+    n = n | 0;
+    return ((n << 1) ^ (n >> 31)) >>> 0;
+  }
+
+  function hex2(b) {
+    var h = (b & 255).toString(16);
+    return h.length < 2 ? "0" + h : h;
+  }
+
+  function strLen(v) {
+    v = Math.floor(Number(v));
+    if (v < 0) return 0;
+    if (v > 18) return 18;
+    return v;
+  }
+
+  function jsonPair(name, kind, value) {
+    var i, s;
+    if (kind === 2) {
+      s = "";
+      for (i = 0; i < strLen(value); i++) s += "a";
+      return '"' + name + '":"' + s + '"';
+    }
+    return '"' + name + '":' + Math.floor(Number(value));
+  }
+
+  function encodeOne(field, kind, value) {
+    var wire = kind === 2 ? 2 : 0;
+    var tagKey = field * 8 + wire;
+    var tag = uVarint(tagKey);
+    var payload;
+    var zigzag = 0;
+    var ten = 0;
+    var lenPrefix = 0;
+    if (kind === 1) {
+      zigzag = zigzag32(value);
+      payload = uVarint(zigzag);
+    } else if (kind === 2) {
+      lenPrefix = uVarint(strLen(value)).length;
+      payload = uVarint(strLen(value));
+      var i;
+      for (i = 0; i < strLen(value); i++) payload.push(97);
+    } else {
+      if (value < 0) ten = 1;
+      payload = int32Varint(value);
+    }
+    return {
+      field: field,
+      kind: kind,
+      wire: wire,
+      tagKey: tagKey,
+      tagLen: tag.length,
+      payloadLen: payload.length,
+      zigzag: zigzag,
+      ten: ten,
+      lenPrefix: lenPrefix,
+      raw: tag.concat(payload)
+    };
+  }
+
+  // @probe fn       computeWire
+  // @probe baseline {"field":2,"kind":0,"value":1,"extra":0}
+  // @probe sweep    {"field":[1,16],"kind":[0,2],"value":[-1,16384],"extra":[0,1]}
+  function computeWire(p) {
+    var field = Math.floor(Number(p.field));
+    var kind = Math.floor(Number(p.kind));
+    var value = Math.floor(Number(p.value));
+    var extra = p.extra ? 1 : 0;
+    if (isNaN(field) || field < 1) field = 1;
+    if (field > 536870911) field = 536870911;
+    if (isNaN(kind) || kind < 0 || kind > 2) kind = 0;
+    if (isNaN(value)) value = 0;
+
+    var mine = encodeOne(field, kind, value);
+    var list = [mine];
+    var extraField = 0;
+    var extraBytes = 0;
+    if (extra) {
+      extraField = field === 5 ? 6 : 5;
+      var ex = encodeOne(extraField, 1, -1);
+      list.push(ex);
+      extraBytes = ex.raw.length;
+    }
+    list.sort(function (a, b) { return a.field - b.field; });
+
+    var bytes = [];
+    var fi, enc, i, b, role, cont, lab, at;
+    for (fi = 0; fi < list.length; fi++) {
+      enc = list[fi];
+      for (i = 0; i < enc.raw.length; i++) {
+        b = enc.raw[i];
+        at = i;
+        if (at < enc.tagLen) role = 1;
+        else if (enc.kind === 2 && (at - enc.tagLen) < enc.lenPrefix) role = 3;
+        else if (enc.kind === 2) role = 4;
+        else role = 2;
+        cont = role === 4 ? 0 : ((b & 128) ? 1 : 0);
+        if (at === 0) lab = "wt" + enc.wire;
+        else if (role === 1) lab = cont ? "續" : "標";
+        else if (role === 3) lab = "長";
+        else if (role === 4) lab = "料";
+        else lab = cont ? "續" : "值";
+        bytes.push({
+          hex: hex2(b),
+          role: role,
+          cont: cont,
+          field: enc.field,
+          wt: enc.wire,
+          off: bytes.length,
+          lab: lab
+        });
+      }
+    }
+
+    var pairs = [];
+    for (fi = 0; fi < list.length; fi++) {
+      enc = list[fi];
+      if (enc.field === field) pairs.push(jsonPair("id", kind, value));
+      else pairs.push(jsonPair("flag", 1, -1));
+    }
+    var jsonText = "{" + pairs.join(",") + "}";
+
+    return {
+      tagKey: mine.tagKey,
+      tagBytes: mine.tagLen,
+      wireType: mine.wire,
+      payloadLen: mine.payloadLen,
+      protoLen: bytes.length,
+      jsonLen: jsonText.length,
+      delta: jsonText.length - bytes.length,
+      zigzag: mine.zigzag,
+      tenByte: mine.ten,
+      strShown: kind === 2 ? strLen(value) : value,
+      fieldCount: list.length,
+      extraBytes: extraBytes,
+      extraField: extraField,
+      jsonText: jsonText,
+      bytes: bytes
+    };
+  }
+
+  /* (3) DOM 參照 */
+  var FIELD_STOPS = [1, 2, 8, 15, 16, 128];
+  var VALUE_STOPS = [-1, 0, 1, 127, 128, 300, 16384];
+  var root = document.getElementById("demo-gpb");
+  var stage = document.getElementById("gpb-stage");
+  var readout = document.getElementById("gpb-readout");
+  var extraBtn = document.getElementById("gpb-extra");
+  var resetBtn = document.getElementById("gpb-reset");
+  var state = { field: 2, kind: 0, value: 1, extra: 0 };
+
+  /* (4) render —— 只把 computeWire 的結果畫成位址空間 */
+  function svgText(x, y, cls, body, anchor) {
+    return '<text x="' + x + '" y="' + y + '" class="' + cls + '"' +
+      (anchor ? ' text-anchor="' + anchor + '"' : '') + '>' + body + '</text>';
+  }
+
+  function draw() {
+    var r = computeWire(state);
+    var pitch = 28;
+    var x0 = 16;
+    var cells = Math.max(r.bytes.length, r.jsonLen, 12);
+    var width = Math.max(680, x0 + cells * pitch + 20);
+    var height = 292;
+    var parts = [];
+    parts.push('<svg class="gpb-svg" viewBox="0 0 ' + width + ' ' + height + '" role="group" aria-label="Protobuf 位址空間">');
+    parts.push('<title>欄位編號與數值決定每一格 byte 的寬度，下方長條是同一比例尺的 JSON 長度</title>');
+    parts.push(svgText(16, 18, "ax", "欄位編號（點選）"));
+    parts.push(svgText(width - 16, 18, "ax", "16 起 tag 為 2 byte", "end"));
+
+    var i, n, gx, gy, gw, on;
+    gw = 46;
+    gy = 28;
+    for (i = 0; i < FIELD_STOPS.length; i++) {
+      n = FIELD_STOPS[i];
+      gx = 16 + i * ((width - 32 - gw) / (FIELD_STOPS.length - 1));
+      on = state.field === n ? " on" : "";
+      parts.push('<g class="hit' + on + '" data-axis="field" data-n="' + n + '">');
+      parts.push('<rect x="' + gx + '" y="' + gy + '" width="' + gw + '" height="32" rx="6"></rect>');
+      parts.push(svgText(gx + gw / 2, gy + 21, "hx", String(n), "middle"));
+      parts.push('</g>');
+    }
+
+    parts.push(svgText(16, 82, "ax", "數值（點選；string 當長度，上限 18）"));
+    gy = 92;
+    for (i = 0; i < VALUE_STOPS.length; i++) {
+      n = VALUE_STOPS[i];
+      gx = 16 + i * ((width - 32 - gw) / (VALUE_STOPS.length - 1));
+      on = state.value === n ? " on" : "";
+      parts.push('<g class="hit' + on + '" data-axis="value" data-n="' + n + '">');
+      parts.push('<rect x="' + gx + '" y="' + gy + '" width="' + gw + '" height="32" rx="6"></rect>');
+      parts.push(svgText(gx + gw / 2, gy + 21, "hx", String(n), "middle"));
+      parts.push('</g>');
+    }
+
+    var by = 156;
+    for (i = 0; i < r.bytes.length; i++) {
+      var cell = r.bytes[i];
+      var bx = x0 + i * pitch;
+      if (i === 0 || r.bytes[i - 1].field !== cell.field) {
+        parts.push(svgText(bx + 2, 146, "ax", "f" + cell.field));
+      }
+      parts.push('<rect class="r' + cell.role + '" x="' + bx + '" y="' + by + '" width="' + (pitch - 3) + '" height="46" rx="3"></rect>');
+      parts.push(svgText(bx + (pitch - 3) / 2, by + 20, "hx", cell.hex, "middle"));
+      parts.push(svgText(bx + (pitch - 3) / 2, by + 36, "rl", cell.lab, "middle"));
+    }
+
+    parts.push(svgText(16, 232, "ax", "JSON  " + r.jsonLen + " byte（未壓縮 UTF-8，鍵是 IDL 名稱）"));
+    var jw = Math.max(pitch - 3, r.jsonLen * pitch - 3);
+    parts.push('<rect class="rjson" x="' + x0 + '" y="240" width="' + jw + '" height="26" rx="3"></rect>');
+    parts.push(svgText(x0 + 8, 258, "hx", r.jsonLen + " B"));
+    parts.push('</svg>');
+    stage.innerHTML = parts.join("");
+
+    var cmp = r.delta > 0
+      ? "protobuf 少 " + r.delta + " byte"
+      : (r.delta < 0 ? "protobuf 多 " + (-r.delta) + " byte" : "兩者等長");
+    var line = "tag key " + r.tagKey + " 佔 " + r.tagBytes + " byte，wire type " + r.wireType +
+      "，主欄位 payload " + r.payloadLen + " byte。" + cmp + "。" + r.jsonText + "。";
+    if (r.tenByte) line += " int32 負值 sign-extend，payload " + r.payloadLen + " byte。";
+    if (state.kind === 1) line += " zigzag(" + state.value + ")=" + r.zigzag + "。";
+    if (state.kind === 2) line += " 字串長度收成 " + r.strShown + "。";
+    if (r.extraField) line += " 第二個欄位 f" + r.extraField + " sint32 -1 佔 " + r.extraBytes + " byte，依編號升冪排進同一段位址。";
+    readout.textContent = line;
+
+    var kindBtns = root.querySelectorAll("[data-kind]");
+    for (i = 0; i < kindBtns.length; i++) {
+      kindBtns[i].setAttribute("aria-pressed", String(Number(kindBtns[i].getAttribute("data-kind")) === state.kind));
+    }
+    extraBtn.setAttribute("aria-pressed", state.extra ? "true" : "false");
+    extraBtn.textContent = state.extra ? "拿掉第二個欄位" : "放上第二個欄位";
+  }
+
+  /* (5) 事件綁定 */
+  function hitOf(node) {
+    while (node && node !== stage) {
+      if (node.getAttribute && node.getAttribute("data-axis")) return node;
+      node = node.parentNode;
+    }
+    return null;
+  }
+
+  stage.addEventListener("click", function (ev) {
+    var hit = hitOf(ev.target);
+    if (!hit) return;
+    var axis = hit.getAttribute("data-axis");
+    var n = parseInt(hit.getAttribute("data-n"), 10);
+    if (axis === "field") state.field = n;
+    else if (axis === "value") state.value = n;
+    draw();
+  });
+
+  root.addEventListener("click", function (ev) {
+    var t = ev.target;
+    while (t && t !== root) {
+      if (t.getAttribute && t.getAttribute("data-kind") != null) {
+        state.kind = parseInt(t.getAttribute("data-kind"), 10);
+        draw();
+        return;
+      }
+      t = t.parentNode;
+    }
+  });
+
+  extraBtn.addEventListener("click", function () {
+    state.extra = state.extra ? 0 : 1;
+    draw();
+  });
+
+  resetBtn.addEventListener("click", function () {
+    state.field = 2;
+    state.kind = 0;
+    state.value = 1;
+    state.extra = 0;
+    draw();
+  });
+
+  draw();
+})();
+</script>

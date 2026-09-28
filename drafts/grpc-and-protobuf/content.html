@@ -1,0 +1,463 @@
+<!-- demo-archetype: D｜空間視覺化 — 讀者在欄位編號軸與數值軸上點選座標，並可增刪第二個欄位節點；tag、varint、長度前綴與 JSON 位元組以同一比例尺重算。選 D 是因為 wire format 就是一段位址空間；逐 byte 拆解被最近 3 篇的主 archetype 佔用。 -->
+<style>
+  .gpb-sub { font-weight: 700; font-size: 14px; margin: 20px 0 6px; padding-left: 10px; border-left: 3px solid var(--accent); color: var(--text); }
+
+  .gpb-row {
+    display: flex; flex-wrap: wrap; gap: 10px;
+    align-items: stretch; justify-content: center;
+    margin: 14px 0 6px;
+  }
+  .gpb-node {
+    border: 1px solid var(--border-strong); border-radius: 8px;
+    background: #fff; padding: 10px 12px;
+    min-width: 110px; max-width: 200px; text-align: center;
+  }
+  .gpb-node .nn { font-family: var(--mono); font-size: 12px; font-weight: 700; color: var(--text); }
+  .gpb-node .ns { font-size: 11px; color: var(--text-2); margin-top: 3px; line-height: 1.4; }
+  .gpb-node.accent { border-top: 3px solid var(--accent); }
+  .gpb-node.ok { border-top: 3px solid var(--ok); }
+  .gpb-arrow {
+    display: flex; align-items: center;
+    font-family: var(--mono); font-size: 13px; color: var(--text-3);
+    white-space: nowrap;
+  }
+
+  .gpb-stack { display: flex; flex-direction: column; gap: 6px; margin: 14px 0 6px; }
+  .gpb-layer {
+    border: 1px solid var(--border-strong); border-radius: 8px;
+    background: #fff; padding: 10px 14px;
+  }
+  .gpb-layer .nn { font-family: var(--mono); font-size: 12px; font-weight: 700; color: var(--text); }
+  .gpb-layer .ns { font-size: 12px; color: var(--text-2); margin-top: 2px; line-height: 1.5; }
+  .gpb-layer.accent { border-left: 3px solid var(--accent); background: var(--accent-soft); }
+  .gpb-layer.ok { border-left: 3px solid var(--ok); }
+  .gpb-layer.warn { border-left: 3px solid var(--warn); }
+
+  .gpb-lane {
+    display: grid; grid-template-columns: 52px repeat(3, 1fr); gap: 1px;
+    background: var(--border); border: 1px solid var(--border);
+    border-radius: 8px; overflow: hidden; margin: 14px 0 6px;
+  }
+  .gpb-lane > div { background: #fff; padding: 8px 10px; font-size: 12px; line-height: 1.5; }
+  .gpb-lane .lh { background: var(--bg-soft); font-family: var(--mono); font-size: 11px; font-weight: 700; color: var(--text-2); }
+  .gpb-lane .lt { background: var(--bg-soft); font-family: var(--mono); font-size: 11px; color: var(--text-3); }
+  .gpb-lane .lc.act { background: var(--accent-soft); }
+  .gpb-lane .lc.ok { background: var(--ok-soft); }
+  .gpb-lane .lc.warn { background: var(--warn-soft); }
+  @media (max-width: 720px) {
+    .gpb-lane { grid-template-columns: 44px repeat(3, minmax(0, 1fr)); }
+    .gpb-lane > div { font-size: 11px; padding: 6px; }
+  }
+
+  .gpb-svg { width: 100%; height: auto; display: block; background: #fff; }
+  .gpb-svg text { font-family: var(--mono); }
+  .gpb-svg .ax { fill: var(--text-2); font-size: 11px; }
+  .gpb-svg .hx { fill: var(--text); font-size: 11px; }
+  .gpb-svg .rl { fill: var(--text-2); font-size: 11px; }
+  .gpb-svg .hit { cursor: pointer; }
+  .gpb-svg .hit rect { fill: #fff; stroke: var(--border-strong); }
+  .gpb-svg .hit.on rect { fill: var(--accent-soft); stroke: var(--accent); stroke-width: 1.5; }
+  .gpb-svg .r1 { fill: var(--accent-soft); stroke: var(--accent); }
+  .gpb-svg .r2 { fill: var(--ok-soft); stroke: var(--ok); }
+  .gpb-svg .r3 { fill: var(--warn-soft); stroke: var(--warn); }
+  .gpb-svg .r4 { fill: var(--bg-soft); stroke: var(--border-strong); }
+  .gpb-svg .rjson { fill: var(--bg-soft); stroke: var(--text-2); }
+  .gpb-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+</style>
+
+<section id="s1">
+  <div class="sec-head">
+    <span class="sec-num">01</span>
+    <h2>服務間契約放在線上</h2>
+  </div>
+  <p class="sec-sub">Protobuf 決定位元組怎麼排，gRPC 決定這段位元組怎麼佔用一條 HTTP/2 stream。風格選型不在這裡。</p>
+
+  <p>內部服務之間若用 JSON over HTTP，契約通常活在文件、慣例與「對方應該會接受這個欄位」的默契裡。Protobuf 把契約收成一份 <code>.proto</code>：欄位編號、型別與 RPC 方法在編譯期就固定，兩邊的 stub 由同一份 IDL 生成。gRPC 則規定這份訊息如何走在網路上——一個 RPC 佔一條 HTTP/2 stream，不是「把 JSON 換成二進位再 POST 到某個 URL」這麼薄。</p>
+
+  <div class="gpb-row">
+    <div class="gpb-node">
+      <div class="nn">.proto</div>
+      <div class="ns">編號與型別是契約</div>
+    </div>
+    <span class="gpb-arrow">▸</span>
+    <div class="gpb-node accent">
+      <div class="nn">Generated stub</div>
+      <div class="ns">呼叫像本地函式</div>
+    </div>
+    <span class="gpb-arrow">▸</span>
+    <div class="gpb-node">
+      <div class="nn">HTTP/2 stream</div>
+      <div class="ns">一 RPC 一條</div>
+    </div>
+    <span class="gpb-arrow">▸</span>
+    <div class="gpb-node ok">
+      <div class="nn">Server stub</div>
+      <div class="ns">還原成同型訊息</div>
+    </div>
+  </div>
+  <p class="cap">看中間那一跳：應用程式不自己組 HTTP 語意，stub 把一次呼叫對上一條 stream。Frame、HPACK、多路復用的原理由 HTTP/1.1 與 HTTP/2 篇負責，本篇只講 gRPC 怎麼使用它們。</p>
+
+  <p>體積與速度的來源不是「二進位比較酷」。線上沒有欄位名稱，小整數用 varint 壓進一個 byte，解碼是依 schema 往前掃，不必先做 JSON tokenize。代價是訊息<strong>不能自我描述</strong>：沒有 schema 就讀不出欄位。除錯要靠 <code>protoc --decode</code> 或同等工具，不能對著一截 tcpdump 用眼睛讀。</p>
+
+  <div class="callout warn">
+    <div class="c-title"><span class="ic">邊界</span>本篇不幫你選 REST、GraphQL 還是 gRPC</div>
+    <p>三種風格的資源模型、查詢形狀與版本化策略留給 API 設計風格與演進篇。這裡假設你已經決定走服務間 RPC，要搞清楚的是編碼、相容性、串流生命週期，以及長連線如何搞砸負載均衡。</p>
+  </div>
+
+  <div class="oneliner">
+    <b>一句話答法</b>Protobuf 是帶編號的二進位契約，gRPC 把每次呼叫映射到一條 HTTP/2 stream；省下的是欄位名與解析成本，不是 API 風格的選擇題。
+  </div>
+</section>
+
+<section id="s2">
+  <div class="sec-head">
+    <span class="sec-num">02</span>
+    <h2>位元組怎麼排</h2>
+  </div>
+  <p class="sec-sub">一個欄位是 tag、wire type、然後才是值。負的 int32 會膨脹，zigzag 就是為了這件事。</p>
+
+  <p>每個欄位在線上是 <strong>tag-length-value</strong>，但 length 只在某些 wire type 出現。Tag 本身是一個 varint，它的整數值由欄位編號與 wire type 拼出來：</p>
+
+  <div class="formula">tag = (field_number &lt;&lt; 3) | wire_type</div>
+
+  <p>最低 3 bit 是 wire type，其餘是欄位編號。編號 1 到 15 配上任何 wire type 都還塞得進一個 byte（最大 15&lt;&lt;3|7 = 127）；編號 16 起 tag 變成兩個 byte。所以熱路徑上的欄位要把小編號留給它，不是依著想法的順序從 1 往下編就算了。</p>
+
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr><th>Wire type</th><th>線上形狀</th><th>典型型別</th></tr>
+      </thead>
+      <tbody>
+        <tr><td class="hl">0 Varint</td><td>7 bit 一組，最高 bit 表示後面還有沒有</td><td>int32 / int64 / uint / sint / bool / enum</td></tr>
+        <tr><td class="hl">1 64-bit</td><td>固定 8 byte</td><td>fixed64 / sfixed64 / double</td></tr>
+        <tr><td class="hl">2 Length-delimited</td><td>先一個 varint 長度，再跟那一截位元組</td><td>string / bytes / 嵌套訊息 / packed repeated</td></tr>
+        <tr><td class="hl">5 32-bit</td><td>固定 4 byte</td><td>fixed32 / sfixed32 / float</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="cap">3 與 4 是已廢棄的 group，新契約不要用。面試時能說出 0、2、5 的差別就夠：變長、帶長度、固定 4 byte。</p>
+
+  <p class="gpb-sub">Varint 與兩種「負數」</p>
+
+  <p>Varint 把整數拆成 7 bit 一組。0 到 127 是一個 byte；128 要兩個 byte（<code>80 01</code>）。它偏愛小的非負整數。<code>int32</code> 的負數不是小整數：規格把負的 int32 / int64 <strong>sign-extend 成 64 bit</strong>再編碼，於是 -1 變成十個 byte，<code>ff ff ff ff ff ff ff ff ff 01</code>。這時候 protobuf 可以比 JSON 還大。</p>
+
+  <p><code>sint32</code> / <code>sint64</code> 先做 zigzag，把小的負數折回小的非負數，再走 varint：</p>
+
+  <div class="formula">zigzag(n) = (n &lt;&lt; 1) XOR (n &gt;&gt; 31)</div>
+
+  <p>-1 變成 1，一個 byte；1 變成 2；-64 變成 127，仍是一個 byte。代價是正數少了一個 bit：<code>sint32</code> 的 127 會 zigzag 成 254，反而要兩個 byte，而 <code>int32</code> 的 127 只要一個。正數很大、又幾乎不會是負的（識別碼、長度、計數），用 <code>int32</code> 或乾脆 <code>fixed32</code>；會在零附近擺盪的差值，用 <code>sint32</code>。</p>
+
+  <p><code>fixed32</code> 永遠 4 byte，沒有 varint 的迴圈。數字經常接近 2<sup>31</sup> 時，varint 要 5 byte，fixed 更短也更好預測。小計數則相反。</p>
+
+  <div class="callout accent">
+    <div class="c-title"><span class="ic">關鍵</span>名稱不在線上，編號在</div>
+    <p>二進位 protobuf 的 JSON 對照物長得像 <code>{"id":1}</code>，鍵是 IDL 裡的名稱。把欄位從 1 改到 16，JSON 長度不變，protobuf 的 tag 多一個 byte。體積差要在<strong>未壓縮</strong>的前提下比；很大又很重複的 JSON 加上 gzip 可以追近 protobuf，但小訊息的 gzip 標頭常常先輸，解析 CPU 也仍是 JSON 比較貴。</p>
+  </div>
+
+  <div class="demo" id="demo-gpb">
+    <div class="demo-bar">
+      <span class="label">互動 · 編碼位址空間</span>
+      <span class="label" style="text-transform:none;font-family:var(--sans);font-size:12px;color:var(--text-2)">點選編號與數值座標，必要時放上第二個欄位</span>
+    </div>
+    <div class="demo-body">
+      <div class="seg" role="group" aria-label="編碼種類">
+        <button type="button" data-kind="0" aria-pressed="true">int32</button>
+        <button type="button" data-kind="1" aria-pressed="false">sint32</button>
+        <button type="button" data-kind="2" aria-pressed="false">string</button>
+      </div>
+      <div id="gpb-stage"></div>
+      <div class="legend">
+        <span><i class="dot ns-wait"></i>tag（第一格標 wire type）</span>
+        <span><i class="dot ns-ok"></i>varint 值</span>
+        <span><i class="dot ns-lock"></i>長度前綴</span>
+        <span><i class="dot ns-idle"></i>原始位元組</span>
+      </div>
+      <div class="status-line" id="gpb-readout">點選編號軸與數值軸，位址空間會依編碼規則重算。</div>
+      <div class="gpb-actions">
+        <button type="button" class="btn" id="gpb-extra" aria-pressed="false">放上第二個欄位</button>
+        <button type="button" class="btn" id="gpb-reset">重置</button>
+      </div>
+    </div>
+  </div>
+  <p class="cap">每一格是一個 byte，寬度與下方 JSON 長條共用同一比例尺。編號 15 點到 16，tag 多一格；數值點到 -1，int32 的值區拉成 10 格，sint32 仍是 1 格。第二個欄位固定是 sint32 的 -1（編號 5，若主欄位已是 5 則改 6），用來對照「負數不該用 int32」。</p>
+
+  <div class="oneliner">
+    <b>一句話答法</b>Tag 是欄位編號與 wire type 拼成的 varint；int32 的負數會變成 10 byte，零附近的差值改用 sint32 的 zigzag。
+  </div>
+</section>
+
+<section id="s3">
+  <div class="sec-head">
+    <span class="sec-num">03</span>
+    <h2>欄位編號才是身分</h2>
+  </div>
+  <p class="sec-sub">改名稱不會改線上格式，改編號等於刪掉舊欄位再新增一個。required 是用相容性換檢查的歷史錯誤。</p>
+
+  <p>IDL 同時服務人類與編譯器。一份能生成 stub 的最小契約長這樣：</p>
+
+<pre><code>syntax = "proto3";
+
+message Page {
+  int32 limit = 1;
+  string cursor = 2;
+  sint32 delta = 3;
+}
+
+service Catalog {
+  rpc Get (Page) returns (Page);
+}</code></pre>
+
+  <p>程式碼生成（<code>protoc</code>、buf 這類工具鏈）吐出的 stub 不要手改。方法改名只影響生成出來的函式；<strong>線上身分是等號右邊的編號</strong>。舊 client 仍送編號 2 的時候，新 server 若把 2 的意義換掉，解出來的是安靜的錯資料，不是編譯錯誤。</p>
+
+  <p class="gpb-sub">向前相容與向後相容</p>
+
+  <p>向後相容：新程式讀得懂舊資料。向前相容：舊程式讀得懂新資料（至少能安全忽略）。Protobuf 的預設能力來自三條規則——沒出現的欄位用型別的零值；不認識的欄位編號要保留，轉送時不能丟；新增欄位使用新編號。</p>
+
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr><th>變更</th><th>線上</th><th>你實際會踩到的事</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>新增欄位（新編號）</td><td class="hl">相容</td><td>舊讀者忽略它；新讀者對舊資料看到零值</td></tr>
+        <tr><td>刪除欄位</td><td class="hl">必須 reserved</td><td>編號與名稱都保留，禁止以後的人重用</td></tr>
+        <tr><td>改名稱、不改編號</td><td class="hl">二進位相容</td><td>生成程式與 JSON 映射會斷；線上 protobuf 還在</td></tr>
+        <tr><td>重用編號或改編號</td><td class="hl">不相容</td><td>舊值被當成新意義，沒有解析錯誤</td></tr>
+        <tr><td>int32 改 sint32</td><td class="hl">負數會錯</td><td>同一串 varint，zigzag 與 sign-extend 解出來不同</td></tr>
+        <tr><td>單一欄位改成 repeated</td><td class="hl">通常不相容</td><td>proto3 的純量 repeated 預設 packed（wire type 2），原本是 varint（wire type 0）</td></tr>
+        <tr><td>proto2 新增 required</td><td class="hl">不相容</td><td>舊資料缺欄位，新讀者直接拒絕</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="cap">安全的演進是「只加編號、刪了就預約」。型別若要換編碼方式，加一個新欄位，不要原位改。</p>
+
+  <div class="callout warn">
+    <div class="c-title"><span class="ic">陷阱</span>proto2 的 required 檢查的是部署，不是商業規則</div>
+    <p>required 讓缺欄位的訊息無法解析。一旦有舊資料、或有還沒升級的發送端，這個檢查就變成滾動升級的障礙。proto3 拿掉了 required：純量看零值，真的要區分「沒送」與「送了零」，用 proto3 的 <code>optional</code> 拿回 presence。商業上的必填放到應用層驗證，不要放到線上格式的語法裡。</p>
+  </div>
+
+  <p>轉送型的服務（閘道、異步橋）若在解碼後用自己的 schema 再編碼，不認識的新欄位會被剝掉。那等於替上游做了一次不相容的刪欄。現行 Protobuf 會保留 unknown fields；早期 proto3 曾經丟棄它們，轉送層不能靠那個舊行為。留住這些欄位，才允許對方先升級。</p>
+
+  <p>嵌套訊息與 map 沒有新的 wire type：嵌套訊息是 wire type 2，長度蓋住整個子訊息；map 是重複的 key/value 訊息。子訊息裡的 unknown fields 一樣要留。</p>
+
+  <div class="oneliner">
+    <b>一句話答法</b>相容性看欄位編號與 wire type，不看名稱；編號用過就 reserved，required 已經用部署事故證明它不該當必填檢查。
+  </div>
+</section>
+
+<section id="s4">
+  <div class="sec-head">
+    <span class="sec-num">04</span>
+    <h2>一條 stream 上的四種 RPC</h2>
+  </div>
+  <p class="sec-sub">Unary、server streaming、client streaming、bidi 差在誰寫、誰先 half-close。背壓是 stream 視窗，不是再造一個佇列。</p>
+
+  <p>原生 gRPC 要求 HTTP/2。TLS 時 ALPN 要協商到 <code>h2</code>。一個 RPC 的路徑是 <code>/package.Service/Method</code>，<code>POST</code>，<code>content-type: application/grpc</code>，並帶 <code>te: trailers</code>。這些是 gRPC 怎麼<strong>使用</strong> HTTP/2；frame 怎麼切、HPACK 怎麼壓標頭、一條連線如何多路復用，見 HTTP/1.1 與 HTTP/2 篇。</p>
+
+  <div class="gpb-stack">
+    <div class="gpb-layer">
+      <div class="nn">Protobuf message</div>
+      <div class="ns">第 2 節那些 tag 與 varint</div>
+    </div>
+    <div class="gpb-layer accent">
+      <div class="nn">gRPC length prefix · 5 byte</div>
+      <div class="ns">1 byte 壓縮旗標 + 4 byte 大端長度 + 訊息本體。訊息邊界在這裡，不在 HTTP/2 frame 邊界</div>
+    </div>
+    <div class="gpb-layer">
+      <div class="nn">HTTP/2 stream</div>
+      <div class="ns">HEADERS 帶 metadata，DATA 載上面那一截，結束時用 trailer 送 grpc-status</div>
+    </div>
+    <div class="gpb-layer warn">
+      <div class="nn">TCP 連線</div>
+      <div class="ns">長連線、多條 stream 共用。這一層看不見 RPC</div>
+    </div>
+  </div>
+  <p class="cap">5 byte 前綴讓同一條 stream 能接連續多則訊息；一個 DATA frame 可以切在訊息中間。壓縮旗標是 0 或 1，和 protobuf 自己的 length-delimited 欄位不是同一層。</p>
+
+  <div class="formula">[compressed:1 byte][length:4 byte big-endian][protobuf bytes]</div>
+
+  <p class="gpb-sub">Unary：狀態在最後的 trailer</p>
+
+<pre class="mermaid">
+sequenceDiagram
+  participant C as Client
+  participant S as Server
+  C->>S: HEADERS + timeout
+  C->>S: DATA 一則請求
+  S-->>C: DATA 一則回應
+  S-->>C: trailer grpc-status
+</pre>
+  <p class="cap">成功與失敗都在 trailer 的 grpc-status，不在 HTTP status line。串流因此可以等最後一則訊息寫完才宣布結果。HTTP/1.1 對 trailer 的支援不夠，所以沒有「gRPC over HTTP/1.1」這條路。</p>
+
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr><th>模式</th><th>誰持續寫</th><th>請求結束的信號</th><th>典型用途</th></tr>
+      </thead>
+      <tbody>
+        <tr><td class="hl">Unary</td><td>各一則</td><td>請求訊息之後就 half-close</td><td>查詢、命令</td></tr>
+        <tr><td class="hl">Server streaming</td><td>伺服器</td><td>客戶端送來的那一則請求</td><td>訂閱一個會結束的結果集</td></tr>
+        <tr><td class="hl">Client streaming</td><td>客戶端</td><td>客戶端 half-close</td><td>上傳、彙總</td></tr>
+        <tr><td class="hl">Bidirectional</td><td>兩邊</td><td>各自的 half-close，彼此獨立</td><td>服務間的雙向工作階段</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="cap">四種模式不是四種協定。差別只在同一條 stream 上，每一端什麼時候停止寫入。瀏覽器要推播給人看，選型在 WebSocket 即時雙向通訊篇與 Server-Sent Events 篇，不在這裡。</p>
+
+  <p class="gpb-sub">背壓與取消</p>
+
+  <p>發送端能寫多快，取決於對端有沒有把 HTTP/2 stream 視窗還回來。應用讀得慢，視窗不還，下一個 <code>Write</code> 就停住。這是背壓，不是故障。視窗的預設大小與調法見 HTTP/1.1 與 HTTP/2 篇；gRPC 大量傳輸時，那個預設視窗常常是第一個要動的旋鈕。訊息還有實作層的大小上限（常見預設約 4 MiB），超過要改上限或改成串流，不要假設一則 message 能裝下整個檔案。</p>
+
+  <div class="gpb-lane">
+    <div class="lh">步驟</div><div class="lh">Client</div><div class="lh">Stream 視窗</div><div class="lh">Server</div>
+    <div class="lt">t1</div>
+    <div class="lc act">HEADERS，帶 timeout</div><div class="lc">初始額度</div><div class="lc">接受 RPC</div>
+    <div class="lt">t2</div>
+    <div class="lc">連續 Write</div><div class="lc">每則 DATA 扣額度</div><div class="lc">應用慢慢 Read</div>
+    <div class="lt">t3</div>
+    <div class="lc warn">Write 停住</div><div class="lc warn">額度歸零</div><div class="lc">還沒讀完，機制生效</div>
+    <div class="lt">t4</div>
+    <div class="lc">half-close</div><div class="lc">—</div><div class="lc ok">知道請求已結束</div>
+    <div class="lt">t5</div>
+    <div class="lc ok">讀到 grpc-status</div><div class="lc">—</div><div class="lc ok">trailer OK</div>
+    <div class="lt">t6</div>
+    <div class="lc warn">cancel</div><div class="lc">stream 拆掉</div><div class="lc warn">CANCELLED</div>
+  </div>
+  <p class="cap">t3 是背壓生效，不是資料壞掉。t4 的 half-close 只代表「我不再寫」，對端還可以繼續寫回應。t6 的取消是呼叫端放棄這次 RPC，伺服器應停止後續工作並回 CANCELLED，而不是把行程殺掉。</p>
+
+  <div class="oneliner">
+    <b>一句話答法</b>四種 RPC 共用「一 stream、5 byte 前綴、狀態在 trailer」；慢的讀者用視窗把發送端停住，取消是 CANCELLED 這條生命週期，不是連線層的意外。
+  </div>
+</section>
+
+<section id="s5">
+  <div class="sec-head">
+    <span class="sec-num">05</span>
+    <h2>Deadline、Metadata 與狀態碼</h2>
+  </div>
+  <p class="sec-sub">逾時要沿呼叫鏈扣時間。機器讀狀態碼，人讀 message，商業錯誤不一定是非 OK。</p>
+
+  <p>Metadata 是 RPC 的側頻道：認證、追蹤編號、租戶、<code>grpc-timeout</code>。它不是第二份 protobuf。標頭有大小上限（許多實作的入站預設在數 KB 到十來 KB），二進位鍵以 <code>-bin</code> 結尾。把 payload 塞進 metadata，會撞上標頭表與延遲，也繞過你為訊息設計的 schema。</p>
+
+  <p class="gpb-sub">Deadline 是剩餘時間，不是每一跳的新配額</p>
+
+  <p><code>grpc-timeout</code> 的形狀像 <code>200m</code>（200 毫秒）、<code>1S</code>、<code>5M</code>。它寫在協定上，不寫進訊息欄位——interceptor 與伺服器 runtime 看的是 call context。每一跳轉呼時要寫入<strong>剩下的時間</strong>，不是把上游給的 200 ms 再原樣發給下游。</p>
+
+  <div class="gpb-lane">
+    <div class="lh">步驟</div><div class="lh">Caller</div><div class="lh">Service A</div><div class="lh">Service B</div>
+    <div class="lt">t1</div>
+    <div class="lc act">deadline 200 ms</div><div class="lc">context 剩餘 200 ms</div><div class="lc">—</div>
+    <div class="lt">t2</div>
+    <div class="lc">—</div><div class="lc ok">自己花了 50 ms，轉呼寫 150 ms</div><div class="lc ok">context 是 150 ms，不是新的 200</div>
+    <div class="lt">t3</div>
+    <div class="lc warn">整體到點則放棄</div><div class="lc">—</div><div class="lc warn">再花 140 ms 後只剩 10 ms，做完或 DEADLINE_EXCEEDED</div>
+  </div>
+  <p class="cap">t2 那格是正確的扣減。若 A 每次轉呼都重設成 200 ms，三跳串起來可以變成 600 ms，Caller 的 deadline 名存實亡。t3 的逾時是機制生效，不是訊息毀損。</p>
+
+  <div class="callout warn">
+    <div class="c-title"><span class="ic">陷阱</span>重試若各自領一個新的超時，deadline 會被放大</div>
+    <p>所有嘗試必須共用這次 RPC 剩下的時間。外層重試、內層才設定 timeout 的 interceptor 順序，會讓每一試都拿到滿額。重試也只適用於冪等、或帶冪等鍵的方法；<code>UNAVAILABLE</code> 上對非冪等寫入重試，等於幫使用者做了兩次。</p>
+  </div>
+
+  <p class="gpb-sub">狀態碼是契約的一部分</p>
+
+  <p>gRPC 的結果是狀態碼、給人看的 message、以及選用的 details（常見載體是 <code>google.rpc.Status</code> 裡的 <code>Any</code>）。程式判斷用狀態碼，不要解析 message 的英文。HTTP 狀態只是這條 stream 的外殼：應用錯誤多數仍是 HTTP 200，真正的碼在 trailer。</p>
+
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr><th>狀態碼</th><th>意思</th><th>重試</th></tr>
+      </thead>
+      <tbody>
+        <tr><td class="hl">INVALID_ARGUMENT / NOT_FOUND / ALREADY_EXISTS / PERMISSION_DENIED / UNAUTHENTICATED / UNIMPLEMENTED</td><td>請求或部署就不對</td><td>不要</td></tr>
+        <tr><td class="hl">FAILED_PRECONDITION</td><td>系統狀態還不允許</td><td>先改狀態，盲目重試通常沒用</td></tr>
+        <tr><td class="hl">UNAVAILABLE</td><td>暫時連不上、或連線被拆</td><td>冪等才重試，並退避</td></tr>
+        <tr><td class="hl">DEADLINE_EXCEEDED</td><td>剩餘時間用完</td><td>只有上游還有預算、且冪等才有意義</td></tr>
+        <tr><td class="hl">RESOURCE_EXHAUSTED</td><td>配額或本地背壓</td><td>限流可退避；配額用盡則不要</td></tr>
+        <tr><td class="hl">ABORTED</td><td>並發衝突，交易可重做</td><td>冪等前提下可以</td></tr>
+        <tr><td class="hl">INTERNAL / UNKNOWN / DATA_LOSS</td><td>伺服器沒把錯誤分類好，或資料受損</td><td>不要當暫時性故障</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="cap">CANCELLED 多半是呼叫端自己取消的，伺服器不要把它記成下游故障去報警。OK 只表示 RPC 協定層成功。</p>
+
+  <p>庫存不足、餘額不夠這類<strong>領域結果</strong>有兩種放法。放進非 OK 狀態碼，interceptor、指標與負載卸載看得到，但客戶端必須把「商業失敗」從「傳輸失敗」裡分出來。放進 OK 回應的欄位，型別清楚，卻容易被中介層當成成功而計入 SLO。選一種，寫進服務契約，不要混用。</p>
+
+  <div class="oneliner">
+    <b>一句話答法</b>Deadline 沿路扣剩餘時間並讓重試共用它；機器看 grpc-status，人看 message，領域錯誤要事先決定放狀態碼還是放 OK 本體。
+  </div>
+</section>
+
+<section id="s6">
+  <div class="sec-head">
+    <span class="sec-num">06</span>
+    <h2>長連線、Interceptor 與瀏覽器</h2>
+  </div>
+  <p class="sec-sub">L4 均衡器只看見連線。一條 HTTP/2 連線上的所有 RPC 會黏在同一台後端，直到你改成 per-RPC 選路。</p>
+
+  <p>Interceptor 是包在真實呼叫外面的一層函式，客戶端與伺服器各有一串。外層先看到出去的呼叫、最後看到回來的狀態。驗證、計量、填 deadline、重試都放這裡，但順序就是語意：重試必須看得到原始 deadline（第 5 節），驗證不該放在會把失敗吞掉的重試內層之下。各語言註冊時「第一個還是最後一個先執行」並不一致，以該實作的鏈是誰在最外層為準，不要背一個通用的陣列順序。</p>
+
+  <p class="gpb-sub">為什麼 L4 負載均衡會失效</p>
+
+  <p>gRPC 的連線是長生命週期的 HTTP/2。L4 均衡器按連線轉發：客戶端握手套到後端 A 之後，這條連線上後來開的每一條 stream 都在 A。B 與 C 要等新的 TCP 連線。一個行程常常只維持少數幾條連線，流量就黏死了。連線層的 keepalive 只讓中間盒不要砍掉閒置連線，它不會重新分配 RPC。</p>
+
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr><th>作法</th><th>選路單位</th><th>代價</th></tr>
+      </thead>
+      <tbody>
+        <tr><td class="hl">L4 LB</td><td>TCP 連線</td><td>長連線黏住單一後端</td></tr>
+        <tr><td class="hl">Client-side LB</td><td>每個 RPC 選一條 subchannel</td><td>客戶端要有後端清單與健康狀態；pick_first 仍會黏住第一條 READY 連線</td></tr>
+        <tr><td class="hl">L7 proxy</td><td>每一條 stream</td><td>多一跳，proxy 必須轉送 trailer 與 timeout，自己變成故障域</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="cap">round_robin 這類政策是 per RPC 的；pick_first 在連線健康時行為看起來像 L4。後端要下線時，對端應停止在舊連線上開新 stream（GOAWAY 的使用方式見 HTTP/1.1 與 HTTP/2 篇），進行中的 RPC 可能以 UNAVAILABLE 結束，是否重試回到第 5 節的冪等條件。</p>
+
+  <p>Lookaside 或 xDS 這類控制平面解決的是「客戶端怎麼知道後端名單與權重」，不是另一種編碼。名單若只在啟動時抓一次，自動擴縮就會把新機器閒置。</p>
+
+  <p class="gpb-sub">瀏覽器講的不是原生 gRPC</p>
+
+  <p>瀏覽器的 fetch / XHR 拿不到原生 gRPC 需要的 HTTP/2 控制能力，trailer 也不是一般網頁 API 能穩定讀到的東西。gRPC-Web 是另一份協定：基本規格支援 unary 與 server streaming，要一層 proxy 把它翻成原生 gRPC。Client streaming 與 bidirectional 不在這份基本規格裡。若產品要的是瀏覽器裡的雙向通道，那是 WebSocket 即時雙向通訊篇的問題，不要在 gRPC-Web proxy 裡順便發明一套推播。</p>
+
+  <div class="callout accent">
+    <div class="c-title"><span class="ic">關鍵</span>長連線同時是優點與負載均衡的單位錯誤</div>
+    <p>少握手、多路復用、串流背壓，都建立在「連線活很久」上。均衡與摘除機器則要求「下一個 RPC 可以換後端」。兩件事要分層：連線可以長，選路必須 per RPC，或者乾脆在 L7 把 stream 終結掉再轉出去。</p>
+  </div>
+
+  <div class="oneliner">
+    <b>一句話答法</b>L4 只會把整條 HTTP/2 連線釘在一台機器上；要嘛客戶端按 RPC 選 subchannel，要嘛用懂 trailer 的 L7 proxy。瀏覽器走 gRPC-Web，不是原生 gRPC。
+  </div>
+</section>
+
+<section id="s7">
+  <div class="sec-head">
+    <span class="sec-num">07</span>
+    <h2>面試時把取捨說完</h2>
+  </div>
+  <p class="sec-sub">面試官要聽的是編號、負數編碼、trailer、deadline 與連線黏著，不是把 proto 語法背完。</p>
+
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr><th>他丟出的問題</th><th>先給的答案</th><th>緊接著的代價</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>為什麼比 JSON 小又快？</td><td class="hl">線上沒有欄位名，小整數是 varint，依 schema 順序解碼</td><td>不能自我描述；未壓縮小訊息才穩定贏，gzip 後的大 JSON 會追近</td></tr>
+        <tr><td>負數為什麼特別？</td><td class="hl">int32 負值 10 byte；sint32 用 zigzag</td><td>sint 的大正數少 1 bit，127 就會變成兩個 byte</td></tr>
+        <tr><td>怎麼演進 schema？</td><td class="hl">只加新編號，刪除就 reserved，不改 wire type</td><td>轉送層若丟掉 unknown fields，新欄位還是會消失</td></tr>
+        <tr><td>四種 RPC 差在哪？</td><td class="hl">誰在寫、何時 half-close；狀態在 trailer</td><td>慢消費者會把視窗吃完，Write 阻塞是背壓</td></tr>
+        <tr><td>逾時怎麼設？</td><td class="hl">每一跳傳遞剩餘 deadline，重試共用它</td><td>每跳重設滿額，或重試各自計時，都會把上游預算放大</td></tr>
+        <tr><td>負載均衡怎麼做？</td><td class="hl">Per-RPC 的 client LB，或 L7 按 stream 轉發</td><td>pick_first 與純 L4 都會讓長連線黏住一台</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="cap">每一列都是「機制 + 它破壞什麼」。只答優點的那一半，聽起來像文件複述。</p>
+
+  <p>若被問到與 REST 或 GraphQL 怎麼選、URL 版本號怎麼編，停在邊界：那是 API 設計風格與演進篇的題。本篇的契約單位是欄位編號與 RPC 方法，不是資源 URL。</p>
+
+  <div class="oneliner">
+    <b>一句話答法</b>Protobuf 用編號與 wire type 換掉自我描述，gRPC 用一條長連線上的 stream 換掉每請求一條 TCP；相容性、deadline 與 per-RPC 選路是這筆交易真正的維護成本。
+  </div>
+</section>
