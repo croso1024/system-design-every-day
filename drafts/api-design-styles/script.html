@@ -1,0 +1,348 @@
+<script>
+(function () {
+  "use strict";
+
+  /* (1) 常數與參數表
+     教學帳，不是封包基準。文章第 3 節把每一個常數的理由寫明。 */
+  var ORDER_BYTES = 64;
+  var ITEM_BYTES = 20;
+  var FIELD_BYTES = 48;
+  var FULL_FIELDS = 8;
+  var HTTP_HEADER = 220;
+  var GQL_DOC_BASE = 160;
+  var GQL_DOC_PER_FIELD = 12;
+  var GQL_ERROR_BODY = 96;
+  var GRPC_FRAME = 32;
+  var GRPC_NUM = 72;
+  var GRPC_DEN = 100;
+  var COMPLEXITY_BUDGET = 200;
+  var DISTINCT_NUM = 3;
+  var DISTINCT_DEN = 5;
+
+  /* (2) compute* 純函式 —— 不得碰 DOM。helper 必須寫在最後一個 compute* 結束之前。 */
+
+  function clampInt(v, lo, hi, dflt) {
+    var n = Math.round(Number(v));
+    if (!Number.isFinite(n)) n = dflt;
+    if (n < lo) n = lo;
+    if (n > hi) n = hi;
+    return n;
+  }
+
+  // @probe fn       computeContract
+  // @probe baseline {"orders":8,"itemsPer":3,"fieldsUsed":4,"cacheHitPct":40,"dataloader":0}
+  // @probe sweep    {"orders":[2,30],"itemsPer":[1,12],"fieldsUsed":[1,8],"cacheHitPct":[0,100],"dataloader":[0,1]}
+  function computeContract(p) {
+    var n = clampInt(p.orders, 2, 30, 8);
+    var k = clampInt(p.itemsPer, 1, 12, 3);
+    var fields = clampInt(p.fieldsUsed, 1, 8, 4);
+    var hitPct = clampInt(p.cacheHitPct, 0, 100, 40);
+    var loader = clampInt(p.dataloader, 0, 1, 0);
+
+    var pairs = n * k;
+    var distinct = Math.max(1, Math.round(pairs * DISTINCT_NUM / DISTINCT_DEN));
+    var full = FULL_FIELDS * FIELD_BYTES;
+    var used = fields * FIELD_BYTES;
+    var hitCount = Math.round(distinct * hitPct / 100);
+    if (hitCount > distinct) hitCount = distinct;
+    var missCount = distinct - hitCount;
+
+    var listBody = n * ORDER_BYTES;
+    var itemsBody = pairs * ITEM_BYTES;
+
+    var chattyTrips = 1 + n + distinct;
+    var chattyBytes = HTTP_HEADER * chattyTrips + listBody + itemsBody + missCount * full;
+    var chattyCacheable = hitCount * full;
+    var chattyExtra = missCount * (full - used);
+    var chattyOrigin = 1 + n + missCount;
+
+    var embedBytes = HTTP_HEADER + listBody + itemsBody + pairs * full;
+    var embedExtra = pairs * full - distinct * used;
+
+    var docCost = fields;
+    var runtimeCost = pairs * fields;
+    var rejected = runtimeCost > COMPLEXITY_BUDGET ? 1 : 0;
+    var gqlDoc = GQL_DOC_BASE + fields * GQL_DOC_PER_FIELD;
+    var gqlData = listBody + itemsBody + pairs * used;
+    var gqlBytes = rejected ? (HTTP_HEADER + GQL_ERROR_BODY) : (HTTP_HEADER + gqlDoc + gqlData);
+    var gqlExtra = rejected ? 0 : (pairs - distinct) * used;
+    var gqlResolvers = rejected ? 0 : (loader ? 3 : (1 + n + distinct));
+
+    var grpcJson = listBody + itemsBody + pairs * used;
+    var grpcBytes = GRPC_FRAME + Math.round(grpcJson * GRPC_NUM / GRPC_DEN);
+    var grpcExtra = Math.round((pairs - distinct) * used * GRPC_NUM / GRPC_DEN);
+
+    return {
+      orders: n,
+      itemsPer: k,
+      fieldsUsed: fields,
+      cacheHitPct: hitPct,
+      dataloader: loader,
+      pairs: pairs,
+      distinct: distinct,
+      hitCount: hitCount,
+      missCount: missCount,
+      chattyTrips: chattyTrips,
+      chattyWaves: 3,
+      chattyBytes: chattyBytes,
+      chattyCacheable: chattyCacheable,
+      chattyExtra: chattyExtra,
+      chattyOrigin: chattyOrigin,
+      embedTrips: 1,
+      embedWaves: 1,
+      embedBytes: embedBytes,
+      embedCacheable: 0,
+      embedExtra: embedExtra,
+      embedOrigin: 1,
+      docCost: docCost,
+      runtimeCost: runtimeCost,
+      complexityBudget: COMPLEXITY_BUDGET,
+      rejected: rejected,
+      gqlTrips: 1,
+      gqlWaves: 1,
+      gqlBytes: gqlBytes,
+      gqlCacheable: 0,
+      gqlExtra: gqlExtra,
+      gqlResolvers: gqlResolvers,
+      grpcTrips: 1,
+      grpcWaves: 1,
+      grpcBytes: grpcBytes,
+      grpcCacheable: 0,
+      grpcExtra: grpcExtra
+    };
+  }
+
+  // @probe fn       computePage
+  // @probe baseline {"pageSize":4,"totalRows":10,"bump":2}
+  // @probe sweep    {"pageSize":[1,20],"totalRows":[4,80],"bump":[0,8]}
+  function computePage(p) {
+    var page = clampInt(p.pageSize, 1, 20, 4);
+    var total = clampInt(p.totalRows, 4, 80, 10);
+    var bump = clampInt(p.bump, 0, 8, 2);
+    var planned = Math.ceil(total / page);
+    var growth = 0;
+    var marks = [];
+    var i;
+    for (i = 0; i < total; i += 1) marks.push(0);
+
+    var dup = 0;
+    var neu = 0;
+    var examined = 0;
+    var r;
+    var idx;
+    var orig;
+    for (r = 0; r < planned; r += 1) {
+      var offset = r * page;
+      examined += offset;
+      for (i = 0; i < page; i += 1) {
+        idx = offset + i;
+        if (idx >= total + growth) break;
+        if (idx < growth) {
+          neu += 1;
+        } else {
+          orig = idx - growth;
+          if (orig >= 0 && orig < total) {
+            if (marks[orig] > 0) dup += 1;
+            marks[orig] = marks[orig] > 0 ? 2 : 1;
+          }
+        }
+      }
+      growth += bump;
+    }
+
+    var missed = 0;
+    for (i = 0; i < total; i += 1) {
+      if (marks[i] === 0) missed += 1;
+    }
+
+    var headInserts = bump * (planned > 0 ? planned - 1 : 0);
+
+    return {
+      pageSize: page,
+      totalRows: total,
+      bump: bump,
+      plannedPages: planned,
+      offsetDup: dup,
+      offsetMissed: missed,
+      offsetNew: neu,
+      offsetExamined: examined,
+      headInserts: headInserts,
+      marks: marks,
+      cursorPages: planned,
+      cursorDup: 0,
+      cursorMissed: 0,
+      cursorNew: 0,
+      cursorExamined: total
+    };
+  }
+
+  /* (3) DOM 參照 */
+
+  function el(id) {
+    return document.getElementById(id);
+  }
+
+  function setText(id, text) {
+    el(id).textContent = text;
+  }
+
+  function fmt(n) {
+    var s = String(Math.round(n));
+    var i = s.length % 3 || 3;
+    var out = s.slice(0, i);
+    for (; i < s.length; i += 3) out += "," + s.slice(i, i + 3);
+    return out;
+  }
+
+  /* (4) render —— 只讀 state，不做規則判斷 */
+
+  function paintContract() {
+    var s = computeContract({
+      orders: el("ads-orders").value,
+      itemsPer: el("ads-items").value,
+      fieldsUsed: el("ads-fields").value,
+      cacheHitPct: el("ads-hit").value,
+      dataloader: el("ads-load-on").getAttribute("aria-pressed") === "true" ? 1 : 0
+    });
+
+    setText("ads-orders-v", String(s.orders));
+    setText("ads-items-v", String(s.itemsPer));
+    setText("ads-fields-v", String(s.fieldsUsed));
+    setText("ads-hit-v", String(s.cacheHitPct) + "%");
+
+    var maxBytes = s.chattyBytes;
+    if (s.embedBytes > maxBytes) maxBytes = s.embedBytes;
+    if (s.gqlBytes > maxBytes) maxBytes = s.gqlBytes;
+    if (s.grpcBytes > maxBytes) maxBytes = s.grpcBytes;
+
+    function bar(id, bytes) {
+      var w = 2;
+      if (maxBytes > 0) {
+        w = Math.round(bytes / maxBytes * 240);
+        if (w < 2) w = 2;
+        if (w > 240) w = 240;
+      }
+      el(id).setAttribute("width", String(w));
+    }
+
+    bar("ads-w-chat", s.chattyBytes);
+    bar("ads-w-embed", s.embedBytes);
+    bar("ads-w-gql", s.gqlBytes);
+    bar("ads-w-grpc", s.grpcBytes);
+    setText("ads-n-chat", fmt(s.chattyBytes));
+    setText("ads-n-embed", fmt(s.embedBytes));
+    setText("ads-n-gql", fmt(s.gqlBytes));
+    setText("ads-n-grpc", fmt(s.grpcBytes));
+
+    setText("ads-chat-trips", String(s.chattyTrips));
+    setText("ads-chat-waves", String(s.chattyWaves));
+    setText("ads-chat-bytes", fmt(s.chattyBytes));
+    setText("ads-chat-cache", fmt(s.chattyCacheable));
+    setText("ads-chat-extra", fmt(s.chattyExtra));
+    setText("ads-chat-inner", "源站 " + s.chattyOrigin);
+
+    setText("ads-embed-trips", String(s.embedTrips));
+    setText("ads-embed-waves", String(s.embedWaves));
+    setText("ads-embed-bytes", fmt(s.embedBytes));
+    setText("ads-embed-cache", fmt(s.embedCacheable));
+    setText("ads-embed-extra", fmt(s.embedExtra));
+    setText("ads-embed-inner", "源站 " + s.embedOrigin);
+
+    setText("ads-gql-trips", String(s.gqlTrips));
+    setText("ads-gql-waves", String(s.gqlWaves));
+    setText("ads-gql-bytes", fmt(s.gqlBytes));
+    setText("ads-gql-cache", fmt(s.gqlCacheable));
+    setText("ads-gql-extra", fmt(s.gqlExtra));
+    setText("ads-gql-inner", s.rejected ? "未執行" : ("resolver " + s.gqlResolvers));
+
+    setText("ads-grpc-trips", String(s.grpcTrips));
+    setText("ads-grpc-waves", String(s.grpcWaves));
+    setText("ads-grpc-bytes", fmt(s.grpcBytes));
+    setText("ads-grpc-cache", fmt(s.grpcCacheable));
+    setText("ads-grpc-extra", fmt(s.grpcExtra));
+    setText("ads-grpc-inner", "RPC 1");
+
+    var line = "不重複商品 P = " + s.distinct + "（明細 " + s.pairs + " 筆）。拆開的 REST 傳 " + fmt(s.chattyBytes) + " bytes、可快取 " + fmt(s.chattyCacheable) + "；內嵌傳 " + fmt(s.embedBytes) + "，可快取 0。";
+    if (s.rejected) {
+      line += " GraphQL 執行期複雜度 " + s.runtimeCost + " 超過預算 " + s.complexityBudget + "，查詢被拒，線上只剩錯誤文件 " + fmt(s.gqlBytes) + " bytes（文件本身只看得到 " + s.docCost + " 個欄位）。";
+    } else {
+      line += " GraphQL 文件成本 " + s.docCost + "、執行期複雜度 " + s.runtimeCost + "，resolver " + s.gqlResolvers + " 次，傳 " + fmt(s.gqlBytes) + " bytes。";
+    }
+    line += " gRPC 客戶端 1 次 unary，傳 " + fmt(s.grpcBytes) + " bytes。";
+    setText("ads-status", line);
+  }
+
+  function paintPage() {
+    var s = computePage({
+      pageSize: el("ads-page").value,
+      totalRows: el("ads-total").value,
+      bump: el("ads-bump").value
+    });
+
+    setText("ads-page-v", String(s.pageSize));
+    setText("ads-total-v", String(s.totalRows));
+    setText("ads-bump-v", String(s.bump));
+
+    var html = "";
+    var i;
+    var cls;
+    for (i = 0; i < s.marks.length; i += 1) {
+      if (s.marks[i] === 0) cls = "ns-bad";
+      else if (s.marks[i] === 1) cls = "ns-ok";
+      else cls = "ns-lock";
+      html += "<div class=\"ads-cell " + cls + "\">" + i + "</div>";
+    }
+    el("ads-map").innerHTML = html;
+
+    setText("ads-o-pages", String(s.plannedPages));
+    setText("ads-c-pages", String(s.cursorPages));
+    setText("ads-o-dup", String(s.offsetDup));
+    setText("ads-c-dup", String(s.cursorDup));
+    setText("ads-o-miss", String(s.offsetMissed));
+    setText("ads-c-miss", String(s.cursorMissed));
+    setText("ads-o-new", String(s.offsetNew));
+    setText("ads-c-new", String(s.cursorNew));
+    setText("ads-o-exam", fmt(s.offsetExamined));
+    setText("ads-c-exam", fmt(s.cursorExamined));
+
+    setText(
+      "ads-page-status",
+      "客戶端只打 " + s.plannedPages + " 頁就停。offset 重複 " + s.offsetDup + " 列、漏掉原始列 " + s.offsetMissed + "、混進新列 " + s.offsetNew + "，引擎走訪 " + fmt(s.offsetExamined) + " 列。掃描期間表頭插入 " + s.headInserts + " 列。cursor 走訪 " + s.cursorExamined + " 列，原始列不重複、不漏；新列留在表頭，不混進已經錨住的後續頁。"
+    );
+  }
+
+  function pressLoader(on) {
+    el("ads-load-off").setAttribute("aria-pressed", on ? "false" : "true");
+    el("ads-load-on").setAttribute("aria-pressed", on ? "true" : "false");
+    paintContract();
+  }
+
+  /* (5) 事件綁定 */
+
+  ["ads-orders", "ads-items", "ads-fields", "ads-hit"].forEach(function (id) {
+    el(id).addEventListener("input", paintContract);
+  });
+  el("ads-load-off").addEventListener("click", function () { pressLoader(false); });
+  el("ads-load-on").addEventListener("click", function () { pressLoader(true); });
+  el("ads-reset").addEventListener("click", function () {
+    el("ads-orders").value = "8";
+    el("ads-items").value = "3";
+    el("ads-fields").value = "4";
+    el("ads-hit").value = "40";
+    pressLoader(false);
+  });
+
+  ["ads-page", "ads-total", "ads-bump"].forEach(function (id) {
+    el(id).addEventListener("input", paintPage);
+  });
+  el("ads-page-reset").addEventListener("click", function () {
+    el("ads-page").value = "4";
+    el("ads-total").value = "10";
+    el("ads-bump").value = "2";
+    paintPage();
+  });
+
+  paintContract();
+  paintPage();
+})();
+</script>
