@@ -1,0 +1,634 @@
+<!-- demo-archetype: B｜參數掃描（主，訂單畫面的四筆契約帳）＋C｜並排對照（次，offset 與 cursor 吃同一組翻頁參數） — 讀者調整訂單數、明細數、畫面真正用到的欄位、商品快取命中率與有沒有 DataLoader，四種契約的往返、傳輸與可快取位元組一起重算。翻頁那一節把同一組頁大小、列數與表頭插入量同時餵給 offset 與 keyset。主選 B 是因為並排對照這個主形被最近 3 篇封住，而這筆帳本身是參數的函數。 -->
+<style>
+  .ads-row {
+    display: flex; flex-wrap: wrap; gap: 10px;
+    align-items: stretch; justify-content: center;
+    margin: 14px 0 6px;
+  }
+  .ads-node {
+    border: 1px solid var(--border-strong); border-radius: 8px;
+    background: #fff; padding: 10px 12px;
+    min-width: 110px; max-width: 200px; text-align: center;
+  }
+  .ads-node .nn { font-family: var(--mono); font-size: 12px; font-weight: 700; color: var(--text); }
+  .ads-node .ns { font-size: 11px; color: var(--text-2); margin-top: 3px; line-height: 1.4; }
+  .ads-node.accent { border-top: 3px solid var(--accent); }
+  .ads-node.ok { border-top: 3px solid var(--ok); }
+  .ads-node.warn { border-top: 3px solid var(--warn); }
+  .ads-arrow {
+    display: flex; align-items: center;
+    font-family: var(--mono); font-size: 13px; color: var(--text-3);
+    white-space: nowrap;
+  }
+
+  .ads-lane {
+    display: grid; grid-template-columns: 52px repeat(3, 1fr); gap: 1px;
+    background: var(--border); border: 1px solid var(--border);
+    border-radius: 8px; overflow: hidden; margin: 14px 0 6px;
+  }
+  .ads-lane > div { background: #fff; padding: 8px 10px; font-size: 12px; line-height: 1.5; }
+  .ads-lane .lh { background: var(--bg-soft); font-family: var(--mono); font-size: 11px; font-weight: 700; color: var(--text-2); }
+  .ads-lane .lt { background: var(--bg-soft); font-family: var(--mono); font-size: 11px; color: var(--text-3); }
+  .ads-lane .lc.act { background: var(--accent-soft); }
+  .ads-lane .lc.ok { background: var(--ok-soft); }
+  .ads-lane .lc.bad { background: var(--bad-soft); }
+  @media (max-width: 720px) {
+    .ads-lane { grid-template-columns: 44px repeat(3, minmax(0, 1fr)); }
+    .ads-lane > div { font-size: 11px; padding: 6px; }
+  }
+
+  .ads-ctl {
+    display: grid;
+    grid-template-columns: 148px 1fr 64px;
+    gap: 8px 10px;
+    align-items: center;
+    margin: 0 0 12px;
+  }
+  .ads-ctl label { font-size: 13px; color: var(--text); }
+  .ads-ctl input[type="range"] { width: 100%; accent-color: var(--accent); }
+  .ads-val {
+    font-family: var(--mono); font-size: 12px; color: var(--text);
+    text-align: right;
+  }
+  .ads-hint { font-size: 12px; color: var(--text-2); margin: 2px 0 8px; }
+  .ads-svg { width: 100%; height: auto; display: block; background: #fafaf9; border: 1px solid var(--border); border-radius: 8px; }
+  .ads-svg text { font-family: var(--mono); font-size: 12px; fill: #262a2f; }
+  .ads-svg .ads-track { fill: none; stroke: var(--border-strong); }
+  .ads-map {
+    display: grid;
+    grid-template-columns: repeat(10, minmax(0, 1fr));
+    gap: 4px;
+    margin: 10px 0 8px;
+  }
+  .ads-cell {
+    border: 1px solid var(--border-strong);
+    border-radius: 4px;
+    text-align: center;
+    font-family: var(--mono);
+    font-size: 11px;
+    line-height: 1.6;
+    color: var(--text);
+  }
+  @media (max-width: 720px) {
+    .ads-ctl { grid-template-columns: 1fr 56px; }
+    .ads-ctl label { grid-column: 1 / -1; }
+  }
+</style>
+
+<section id="s1">
+  <div class="sec-head">
+    <span class="sec-num">01</span>
+    <h2>契約要對準誰在呼叫</h2>
+  </div>
+  <p class="sec-sub">REST、GraphQL、gRPC 不是三個傳輸格式，是三種「呼叫者被允許說什麼」的表面。</p>
+
+  <p>選風格之前先問誰拿著客戶端。外部開發者、合作夥伴、瀏覽器裡的前端，和你自己機房裡的下一個服務，要的契約完全不一樣。外部的人需要穩定、可書籤、可被中介層快取的文件；前端需要「這一屏剛好要的形狀」；內部服務需要雙方編譯期就對得上的型別，以及一條 RPC 對應一件工作。</p>
+
+  <div class="ads-row">
+    <div class="ads-node">
+      <div class="nn">外部客戶端</div>
+      <div class="ns">文件、SDK、共享快取</div>
+    </div>
+    <span class="ads-arrow">──資源──▸</span>
+    <div class="ads-node accent">
+      <div class="nn">REST</div>
+      <div class="ns">URL、方法、狀態碼</div>
+    </div>
+  </div>
+  <div class="ads-row">
+    <div class="ads-node">
+      <div class="nn">前端畫面</div>
+      <div class="ns">一屏聚合多個資源</div>
+    </div>
+    <span class="ads-arrow">──查詢──▸</span>
+    <div class="ads-node ok">
+      <div class="nn">GraphQL</div>
+      <div class="ns">客戶端決定形狀</div>
+    </div>
+  </div>
+  <div class="ads-row">
+    <div class="ads-node">
+      <div class="nn">內部服務</div>
+      <div class="ns">雙方持有同一份 IDL</div>
+    </div>
+    <span class="ads-arrow">──RPC──▸</span>
+    <div class="ads-node warn">
+      <div class="nn">gRPC</div>
+      <div class="ns">方法與訊息</div>
+    </div>
+  </div>
+  <p class="cap">三條箭頭不是同一條管線的先後步驟。它們是三種呼叫者各自的契約：左邊的人不同，中間那一格就該換。</p>
+
+  <p>REST 把契約放在資源與 HTTP 語意上。客戶端用 URL 指名要什麼、用方法表明想做的事、用狀態碼判斷整筆結果。中介層（瀏覽器、CDN、反向代理）看得懂 GET，才有機會把公開資源存下來。GraphQL 把契約放在型別系統與一份查詢上：伺服器公布圖，客戶端每次挑自己要的欄位，所以同一份 schema 能餵不同的畫面，不必為每一屏開一個新端點。gRPC 把契約放在 <code>.proto</code> 的方法與訊息上，客戶端與伺服器由同一份 IDL 生成 stub。內部呼叫用它，是因為型別、截止時間與一個 RPC 的成敗都在這條呼叫上，而不是因為「二進位比較快」這一句口號。</p>
+
+  <div class="callout accent">
+    <div class="c-title"><span class="ic">邊界</span>這篇不重講的東西</div>
+    <p>Protobuf 的欄位怎麼編碼、gRPC 一條 stream 上的四種 RPC、deadline 與狀態碼表，都在 gRPC 與 Protocol Buffers 那篇。瀏覽器要的即時推送（誰該用長連線、誰該用單向下推）在 WebSocket 與 SSE 那兩篇。這裡只用「內部是強型別 RPC、瀏覽器不是 gRPC 的原生客戶端」當作選型論據。</p>
+  </div>
+
+  <p>同一個取捨在別的協定上也看得到。MCP 把模型能碰到的表面收成 tools 與 resources，而不是給模型一門通用查詢語言；A2A 把 agent 之間的契約收成任務的生命週期，而不是共享對方的內部 API。兩者都是「誰在呼叫，表面就長成那樣」。角色、交握與生命週期各有專文，這裡不展開。</p>
+
+  <div class="oneliner">
+    <b>一句話答法</b>對外用 REST，因為客戶端、文件與共享快取都說 HTTP 資源；畫面聚合用 GraphQL，因為形狀該由客戶端決定；內部用 gRPC，因為雙方持有同一份型別契約。不要用傳輸格式反推風格。
+  </div>
+</section>
+
+<section id="s2">
+  <div class="sec-head">
+    <span class="sec-num">02</span>
+    <h2>資源、方法與安全語意</h2>
+  </div>
+  <p class="sec-sub">URL 是名詞，方法才是動詞。冪等是伺服器狀態的性質，不是方法名字的保證書。</p>
+
+  <p>資源建模先問「客戶端想指到的東西有沒有穩定的名字」。訂單是 <code>/orders/18</code>，它的明細可以是巢狀資源 <code>/orders/18/items</code>，商品則是另一個可被許多訂單引用的 <code>/products/9</code>。把商品欄位直接焊進訂單文件裡，客戶端少打一次，但商品不再是一個能單獨快取、單獨授權、單獨演進的資源。第 3 節的帳本就是在算這個決定值多少錢。</p>
+
+  <p>HTTP 方法的語意在 RFC 9110。安全（safe）表示這次呼叫不該改變伺服器狀態；冪等（idempotent）表示同一筆請求做一次與做多次，伺服器狀態相同。客戶端能不能在逾時後重試，看的是冪等，不是「這個方法通常很快」。</p>
+
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>方法</th>
+          <th>安全</th>
+          <th>冪等</th>
+          <th>逾時後</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>GET</td>
+          <td>是</td>
+          <td>是</td>
+          <td>可以重試</td>
+        </tr>
+        <tr>
+          <td>PUT</td>
+          <td>否</td>
+          <td>是，整份替換</td>
+          <td>本體相同就可以重試</td>
+        </tr>
+        <tr>
+          <td>DELETE</td>
+          <td>否</td>
+          <td>是，狀態收到「已刪」</td>
+          <td>可以重試</td>
+        </tr>
+        <tr>
+          <td>POST</td>
+          <td>否</td>
+          <td>否</td>
+          <td>要有冪等鍵，否則可能做第二次</td>
+        </tr>
+        <tr>
+          <td>PATCH</td>
+          <td>否</td>
+          <td>看這份 patch 能不能重做</td>
+          <td>JSON Merge Patch 常常可以；「陣列尾端追加」不行</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="cap">重試欄要看的是「狀態會不會做第二次」，不是狀態碼好不好看。DELETE 第二次回 404 或 204 都可以，只要資源停在已刪。</p>
+
+  <div class="callout warn">
+    <div class="c-title"><span class="ic">陷阱</span>把 POST 說成「建立」、把 PUT 說成「更新」就結束</div>
+    <p>PUT 的契約是「這個 URL 的整份表示變成你送來的這一份」。用 PUT 送一個只含三個欄位的片段，伺服器若照字面替換，其餘欄位會被清掉。部分更新用 PATCH，或用一個更小的子資源。POST 不是「不冪等的 PUT」：它的 URL 常常是集合，伺服器決定新資源的名字。客戶端若需要冪等，鍵要另外帶，見第 8 節。</p>
+  </div>
+
+  <p>公開 API 多數停在 Richardson 成熟度第 2 級：有資源、有方法、有狀態碼，沒有把每一個下一步都做成超媒體控制。HATEOAS 讓文件可以在不改客戶端的情況下改流程，但瀏覽器以外的 SDK 很少真的跟著連結走。面試時承認你做的是第 2 級，並說明為什麼不強求客戶端解譯連結，比背誦四個等級有用。</p>
+
+  <div class="oneliner">
+    <b>一句話答法</b>資源用名詞 URL 指到，方法表達意圖。GET 可重試，PUT／DELETE 在實作遵守語意時可重試，POST 預設不可。逾時表示你不知道伺服器做完沒有。
+  </div>
+</section>
+
+<section id="s3">
+  <div class="sec-head">
+    <span class="sec-num">03</span>
+    <h2>同一個訂單畫面的四筆帳</h2>
+  </div>
+  <p class="sec-sub">畫面要 N 筆訂單、每筆 K 個明細、以及商品上畫面真正用到的欄位。四種契約搬的東西不一樣。</p>
+
+  <p>面試裡「REST 比較囉嗦、GraphQL 一次拿完、gRPC 比較小」這三句可以同時為真，也可以同時為假，取決於你把商品放在哪、快取暖不暖、客戶端到底有沒有用到那 8 個欄位。下面的模型把這件事拆成能重算的帳，常數是教學用的整數，不是生產環境的封包基準。面試要講的是哪一項會變、為什麼變。</p>
+
+  <h3>模型假設</h3>
+  <p>訂單摘要 64 bytes，明細 20 bytes，商品每個欄位 48 bytes，完整商品固定 8 欄。每個 HTTP 請求加回應的標頭預算 220 bytes（方法、路徑、授權、內容型別，取整）。不重複商品數 <var>P</var> = round(<var>N</var> × <var>K</var> × 3 / 5)，也就是大約六成的明細指向不同商品，其餘是重複引用。</p>
+  <div class="formula">拆開的請求數 = 1 + N + P</div>
+  <p>拆開的 REST 打三波：一次 <code>GET /orders</code>、<var>N</var> 次 <code>GET /orders/{id}/items</code>、<var>P</var> 次 <code>GET /products/{id}</code>。同一波裡的請求可以並行，所以瀑布深度是 3，但請求數不會因為 HTTP/2 多路複用而變少。多路複用減少的是排程，不是快取鍵，也不是源站要處理的 GET。商品 GET 若是公開且仍新鮮，共享快取可以不把本體再傳一次；訂單清單是使用者自己的，模型裡不把它算進可快取位元組。命中率滑桿只作用在這 <var>P</var> 個商品 GET 上。</p>
+  <p>內嵌的 REST 只打一次，伺服器把完整 8 欄焊進每一筆明細。請求數變成 1，商品卻不再是獨立的快取對象，而且同一個商品被幾筆明細用到就會在文件裡出現幾次。</p>
+  <p>GraphQL 也是一次 POST。選取集只帶畫面用到的欄位，所以沒有「8 欄全下」的浪費；但查詢若把商品嵌在明細底下，用到的欄位仍會按明細筆數重複出現。正規化快取是客戶端收到之後的事，減不了這一次回應的位元組。查詢文件本身約 160 bytes 再加每欄 12 bytes。執行期複雜度 = <var>N</var> × <var>K</var> × 欄位數，預算 200；超過就拒絕，線上只回 220 + 96 bytes 的錯誤文件，resolver 不跑。只看查詢文件的成本是欄位數本身——變數裡的 <var>N</var> 與 <var>K</var> 不會出現在文件上。</p>
+  <div class="formula">執行期複雜度 = N × K × 欄位數，預算 200</div>
+  <p>沒有 DataLoader 時，伺服器對資料庫的往返是 1 + <var>N</var> + <var>P</var>（訂單一查、每筆訂單的明細各一查、每個商品各一查），和拆開的 REST 在網路上的請求數同一形狀，只是這次藏在機房裡。DataLoader 在同一次請求內把這三類收成 3 次批次查詢（訂單、全部明細、全部商品）。它減的是伺服器內部往返，不是客戶端看到的 bytes。</p>
+  <p>gRPC 在這個模型裡是 BFF 對客戶端的一次 unary RPC。本體用同一份嵌套形狀，再乘上 72%：欄位名不會在每筆重複出現。這是方向性的教學折算，不是 wire format 的逐 byte 解碼；編碼細節在 gRPC 與 Protocol Buffers 那篇。框架另計 32 bytes。中介層不把它當成可快取的 GET，可快取位元組是 0。內部若再扇出成三個服務，那是伺服器拓樸，不計進這張客戶端帳。</p>
+
+  <pre class="mermaid">
+sequenceDiagram
+    participant C as 客戶端
+    participant O as 訂單 API
+    participant P as 商品目錄
+    C->>O: GET /orders
+    O-->>C: N 筆摘要
+    C->>O: GET /orders/id/items
+    O-->>C: 該筆明細
+    C->>P: GET /products/id
+    P-->>C: 完整 8 欄
+  </pre>
+  <p class="cap">圖上每一對箭頭是一波，不是只發生一次。明細那一波實際是 N 次，商品那一波是 P 次。同一波可以並行，瀑布深度仍是 3。內嵌、GraphQL 與這次的 gRPC 都把三波收成客戶端的一次呼叫，商品也就不再是共享快取能單獨認領的對象。</p>
+
+  <div class="demo" id="demo-contract">
+    <div class="demo-bar">
+      <span class="label">互動 · 訂單畫面的契約帳</span>
+      <span class="label" style="text-transform:none;font-family:var(--sans);font-size:12px;color:var(--text-2)">拖動參數，四列一起重算</span>
+    </div>
+    <div class="demo-body">
+      <div class="ads-ctl">
+        <label for="ads-orders">訂單數 N</label>
+        <input id="ads-orders" type="range" min="2" max="30" step="1" value="8" aria-label="訂單數">
+        <span class="ads-val" id="ads-orders-v">8</span>
+
+        <label for="ads-items">每筆明細 K</label>
+        <input id="ads-items" type="range" min="1" max="12" step="1" value="3" aria-label="每筆明細數">
+        <span class="ads-val" id="ads-items-v">3</span>
+
+        <label for="ads-fields">畫面用到的欄位</label>
+        <input id="ads-fields" type="range" min="1" max="8" step="1" value="4" aria-label="畫面用到的商品欄位數">
+        <span class="ads-val" id="ads-fields-v">4</span>
+
+        <label for="ads-hit">商品快取命中</label>
+        <input id="ads-hit" type="range" min="0" max="100" step="1" value="40" aria-label="商品 GET 的快取命中率">
+        <span class="ads-val" id="ads-hit-v">40%</span>
+      </div>
+      <p class="ads-hint">命中率只影響拆開的 REST 那些公開商品 GET。內嵌文件、GraphQL 的 POST、gRPC 的 unary 都不會因為這個滑桿變得可快取。</p>
+      <div class="seg" role="group" aria-label="GraphQL 的資料載入">
+        <button type="button" id="ads-load-off" aria-pressed="true">Resolver 各打一次</button>
+        <button type="button" id="ads-load-on" aria-pressed="false">DataLoader 收成 3 次</button>
+      </div>
+
+      <svg class="ads-svg" viewBox="0 0 430 148" role="img" style="width:100%;height:auto;margin-top:12px">
+        <title>四種契約這次要傳的位元組</title>
+        <text x="8" y="28">拆開</text>
+        <rect x="78" y="14" width="240" height="16" rx="2" class="ads-track"></rect>
+        <rect id="ads-w-chat" x="78" y="14" width="2" height="16" rx="2" fill="var(--accent)"></rect>
+        <text id="ads-n-chat" x="328" y="28">0</text>
+        <text x="8" y="60">內嵌</text>
+        <rect x="78" y="46" width="240" height="16" rx="2" class="ads-track"></rect>
+        <rect id="ads-w-embed" x="78" y="46" width="2" height="16" rx="2" fill="var(--accent)"></rect>
+        <text id="ads-n-embed" x="328" y="60">0</text>
+        <text x="8" y="92">GraphQL</text>
+        <rect x="78" y="78" width="240" height="16" rx="2" class="ads-track"></rect>
+        <rect id="ads-w-gql" x="78" y="78" width="2" height="16" rx="2" fill="var(--accent)"></rect>
+        <text id="ads-n-gql" x="328" y="92">0</text>
+        <text x="8" y="124">gRPC</text>
+        <rect x="78" y="110" width="240" height="16" rx="2" class="ads-track"></rect>
+        <rect id="ads-w-grpc" x="78" y="110" width="2" height="16" rx="2" fill="var(--accent)"></rect>
+        <text id="ads-n-grpc" x="328" y="124">0</text>
+      </svg>
+      <p class="cap">條的長度是這一次線上要傳的 bytes，四列共用同一把尺。變短不一定是風格贏了：GraphQL 被預算拒絕時，條會縮成一份錯誤文件。</p>
+
+      <div class="tbl-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>契約</th>
+              <th>請求</th>
+              <th>深度</th>
+              <th>傳輸</th>
+              <th>可快取</th>
+              <th>多傳</th>
+              <th>內部</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>REST 拆開</td>
+              <td id="ads-chat-trips">23</td>
+              <td id="ads-chat-waves">3</td>
+              <td id="ads-chat-bytes">0</td>
+              <td id="ads-chat-cache">0</td>
+              <td id="ads-chat-extra">0</td>
+              <td id="ads-chat-inner">源站</td>
+            </tr>
+            <tr>
+              <td>REST 內嵌</td>
+              <td id="ads-embed-trips">1</td>
+              <td id="ads-embed-waves">1</td>
+              <td id="ads-embed-bytes">0</td>
+              <td id="ads-embed-cache">0</td>
+              <td id="ads-embed-extra">0</td>
+              <td id="ads-embed-inner">源站</td>
+            </tr>
+            <tr>
+              <td>GraphQL</td>
+              <td id="ads-gql-trips">1</td>
+              <td id="ads-gql-waves">1</td>
+              <td id="ads-gql-bytes">0</td>
+              <td id="ads-gql-cache">0</td>
+              <td id="ads-gql-extra">0</td>
+              <td id="ads-gql-inner">resolver</td>
+            </tr>
+            <tr>
+              <td>gRPC</td>
+              <td id="ads-grpc-trips">1</td>
+              <td id="ads-grpc-waves">1</td>
+              <td id="ads-grpc-bytes">0</td>
+              <td id="ads-grpc-cache">0</td>
+              <td id="ads-grpc-extra">0</td>
+              <td id="ads-grpc-inner">RPC 1</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <p class="cap">多傳是線上多付的商品 bytes：拆開的 REST 是未命中的完整欄位減去畫面用到的部分；內嵌是整份 8 欄乘上每一筆明細，再扣掉每個不重複商品真正需要的那一份；GraphQL 與 gRPC 只重複嵌套裡已經選到的欄位。可快取只計算共享快取省下、不必再傳的商品本體。</p>
+
+      <div class="status-line" id="ads-status">拖動滑桿後，這裡用算出來的數字說明四筆帳。</div>
+      <button type="button" class="btn" id="ads-reset">重置</button>
+    </div>
+  </div>
+  <p class="cap">預設 N=8、K=3、用 4 欄、命中 40%、沒有 DataLoader。此時 P=14。拆開傳 9,124 bytes（可快取 2,304、多傳 1,536、源站 17 次），內嵌傳 10,428（多傳 6,528），GraphQL 傳 6,028（多傳 1,920、resolver 23 次、複雜度 96），gRPC 傳 4,064。把命中拉到 0%，拆開變成 11,428，比內嵌更貴；拉到 100%，拆開掉到 6,052，多傳變 0，和 GraphQL 的總量接近，但組成是 23 次請求的標頭，不是商品欄位。</p>
+
+  <div class="oneliner">
+    <b>一句話答法</b>往返、位元組、可快取是三筆分開的帳。內嵌省請求，卻把商品焊進私人文件；拆開的 REST 用標頭稅換商品 GET 的共享快取。GraphQL 省的是沒選到的欄位，不自動省 N+1，也不讓這份私人回應進共享快取。
+  </div>
+</section>
+
+<section id="s4">
+  <div class="sec-head">
+    <span class="sec-num">04</span>
+    <h2>GraphQL 多付的三筆帳</h2>
+  </div>
+  <p class="sec-sub">選取集解決 over-fetch 與 under-fetch。N+1、查詢成本、HTTP 快取失效要另外設計。</p>
+
+  <p>Over-fetch 是伺服器把畫面不會畫的欄位也送了；under-fetch 是客戶端為了補一個欄位再打一輪。GraphQL 的選取集把這兩件事收進同一次查詢，這是它對前端聚合真正的貢獻。第 3 節裡，欄位滑桿會改變 GraphQL 與 gRPC 的本體，卻不會改變內嵌 REST 的傳輸量——內嵌文件始終是 8 欄。這就是 over-fetch 在帳上的樣子。</p>
+
+  <h3>Resolver N+1</h3>
+  <p>圖上的 <code>Order.items</code> 與 <code>Item.product</code> 各是一個 resolver。天真的實作對每一筆父物件各打一次資料庫：訂單一查之後，<var>N</var> 次明細、<var>P</var> 次商品。客戶端只看到一次 HTTP 200，延遲與連線池的壓力都在伺服器。DataLoader 這類批次器在同一次請求內把相同型別的鍵收成 <code>WHERE id IN (...)</code>，並在這次請求內記住已經載過的鍵。它不是跨請求的 HTTP 快取，也不能把私人訂單回應存進 CDN。預設參數下，沒有批次時 resolver 是 23 次，和拆開的 REST 請求數相同；打開批次後變成 3 次，客戶端 bytes 不動。</p>
+
+  <h3>複雜度與深度</h3>
+  <p>公開或半公開的 GraphQL 端點必須假設查詢是敵意的。只限制深度會放過「深度很淺、但清單變數很大」的查詢：文件上只看得到幾個欄位，<var>N</var> 與 <var>K</var> 在變數裡。第 3 節的預算吃的是執行期的 <var>N</var> × <var>K</var> × 欄位。把訂單拉到 30、明細拉到 12、欄位拉到 8，複雜度是 2,880，查詢被拒，條形縮成錯誤文件。生產上常用的是持久化查詢（只允許已經登記的文件）加上執行期成本，兩者缺一，持久化擋不住「合法文件配一個巨大的變數」。</p>
+
+  <h3>快取為什麼失效</h3>
+  <p>共享快取認的是方法、URL 與明確的 <code>Cache-Control</code>。GraphQL 常見的 POST 沒有可共享的 URL 鍵，回應又混進了這個使用者的訂單，整份都必須是私人的。把查詢換成 GET、或用持久化查詢的雜湊當 URL，只讓「回應本身可以公開」的查詢有機會被存下來。訂單畫面不是那種查詢。商品若要被共享快取認領，就得回到有自己 URL 的 GET，也就是拆開的 REST 那一列。這不是 GraphQL 寫錯，是這份回應的身分不適合當共享物件。</p>
+
+  <div class="callout warn">
+    <div class="c-title"><span class="ic">陷阱</span>用 GraphQL 當公開 API 的預設</div>
+    <p>合作夥伴要的是穩定資源、可預期的速率限制與能放進 CDN 的 GET。把一個可任意組合的查詢語言交給他們，等於把第 4 節這三筆帳變成他們的攻擊面，也變成你的支援面。公開邊界用 REST；GraphQL 放在你自己的 BFF 後面，查詢文件由你的前端登記。</p>
+  </div>
+
+  <div class="oneliner">
+    <b>一句話答法</b>GraphQL 解決的是欄位級的 over-fetch 與 under-fetch。N+1 用同請求批次，查詢成本要用執行期的清單大小而不只是文件深度，私人回應進不了共享快取。
+  </div>
+</section>
+
+<section id="s5">
+  <div class="sec-head">
+    <span class="sec-num">05</span>
+    <h2>分頁：offset 會滑，cursor 會錨</h2>
+  </div>
+  <p class="sec-sub">offset 說「跳過幾列」。表頭一插入，跳過的位置就不再是上一頁的下一列。</p>
+
+  <p>清單契約要比風格更早講清楚，因為三種風格最後都會碰到同一個問題。REST 可以做 <code>?offset=40&amp;limit=20</code>，也可以做 <code>?page_token=</code>。GraphQL 社群的 Connection 模型就是 cursor，不該在選取集裡再發明一套 offset。gRPC 則是請求訊息上的 page token 欄位，語意仍是 keyset，不是「RPC 就不會漏列」。</p>
+
+  <p>Offset 的實作是 <code>ORDER BY</code> 之後再跳過前 <var>offset</var> 列。沒有以鍵定位的索引時，引擎仍要走訪被跳過的列，所以越深越貴。第 5 節的「走訪」就是把每一頁的 offset 加總：page × 頁數 × (頁數 − 1) / 2。Cursor（keyset）記住上一頁最後一列的排序鍵，下一頁問的是「嚴格排在這把鍵之後的 page 列」。排序鍵必須唯一，時間相同時用 id 打破平手，否則同一把時間鍵會漏列或重列。</p>
+
+  <p>下面的模型把排序定成「新的在表頭」。客戶端相信總共只有原始的 <var>T</var> 列，所以只打 ceil(<var>T</var> / page) 頁就停。每打完一頁，表頭插入 <var>bump</var> 列，再打下一頁。Offset 用頁碼乘上頁大小當下一頁的起點，表頭變長之後，這個起點會滑進上一頁已經看過的列，同時原始清單的尾巴在頁數用完時還沒被讀到。插入若夠大，起點甚至會落在新列裡面。Cursor 的下一頁仍從上一把鍵往舊的方向走，原始列各出現一次；掃描期間插在表頭的列不會混進已經翻過去的頁，它們只出現在重新從表頭讀的時候。這不是 cursor 比較完整，是它故意不把新列塞進這一次走訪。</p>
+
+  <div class="demo" id="demo-page">
+    <div class="demo-bar">
+      <span class="label">互動 · 同一組翻頁參數</span>
+      <span class="label" style="text-transform:none;font-family:var(--sans);font-size:12px;color:var(--text-2)">插入發生在每頁之後、表頭</span>
+    </div>
+    <div class="demo-body">
+      <div class="ads-ctl">
+        <label for="ads-page">每頁列數</label>
+        <input id="ads-page" type="range" min="1" max="20" step="1" value="4" aria-label="每頁列數">
+        <span class="ads-val" id="ads-page-v">4</span>
+
+        <label for="ads-total">原始列數</label>
+        <input id="ads-total" type="range" min="4" max="40" step="1" value="10" aria-label="原始列數">
+        <span class="ads-val" id="ads-total-v">10</span>
+
+        <label for="ads-bump">每頁之後插入</label>
+        <input id="ads-bump" type="range" min="0" max="8" step="1" value="2" aria-label="每翻一頁在表頭插入的列數">
+        <span class="ads-val" id="ads-bump-v">2</span>
+      </div>
+      <p class="ads-hint">格子是 offset 客戶端對原始列的結果。編號是掃描開始時的列號，不是插入之後的位置。</p>
+      <div id="ads-map" aria-label="offset 走訪過的原始列"></div>
+      <div class="legend">
+        <span><i class="dot ns-ok"></i>讀到一次</span>
+        <span><i class="dot ns-lock"></i>重複讀到</span>
+        <span><i class="dot ns-bad"></i>頁數用完仍沒讀到</span>
+      </div>
+      <div class="tbl-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th></th>
+              <th>offset</th>
+              <th>cursor</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>頁數</td>
+              <td id="ads-o-pages">3</td>
+              <td id="ads-c-pages">3</td>
+            </tr>
+            <tr>
+              <td>重複讀到</td>
+              <td id="ads-o-dup">0</td>
+              <td id="ads-c-dup">0</td>
+            </tr>
+            <tr>
+              <td>漏掉的原始列</td>
+              <td id="ads-o-miss">0</td>
+              <td id="ads-c-miss">0</td>
+            </tr>
+            <tr>
+              <td>混進頁面的新列</td>
+              <td id="ads-o-new">0</td>
+              <td id="ads-c-new">0</td>
+            </tr>
+            <tr>
+              <td>引擎走訪</td>
+              <td id="ads-o-exam">0</td>
+              <td id="ads-c-exam">0</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <p class="cap">兩欄吃的是同一組滑桿。預設每頁 4、共 10 列、每頁之後插入 2 列，客戶端打 3 頁：offset 重複 4、漏掉列 8 與列 9、新插入的 4 列一次都沒進頁面，引擎走訪 12 列。cursor 走訪 10 列，原始列不重複也不漏。</p>
+      <div class="status-line" id="ads-page-status">拖動後這裡會改寫走訪結果。</div>
+      <button type="button" class="btn" id="ads-page-reset">重置</button>
+    </div>
+  </div>
+
+  <div class="callout accent">
+    <div class="c-title"><span class="ic">關鍵</span>漏讀是頁數用完，不是 offset 算錯一列</div>
+    <p>若客戶端一直打到伺服器回空頁，尾巴終究會出現，但中間的重複已經顯示給使用者，而且每一次都在付更深的 offset。契約若寫「共有 T 列、請打 ceil(T/page) 次」，插入發生的當下這個 T 就是錯的。Cursor 的契約改問「還有沒有下一頁」，總數可以另外估，不要拿來當迴圈終點。</p>
+  </div>
+
+  <div class="oneliner">
+    <b>一句話答法</b>Offset 是跳過幾列，表頭插入會讓下一頁滑進已經看過的列，並在固定頁數時漏掉尾巴。Cursor 錨在上一頁最後一把唯一鍵上，原始列不重複；新列要不要通知已經翻過去的人，是另一個產品決定。
+  </div>
+</section>
+
+<section id="s6">
+  <div class="sec-head">
+    <span class="sec-num">06</span>
+    <h2>錯誤模型與部分失敗</h2>
+  </div>
+  <p class="sec-sub">客戶端要知道「整筆失敗」和「這一份裡有一格失敗」是兩種不同的契約。</p>
+
+  <p>REST 用狀態碼描述整份回應。4xx 是客戶端這次的請求不成立，5xx 是伺服器沒有完成自己的契約。回應本體可以用 RFC 9457 Problem Details：<code>type</code> 是穩定的問題識別，<code>title</code> 給人讀，<code>status</code> 與 HTTP 狀態碼一致。機器判斷用 <code>type</code>，不要用 <code>title</code> 的英文句子。</p>
+
+  <p>部分失敗要在文件裡明文寫，不要默默回 200 再缺欄。訂單 API 在商品目錄逾時時，可以選擇整筆 502，或回 200 並在該筆明細上放一個問題物件。兩種都合法，客戶端的寫法完全不同。207 Multi-Status 幾乎沒有共享快取與 SDK 會正確處理它，公開 API 少用它來表達「有的列成功、有的列失敗」。</p>
+
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th></th>
+          <th>整筆失敗</th>
+          <th>部分成功</th>
+          <th>客戶端最容易看錯的地方</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>REST</td>
+          <td>4xx／5xx，本體用 RFC 9457</td>
+          <td>必須在文件裡定義，不要默默 200 缺欄</td>
+          <td>把 200 當成每一格都成功</td>
+        </tr>
+        <tr>
+          <td>GraphQL</td>
+          <td><code>errors</code> 且 <code>data</code> 為 null</td>
+          <td>HTTP 200，<code>data</code> 與 <code>errors</code> 並存，<code>path</code> 指到失敗的欄</td>
+          <td>只看 HTTP 狀態碼</td>
+        </tr>
+        <tr>
+          <td>gRPC</td>
+          <td>一個 RPC 一個非 OK 狀態</td>
+          <td>要寫進訊息；狀態若仍是 OK，空欄位就是應用的語意</td>
+          <td>把 OK 裡的空訊息當成「沒有這筆訂單」</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="cap">三種風格的失敗粒度不同。GraphQL 的部分成功是規格裡的常態；REST 與 gRPC 若要同樣的粒度，得在應用契約裡自己定義，傳輸不會幫你表達。</p>
+
+  <p>GraphQL 的客戶端必須先看 <code>errors</code>，即使狀態碼是 200、即使 <code>data.orders</code> 有內容。某一筆的 <code>items</code> 是 null 且 <code>path</code> 指到它，表示那一格失敗，不是這張訂單沒有明細。把 null 畫成空清單，使用者會以為商品被清空。</p>
+
+  <p>gRPC 的一個 RPC 有一個狀態。目錄逾時就讓這次 RPC 失敗，呼叫端不會同時拿到「成功」與「半份訊息」，除非伺服器故意回 OK 並在訊息裡放部分結果——那是應用契約，不是傳輸的預設。狀態碼的名字與何時用哪一個，在 gRPC 與 Protocol Buffers 那篇；這裡只區分「一筆 RPC 一個成敗」和「一份文件裡可以有一格失敗」。</p>
+
+  <div class="oneliner">
+    <b>一句話答法</b>HTTP 狀態碼描述整份回應。GraphQL 常以 200 搭配 errors，客戶端只看狀態碼會把部分失敗當成成功。gRPC 預設是一筆 RPC 一個狀態，部分結果要寫進訊息並在文件裡定義空欄位的意思。
+  </div>
+</section>
+
+<section id="s7">
+  <div class="sec-head">
+    <span class="sec-num">07</span>
+    <h2>版本化與棄用</h2>
+  </div>
+  <p class="sec-sub">能加欄位就不要改欄位的意思。版本是給無法相容的斷裂用的，不是給每一個迭代用的。</p>
+
+  <p>多數演進應該是加選的：新客戶端認得新欄位，舊客戶端忽略它。REST 的 JSON 加一個欄位、GraphQL 的 schema 加一個欄位或加一個可空參數、protobuf 加一個新的欄位編號，三者在這件事上是同一個原則。protobuf 不能重用已經刪除的編號，原因在 gRPC 與 Protocol Buffers 那篇的欄位身分；REST 與 GraphQL 對應的紀律是不重用已經棄用的欄位名字，也不改變舊名字的意思。</p>
+
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>策略</th>
+          <th>客戶端怎麼選</th>
+          <th>快取</th>
+          <th>什麼時候才用</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>URL <code>/v2</code></td>
+          <td>換路徑</td>
+          <td>自然分成兩份</td>
+          <td>資源的意思斷了，舊路徑會活很久</td>
+        </tr>
+        <tr>
+          <td>媒體型別或標頭</td>
+          <td><code>Accept</code> 指定版本</td>
+          <td>必須送 <code>Vary: Accept</code></td>
+          <td>同一個 URL，舊型別可以設期限</td>
+        </tr>
+        <tr>
+          <td>欄位級</td>
+          <td>不選；舊客戶端忽略新欄位</td>
+          <td>仍是同一份回應</td>
+          <td>預設。加欄位、不改意思</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="cap">三種策略可以並存，但不能拿 URL 版本代替「加一個欄位」這種相容演進。每切一次 /v2，文件、SDK、權限與快取都要再養一份。</p>
+
+  <p>媒體型別版本（例如 <code>application/vnd.orders.v2+json</code>）讓 URL 保持穩定，共享快取才不會把兩種表示存成同一個鍵。<code>Vary: Accept</code> 沒寫，快取就可能把 v2 的回應交給只接受 v1 的客戶端。這是標頭版本比路徑版本更容易出錯的地方，不是它比較先進所以免檢。</p>
+
+  <p>棄用是一個有期限的過程，不是註解。回應可以帶 RFC 8594 的 <code>Sunset</code> 標頭，文件寫下舊欄位或舊路徑的最後日期，並用實際呼叫量決定能不能刪。沒有量測的棄用只會在某次發佈把仍在用的客戶端打斷。GraphQL 用 schema 上的 deprecated 標記讓工具在建置期警告，執行期仍要接受舊欄位，直到呼叫量歸零。gRPC 則是保留編號、停止寫入、等舊 stub 消失，而不是把編號讓給新欄位。</p>
+
+  <div class="callout warn">
+    <div class="c-title"><span class="ic">陷阱</span>用版本號掩蓋不相容的語意</div>
+    <p>把 <code>status</code> 從字串改成整數、或把「金額」從元改成分，即使用 <code>/v2</code> 包起來，舊客戶端的資料仍然會被讀錯。版本只隔離已經斷裂的契約，不代替遷移腳本與雙讀。能並行寫入新舊兩種表示、再用呼叫量切換的，不要只靠客戶端自己升級。</p>
+  </div>
+
+  <div class="oneliner">
+    <b>一句話答法</b>預設用加欄位演進，不改舊欄位的意思，也不重用棄用過的名字。URL 版本留給已經不相容的斷裂，媒體型別版本必須配 Vary。棄用要有 Sunset 與呼叫量，而不是只有文件裡的一句 deprecated。
+  </div>
+</section>
+
+<section id="s8">
+  <div class="sec-head">
+    <span class="sec-num">08</span>
+    <h2>冪等重試與配額標頭</h2>
+  </div>
+  <p class="sec-sub">逾時以後你不知道伺服器做完沒有。沒有鍵的 POST 重試，會把扣款做第二次。</p>
+
+  <p>第 2 節的方法表決定「能不能裸重試」。建立訂單是 POST：第一次請求可能已經扣款，回應卻在網路上丟了。客戶端只看得到逾時。沒有額外的鍵，重試就是第二筆訂單。</p>
+
+  <div class="ads-lane">
+    <div class="lh">步驟</div>
+    <div class="lh">客戶端</div>
+    <div class="lh">訂單 API</div>
+    <div class="lh">付款</div>
+    <div class="lt">t1</div>
+    <div class="lc act">POST /orders，帶鍵 K</div>
+    <div class="lc">建立訂單，記下 K</div>
+    <div class="lc">扣款一次</div>
+    <div class="lt">t2</div>
+    <div class="lc bad">逾時，沒看到回應</div>
+    <div class="lc ok">其實已經提交</div>
+    <div class="lc ok">已經入帳</div>
+    <div class="lt">t3</div>
+    <div class="lc act">同一把 K 再 POST</div>
+    <div class="lc ok">回放第一次的 201</div>
+    <div class="lc ok">不再扣款</div>
+  </div>
+  <p class="cap">t2 的紅格是客戶端的未知，不是付款失敗。t3 的綠格是鍵發揮作用：同一把鍵、同一份本體，回放第一次的結果。若 t3 沒有鍵，付款格會變成第二次扣款，那才是資料錯誤。</p>
+
+  <p><code>Idempotency-Key</code> 仍是 HTTPAPI 工作小組的 Internet-Draft（draft-ietf-httpapi-idempotency-key-header），不是 RFC，但支付與建立類 API 已經把它當成事實契約。客戶端產生唯一字串，建議是 UUID；伺服器在鍵的有效期內記住第一次的請求指紋與回應。同一把鍵配上不同的本體，草案建議回 422，避免把「重試」和「改了一筆新的扣款」混成同一把鍵。第一次還在處理時又送來同一把鍵，回 409，不要並行跑兩次扣款。鍵過期之後的重試必須在文件裡定義：拒絕，或當成新的一次。gRPC 沒有這個 HTTP 標頭，對等的做法是把請求識別放進 metadata，伺服器用同一套「指紋加回應回放」；不要因為換了 RPC 就假設重試是安全的。</p>
+
+  <h3>速率、配額，以及客戶端看得到的拒絕</h3>
+  <p>速率是一個窗口裡能打幾次，配額是一段較長時間的預算（例如每月呼叫數）。兩者都該在拒絕時告訴客戶端多久以後再試，否則客戶端的重試會變成放大。公開 HTTP API 用 429 Too Many Requests，並帶 <code>Retry-After</code>（秒數或 HTTP 日期）。只回 429、不回何時恢復，客戶端只能猜。</p>
+
+  <p>剩餘額度目前沒有一份已經發布的 RFC。網路上常見的是 <code>X-RateLimit-Limit</code>、<code>X-RateLimit-Remaining</code>、<code>X-RateLimit-Reset</code>，這是廠商慣例，不是標準。HTTPAPI 的草案 draft-ietf-httpapi-ratelimit-headers 定義 <code>RateLimit-Policy</code> 與 <code>RateLimit</code>，用參數 <code>r</code> 表示剩餘額度、<code>t</code> 表示這個窗口還剩幾秒。契約裡寫明你回的是哪一套，客戶端只實作那一套。兩套同時回可以，但文件要指定哪一套是權威。</p>
+
+  <p>429 的本體仍適合用 RFC 9457，讓機器讀 <code>type</code> 區分「視窗速率用盡」和「每月配額用盡」——兩者的等待策略不同，前者等秒，後者可能要等到下個帳期。授權標頭通常讓共享快取不存這份回應；速率限制標頭放在真正打到源站的回應上，不要讓 CDN 快取一份過期的剩餘額度。</p>
+
+  <p>gRPC 的配額用盡通常是 RPC 狀態而不是 429。狀態碼表不在這裡重複；公開給瀏覽器與合作夥伴的邊界若是 HTTP，就用上面這組標頭。內部 RPC 的配額常常在服務網格的 token bucket，呼叫端仍要有明確的可重試信號，而不是把所有失敗都立刻重試。</p>
+
+  <div class="callout accent">
+    <div class="c-title"><span class="ic">選型</span>面試時把三個邊界說完</div>
+    <p>對外與合作夥伴：REST，資源與方法守住 RFC 9110，錯誤用 RFC 9457，建立類 POST 配冪等鍵，429 配 Retry-After 與你文件指定的額度標頭，分頁用 keyset。自己的前端聚合：GraphQL 放在 BFF 後，查詢文件要登記，resolver 要批次，成本用執行期清單大小計算。內部服務：gRPC，契約是方法與訊息；重試靠請求識別與冪等的伺服器狀態，不靠「RPC 框架會幫我重試」。</p>
+  </div>
+
+  <div class="oneliner">
+    <b>一句話答法</b>逾時代表未知，不是失敗。沒有冪等鍵的 POST 不能重試。429 必須帶何時再試；剩餘額度用你文件寫明的那一套標頭，不要假設客戶端認得每一種 X-RateLimit。
+  </div>
+</section>
