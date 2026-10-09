@@ -14,6 +14,7 @@ const TODO_PATH = path.join(ROOT, 'docs', 'todo.json');
 const COMPLETED_PATH = path.join(ROOT, 'docs', 'completed.json');
 const MINDMAP_PATH = path.join(ROOT, 'docs', 'mindmap.json');
 const BOOKS_INDEX_PATH = path.join(ROOT, 'books', 'index.html');
+const HOME_MAP_CSS_PATH = path.join(ROOT, 'templates', 'home-learning-map.css');
 
 let hasError = false;
 
@@ -185,7 +186,7 @@ function validateBooksIndexConsistency(completed, mindmap) {
   const html = fs.readFileSync(BOOKS_INDEX_PATH, 'utf8');
   const payload = extractLearningMapPayload(html);
   if (!payload) {
-    error('books/index.html 缺少可解析的 <script id="learning-map-data" type="application/json"> payload（首頁過時或未改用 Cytoscape Learning Map，請執行 node scripts/reindex-home.js 只重繪首頁，或 generate.js / rebuild-all.js）。');
+    error('books/index.html 缺少可解析的 <script id="learning-map-data" type="application/json"> payload（首頁過時，請執行 node scripts/reindex-home.js 只重繪首頁，或 generate.js / rebuild-all.js）。');
     return;
   }
 
@@ -224,8 +225,10 @@ function validateBooksIndexConsistency(completed, mindmap) {
 }
 
 /**
- * books/index.html Learning Map payload 結構與狀態一致性檢查。
- * 取代舊的 Mermaid :::completed regex 安全網。
+ * books/index.html Learning Map payload（v2）結構與狀態一致性檢查。
+ * - topics：逐筆對照 mindmap 節點與 completed.json（title / category / completed / path / completed_at）。
+ * - R7：version / stats / domains / categories / categoryPrereqs / layout 必須深度等於以目前資料重算的結果
+ *   （JSON.stringify 相等）；不符代表首頁過時，提示執行 reindex-home.js。
  */
 function validateBooksIndexLearningMapConsistency(completed, mindmap) {
   if (!fs.existsSync(BOOKS_INDEX_PATH)) return;
@@ -235,7 +238,13 @@ function validateBooksIndexLearningMapConsistency(completed, mindmap) {
   if (!payload) return; // 缺少 payload 已由 validateBooksIndexConsistency 報錯
 
   const { buildLearningMapData } = require('./mindmap');
-  const expectedPayload = buildLearningMapData(completed);
+  let expectedPayload;
+  try {
+    expectedPayload = buildLearningMapData(completed);
+  } catch (e) {
+    error(`無法以目前資料重算首頁 Learning Map payload：${e.message}`);
+    return;
+  }
 
   const mindmapNodes = Array.isArray(mindmap && mindmap.nodes) ? mindmap.nodes : [];
   const mindmapById = new Map(
@@ -303,90 +312,33 @@ function validateBooksIndexLearningMapConsistency(completed, mindmap) {
     }
   });
 
-  // Category 名稱集合一致
-  const expectedCategoryNames = new Set(expectedPayload.categories.map((c) => c.name));
-  const actualCategoryNames = new Set(
-    (Array.isArray(payload.categories) ? payload.categories : []).map((c) => c && c.name)
-  );
-  expectedCategoryNames.forEach((name) => {
-    if (!actualCategoryNames.has(name)) {
-      error(`Learning Map payload 缺少 category "${name}"`);
-    }
-  });
-  actualCategoryNames.forEach((name) => {
-    if (name && !expectedCategoryNames.has(name)) {
-      error(`Learning Map payload 出現多餘 category "${name}"`);
-    }
-  });
-
-  // Category relations：比對 builder 重算的聚合結果
-  function relationKey(rel) {
-    return `${rel.sourceCategory}|${rel.targetCategory}|${rel.type}|${rel.count}`;
+  // R7：payload v2 的衍生區塊必須與重算結果逐位元相同（排版在產頁時算好，前端不重算）。
+  if (payload.version !== 2) {
+    error(`books/index.html Learning Map payload version 為 ${payload.version}，預期 2（首頁過時，請執行 node scripts/reindex-home.js）`);
+    return;
   }
-  const expectedRelations = new Set(
-    (expectedPayload.categoryRelations || []).map(relationKey)
-  );
-  const actualRelations = new Set(
-    (Array.isArray(payload.categoryRelations) ? payload.categoryRelations : []).map((rel) => {
-      if (!rel || typeof rel.sourceCategory !== 'string' || typeof rel.targetCategory !== 'string') {
-        error('Learning Map payload categoryRelations 含無效項目');
-        return '';
-      }
-      if (rel.type !== 'prerequisite' && rel.type !== 'related') {
-        error(`Learning Map payload categoryRelations 含非聚合類型 "${rel.type}"`);
-      }
-      return relationKey(rel);
-    })
-  );
-
-  expectedRelations.forEach((key) => {
-    if (!actualRelations.has(key)) {
-      error(`Learning Map payload 缺少聚合 relation：${key}`);
+  ['stats', 'domains', 'categories', 'categoryPrereqs', 'layout'].forEach((key) => {
+    if (JSON.stringify(payload[key]) !== JSON.stringify(expectedPayload[key])) {
+      error(`books/index.html Learning Map payload 的 "${key}" 與目前 docs/ 資料重算結果不符（首頁過時，請執行 node scripts/reindex-home.js 只重繪首頁，或 generate.js / rebuild-all.js）。`);
     }
   });
-  actualRelations.forEach((key) => {
-    if (key && !expectedRelations.has(key)) {
-      error(`Learning Map payload 多餘聚合 relation：${key}`);
-    }
-  });
+}
 
-  // Same-category topic↔topic relations（選取分群後才顯示；payload 必須完整）
-  function topicRelationKey(rel) {
-    return `${rel.source}|${rel.target}|${rel.type}|${rel.category}`;
+/**
+ * R8：templates/home-learning-map.css 對登記表的每個 domain 都有 [data-domain="<id>"] 規則。
+ * 領域顏色只放在 CSS（登記表不存顏色），新增領域時必須同步補上，否則該領域的點點會退回預設灰色。
+ */
+function validateHomeMapCssDomains(registry) {
+  if (!registry || !Array.isArray(registry.domains)) return;
+  if (!fs.existsSync(HOME_MAP_CSS_PATH)) {
+    error(`缺少首頁 Learning Map 樣式模板：${HOME_MAP_CSS_PATH}`);
+    return;
   }
-  const expectedTopicRelations = new Set(
-    (expectedPayload.topicRelations || []).map(topicRelationKey)
-  );
-  const actualTopicRelations = new Set(
-    (Array.isArray(payload.topicRelations) ? payload.topicRelations : []).map((rel) => {
-      if (!rel || typeof rel.source !== 'string' || typeof rel.target !== 'string' || typeof rel.category !== 'string') {
-        error('Learning Map payload topicRelations 含無效項目');
-        return '';
-      }
-      if (rel.type !== 'prerequisite' && rel.type !== 'related') {
-        error(`Learning Map payload topicRelations 含非預期類型 "${rel.type}"`);
-      }
-      if (!mindmapById.has(rel.source) || !mindmapById.has(rel.target)) {
-        error(`Learning Map payload topicRelations 指向未知 topic：${rel.source} -> ${rel.target}`);
-      } else {
-        const sourceNode = mindmapById.get(rel.source);
-        const targetNode = mindmapById.get(rel.target);
-        if (sourceNode.category !== targetNode.category) {
-          error(`Learning Map payload topicRelations 不可含跨 Category 邊：${rel.source} -> ${rel.target}`);
-        }
-      }
-      return topicRelationKey(rel);
-    })
-  );
-
-  expectedTopicRelations.forEach((key) => {
-    if (!actualTopicRelations.has(key)) {
-      error(`Learning Map payload 缺少 topic relation：${key}`);
-    }
-  });
-  actualTopicRelations.forEach((key) => {
-    if (key && !expectedTopicRelations.has(key)) {
-      error(`Learning Map payload 多餘 topic relation：${key}`);
+  const css = fs.readFileSync(HOME_MAP_CSS_PATH, 'utf8');
+  registry.domains.forEach((domain) => {
+    if (!domain || typeof domain.id !== 'string') return;
+    if (!css.includes(`[data-domain="${domain.id}"]`)) {
+      error(`templates/home-learning-map.css 缺少領域 "${domain.id}" 的 [data-domain="${domain.id}"] 顏色規則`);
     }
   });
 }
@@ -670,7 +622,8 @@ function main() {
   validateCategoryAgreement(todo, 'todo.json', nodeById); // R6
   validateMutualExclusion(todoIds, completedIds);
   validateBooksIndexConsistency(completed, mindmap);
-  validateBooksIndexLearningMapConsistency(completed, mindmap);
+  validateBooksIndexLearningMapConsistency(completed, mindmap); // 含 R7
+  validateHomeMapCssDomains(registry); // R8
 
   if (hasError) {
     console.error('\nValidation FAILED. Please fix the errors above.');

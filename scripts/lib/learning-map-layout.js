@@ -21,12 +21,12 @@
 const { compareCodePoint } = require('./categories');
 
 // ---- 尺寸常數（CSS 以 payload 帶出的值為準，模板不另外維護） ----
-const CARD_W = 164;
+const CARD_W = 200;
 const CARD_H_ONE_ROW = 62;
 const CARD_H_TWO_ROWS = 76;
 const DOTS_PER_ROW = 11;        // 決策 7：點點一列最多 11 顆
 const PAD_X = 24;               // 畫布左右內距
-const COL_STEP = 205;           // 欄距（CARD_W + 41px 走線溝槽）
+const COL_STEP = 248;           // 欄距（CARD_W + 48px 走線溝槽）
 const GUTTER = COL_STEP - CARD_W;
 const CARD_GAP = 16;            // 同欄卡片間距
 const LABEL_TOP = 22;           // 欄標題的 y
