@@ -17,7 +17,7 @@
 {
   "id": "consistent-hashing",
   "title": "一致性雜湊 (Consistent Hashing)",
-  "category": "Caching & Sharding",
+  "category": "Sharding & Hashing",
   "brief": "重點放在 Ring 上的 key 遷移與虛擬節點；Demo 模擬節點上下線。"
 }
 ```
@@ -37,7 +37,7 @@
 ```json
 {
   "nodes": [
-    { "id": "consistent-hashing", "title": "一致性雜湊", "category": "Caching & Sharding" }
+    { "id": "consistent-hashing", "title": "一致性雜湊", "category": "Sharding & Hashing" }
   ],
   "edges": [
     { "from": "hashing-basics", "to": "consistent-hashing", "type": "prerequisite" },
@@ -46,10 +46,23 @@
 }
 ```
 
+### docs/categories.json (Object) — 分類 → 領域登記表
+```json
+{
+  "domains": [ { "id": "network", "name": "網路與通訊" } ],
+  "categories": [ { "name": "API Design", "domain": "network" } ]
+}
+```
+- `domains` 的順序 = 首頁圖例順序；`categories` 依 `name` 的 code point 排序（`add-topic.js` 插入時會維持）。
+- 分類的穩定 id 由 name slugify 而來（例 `"Network Protocols & Real-time Systems"` → `network-protocols-real-time-systems`），不另存欄位。
+- 領域顏色不放這裡，放在 `templates/home-learning-map.css` 的 `[data-domain="<id>"]` 規則（validate R8 會檢查每個領域都有）。
+- **可直接編輯的範圍**（全域鐵律 1 的例外）：新增領域、調整分類所屬領域、改領域名稱。新增分類一律走 `add-topic.js --domain`。改完必跑 `node scripts/reindex-home.js` → `node scripts/validate.js`。
+
 ## 2. Edge 語義 (與 scripts/mindmap.js 行為對齊)
 
 > 註：以下「連線表示」欄為 `mindmap.js --action generate-mermaid`（獨立 CLI 工具）的 Mermaid 語法慣例。
-> **首頁學習地圖已改用 Cytoscape 呈現**（`generate-learning-map` payload），方向語義完全相同，只是渲染器不同。
+> **首頁學習地圖由產頁時的伺服器端排版輸出**（`generate-learning-map` payload v2），方向語義完全相同：
+> 文章層的 `prerequisite` 邊會聚合成分類層的邊，分類的欄位 = 其 prerequisite 最長路徑深度；`related` 不參與首頁排版。
 
 | type | 方向慣例 | 連線表示 (Mermaid CLI) | 推薦器行為 |
 | :--- | :--- | :--- | :--- |
@@ -70,8 +83,9 @@
 - [ ] 顆粒度是否恰當？能不能獨立成一篇？是否和既有主題重疊？
 - [ ] 是否有「必須先懂」的既有主題？→ 設為 `prerequisite`。
 - [ ] 是否有同層互補/對照主題？→ 設為 `related`。
-- [ ] 加入這條邊會不會形成 prerequisite 循環？
-- [ ] category 是否與既有命名一致（避免同義分類碎片化，如 "Cache" vs "Caching"）？
+- [ ] 加入這條邊會不會形成 prerequisite 循環？**分類層**呢（跨分類的 prerequisite 聚合後不得成環，validate R4 會擋）？
+- [ ] category 是否與既有命名一致（先 `mindmap.js --action list-categories`，避免同義分類碎片化，如 "Cache" vs "Caching"）？
+- [ ] 若是新分類：應歸到哪個領域（`--domain`：網路與通訊 / 資料與儲存 / 架構與維運 / AI 與 LLM）？
 
 ## 4. 領域知識：常見 System Design 主題與學習順序
 
@@ -128,4 +142,4 @@ node scripts/add-topic.js --id cdn \
   --title "內容傳遞網路 (CDN)" --category "Caching" --related cache-patterns
 ```
 
-3. `node scripts/validate.js` 驗證通過後，交棒撰稿流程。
+3. `node scripts/reindex-home.js` 重繪首頁，再 `node scripts/validate.js` 驗證通過後，交棒撰稿流程。

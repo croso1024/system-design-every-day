@@ -28,7 +28,7 @@ description: >-
 - [ ] 2a. 選型：archetype-window.js 查「下一篇不可用的主 archetype」，替本篇選一個不撞形的 archetype 與圖表形式
 - [ ] 2b. 撰寫草稿：drafts/<id>/content.html (必填) 與 script.html (互動 JS，compute/render 分離 + @probe)
 - [ ] 2c. 品質閘門：demo-audit.js / compute-probe.js / archetype-window.js --topic 皆 exit 0，未過不得 generate
-- [ ] 3. 組裝發佈：node scripts/generate.js --topic <id> --title "..." --category "..."
+- [ ] 3. 組裝發佈：node scripts/generate.js --topic <id> --title "..."（分類由 mindmap 帶出）
 - [ ] 4. 品質檢查：用 ReadLints 檢查產出的 books/<id>/index.html 有無 HTML/CSS 錯誤
 - [ ] 5. 收尾（順序不可顛倒）：remove-todo.js 移除 todo -> validate.js 驗證 -> git commit（單行規範）-> push origin main（僅 Cursor 自動化環境）
 ```
@@ -144,11 +144,14 @@ node scripts/quality/archetype-window.js --topic <id>   # 本篇尚未發佈，�
 ### Step 3：組裝發佈
 
 ```bash
-node scripts/generate.js --topic <id> --title "標題" --category "分類"
+node scripts/generate.js --topic <id> --title "標題"
 ```
 
+分類由 `docs/mindmap.json` 的節點帶出（主題不在 mindmap 時 exit 1，請先交棒 `topic-explorer`）；
+`--category` 選填，有給就必須與節點一致，否則在寫任何檔案之前 exit 1。
+
 它會：注入 `templates/base.html` → 掃描章節生成 TOC → 寫出 `books/<id>/index.html`
-→ **自動 upsert `docs/completed.json`** → 重新編譯首頁 Cytoscape 學習地圖 payload 並重寫 `books/index.html`。
+→ **自動 upsert `docs/completed.json`** → 重新編譯首頁學習地圖 payload v2（產頁時排版）並重寫 `books/index.html`。
 （`completed.json` 與 `books/index.html` 皆為自動產物，**勿手動編輯**。）
 
 > **TOC 結構守門**：若草稿抽不到任何合法 `<section id="..."> + <h2>`（TOC 會是空的），
@@ -165,7 +168,7 @@ node scripts/generate.js --topic <id> --title "標題" --category "分類"
 > 非錯誤）。CI 每次 push 都會跑 validate，遵守此順序即保證 commit 快照互斥乾淨、CI 必綠。
 > 若 Step 4 的 lint 發現問題，因尚未 remove-todo、尚未 commit，可安全回 Step 2 修草稿重跑 `generate.js`。
 
-- 確認 `docs/completed.json` 已新增該主題、`books/index.html` 已渲染出含新節點的可點擊學習地圖（Cytoscape）。
+- 確認 `docs/completed.json` 已新增該主題、`books/index.html` 的學習地圖已把該篇標成已發布（所屬分類卡片多一顆實心點）。
 - **移除待辦項目**：執行以下獨立腳本，將已完成的主題自 `docs/todo.json` 中自動移除：
   ```bash
   node scripts/remove-todo.js --topic <id>

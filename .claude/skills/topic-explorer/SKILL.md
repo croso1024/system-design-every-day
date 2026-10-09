@@ -23,10 +23,12 @@ description: >-
 ## 鐵律 (Hard Rules)
 
 1. **嚴禁全量讀寫 `docs/completed.json` 與 `docs/mindmap.json`**。一律用下方 CLI 取得精簡輸出；
-   新增主題用 `node scripts/add-topic.js`（雙檔原子寫入 + todo 失敗時回滾 mindmap），不要手動拼接大型 JSON。
-2. **每次改完圖譜：先重繪首頁、再驗證**。動到 `mindmap.json` 的節點或邊後，先 `node scripts/reindex-home.js`
-   （首頁 Learning Map 由 mindmap + completed 推導，`validate.js` 會要求「每個 mindmap 節點都出現在首頁 payload」，
-   不重繪必失敗），再 `node scripts/validate.js`。未通過不可收工。
+   新增主題用 `node scripts/add-topic.js`（mindmap + todo 原子寫入，新分類時連同 `categories.json`，任一步失敗即回滾），不要手動拼接大型 JSON。
+   **唯一例外是 `docs/categories.json`**（分類 → 領域登記表，檔案很小）：**新增領域、調整分類所屬領域、改領域名稱**
+   可以直接編輯；但**新增分類**仍一律走 `add-topic.js --domain`，不要手動加進登記表。
+2. **每次改完圖譜或登記表：先重繪首頁、再驗證**。動到 `mindmap.json` 的節點或邊、或改了 `categories.json` 後，
+   先 `node scripts/reindex-home.js`（首頁學習地圖的領域、分類欄位與排版由 mindmap + completed + categories 在產頁時推導，
+   `validate.js` 會要求首頁 payload 與重算結果完全一致，不重繪必失敗），再 `node scripts/validate.js`。未通過不可收工。
 3. **參照完整性**：`todo.json` / `completed.json` 的每個 id **必須**同時是 `mindmap.json` 的 node，
    否則 `validate.js` 會失敗。新增主題時務必同時建立 node。
 4. **去重**：新增前先確認 id 不存在於 nodes / completed / todo。
@@ -39,6 +41,7 @@ node scripts/completed-ledger.js --action status            # 全站完成度統
 node scripts/completed-ledger.js --action get-recent --limit 5   # 最近完成主題
 node scripts/mindmap.js --action next                       # 依 DAG 推薦下一個主題
 node scripts/mindmap.js --action next --last-topic <id>     # 指定基準主題的鄰接推薦
+node scripts/mindmap.js --action list-categories            # 已登記的分類與所屬領域（決定 --category / --domain 前必查）
 node scripts/quality/archetype-window.js                    # 全站 demo archetype 分佈與「下一篇不可用的主 archetype」
 ```
 
@@ -65,7 +68,8 @@ node scripts/quality/archetype-window.js                    # 全站 demo archet
 - [ ] 1. 列出該領域的核心子主題，標註每個的「重要性 / 面試頻率 / 實務情境」
 - [ ] 2. 推導主題間的 prerequisite 與 related 關係，做拓撲排序成學習順序
 - [ ] 3. 提出建議的「生成順序」(generation order)，先 prerequisite 後進階
-- [ ] 4. 與使用者確認後 → 用 add-topic.js 批次寫入 (依拓撲序逐一加入)
+- [ ] 4. 若需要新分類，先決定它歸哪個領域（`list-categories` 看 4 個領域；寫入時帶 `--domain`）
+- [ ] 5. 與使用者確認後 → 用 add-topic.js 批次寫入 (依拓撲序逐一加入)
 ```
 
 主題顆粒度準則：一個主題 = 一篇能獨立成文的指南（不過大、不與既有主題重疊）。
@@ -79,12 +83,20 @@ node scripts/quality/archetype-window.js                    # 全站 demo archet
 node scripts/add-topic.js \
   --id consistent-hashing \
   --title "一致性雜湊 (Consistent Hashing)" \
-  --category "Caching & Sharding" \
+  --category "Sharding & Hashing" \
   --prereq hashing-basics \
   --related load-balancing,data-partitioning \
   --brief "重點放在 Ring 上的 key 遷移與虛擬節點；Demo 模擬節點上下線。勿重複講 hash 基礎。"
+
+# 分類尚未登記時，必須同時指定所屬領域（domain id 見 list-categories），腳本會一併寫進 docs/categories.json
+node scripts/add-topic.js \
+  --id service-mesh-basics \
+  --title "Service Mesh 基礎" \
+  --category "Service Mesh" --domain platform
 ```
 
+- `--category "..."`：**必填**。先用 `node scripts/mindmap.js --action list-categories` 查已登記的分類，逐字沿用既有名稱（避免 "Cache" vs "Caching" 碎片化）。
+- `--domain <domain-id>`：分類**尚未登記**時必填，且必須是 `docs/categories.json` 既有的領域 id（目前為 `network` / `data` / `platform` / `ai`）；分類已登記時可省略，有給就必須和登記值一致，否則中止。
 - `--prereq a,b`：a、b 是新主題的**先備**，產生 `{from:a, to:新主題, type:'prerequisite'}`。
 - `--related c,d`：關聯主題，產生 `{from:新主題, to:c, type:'related'}`。
 - `--brief "..."`：**選填**。寫入 `todo.json` 的 per-topic 撰文指引（通常 2-3 句）。僅在 `add-topic.js` 新增主題時一併寫入，不提供事後補寫。
@@ -126,6 +138,7 @@ git commit -m "[explore] add <id> to todo and mindmap"
 
 - **方向正確**：`prerequisite` 邊一律 `先備 → 進階`（學習依賴方向）。
 - **不可成環**：prerequisite 邊不能形成循環（會讓「解鎖」邏輯失效）。**現由 `validate.js` 以 DFS 強制偵測 prerequisite 環**（add-topic 也擋自環）；新增前仍應人工確認新主題不會回指其祖先。
+- **分類層也不可成環**：文章的 prerequisite 邊會聚合成「分類 → 分類」的邊，決定首頁地圖的欄位。若新邊讓分類層出現循環（例如 Caching → Replication 又 Replication → Caching），`validate.js`（R4）與首頁排版都會失敗並印出循環路徑與造成循環的文章邊。跨分類掛 prerequisite 前先確認方向。
 - **優先掛接**：新節點盡量連到既有圖譜，避免孤島節點；找不到關聯時才作為獨立起點。
 - **prerequisite vs related**：強學習依賴用 `prerequisite`；同層、互補、對照關係用 `related`。
 
@@ -133,7 +146,7 @@ git commit -m "[explore] add <id> to todo and mindmap"
 
 選題與圖譜維護完成後，交棒給後段撰稿/發佈的 `topic-author` skill：
 於 `drafts/<id>/` 寫 `content.html`（嚴格遵守 `<section id="sX">` 結構與 `guidelines/style-guide.md`），
-再 `node scripts/generate.js --topic <id> --title "..." --category "..."` 發佈。
+再 `node scripts/generate.js --topic <id> --title "..."` 發佈（分類由 mindmap 節點帶出，不必帶 `--category`）。
 `generate.js` 會自動維護 `completed.json` 與 `books/index.html`，發佈後由 author 收尾把該主題移出 `todo.json`。
 
 ## 補充資源
