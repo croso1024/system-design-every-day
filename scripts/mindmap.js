@@ -9,6 +9,7 @@
  * Usage:
  *   node scripts/mindmap.js --action next [--last-topic <topic-id>]
  *   node scripts/mindmap.js --action list-categories
+ *   node scripts/mindmap.js --action layout-report
  *   node scripts/mindmap.js --action generate-mermaid
  *   node scripts/mindmap.js --action generate-learning-map
  */
@@ -19,7 +20,9 @@ const {
   readCategoryRegistry,
   validateCategoryRegistry,
   buildCategoryIndex,
+  compareCodePoint,
 } = require('./lib/categories');
+const { buildLearningMapLayout } = require('./lib/learning-map-layout');
 
 const ROOT = path.resolve(__dirname, '..');
 const MINDMAP_PATH = path.join(ROOT, 'docs', 'mindmap.json');
@@ -179,18 +182,8 @@ function recommendNext(lastTopicId) {
   }, null, 2));
 }
 
-/**
- * 列出分類登記表（docs/categories.json）與各分類在 mindmap 上的文章數。
- * 供 topic-explorer 在新增主題前查詢「既有分類名稱（逐字）」與「分類所屬領域」，
- * 避免為了查分類而直接讀大型 JSON。登記表格式有誤時 fail-loud（exit 1），不吞錯。
- *
- * 輸出：
- *   {
- *     "domains":    [ { "id", "name", "category_count" } ],                // 登記表順序
- *     "categories": [ { "id", "name", "domain", "published", "total" } ]   // 登記表順序（name 的 code point 序）
- *   }
- */
-function listCategories() {
+/** 讀取並驗證分類登記表；缺檔或格式有誤時 fail-loud（exit 1）。 */
+function loadCategoryIndexOrExit() {
   let registry;
   try {
     registry = readCategoryRegistry();
@@ -203,8 +196,135 @@ function listCategories() {
     console.error(`[mindmap] ERROR: docs/categories.json 格式有誤：\n  - ${errors.join('\n  - ')}`);
     process.exit(1);
   }
+  return buildCategoryIndex(registry);
+}
 
-  const index = buildCategoryIndex(registry);
+/**
+ * 從 mindmap 與登記表推導「分類層圖」：排版模組（learning-map-layout.js）的輸入，
+ * 也是首頁 payload v2 的 domains / categories / categoryPrereqs 來源。
+ *
+ * - categories 依登記表順序（name 的 code point 序），每筆含 topicIds（此處依 id 的 code point 排序；
+ *   payload 的閱讀順序由 payload builder 另行計算）。
+ * - categoryPrereqs 只聚合「跨分類」的 prerequisite 邊，count 為文章 edge 數；依 source、target 排序。
+ * - 節點 category 未登記時 throw：這是 validate R2 的範圍，排版不應靜默吞掉。
+ *
+ * @param {object} mindmap docs/mindmap.json 內容
+ * @param {object} categoryIndex buildCategoryIndex() 的結果
+ */
+function buildCategoryGraph(mindmap, categoryIndex) {
+  const nodes = Array.isArray(mindmap && mindmap.nodes) ? mindmap.nodes : [];
+  const edges = Array.isArray(mindmap && mindmap.edges) ? mindmap.edges : [];
+
+  const topicIdsByCategory = new Map(categoryIndex.categories.map((category) => [category.id, []]));
+  const categoryIdByTopic = new Map();
+  nodes.forEach((node) => {
+    if (!node || typeof node.id !== 'string') return;
+    const category = categoryIndex.categoryByName.get(node.category);
+    if (!category) {
+      throw new Error(`mindmap 節點 "${node.id}" 的 category "${node.category}" 未登記於 docs/categories.json`);
+    }
+    topicIdsByCategory.get(category.id).push(node.id);
+    categoryIdByTopic.set(node.id, category.id);
+  });
+
+  const countByEdge = new Map();
+  edges.forEach((edge) => {
+    if (!edge || edge.type !== 'prerequisite') return;
+    const source = categoryIdByTopic.get(edge.from);
+    const target = categoryIdByTopic.get(edge.to);
+    if (!source || !target || source === target) return;
+    const key = `${source}|${target}`;
+    countByEdge.set(key, (countByEdge.get(key) || 0) + 1);
+  });
+
+  const categoryPrereqs = [...countByEdge.entries()]
+    .map(([key, count]) => {
+      const [source, target] = key.split('|');
+      return { source, target, count };
+    })
+    .sort((p, q) => compareCodePoint(p.source, q.source) || compareCodePoint(p.target, q.target));
+
+  return {
+    domains: categoryIndex.domains.map((domain) => ({ id: domain.id, name: domain.name })),
+    categories: categoryIndex.categories.map((category) => ({
+      id: category.id,
+      name: category.name,
+      domain: category.domain,
+      topicIds: topicIdsByCategory.get(category.id).slice().sort(compareCodePoint),
+    })),
+    categoryPrereqs,
+  };
+}
+
+/**
+ * 以文字印出目前資料的排版結果（各欄分類與順序、獨立主題、edge 數、穿過卡片的 edge 數）。
+ * 純唯讀，供人工核對分欄與排序是否合理；非 strict 模式，所以即使有 edge 穿過卡片也會印出計數而非中止。
+ */
+function layoutReport() {
+  const categoryIndex = loadCategoryIndexOrExit();
+  const mindmap = loadJSON(MINDMAP_PATH, { nodes: [], edges: [] });
+
+  let graph;
+  let result;
+  try {
+    graph = buildCategoryGraph(mindmap, categoryIndex);
+    result = buildLearningMapLayout(graph, { strict: false });
+  } catch (e) {
+    console.error(`[mindmap] ERROR: ${e.message}`);
+    process.exit(1);
+  }
+
+  const nameById = new Map(graph.categories.map((category) => [category.id, category.name]));
+  const topicCountById = new Map(graph.categories.map((category) => [category.id, category.topicIds.length]));
+  const { layout } = result;
+  const lines = [];
+
+  lines.push(`畫布：${layout.width} × ${layout.height}；卡片：${layout.card.w} × ${layout.card.h}（${layout.card.h === 62 ? '一列' : '兩列'}點點）`);
+  lines.push(`欄數：${result.columnCount}`);
+  layout.columns.forEach((column) => {
+    const members = graph.categories
+      .filter((category) => result.columnById.get(category.id) === column.index)
+      .map((category) => ({ id: category.id, y: layout.boxes[category.id].y }))
+      .sort((p, q) => p.y - q.y);
+    const label = column.label ? `（${column.label}）` : '';
+    lines.push(`第 ${column.index} 欄${label} x=${column.x}：`);
+    members.forEach((member, i) => {
+      const box = layout.boxes[member.id];
+      lines.push(`  ${i + 1}. ${nameById.get(member.id)}  [y=${box.y}, pop=${box.pop}, ${topicCountById.get(member.id)} 篇]`);
+    });
+  });
+
+  const isolated = graph.categories.filter((category) => result.columnById.get(category.id) === null);
+  if (layout.isolated) {
+    lines.push(`獨立主題（y=${layout.isolated.y}）：${isolated.map((category) => nameById.get(category.id)).join('、')}`);
+  } else {
+    lines.push('獨立主題：無');
+  }
+
+  lines.push(`分類層 prerequisite edge 數：${layout.edges.length}（文章 edge 合計 ${graph.categoryPrereqs.reduce((sum, edge) => sum + edge.count, 0)}）`);
+  const multiColumn = layout.edges.filter((edge) => result.columnById.get(edge.target) - result.columnById.get(edge.source) > 1).length;
+  lines.push(`跨越多欄的 edge 數：${multiColumn}`);
+  lines.push(`穿過卡片的 edge 數 = ${result.crossings.count}`);
+  result.crossings.offenders.forEach((offender) => {
+    lines.push(`  ! ${nameById.get(offender.source)} -> ${nameById.get(offender.target)} 穿過 ${nameById.get(offender.card)}`);
+  });
+
+  console.log(lines.join('\n'));
+}
+
+/**
+ * 列出分類登記表（docs/categories.json）與各分類在 mindmap 上的文章數。
+ * 供 topic-explorer 在新增主題前查詢「既有分類名稱（逐字）」與「分類所屬領域」，
+ * 避免為了查分類而直接讀大型 JSON。登記表格式有誤時 fail-loud（exit 1），不吞錯。
+ *
+ * 輸出：
+ *   {
+ *     "domains":    [ { "id", "name", "category_count" } ],                // 登記表順序
+ *     "categories": [ { "id", "name", "domain", "published", "total" } ]   // 登記表順序（name 的 code point 序）
+ *   }
+ */
+function listCategories() {
+  const index = loadCategoryIndexOrExit();
   const mindmap = loadJSON(MINDMAP_PATH, { nodes: [], edges: [] });
   const completed = loadJSON(COMPLETED_PATH, []);
   const completedIds = new Set((Array.isArray(completed) ? completed : []).map((item) => item && item.id));
@@ -440,7 +560,7 @@ function main() {
   const action = args.action;
 
   if (!action) {
-    console.error('Usage: node scripts/mindmap.js --action <next|list-categories|generate-mermaid|generate-learning-map> [--last-topic <id>]');
+    console.error('Usage: node scripts/mindmap.js --action <next|list-categories|layout-report|generate-mermaid|generate-learning-map> [--last-topic <id>]');
     process.exit(1);
   }
 
@@ -448,6 +568,8 @@ function main() {
     recommendNext(args['last-topic']);
   } else if (action === 'list-categories') {
     listCategories();
+  } else if (action === 'layout-report') {
+    layoutReport();
   } else if (action === 'generate-mermaid') {
     const code = generateMermaid();
     console.log(code);
@@ -462,4 +584,4 @@ function main() {
 if (require.main === module) {
   main();
 }
-module.exports = { generateMermaid, buildLearningMapData };
+module.exports = { generateMermaid, buildLearningMapData, buildCategoryGraph };
