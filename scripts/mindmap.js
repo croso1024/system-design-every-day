@@ -182,21 +182,25 @@ function recommendNext(lastTopicId) {
   }, null, 2));
 }
 
-/** 讀取並驗證分類登記表；缺檔或格式有誤時 fail-loud（exit 1）。 */
+/** 讀取並驗證分類登記表；缺檔或格式有誤時 throw（供 buildLearningMapData 等 library 路徑使用）。 */
+function loadCategoryRegistryOrThrow() {
+  const registry = readCategoryRegistry();
+  const errors = validateCategoryRegistry(registry);
+  if (errors.length) {
+    throw new Error(`docs/categories.json 格式有誤：\n  - ${errors.join('\n  - ')}`);
+  }
+  return registry;
+}
+
+/** 讀取並驗證分類登記表；缺檔或格式有誤時 fail-loud（exit 1）。供 CLI action 使用。 */
 function loadCategoryIndexOrExit() {
-  let registry;
   try {
-    registry = readCategoryRegistry();
+    return buildCategoryIndex(loadCategoryRegistryOrThrow());
   } catch (e) {
     console.error(`[mindmap] ERROR: ${e.message}`);
     process.exit(1);
   }
-  const errors = validateCategoryRegistry(registry);
-  if (errors.length) {
-    console.error(`[mindmap] ERROR: docs/categories.json 格式有誤：\n  - ${errors.join('\n  - ')}`);
-    process.exit(1);
-  }
-  return buildCategoryIndex(registry);
+  return null;
 }
 
 /**
@@ -359,9 +363,9 @@ function listCategories() {
 /**
  * Compile the Mindmap DAG + Completed topics into an interactive, beautifully styled Mermaid diagram.
  *
- * ⚠️ 保留作為獨立 CLI 工具（`--action generate-mermaid`）。自首頁改用 Cytoscape 學習地圖重構後，
- *    首頁改由 `buildLearningMapData` 供給，`buildBooksIndexHtml` 已「不再」呼叫本函式；此處僅供
- *    命令列查閱 Mermaid 語法之用。
+ * ⚠️ 保留作為獨立 CLI 工具（`--action generate-mermaid`）。首頁知識地圖改由 `buildLearningMapData`
+ *    的 payload v2 供給（產頁時排版、前端只做互動），`buildBooksIndexHtml` 已「不再」呼叫本函式；
+ *    此處僅供命令列查閱 Mermaid 語法之用。
  *
  * @param {Array} [completedList] 已完成主題清單。呼叫端可傳入手上那份 in-memory 清單，讓節點狀態
  *   與呼叫端同源、與存檔時機解耦；省略時（如 CLI）才 fallback 讀磁碟。
@@ -407,12 +411,67 @@ function generateMermaid(completedList) {
 }
 
 /**
- * Build a renderer-neutral Learning Map payload for the homepage Cytoscape view.
- * Hierarchy: Root → Category → Topic.
- * - categoryRelations: cross-category prerequisite/related, aggregated (related undirected-deduped).
- * - topicRelations: same-category topic↔topic edges (shown only after cluster selection in the UI).
+ * 同分類內文章的閱讀順序：以分類內的 prerequisite 邊做最長路徑分層（Kahn），
+ * 同層依 id 的 code point 排序。跨分類的邊不納入（那是分類層走線的事）。
+ * 分類內成環時 throw（validate 的主題層環偵測會先擋下；此處 fail-loud 以免靜默輸出錯誤順序）。
  *
- * @param {Array} [completedList] in-memory completed ledger (same off-by-one contract as generateMermaid)
+ * @param {string[]} topicIds 同一分類的文章 id
+ * @param {Array<{from:string,to:string,type:string}>} edges mindmap edges
+ * @returns {string[]}
+ */
+function computeReadingOrder(topicIds, edges) {
+  const ids = topicIds.slice().sort(compareCodePoint);
+  const inCategory = new Set(ids);
+  const successors = new Map(ids.map((id) => [id, []]));
+  const indegree = new Map(ids.map((id) => [id, 0]));
+  edges.forEach((edge) => {
+    if (!edge || edge.type !== 'prerequisite') return;
+    if (!inCategory.has(edge.from) || !inCategory.has(edge.to) || edge.from === edge.to) return;
+    successors.get(edge.from).push(edge.to);
+    indegree.set(edge.to, indegree.get(edge.to) + 1);
+  });
+
+  const layerById = new Map(ids.map((id) => [id, 0]));
+  const queue = ids.filter((id) => indegree.get(id) === 0);
+  const order = [];
+  while (queue.length) {
+    queue.sort(compareCodePoint);
+    const current = queue.shift();
+    order.push(current);
+    successors.get(current).forEach((next) => {
+      if (layerById.get(next) < layerById.get(current) + 1) layerById.set(next, layerById.get(current) + 1);
+      indegree.set(next, indegree.get(next) - 1);
+      if (indegree.get(next) === 0) queue.push(next);
+    });
+  }
+  if (order.length !== ids.length) {
+    const stuck = ids.filter((id) => indegree.get(id) > 0).join(', ');
+    throw new Error(`同分類文章的 prerequisite 有循環，無法決定閱讀順序：${stuck}（node scripts/validate.js 會列出環路徑）`);
+  }
+  return ids.sort((a, b) => (layerById.get(a) - layerById.get(b)) || compareCodePoint(a, b));
+}
+
+/**
+ * 首頁知識地圖 payload v2（嵌入 books/index.html 的 <script id="learning-map-data">）。
+ *
+ * 排版在產頁時由 lib/learning-map-layout.js 算好，前端只做選取互動與面板內容：
+ *   {
+ *     version: 2,
+ *     stats: { published, total },                       // 只算 mindmap 節點
+ *     domains: [{ id, name }],                           // 登記表順序 = 圖例順序
+ *     categories: [{ id, name, domain, column, topicIds, published, total }],
+ *                                                        // column null = 獨立主題；topicIds 為閱讀順序
+ *     topics: [{ id, title, category, completed, completed_at, path }],   // 依 id 的 code point 排序
+ *     categoryPrereqs: [{ source, target, count }],      // 跨分類 prerequisite 聚合
+ *     layout: { width, height, card, columns, boxes, isolated, edges }    // 見 learning-map-layout.js
+ *   }
+ *
+ * 輸出完全可重現：排序只比 code point，不用 localeCompare（本機與 CI 的 ICU 可能不同）。
+ * 登記表缺檔／格式錯、節點分類未登記、分類層成環、edge 穿卡時一律 throw：
+ * generate.js 在寫任何檔案之前呼叫本函式，throw 即零副作用 exit 1。
+ *
+ * @param {Array} [completedList] in-memory completed ledger（與 generateMermaid 相同的 off-by-one 契約：
+ *   呼叫端尚未 saveCompleted 時仍能把最新主題標成已發布；省略時才 fallback 讀磁碟）
  */
 function buildLearningMapData(completedList) {
   const mindmap = loadJSON(MINDMAP_PATH, { nodes: [], edges: [] });
@@ -423,135 +482,62 @@ function buildLearningMapData(completedList) {
       .map((item) => [item.id, item])
   );
 
-  const nodes = Array.isArray(mindmap.nodes) ? mindmap.nodes : [];
+  const nodes = (Array.isArray(mindmap.nodes) ? mindmap.nodes : []).filter((node) => node && typeof node.id === 'string');
   const edges = Array.isArray(mindmap.edges) ? mindmap.edges : [];
 
-  // mindmap 節點的 category 為必填（validate.js 會強制非空）。此 fallback 為 defense-in-depth：
-  // 即使遇到未經 validate 的無 category 節點，也把它歸入 'General'（對齊 generate.js 的預設），
-  // 而非讓它因找不到 category 而從學習地圖上「靜默消失」。合法資料下此函式輸出完全不受影響。
-  const nodeCategory = (node) =>
-    (node && typeof node.category === 'string' && node.category.trim()) ? node.category : 'General';
+  const categoryIndex = buildCategoryIndex(loadCategoryRegistryOrThrow());
+  const graph = buildCategoryGraph(mindmap, categoryIndex);
+  const { columnById, layout } = buildLearningMapLayout(graph);
 
-  const categoryNames = [...new Set(nodes.map((node) => nodeCategory(node)))]
-    .sort((left, right) => left.localeCompare(right, 'zh-Hant'));
-
-  const categories = categoryNames.map((name, index) => ({
-    id: `category-${index}`,
-    name,
-    topicIds: [],
-  }));
-  const categoryIndexByName = new Map(categories.map((category, index) => [category.name, index]));
-
-  const sortedTopics = [...nodes].sort((left, right) => {
-    const categoryOrder = nodeCategory(left).localeCompare(nodeCategory(right), 'zh-Hant');
-    if (categoryOrder !== 0) return categoryOrder;
-    const titleOrder = String(left.title || '').localeCompare(String(right.title || ''), 'zh-Hant');
-    return titleOrder !== 0 ? titleOrder : String(left.id).localeCompare(String(right.id));
-  });
-
-  const topics = sortedTopics.map((node) => {
-    const meta = completedById.get(node.id);
-    const isDone = Boolean(meta);
-    const category = nodeCategory(node);
-    const categoryIndex = categoryIndexByName.get(category);
-    if (Number.isInteger(categoryIndex)) {
-      categories[categoryIndex].topicIds.push(node.id);
-    }
-
-    let path = null;
-    let completedAt = null;
-    if (isDone) {
-      completedAt = typeof meta.completed_at === 'string' ? meta.completed_at : null;
-      if (typeof meta.path === 'string' && meta.path) {
-        path = meta.path.replace(/^books\//, '');
-      } else {
-        path = `${node.id}/index.html`;
+  const topics = nodes
+    .slice()
+    .sort((left, right) => compareCodePoint(left.id, right.id))
+    .map((node) => {
+      const meta = completedById.get(node.id);
+      const isDone = Boolean(meta);
+      let path = null;
+      let completedAt = null;
+      if (isDone) {
+        completedAt = typeof meta.completed_at === 'string' ? meta.completed_at : null;
+        path = (typeof meta.path === 'string' && meta.path)
+          ? meta.path.replace(/^books\//, '')
+          : `${node.id}/index.html`;
       }
-    }
+      return {
+        id: node.id,
+        title: node.title,
+        category: node.category,
+        completed: isDone,
+        completed_at: completedAt,
+        path,
+      };
+    });
 
+  const categories = graph.categories.map((category) => {
+    const topicIds = computeReadingOrder(category.topicIds, edges);
+    const column = columnById.get(category.id);
     return {
-      id: node.id,
-      title: node.title,
-      category,
-      completed: isDone,
-      completed_at: completedAt,
-      path,
+      id: category.id,
+      name: category.name,
+      domain: category.domain,
+      column: Number.isInteger(column) ? column : null,
+      topicIds,
+      published: topicIds.filter((id) => completedById.has(id)).length,
+      total: topicIds.length,
     };
   });
 
-  const topicById = new Map(topics.map((topic) => [topic.id, topic]));
-  const relationByKey = new Map();
-  const topicRelationByKey = new Map();
-
-  edges.forEach((edge) => {
-    if (edge.type !== 'prerequisite' && edge.type !== 'related') return;
-    const sourceTopic = topicById.get(edge.from);
-    const targetTopic = topicById.get(edge.to);
-    if (!sourceTopic || !targetTopic) return;
-
-    let sourceIndex = categoryIndexByName.get(sourceTopic.category);
-    let targetIndex = categoryIndexByName.get(targetTopic.category);
-    if (!Number.isInteger(sourceIndex) || !Number.isInteger(targetIndex)) return;
-
-    // Same-category: keep as topic-level relations for cluster-detail view.
-    if (sourceIndex === targetIndex) {
-      let fromId = edge.from;
-      let toId = edge.to;
-      if (edge.type === 'related' && fromId > toId) {
-        const swap = fromId;
-        fromId = toId;
-        toId = swap;
-      }
-      const topicKey = `${fromId}|${toId}|${edge.type}`;
-      if (!topicRelationByKey.has(topicKey)) {
-        topicRelationByKey.set(topicKey, {
-          source: fromId,
-          target: toId,
-          type: edge.type,
-          category: categories[sourceIndex].id,
-        });
-      }
-      return;
-    }
-
-    if (edge.type === 'related' && sourceIndex > targetIndex) {
-      const swap = sourceIndex;
-      sourceIndex = targetIndex;
-      targetIndex = swap;
-    }
-
-    const key = `${sourceIndex}|${targetIndex}|${edge.type}`;
-    const existing = relationByKey.get(key);
-    if (existing) {
-      existing.count += 1;
-    } else {
-      relationByKey.set(key, {
-        sourceCategory: categories[sourceIndex].id,
-        targetCategory: categories[targetIndex].id,
-        type: edge.type,
-        count: 1,
-      });
-    }
-  });
-
-  const categoryRelations = [...relationByKey.values()].sort((left, right) =>
-    left.sourceCategory.localeCompare(right.sourceCategory)
-    || left.targetCategory.localeCompare(right.targetCategory)
-    || left.type.localeCompare(right.type)
-  );
-
-  const topicRelations = [...topicRelationByKey.values()].sort((left, right) =>
-    left.source.localeCompare(right.source)
-    || left.target.localeCompare(right.target)
-    || left.type.localeCompare(right.type)
-  );
-
   return {
-    root: { id: 'root-0', label: 'System Design\nEvery Day' },
+    version: 2,
+    stats: {
+      published: topics.filter((topic) => topic.completed).length,
+      total: topics.length,
+    },
+    domains: graph.domains,
     categories,
     topics,
-    categoryRelations,
-    topicRelations,
+    categoryPrereqs: graph.categoryPrereqs,
+    layout,
   };
 }
 
@@ -574,7 +560,12 @@ function main() {
     const code = generateMermaid();
     console.log(code);
   } else if (action === 'generate-learning-map') {
-    console.log(JSON.stringify(buildLearningMapData(), null, 2));
+    try {
+      console.log(JSON.stringify(buildLearningMapData(), null, 2));
+    } catch (e) {
+      console.error(`[mindmap] ERROR: ${e.message}`);
+      process.exit(1);
+    }
   } else {
     console.error(`Unknown action: ${action}`);
     process.exit(1);
@@ -584,4 +575,4 @@ function main() {
 if (require.main === module) {
   main();
 }
-module.exports = { generateMermaid, buildLearningMapData, buildCategoryGraph };
+module.exports = { generateMermaid, buildLearningMapData, buildCategoryGraph, computeReadingOrder };
