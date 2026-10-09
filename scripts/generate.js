@@ -6,6 +6,9 @@
  * Usage:
  *   node scripts/generate.js --topic <topic-id> --title "Topic Title" [--category "Category"] [--keep-date]
  *
+ *   --category   選填。主題的分類一律由 docs/mindmap.json 的節點帶出（分類的單一真相來源）；
+ *                有給此旗標時必須與節點一致，否則 exit 1。主題不在 mindmap 時亦 exit 1
+ *                （請先用 add-topic.js 建立節點）。兩種失敗都發生在寫任何檔案之前。
  *   --keep-date  更新既有文件時保留 completed.json 原始 completed_at（不 bump 成今天）。
  *                供 topic-reviser 修訂流程使用；新建主題請省略此旗標。
  *
@@ -40,6 +43,7 @@ const { writeFileAtomic } = require('./lib/atomic');
 
 const ROOT = path.resolve(__dirname, '..');
 const TEMPLATE_PATH = path.join(ROOT, 'templates', 'base.html');
+const MINDMAP_PATH = path.join(ROOT, 'docs', 'mindmap.json');
 
 function parseArgs(argv) {
   const args = {};
@@ -66,14 +70,54 @@ function readFileOrDefault(filePath, fallback = '') {
   return fs.readFileSync(filePath, 'utf8');
 }
 
+/**
+ * 守門 0：主題的 category 由 mindmap 節點帶出（純檢查，無副作用）。
+ * 節點不存在、或 --category 與節點不一致時回傳 null（錯誤已印出），呼叫端應 exit 1。
+ */
+function resolveCategoryFromMindmap(topicId, categoryArg) {
+  if (!fs.existsSync(MINDMAP_PATH)) {
+    console.error(`找不到 docs/mindmap.json（${MINDMAP_PATH}），無法取得主題分類。`);
+    return null;
+  }
+  let mindmap;
+  try {
+    mindmap = JSON.parse(fs.readFileSync(MINDMAP_PATH, 'utf8'));
+  } catch (e) {
+    console.error(`docs/mindmap.json 解析失敗（檔案可能損壞）：${e.message}`);
+    return null;
+  }
+  const nodes = Array.isArray(mindmap && mindmap.nodes) ? mindmap.nodes : [];
+  const node = nodes.find((item) => item && item.id === topicId);
+  if (!node) {
+    console.error(`主題 "${topicId}" 不在 docs/mindmap.json 的 nodes 中，拒絕發佈（分類由 mindmap 節點帶出）。`);
+    console.error('請先用 node scripts/add-topic.js 建立節點（新分類需帶 --domain），再重跑 generate.js。');
+    return null;
+  }
+  if (typeof node.category !== 'string' || !node.category) {
+    console.error(`mindmap 節點 "${topicId}" 缺少 category，請先修正 docs/mindmap.json（node scripts/validate.js 會指出問題）。`);
+    return null;
+  }
+  if (typeof categoryArg === 'string' && categoryArg !== node.category) {
+    console.error(`--category "${categoryArg}" 與 mindmap 節點 "${topicId}" 的 category "${node.category}" 不一致，拒絕發佈。`);
+    console.error('請省略 --category（由 mindmap 帶出），或改用與節點相同的值；要改分類請調整 docs/mindmap.json。');
+    return null;
+  }
+  return node.category;
+}
+
 function main() {
   const args = parseArgs(process.argv);
   const topicId = args.topic;
   const title = args.title;
-  const category = args.category || 'General';
 
   if (!topicId || !title) {
     console.error('Usage: node scripts/generate.js --topic <topic-id> --title "Topic Title" [--category "Category"] [--keep-date]');
+    process.exit(1);
+  }
+
+  // ---- 守門 0：category 由 mindmap 節點帶出 (純檢查，無副作用) ----
+  const category = resolveCategoryFromMindmap(topicId, args.category);
+  if (category === null) {
     process.exit(1);
   }
 

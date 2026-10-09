@@ -5,20 +5,26 @@
  *
  * 將一個新主題寫入 docs/mindmap.json (nodes + edges) 與 docs/todo.json，
  * 避免 Agent 直接全量讀寫大型 JSON 造成的 token 浪費與解析錯誤。
+ * 若 --category 是尚未登記的新分類，會一併寫進分類登記表 docs/categories.json（需帶 --domain）。
  *
- * 寫入安全性：每個檔以 temp+rename 做「單檔原子寫入」；對 mindmap + todo 這對「雙檔」
- * 採「先寫 mindmap、todo 寫入失敗則回滾 mindmap」，達成兩檔「全有或全無」。
- * 寫入後請務必執行 `node scripts/validate.js` 驗證結構一致性 (含懸空邊與 prerequisite 環)。
+ * 寫入安全性：每個檔以 temp+rename 做「單檔原子寫入」；對 categories → mindmap → todo 這組
+ * 多檔寫入採「任一步失敗就回滾已寫入的檔」，達成「全有或全無」。
+ * 寫入後請務必執行 `node scripts/validate.js` 驗證結構一致性 (含懸空邊與 prerequisite 環)，
+ * 並執行 `node scripts/reindex-home.js` 重繪首頁學習地圖。
  *
  * 用法:
  *   node scripts/add-topic.js \
- *     --id <topic-id> --title "標題" --category "分類" \
+ *     --id <topic-id> --title "標題" --category "分類" [--domain <domain-id>] \
  *     [--prereq id1,id2] [--related id3,id4] [--brief "撰文重點"] [--no-todo] [--dry-run]
  *
  * 旗標說明:
  *   --id        新主題的 kebab-case id (同時作為 drafts/<id>/ 與 books/<id>/ 資料夾名)
  *   --title     主題標題 (顯示用，可含中英文)
- *   --category  分類 (例: "Distributed Transactions"、"Caching")
+ *   --category  必填。分類 (例: "Distributed Transactions"、"Caching")。
+ *               已登記的分類：直接使用；可用 `node scripts/mindmap.js --action list-categories` 查詢。
+ *               未登記的新分類：必須同時帶 --domain，成功時會寫進 docs/categories.json。
+ *   --domain    分類所屬領域 id（須已存在於 docs/categories.json 的 domains）。
+ *               分類已登記時可省略；有給就必須和登記值一致。
  *   --prereq    逗號分隔的「先備主題」node id 清單 → 產生 edge { from: prereq, to: id, type: 'prerequisite' }
  *   --related   逗號分隔的「關聯主題」node id 清單 → 產生 edge { from: id, to: related, type: 'related' }
  *   --brief     選填。加入 todo 時一併寫入的 per-topic 撰文指引（2-3 句即可）；僅內容取向，不涉及版面格式
@@ -32,6 +38,13 @@
 const fs = require('fs');
 const path = require('path');
 const { writeJSONAtomic } = require('./lib/atomic');
+const {
+  CATEGORIES_PATH,
+  readCategoryRegistry,
+  validateCategoryRegistry,
+  buildCategoryIndex,
+  withCategory,
+} = require('./lib/categories');
 
 const ROOT = path.resolve(__dirname, '..');
 
@@ -75,13 +88,53 @@ function splitList(value) {
     .filter(Boolean);
 }
 
+const USAGE = '--id <topic-id> --title "標題" --category "分類" [--domain <domain-id>] [--prereq a,b] [--related c,d] [--brief "撰文重點"] [--no-todo] [--dry-run]';
+
+/**
+ * 依 §決策 15／17 解析 --category / --domain 與登記表的關係。
+ * @returns {{ registry: object, nextRegistry: object|null, domain: string }}
+ *   nextRegistry 為 null 代表登記表不需變更；否則為插入新分類後的登記表副本。
+ */
+function resolveCategoryRegistration(category, domainArg) {
+  let registry;
+  try {
+    registry = readCategoryRegistry();
+  } catch (e) {
+    fail(e.message);
+  }
+  const registryErrors = validateCategoryRegistry(registry);
+  if (registryErrors.length) {
+    fail(`docs/categories.json 格式有誤，請先修正：\n  - ${registryErrors.join('\n  - ')}`);
+  }
+
+  const index = buildCategoryIndex(registry);
+  const domain = typeof domainArg === 'string' ? domainArg.trim() : '';
+  const registered = index.categoryByName.get(category);
+
+  if (registered) {
+    if (domain && domain !== registered.domain) {
+      fail(`分類 "${category}" 已登記於領域 "${registered.domain}"，與 --domain "${domain}" 不一致。要調整分類所屬領域請直接編輯 docs/categories.json。`);
+    }
+    return { registry, nextRegistry: null, domain: registered.domain };
+  }
+
+  const knownDomains = index.domains.map((d) => d.id).join(', ');
+  if (!domain) {
+    fail(`分類 "${category}" 尚未登記，新增分類必須帶 --domain <domain-id>（可選：${knownDomains}）。已登記的分類可用 node scripts/mindmap.js --action list-categories 查詢。`);
+  }
+  if (!index.domainById.has(domain)) {
+    fail(`--domain "${domain}" 不存在於 docs/categories.json（可選：${knownDomains}）。新增領域請直接編輯該檔。`);
+  }
+  return { registry, nextRegistry: withCategory(registry, { name: category, domain }), domain };
+}
+
 function main() {
   const args = parseArgs(process.argv);
   const { id, title } = args;
-  const category = args.category || 'General';
+  const category = typeof args.category === 'string' ? args.category.trim() : '';
 
-  if (!id || !title) {
-    fail('必填參數缺失。用法: --id <topic-id> --title "標題" [--category "分類"] [--prereq a,b] [--related c,d] [--brief "撰文重點"] [--no-todo] [--dry-run]');
+  if (!id || !title || !category) {
+    fail(`必填參數缺失（--id、--title、--category 皆必填）。用法: ${USAGE}`);
   }
   if (!/^[a-z0-9]+(-[a-z0-9]+)*$/.test(id)) {
     fail(`id "${id}" 不是合法的 kebab-case (僅允許小寫英數與連字號)。`);
@@ -90,6 +143,8 @@ function main() {
   const mindmapPath = path.join(ROOT, 'docs', 'mindmap.json');
   const todoPath = path.join(ROOT, 'docs', 'todo.json');
   const completedPath = path.join(ROOT, 'docs', 'completed.json');
+
+  const { nextRegistry, domain } = resolveCategoryRegistration(category, args.domain);
 
   const mindmap = readJSON(mindmapPath, { nodes: [], edges: [] });
   const todo = readJSON(todoPath, []);
@@ -131,10 +186,14 @@ function main() {
   ];
   const addTodo = !args['no-todo'] && !todoIds.has(id) && !completedIds.has(id);
 
+  const registryChange = nextRegistry ? { add_category: { name: category, domain } } : null;
+
   if (args['dry-run']) {
     console.log(JSON.stringify({
       dry_run: true,
       project_root: ROOT,
+      category_domain: domain,
+      registry_change: registryChange,
       add_node: newNode,
       add_edges: newEdges,
       add_to_todo: addTodo ? todoEntry : null,
@@ -142,35 +201,50 @@ function main() {
     return;
   }
 
-  // ---- 寫入 (雙檔原子 + 回滾) ----
-  // 先記下 mindmap.json 的原始位元組，作為 todo 寫入失敗時的回滾依據。
-  const mindmapBackup = fs.existsSync(mindmapPath) ? fs.readFileSync(mindmapPath, 'utf8') : null;
+  // ---- 寫入 (多檔原子 + 回滾) ----
+  // 順序：categories.json（有變更時）→ mindmap.json → todo.json。
+  // 每寫一檔前先記下原始位元組；任一步失敗就以相反順序還原已寫入的檔，確保「全有或全無」。
+  const written = []; // [{ filePath, backup }]，backup 為 null 代表原本不存在
+
+  function writeWithRollback(filePath, data, label) {
+    const backup = fs.existsSync(filePath) ? fs.readFileSync(filePath, 'utf8') : null;
+    try {
+      writeJSONAtomic(filePath, data);
+      written.push({ filePath, backup });
+    } catch (e) {
+      written.reverse().forEach(({ filePath: writtenPath, backup: writtenBackup }) => {
+        if (writtenBackup !== null) {
+          fs.writeFileSync(writtenPath, writtenBackup, 'utf8');
+        } else if (fs.existsSync(writtenPath)) {
+          fs.unlinkSync(writtenPath); // 原本不存在 → 還原為不存在
+        }
+      });
+      const rolledBack = written.map(({ filePath: p }) => path.basename(p)).join(', ') || '（無）';
+      fail(`寫入 ${label} 失敗，已回滾 ${rolledBack}：${e.message}`);
+    }
+  }
+
+  if (nextRegistry) {
+    writeWithRollback(CATEGORIES_PATH, nextRegistry, 'categories.json');
+  }
 
   mindmap.nodes.push(newNode);
   mindmap.edges.push(...newEdges);
-  writeJSONAtomic(mindmapPath, mindmap);
+  writeWithRollback(mindmapPath, mindmap, 'mindmap.json');
 
   if (addTodo) {
-    try {
-      todo.push(todoEntry);
-      writeJSONAtomic(todoPath, todo);
-    } catch (e) {
-      // todo 寫入失敗 → 還原 mindmap，確保兩檔「全有或全無」。
-      if (mindmapBackup !== null) {
-        fs.writeFileSync(mindmapPath, mindmapBackup, 'utf8');
-      } else if (fs.existsSync(mindmapPath)) {
-        fs.unlinkSync(mindmapPath); // 原本不存在 → 還原為不存在
-      }
-      fail(`寫入 todo.json 失敗，已回滾 mindmap.json：${e.message}`);
-    }
+    todo.push(todoEntry);
+    writeWithRollback(todoPath, todo, 'todo.json');
   }
 
   console.log(JSON.stringify({
     ok: true,
+    category_domain: domain,
+    registry_change: registryChange,
     added_node: newNode,
     added_edges: newEdges,
     added_to_todo: addTodo,
-    next_step: '請執行 `node scripts/validate.js` 驗證結構一致性。',
+    next_step: '請執行 `node scripts/validate.js` 驗證結構一致性，再執行 `node scripts/reindex-home.js` 重繪首頁。',
   }, null, 2));
 }
 

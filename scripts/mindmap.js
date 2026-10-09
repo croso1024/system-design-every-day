@@ -8,12 +8,18 @@
  *
  * Usage:
  *   node scripts/mindmap.js --action next [--last-topic <topic-id>]
+ *   node scripts/mindmap.js --action list-categories
  *   node scripts/mindmap.js --action generate-mermaid
  *   node scripts/mindmap.js --action generate-learning-map
  */
 
 const fs = require('fs');
 const path = require('path');
+const {
+  readCategoryRegistry,
+  validateCategoryRegistry,
+  buildCategoryIndex,
+} = require('./lib/categories');
 
 const ROOT = path.resolve(__dirname, '..');
 const MINDMAP_PATH = path.join(ROOT, 'docs', 'mindmap.json');
@@ -171,6 +177,63 @@ function recommendNext(lastTopicId) {
     last_completed_topic: lastId || 'None',
     recommendations: annotated.slice(0, 5)
   }, null, 2));
+}
+
+/**
+ * 列出分類登記表（docs/categories.json）與各分類在 mindmap 上的文章數。
+ * 供 topic-explorer 在新增主題前查詢「既有分類名稱（逐字）」與「分類所屬領域」，
+ * 避免為了查分類而直接讀大型 JSON。登記表格式有誤時 fail-loud（exit 1），不吞錯。
+ *
+ * 輸出：
+ *   {
+ *     "domains":    [ { "id", "name", "category_count" } ],                // 登記表順序
+ *     "categories": [ { "id", "name", "domain", "published", "total" } ]   // 登記表順序（name 的 code point 序）
+ *   }
+ */
+function listCategories() {
+  let registry;
+  try {
+    registry = readCategoryRegistry();
+  } catch (e) {
+    console.error(`[mindmap] ERROR: ${e.message}`);
+    process.exit(1);
+  }
+  const errors = validateCategoryRegistry(registry);
+  if (errors.length) {
+    console.error(`[mindmap] ERROR: docs/categories.json 格式有誤：\n  - ${errors.join('\n  - ')}`);
+    process.exit(1);
+  }
+
+  const index = buildCategoryIndex(registry);
+  const mindmap = loadJSON(MINDMAP_PATH, { nodes: [], edges: [] });
+  const completed = loadJSON(COMPLETED_PATH, []);
+  const completedIds = new Set((Array.isArray(completed) ? completed : []).map((item) => item && item.id));
+  const nodes = Array.isArray(mindmap.nodes) ? mindmap.nodes : [];
+
+  const totalByCategory = new Map();
+  const publishedByCategory = new Map();
+  nodes.forEach((node) => {
+    if (!node || typeof node.category !== 'string') return;
+    totalByCategory.set(node.category, (totalByCategory.get(node.category) || 0) + 1);
+    if (completedIds.has(node.id)) {
+      publishedByCategory.set(node.category, (publishedByCategory.get(node.category) || 0) + 1);
+    }
+  });
+
+  const categories = index.categories.map((category) => ({
+    id: category.id,
+    name: category.name,
+    domain: category.domain,
+    published: publishedByCategory.get(category.name) || 0,
+    total: totalByCategory.get(category.name) || 0,
+  }));
+  const domains = index.domains.map((domain) => ({
+    id: domain.id,
+    name: domain.name,
+    category_count: categories.filter((category) => category.domain === domain.id).length,
+  }));
+
+  console.log(JSON.stringify({ domains, categories }, null, 2));
 }
 
 /**
@@ -377,12 +440,14 @@ function main() {
   const action = args.action;
 
   if (!action) {
-    console.error('Usage: node scripts/mindmap.js --action <next|generate-mermaid|generate-learning-map> [--last-topic <id>]');
+    console.error('Usage: node scripts/mindmap.js --action <next|list-categories|generate-mermaid|generate-learning-map> [--last-topic <id>]');
     process.exit(1);
   }
 
   if (action === 'next') {
     recommendNext(args['last-topic']);
+  } else if (action === 'list-categories') {
+    listCategories();
   } else if (action === 'generate-mermaid') {
     const code = generateMermaid();
     console.log(code);

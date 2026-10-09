@@ -3,6 +3,12 @@
 const fs = require('fs');
 const path = require('path');
 
+const {
+  readCategoryRegistry,
+  validateCategoryRegistry,
+  buildCategoryIndex,
+} = require('./lib/categories');
+
 const ROOT = path.resolve(__dirname, '..');
 const TODO_PATH = path.join(ROOT, 'docs', 'todo.json');
 const COMPLETED_PATH = path.join(ROOT, 'docs', 'completed.json');
@@ -386,20 +392,25 @@ function validateBooksIndexLearningMapConsistency(completed, mindmap) {
 }
 
 /**
- * prerequisite 邊環偵測 (DFS 三色法)。
- * 只取 type==='prerequisite' 的邊建圖——related 邊方向是任意的，納入會大量誤報。
+ * 有向圖環偵測 (DFS 三色法)，回傳所有相異的環路徑（每條以起點收尾，例如 [a, b, c, a]）。
  * 顏色：undefined=未訪、1=訪問中(在遞迴堆疊)、2=完成。
- * 同一個環可能從多個起點抵達，用 reported 以「環上節點集合」為 key 去重，避免洗版。
+ * 同一個環可能從多個起點抵達，以「環上節點集合」為 key 去重，避免洗版。
+ * 供主題層 prerequisite 環（validateMindmap）與分類層 prerequisite 環（R4）共用。
+ *
+ * @param {Set<string>} nodeIds
+ * @param {Array<{from:string,to:string}>} edges 已過濾為合法端點的有向邊
+ * @returns {string[][]}
  */
-function detectPrerequisiteCycles(nodeIds, edges) {
+function findDirectedCycles(nodeIds, edges) {
   const adj = new Map();
   nodeIds.forEach(id => adj.set(id, []));
   edges
-    .filter(e => e.type === 'prerequisite' && nodeIds.has(e.from) && nodeIds.has(e.to))
+    .filter(e => nodeIds.has(e.from) && nodeIds.has(e.to))
     .forEach(e => { adj.get(e.from).push(e.to); });
 
   const color = new Map();
   const reported = new Set();
+  const cycles = [];
 
   function dfs(u, stack) {
     color.set(u, 1);
@@ -411,7 +422,7 @@ function detectPrerequisiteCycles(nodeIds, edges) {
         const key = cyclePath.slice(0, -1).slice().sort().join('|');
         if (!reported.has(key)) {
           reported.add(key);
-          error(`偵測到 prerequisite 循環依賴: ${cyclePath.join(' -> ')}`);
+          cycles.push(cyclePath);
         }
       } else if (color.get(v) === undefined) {
         dfs(v, stack);
@@ -424,12 +435,111 @@ function detectPrerequisiteCycles(nodeIds, edges) {
   nodeIds.forEach(id => {
     if (color.get(id) === undefined) dfs(id, []);
   });
+  return cycles;
 }
 
-function validateMindmap(mindmap, todoIds, completedIds) {
+/**
+ * 主題層 prerequisite 邊不可成環。
+ * 只取 type==='prerequisite' 的邊建圖——related 邊方向是任意的，納入會大量誤報。
+ */
+function detectPrerequisiteCycles(nodeIds, edges) {
+  const prerequisiteEdges = edges.filter(e => e.type === 'prerequisite');
+  findDirectedCycles(nodeIds, prerequisiteEdges).forEach((cyclePath) => {
+    error(`偵測到 prerequisite 循環依賴: ${cyclePath.join(' -> ')}`);
+  });
+}
+
+/**
+ * R1：docs/categories.json 格式正確。
+ * @returns {object|null} 通過時回傳登記表；缺檔、解析失敗或格式錯誤時回傳 null（錯誤已記錄）。
+ */
+function validateCategoriesFile() {
+  let registry;
+  try {
+    registry = readCategoryRegistry();
+  } catch (e) {
+    error(e.message);
+    return null;
+  }
+  const errors = validateCategoryRegistry(registry);
+  errors.forEach((message) => error(message));
+  return errors.length ? null : registry;
+}
+
+/**
+ * R4：分類層 prerequisite 圖不得有循環。
+ * 首頁學習地圖以「分類的 prerequisite 最長路徑深度」分欄，分類層一旦成環就無法排版；
+ * 主題層無環並不保證分類層無環（A 分類的 a1 → B 分類的 b1，B 的 b2 → A 的 a2 就成環）。
+ * 報錯時印出環路徑，以及每一段分類邊背後造成循環的文章 edge，方便定位要調整哪條邊。
+ *
+ * @param {Map<string, object>} nodeById 合法節點（id → node）
+ * @param {Array} edges mindmap edges
+ */
+function validateCategoryPrerequisiteCycles(nodeById, edges) {
+  const categoryIds = new Set();
+  const topicEdgesByCategoryEdge = new Map(); // "A|B" → [{ from, to }]
+  const categoryEdges = [];
+
+  edges.forEach((edge) => {
+    if (!edge || edge.type !== 'prerequisite') return;
+    const fromNode = nodeById.get(edge.from);
+    const toNode = nodeById.get(edge.to);
+    if (!fromNode || !toNode) return;
+    const fromCategory = fromNode.category;
+    const toCategory = toNode.category;
+    if (typeof fromCategory !== 'string' || typeof toCategory !== 'string') return;
+    if (fromCategory === toCategory) return;
+
+    categoryIds.add(fromCategory);
+    categoryIds.add(toCategory);
+    const key = `${fromCategory}|${toCategory}`;
+    if (!topicEdgesByCategoryEdge.has(key)) {
+      topicEdgesByCategoryEdge.set(key, []);
+      categoryEdges.push({ from: fromCategory, to: toCategory });
+    }
+    topicEdgesByCategoryEdge.get(key).push({ from: edge.from, to: edge.to });
+  });
+
+  findDirectedCycles(categoryIds, categoryEdges).forEach((cyclePath) => {
+    const hops = [];
+    for (let i = 0; i < cyclePath.length - 1; i += 1) {
+      const key = `${cyclePath[i]}|${cyclePath[i + 1]}`;
+      const topicEdges = (topicEdgesByCategoryEdge.get(key) || [])
+        .map((topicEdge) => `${topicEdge.from} -> ${topicEdge.to}`)
+        .join(', ');
+      hops.push(`  "${cyclePath[i]}" -> "${cyclePath[i + 1]}"：${topicEdges}`);
+    }
+    error(
+      `偵測到分類層 prerequisite 循環依賴（首頁學習地圖無法分欄）: ${cyclePath.map((c) => `"${c}"`).join(' -> ')}\n` +
+      `  造成循環的文章 edge：\n${hops.join('\n')}`
+    );
+  });
+}
+
+/**
+ * R5 / R6：completed.json 與 todo.json 每一筆的 category 必須等於 mindmap 節點的 category。
+ * mindmap 是分類的單一真相來源（generate.js 的 category 由節點帶出）；兩邊不一致代表有人手改或流程繞過。
+ * 節點不存在的情況已由 validateMindmap 報錯，此處略過以免重複。
+ */
+function validateCategoryAgreement(entries, fileName, nodeById) {
+  if (!Array.isArray(entries) || !nodeById) return;
+  entries.forEach((item, index) => {
+    if (!item || typeof item.id !== 'string') return;
+    const node = nodeById.get(item.id);
+    if (!node) return;
+    if (item.category !== node.category) {
+      error(`${fileName}[${index}] "${item.id}" 的 category "${item.category}" 與 mindmap 節點的 "${node.category}" 不一致`);
+    }
+  });
+}
+
+/**
+ * @returns {Map<string, object>|null} 合法節點的 id → node 索引（供 R4～R6 使用）；結構錯誤時回傳 null
+ */
+function validateMindmap(mindmap, todoIds, completedIds, registry) {
   if (typeof mindmap !== 'object' || mindmap === null || Array.isArray(mindmap)) {
     error('mindmap.json must be a JSON Object');
-    return;
+    return null;
   }
 
   const nodes = mindmap.nodes;
@@ -437,15 +547,19 @@ function validateMindmap(mindmap, todoIds, completedIds) {
 
   if (!Array.isArray(nodes)) {
     error('mindmap.json must contain a "nodes" Array');
-    return;
+    return null;
   }
 
   if (!Array.isArray(edges)) {
     error('mindmap.json must contain an "edges" Array');
-    return;
+    return null;
   }
 
+  const categoryIndex = registry ? buildCategoryIndex(registry) : null;
+  const usedCategories = new Set();
+
   const nodeIds = new Set();
+  const nodeById = new Map();
   nodes.forEach((node, index) => {
     const label = `mindmap.json nodes[${index}]`;
     if (typeof node !== 'object' || node === null) {
@@ -460,6 +574,7 @@ function validateMindmap(mindmap, todoIds, completedIds) {
         error(`Duplicate node id found in mindmap.json nodes: "${node.id}"`);
       }
       nodeIds.add(node.id);
+      nodeById.set(node.id, node);
     }
 
     if (typeof node.title !== 'string' || !node.title) {
@@ -468,8 +583,23 @@ function validateMindmap(mindmap, todoIds, completedIds) {
 
     if (typeof node.category !== 'string' || !node.category) {
       error(`${label} is missing a valid 'category' (string)`);
+    } else {
+      usedCategories.add(node.category);
+      // R2：每個節點的 category 都已登記（登記表本身有錯時略過，避免連鎖誤報）
+      if (categoryIndex && !categoryIndex.categoryByName.has(node.category)) {
+        error(`${label} "${node.id}" 的 category "${node.category}" 未登記於 docs/categories.json（新分類請走 add-topic.js --domain）`);
+      }
     }
   });
+
+  // R3：登記表中沒有任何節點使用的分類視為錯誤（避免登記表累積殭屍分類）
+  if (categoryIndex) {
+    categoryIndex.categories.forEach((category) => {
+      if (!usedCategories.has(category.name)) {
+        error(`docs/categories.json 的分類 "${category.name}" 沒有任何 mindmap 節點使用，請移除或修正`);
+      }
+    });
+  }
 
   edges.forEach((edge, index) => {
     const label = `mindmap.json edges[${index}]`;
@@ -513,6 +643,11 @@ function validateMindmap(mindmap, todoIds, completedIds) {
 
   // prerequisite 邊不可成環 (否則「解鎖」語意失效)。此為最後防線，獨立於 add-topic 的自環攔截。
   detectPrerequisiteCycles(nodeIds, edges);
+
+  // R4：分類層 prerequisite 圖也不可成環（首頁學習地圖分欄的前提）。
+  validateCategoryPrerequisiteCycles(nodeById, edges);
+
+  return nodeById;
 }
 
 function main() {
@@ -527,9 +662,12 @@ function main() {
     process.exit(1);
   }
 
+  const registry = validateCategoriesFile(); // R1
   const todoIds = validateTodo(todo);
   const completedIds = validateCompleted(completed);
-  validateMindmap(mindmap, todoIds, completedIds);
+  const nodeById = validateMindmap(mindmap, todoIds, completedIds, registry); // 含 R2～R4
+  validateCategoryAgreement(completed, 'completed.json', nodeById); // R5
+  validateCategoryAgreement(todo, 'todo.json', nodeById); // R6
   validateMutualExclusion(todoIds, completedIds);
   validateBooksIndexConsistency(completed, mindmap);
   validateBooksIndexLearningMapConsistency(completed, mindmap);
