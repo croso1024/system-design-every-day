@@ -11,13 +11,15 @@
 ### A. 檔案路徑與功能說明
 
 1. **`scripts/validate.js` (狀態文件驗證指令碼)**
-   - **功能**：專門用來檢驗 `docs/todo.json`、`docs/completed.json` 與 `docs/mindmap.json`。
+   - **功能**：專門用來檢驗 `docs/todo.json`、`docs/completed.json`、`docs/mindmap.json` 與 `docs/categories.json`，並比對首頁 `books/index.html` 的學習地圖 payload。
    - **驗證項目**：
      - JSON 格式與語法正確性。
      - 必要欄位（如 `id`、`title`、`category`）的存在與型別。
      - `completed.json` 的完成時間格式（YYYY-MM-DD）及網頁相對路徑（`path`）是否在專案中真實存在（避免指到不存在的 html 檔案）。
      - 節點一致性：驗證 `todo.json` 與 `completed.json` 的 `id` 是否皆有在 `mindmap.json` 的節點（`nodes`）中宣告。
      - 關係一致性：驗證 `mindmap.json` 中的 `edges` 連接的節點是否存在。
+     - 分類一致性：`categories.json` 登記表格式正確、mindmap 每個節點的分類都已登記、`todo` / `completed` 的分類與 mindmap 節點一致，且分類層 prerequisite 無循環。
+     - 首頁同步：`books/index.html` 內嵌的學習地圖 payload v2 必須等於以目前 `docs/` 重算的結果（過時時提示執行 `node scripts/reindex-home.js`）。
 
 2. **`.github/workflows/deploy.yml` (GitHub Actions 工作流)**
    - **功能**：每當有推送（Push）或合併（Merge）到 `main` 分支時，自動執行驗證與發佈。
@@ -64,8 +66,9 @@ node scripts/validate.js
 3. **本地編譯 (重要)**：
    執行以下指令組裝 HTML 頁面並自動更新 `completed.json` 及 `books/index.html`：
    ```bash
-   node scripts/generate.js --topic <topic-id> --title "主題名稱" --category "分類名稱"
+   node scripts/generate.js --topic <topic-id> --title "主題名稱"
    ```
+   分類由 `docs/mindmap.json` 的節點帶出，不必帶 `--category`（有給就必須與節點一致，否則零副作用 exit 1）。
 4. **移除待辦**：將已完成主題自 `docs/todo.json` 移除（順序鐵律：必須在 `validate` 之前）：
    ```bash
    node scripts/remove-todo.js --topic <topic-id>

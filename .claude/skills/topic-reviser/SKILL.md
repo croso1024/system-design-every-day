@@ -88,8 +88,8 @@ node scripts/quality/archetype-window.js --topic <id>   # 與發佈序上相鄰 
 - [ ] 2. 落地前驗證：demo-audit.js / compute-probe.js / archetype-window.js --topic <id>
          動到 demo → 三者皆須 exit 0（L1 第 6、9 項確認為誤報可放行，見 style-guide §0.6）
          只改論述 → demo-audit.js 不得出現本次新增的失敗；tech-debt.md 已登錄的既有失敗不阻擋
-- [ ] 3. 重新發佈（務必帶 --keep-date + 沿用既有 title/category）：
-         node scripts/generate.js --topic <id> --title "<既有 title>" --category "<既有 category>" --keep-date
+- [ ] 3. 重新發佈（務必帶 --keep-date + 沿用既有 title；分類由 mindmap 帶出，不必傳）：
+         node scripts/generate.js --topic <id> --title "<既有 title>" --keep-date
 - [ ] 4. 使用者審核：提供 open books/<id>/index.html 預覽，等待確認（可反覆回 Step 1 修正）
 - [ ] 5. 一致性驗證：node scripts/validate.js
 - [ ] 6. 提交（確認後才做，單行 [docs] 規範，僅 stage 本次觸及的檔）
@@ -100,8 +100,9 @@ node scripts/quality/archetype-window.js --topic <id>   # 與發佈序上相鄰 
 1. **`--keep-date` 保留原始完成日期**：更新 ≠ 重新完成。`generate.js` 預設會把 `completed_at`
    bump 成今天；更新時**必須**加 `--keep-date`，讓它沿用 `completed.json` 的原始日期（旗標會自動
    讀取既有 entry 的 `completed_at`）。**這是最容易漏的坑。**
-2. **沿用既有 `title` / `category`**：從 `docs/completed.json` 讀該主題現有的 `title` 與 `category`，
-   原封傳入，**不要更動 metadata**（改標題/分類不屬於「內容修訂」）。
+2. **沿用既有 `title`、不要動分類**：從 `docs/completed.json` 定點查（grep 該 id，勿全量讀）該主題現有的 `title` 原封傳入；
+   `category` 由 `docs/mindmap.json` 的節點帶出，不必也不應傳 `--category`（有給且不一致會 exit 1）。
+   **不要更動 metadata**（改標題/分類不屬於「內容修訂」；要改分類得調整 mindmap，交棒 `topic-explorer`）。
 3. **不動 `todo.json` / `mindmap.json`、不跑 `remove-todo.js`**：主題早已完成、不在 todo，
    純內容更新與選題/圖譜無關。（這正是與 `topic-author` 收尾流程最大的不同——沒有 remove-todo 步驟。）
 4. `completed.json` 與 `books/index.html` 皆為 `generate.js` 自動產物，**勿手動編輯**。
