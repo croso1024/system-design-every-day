@@ -49,7 +49,7 @@
 
 ## 🧱 基礎色彩系統 (CSS 變數)
 
-全站基於 CSS 變數進行視覺渲染，請**避免**使用與這套系統衝突的高飽和、隨機 Tailwind 配色：
+全站基於 CSS 變數進行視覺渲染。**全站不載入 Tailwind**（文章頁與首頁皆無，`templates/base.html` 自帶等價於 preflight 的最小重置），utility class 寫了不會生效；所有顏色一律使用下表變數，不要寫高飽和、隨機的 raw hex：
 
 | 變數名稱 | 顏色範例 | 具體色值 | 適用場景 |
 | :--- | :---: | :--- | :--- |
@@ -81,7 +81,7 @@
 ### 首頁殼層與學習地圖的 token 規則
 
 - **單一真相**：`:root` 只寫在 `templates/base.html`。首頁 `books/index.html` 的 token 由 `scripts/lib/books.js` 在產頁時從 base.html 抽出，不另外維護一份；改 token 後跑 `reindex-home.js`（首頁）或 `rebuild-all.js`（文章頁）即可同步。
-- **首頁不載入 Tailwind**：殼層（header / footer / 最後更新列）只用上表 token 寫成少量自訂 class（`.site-*`），不得使用 `stone-*` 等 Tailwind 色票或 utility class。
+- **首頁殼層只用 token**：header / footer / 最後更新列以少量自訂 class（`.site-*`）寫成，顏色全取自上表；不得使用 `stone-*` 等 Tailwind 色票或 utility class（全站已不載入 Tailwind）。
 - **地圖 CSS 不得出現 raw hex**：`templates/home-learning-map.css` 的規則一律 `var()`。全站 token 沒有對應語意的顏色（選取深灰 `--lm-ink`、步驟徽章 `--lm-step`、走線 `--lm-edge` / `--lm-edge-dim`、路徑卡片邊框 `--lm-path-border`）只在 `.learning-map` 區塊命名一次。
 - **領域色**：`network` → `--accent`、`data` → `--ok`、`platform` → `--warn`、`ai` → `--lm-domain-ai`（紫，全站無對應）。新增領域時在 `[data-domain="<id>"]` 補一條規則（validate R8 會檢查），優先沿用既有 token。
 
