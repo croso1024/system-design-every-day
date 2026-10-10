@@ -75,10 +75,10 @@ function buildMetaHtml({ sha, repo, at }) {
 
   if (repo && /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repo)) {
     const href = `https://github.com/${repo}/commit/${encodeURIComponent(full)}`;
-    return `<p class="mt-3 font-mono text-xs text-stone-400">最後更新：${when} · <a href="${href}" class="hover:text-stone-600 underline-offset-2 hover:underline" title="View commit ${escapeHtml(short)}">${escapeHtml(short)}</a></p>`;
+    return `<p class="site-meta">最後更新：${when} · <a href="${href}" title="View commit ${escapeHtml(short)}">${escapeHtml(short)}</a></p>`;
   }
 
-  return `<p class="mt-3 font-mono text-xs text-stone-400">最後更新：${when} · ${escapeHtml(short)}</p>`;
+  return `<p class="site-meta">最後更新：${when} · ${escapeHtml(short)}</p>`;
 }
 
 function main() {
