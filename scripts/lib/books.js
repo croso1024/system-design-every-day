@@ -7,7 +7,9 @@
  *
  * 首頁知識地圖：payload v2 由 mindmap.js `buildLearningMapData` 產生（排版在產頁時算好），
  * 畫面由 lib/home-map-render.js 伺服器端輸出，前端 templates/home-learning-map.js 只做選取互動。
- * 零第三方依賴（無圖形引擎 CDN）；手機寬度改顯示伺服器端分組清單，故不需要 <noscript> 後備。
+ * 零第三方依賴（不載入 Tailwind，也沒有圖形引擎 CDN）；手機寬度改顯示伺服器端分組清單，故不需要 <noscript> 後備。
+ * 設計 token（:root）在產頁時從 templates/base.html 抽出（extractRootTokens），首頁與文章頁共用同一份真相；
+ * 首頁殼層與地圖 CSS 只能用這些 token 或 .learning-map 內命名過的 --lm-* 顏色，不得寫 raw hex。
  */
 
 const fs = require('fs');
@@ -19,6 +21,7 @@ const { writeJSONAtomic, writeFileAtomic } = require('./atomic');
 const ROOT = path.resolve(__dirname, '..', '..');
 const COMPLETED_PATH = path.join(ROOT, 'docs', 'completed.json');
 const BOOKS_INDEX_PATH = path.join(ROOT, 'books', 'index.html');
+const BASE_TEMPLATE_PATH = path.join(ROOT, 'templates', 'base.html');
 const HOME_MAP_CSS_PATH = path.join(ROOT, 'templates', 'home-learning-map.css');
 const HOME_MAP_JS_PATH = path.join(ROOT, 'templates', 'home-learning-map.js');
 
@@ -81,6 +84,19 @@ function readTemplate(filePath, label) {
 }
 
 /**
+ * 從 templates/base.html 抽出第一個 `:root { … }` token 區塊（單一真相來源），供首頁 <style> 使用。
+ * base.html 改了 token，reindex 後首頁自動跟上；找不到區塊時 throw，讓呼叫端零副作用中止。
+ * 換行統一為 LF，避免 base.html 的 CRLF 混進首頁產物。
+ */
+function extractRootTokens(baseHtml) {
+  const match = String(baseHtml).match(/:root\s*\{[^}]*\}/);
+  if (!match) {
+    throw new Error('templates/base.html 找不到 :root { … } token 區塊，無法組出首頁');
+  }
+  return `    ${match[0].replace(/\r\n/g, '\n')}`;
+}
+
+/**
  * 組出完整首頁 HTML（純計算，不落檔）。
  * 傳入 in-memory completed，讓 payload 與 ledger 同源（勿讓 builder 自行讀磁碟，
  * 否則會在「尚未 saveCompleted」的呼叫端出現節點落後的 off-by-one bug）。
@@ -95,6 +111,7 @@ function buildBooksIndexHtml(completed) {
   // 反斜線在 CSS / JS 字串語境中皆為透明轉義（`<\/style` 等價 `</style`），故對合法內容無副作用。
   const learningMapCss = readTemplate(HOME_MAP_CSS_PATH, 'home-learning-map.css').replace(/<\/(style)/gi, '<\\/$1');
   const learningMapJs = readTemplate(HOME_MAP_JS_PATH, 'home-learning-map.js').replace(/<\/(script)/gi, '<\\/$1');
+  const rootTokens = extractRootTokens(readTemplate(BASE_TEMPLATE_PATH, 'base.html'));
 
   return `<!DOCTYPE html>
 <html lang="zh-Hant">
@@ -105,62 +122,50 @@ function buildBooksIndexHtml(completed) {
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@300;400;500;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
-  <script src="https://cdn.tailwindcss.com"></script>
   <style>
-    :root {
-      --bg: #ffffff;
-      --bg-soft: #fafaf9;
-      --text: #262a2f;
-      --text-2: #6b7078;
-      --text-3: #9aa0a8;
-      --border: #ecebe8;
-      --border-strong: #dedcd8;
-      --code-bg: #f6f5f3;
-      --accent: #3f6188;
-      --accent-soft: #eef2f7;
-      --accent-line: #cdd9e6;
-      --ok: #4d7d68;
-      --ok-soft: #eef4f1;
-      --warn: #a3743e;
-      --warn-soft: #f6f0e7;
-      --bad: #a8554f;
-      --bad-soft: #f6ecea;
-      --radius: 10px;
-      --radius-sm: 7px;
-      --sans: "Noto Sans TC", system-ui, -apple-system, "Segoe UI", sans-serif;
-      --mono: "JetBrains Mono", "SFMono-Regular", Menlo, Consolas, monospace;
-    }
-    body {
-      background: var(--bg);
-      color: var(--text);
-      font-family: var(--sans);
-    }
-    .page-wrap {
-      max-width: 1760px;
-      margin: 0 auto;
-      padding-left: 24px;
-      padding-right: 24px;
-    }
+${rootTokens}
+    /* 首頁不載入 Tailwind。以下是等價於其 preflight 的最小重置，讓地圖樣式的基準與改版前一致。 */
+    *, *::before, *::after { box-sizing: border-box; border: 0 solid currentColor; }
+    html { line-height: 1.5; -webkit-text-size-adjust: 100%; }
+    body { margin: 0; min-height: 100vh; background: var(--bg); color: var(--text); font-family: var(--sans); }
+    h1, h2, h3, h4 { margin: 0; font-size: inherit; font-weight: inherit; }
+    p { margin: 0; }
+    a { color: inherit; text-decoration: inherit; }
+    ol, ul { list-style: none; margin: 0; padding: 0; }
+    button { margin: 0; padding: 0; font: inherit; color: inherit; background: transparent; cursor: pointer; }
+    svg { display: block; vertical-align: middle; }
+    summary { display: list-item; }
+    /* 首頁殼層：顏色、字體一律取自上方 token。 */
+    .page-wrap { max-width: 1760px; margin: 0 auto; padding-left: 24px; padding-right: 24px; }
+    .site-header { border-bottom: 1px solid var(--border); background: var(--bg-soft); }
+    .site-header > .page-wrap, .site-main, .site-footer { padding-top: 48px; padding-bottom: 48px; }
+    .site-kicker { font-family: var(--mono); font-size: 12px; line-height: 16px; letter-spacing: 0.2em; text-transform: uppercase; color: var(--text-3); }
+    .site-title { margin-top: 12px; font-size: 36px; line-height: 40px; font-weight: 700; letter-spacing: -0.025em; color: var(--text); }
+    .site-lede { margin-top: 16px; max-width: 42rem; font-weight: 300; line-height: 1.625; color: var(--text-2); }
+    .site-meta { margin-top: 12px; font-family: var(--mono); font-size: 12px; line-height: 16px; color: var(--text-3); }
+    .site-meta a { text-underline-offset: 2px; }
+    .site-meta a:hover { color: var(--text-2); text-decoration: underline; }
+    .site-footer { border-top: 1px solid var(--border); text-align: center; font-family: var(--mono); font-size: 12px; line-height: 16px; color: var(--text-3); }
 ${learningMapCss}
   </style>
 </head>
-<body class="min-h-screen">
-  <header class="border-b border-stone-200 bg-stone-50/50 backdrop-blur">
-    <div class="page-wrap py-12">
-      <p class="font-mono text-xs uppercase tracking-[0.2em] text-stone-400">Learning Handbook</p>
-      <h1 class="mt-3 text-4xl font-bold tracking-tight text-stone-800">System Design Every Day</h1>
-      <p class="mt-4 max-w-2xl text-stone-500 font-light leading-relaxed">
+<body>
+  <header class="site-header">
+    <div class="page-wrap">
+      <p class="site-kicker">Learning Handbook</p>
+      <h1 class="site-title">System Design Every Day</h1>
+      <p class="site-lede">
         每日自動更新的 System Design 學習手冊。每篇指南皆包含概念說明、System Design 脈絡、架構圖與可互動的演算法/系統行為演示。
       </p>
       <!-- BUILD_META -->
     </div>
   </header>
 
-  <main class="page-wrap py-12">
+  <main class="site-main page-wrap">
     ${learningMapHtml}
   </main>
 
-  <footer class="border-t border-stone-100 py-12 text-center text-xs text-stone-400 font-mono">
+  <footer class="site-footer">
     <p>Generated with 🤍 by System Design Every Day</p>
   </footer>
 
@@ -187,6 +192,7 @@ module.exports = {
   loadCompleted,
   saveCompleted,
   upsertCompleted,
+  extractRootTokens,
   buildBooksIndexHtml,
   writeBooksIndex,
 };

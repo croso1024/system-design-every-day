@@ -25,7 +25,7 @@
    - **功能**：每當有推送（Push）或合併（Merge）到 `main` 分支時，自動執行驗證與發佈。
    - **執行流程**：
      1. 拉取程式碼。
-     2. 初始化 Node.js 20 環境。
+     2. 初始化 Node.js 24 環境。
      3. 執行 `node scripts/validate.js`（一旦驗證失敗，即時中斷 Pipeline，保護線上環境不被損毀的追蹤文件影響）。
      4. 打包 `books/` 資料夾（此資料夾為手冊所有網頁與首頁目錄）。
      5. 直接透過 GitHub 官方 Actions 部署至 GitHub Pages，無需額外建立或維護 `gh-pages` 分支。
@@ -61,7 +61,7 @@ node scripts/validate.js
 
 ### B. Cursor Automation 日常開發工作流 (重點)
 當您在其他電腦上繼續開發，或設定 Cursor Automation 讓 Agent 自動寫入新文件時，請確保 Agent 遵循以下步驟：
-1. **讀取與挑選主題**：讀取 `docs/todo.json` 並挑選下一個主題。
+1. **讀取與挑選主題**：用 `node scripts/mindmap.js --action next` 取得候選並挑選（優先先備已齊者），不要全量讀取 `docs/todo.json`。
 2. **撰寫草稿**：在 `drafts/{topic-id}/` 建立 `content.html` 與 `script.html`（可選）。
 3. **本地編譯 (重要)**：
    執行以下指令組裝 HTML 頁面並自動更新 `completed.json` 及 `books/index.html`：

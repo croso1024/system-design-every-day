@@ -6,14 +6,15 @@
  * reindex-home.js — 只重繪首頁 books/index.html（不動文章頁、不動狀態檔）。
  *
  * 動機：
- *   首頁的 Learning Map payload 由 docs/mindmap.json + docs/completed.json 推導，
- *   validate.js 會要求「每個 mindmap 節點都出現在首頁 payload」。因此 topic-explorer 以
- *   add-topic.js 新增 / 修改節點後，若不重繪首頁，validate 會失敗。
+ *   首頁的 Learning Map payload 由 docs/mindmap.json + docs/completed.json + docs/categories.json 推導，
+ *   validate.js 會要求首頁 payload 與重算結果完全一致。因此 topic-explorer 以 add-topic.js
+ *   新增 / 修改節點、或直接編輯 categories.json 後，若不重繪首頁，validate 會失敗。
  *   而 generate.js 需要 draft 才能跑、rebuild-all.js 會連帶重建全部文章頁（blast radius 過大），
  *   兩者都不適合「只想同步首頁」的情境——本腳本補上最小、冪等的「只重繪首頁」路徑。
  *
  * 保證（不變量）：
- *   1. 只讀 docs/completed.json 與 docs/mindmap.json；只寫 books/index.html。
+ *   1. 只讀 docs/{completed,mindmap,categories}.json 與 templates/{base.html,home-learning-map.css,home-learning-map.js}；
+ *      只寫 books/index.html。
  *      「絕不」異動 completed.json / todo.json / mindmap.json / 任何 books/<id>/ 文章頁。
  *   2. 原子寫（temp+rename），與 generate.js / rebuild-all.js 共用同一組 lib/books。
  *   3. 冪等：相同輸入重跑產生相同 books/index.html。
