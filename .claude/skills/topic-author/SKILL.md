@@ -95,7 +95,7 @@ brief 的 `Demo 方向` 若已指定形式，**照它選**；但若該形式正�
 時序 / 因果 → Mermaid `sequenceDiagram` 或 grid swimlane（**禁止** chip row）；
 空間幾何 → inline `<svg>`；靜態拓樸 → 盒 + 箭頭（節點 ≤ 6）。
 
-**4. 在 `content.html` 第一行寫下宣告**
+**4. 在 `content.html` 開頭寫下宣告**（放在第一行；閘門容許宣告從前 20 行內開始）
 
 ```html
 <!-- demo-archetype: B｜參數掃描 — 讀者可拖動 X 與 Y，即時觀察 Z 的變化。
@@ -228,7 +228,7 @@ node scripts/remove-completed.js --topic <id> --dry-run       # 先預覽將發�
    - 橫排節點 > 6 個不得用 `flex-wrap`（必折行，折行即失去順序語意）。
    - **每張圖都要有 `<p class="cap">`** 說明「該看哪裡」。
 5. **互動 Demo 高品質 Vanilla JS**：
-   - **先選型再寫 code**：見 Step 2a 與 style-guide §0 Demo Archetype。`content.html` 第一行必須有 `<!-- demo-archetype: ... -->` 宣告，且**不得與最近 3 篇相同**。
+   - **先選型再寫 code**：見 Step 2a 與 style-guide §0 Demo Archetype。`content.html` 開頭必須有 `<!-- demo-archetype: ... -->` 宣告（閘門只認前 20 行內開始的宣告），且**不得與最近 3 篇相同**。
    - **至少三個算出來的輸出**：使用者的操作必須改變**計算結果**。若所有輸出都是程式碼裡的字面常數，那是投影片不是模擬器（L2 閘門機械檢查）。
    - **compute／render 分離 + `@probe`**：見 style-guide §0.5；缺 `@probe` 過不了 Step 2c。
    - **不得複製上一篇的 demo 骨架改前綴**。Demo 的 CSS/JS **不是**共享資產（圖表 CSS 才是）。

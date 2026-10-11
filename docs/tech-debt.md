@@ -80,8 +80,8 @@
 
 **做法**：寫一次性腳本讀取目前的排版結果（`node scripts/mindmap.js --action layout-report`，或直接呼叫排版模組），
 把每個分類在同欄中的當下順序寫進 `categories.json` 的 `rank` 欄位；comparator 改為先比 `rank`，沒有 `rank` 的分類再走現有鍵。
-`rank` 必須一路傳到 comparator：`lib/categories.js` 的 `buildCategoryIndex` 與排版模組的 `normalizeInput` 目前都會重建分類物件、
-丟掉未知欄位，兩處都要帶上 `rank`（中間經過 `mindmap.js` 的 `buildCategoryGraph`）；`validateCategoryRegistry` 補 `rank` 的型別檢查。
+`rank` 必須一路傳到 comparator：`lib/categories.js` 的 `buildCategoryIndex`、`mindmap.js` 的 `buildCategoryGraph`、排版模組的 `normalizeInput`
+目前都會重建分類物件、丟掉未知欄位，三處都要帶上 `rank`；`validateCategoryRegistry` 補 `rank` 的型別檢查。
 `add-topic.js --domain` 新增分類時不填 `rank`，
 新分類插入的位置仍由 barycenter 決定，要固定時再補。做完當下畫面不變，之後既有分類的順序就固定了。
 改完必跑 `node scripts/reindex-home.js` → `node scripts/validate.js`（首頁 payload 與 docs 重算結果必須同步）。

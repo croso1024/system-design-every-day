@@ -84,7 +84,7 @@
 
 - **單一真相**：`:root` 只寫在 `templates/base.html`。首頁 `books/index.html` 的 token 由 `scripts/lib/books.js` 在產頁時從 base.html 抽出，不另外維護一份；改 token 後跑 `rebuild-all.js`（重建全站文章頁並一併重繪首頁）。只改 `templates/home-learning-map.css` 時跑 `reindex-home.js` 即可。
 - **首頁殼層只用 token**：header / footer / 最後更新列以少量自訂 class（`.site-*`）寫成，顏色全取自上表；不得使用 `stone-*` 等 Tailwind 色票或 utility class（全站已不載入 Tailwind）。
-- **地圖 CSS 不得出現 raw hex**：`templates/home-learning-map.css` 的規則一律 `var()`。全站 token 沒有對應語意的顏色（選取深灰 `--lm-ink`、步驟徽章 `--lm-step`、走線 `--lm-edge` / `--lm-edge-dim`、路徑卡片邊框 `--lm-path-border`）只在 `.learning-map` 區塊命名一次。
+- **地圖 CSS 不得出現 raw hex**：`templates/home-learning-map.css` 的規則一律 `var()`。全站 token 沒有對應語意的顏色（選取深灰 `--lm-ink`、步驟徽章 `--lm-step`、走線 `--lm-edge` / `--lm-edge-dim`、路徑卡片邊框 `--lm-path-border`、浮出清單陰影 `--lm-shadow`）只在 `.learning-map` 區塊命名一次。
 - **領域色**：`network` → `--accent`、`data` → `--ok`、`platform` → `--warn`、`ai` → `--lm-domain-ai`（紫，全站無對應）。新增領域時在 `[data-domain="<id>"]` 補一條規則（validate R8 會檢查），優先沿用既有 token。
 
 ---
@@ -427,7 +427,7 @@ sequenceDiagram
 
 #### 0.2 選型鐵律
 
-**1. 必須宣告。** `drafts/<id>/content.html` 的**第一行**寫一則 HTML 註解：
+**1. 必須宣告。** `drafts/<id>/content.html` 的**開頭**寫一則 HTML 註解（放在第一行；閘門容許宣告從前 20 行內開始，因為它可以跨多行）：
 
 ```html
 <!-- demo-archetype: B｜參數掃描 — 讀者可拖動每個事件的 event-time 與 watermark 延遲，
@@ -658,7 +658,7 @@ node scripts/quality/archetype-window.js --topic <id>   # 撞形檢查（§0.2 �
 
 ### 互動 Demo
 
-9. **禁止未宣告 archetype 就動手寫 demo**（`content.html` 第一行的 `<!-- demo-archetype: ... -->` 註解為必填）。
+9. **禁止未宣告 archetype 就動手寫 demo**（`content.html` 開頭的 `<!-- demo-archetype: ... -->` 註解為必填，閘門只認前 20 行內開始的宣告）。
 10. **禁止與最近 3 篇使用相同的 archetype。**
 11. **禁止「腳本重播型」demo**——整個 demo 的輸出全是程式碼裡的字面常數、使用者操作只是切換播放哪一段預寫敘事。至少要有三個輸出是**算出來的**（§0.2 鐵律 4）。
 12. **禁止複製上一篇的 demo 骨架再改 class 前綴。** Demo 的 CSS/JS 骨架**不是**共享資產（與圖表 CSS 相反）；每篇的互動模型必須從 §0 重新選型。
