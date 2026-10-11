@@ -42,7 +42,7 @@ node scripts/completed-ledger.js --action get-todo --topic <id>    # 選定後�
 ```
 
 `next` 的每筆候選帶有 `prerequisites_satisfied` 與 `missing_prereqs`：
-**優先挑 `prerequisites_satisfied: true` 者**；候選順序刻意非確定，可自發選擇，但不要在先備未齊
+**優先挑 `prerequisites_satisfied: true` 者**；同等就緒的候選之間可自行擇一，但不要在先備未齊
 （`missing_prereqs` 非空）時硬寫深主題——若真的想寫，請先回去補先備。
 
 選定主題後，若 `get-todo` 或 `next` 回傳含 `brief`，**必須在規劃章節大綱與 Demo 時納入考量**（見下方「brief 遵循準則」）。
@@ -149,7 +149,7 @@ node scripts/generate.js --topic <id> --title "標題"
 
 分類由 `docs/mindmap.json` 的節點帶出（主題不在 mindmap 時 exit 1，請先交棒 `topic-explorer`）；
 `--category` 選填，有給就必須與節點一致，否則在寫任何檔案之前 exit 1。
-`--title` **逐字使用** `node scripts/completed-ledger.js --action get-todo --topic <id>` 回傳的 title：
+`--title` **逐字使用 mindmap 節點的標題**（主題仍在 todo 時，`completed-ledger.js --action get-todo --topic <id>` 回傳的 title 即為節點標題，兩者由 `add-topic.js` 同時寫入）：
 首頁地圖讀 mindmap 節點的標題、文章頁讀 `--title`，兩者不一致時目前沒有閘門會擋（見 `docs/tech-debt.md` #11）。
 
 它會：注入 `templates/base.html` → 掃描章節生成 TOC → 寫出 `books/<id>/index.html`
@@ -215,7 +215,7 @@ node scripts/remove-completed.js --topic <id> --dry-run       # 先預覽將發�
 > 務必執行 `node scripts/reindex-home.js` 補一次重繪**，否則 validate 會失敗。
 > （不要重跑 `remove-completed.js`：主題已不在 completed.json，它會直接結束而不重繪；也不要跑 `generate.js`，那會把主題重新發佈。）
 
-撤回後一樣要跑 `node scripts/validate.js` 確認一致。本腳本**不動 mindmap**（刪節點屬 `topic-explorer` 職責）。
+撤回後一樣要跑 `node scripts/validate.js` 確認一致。本腳本**不動 mindmap**；目前沒有刪除 mindmap 節點的工具（見 `docs/tech-debt.md` #15），不要手改 mindmap.json，需要時回報使用者。
 
 ## 撰稿鐵律（讀者體驗）
 

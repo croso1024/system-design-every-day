@@ -4,8 +4,8 @@
  * validate.js — 狀態檔與首頁的一致性驗證（CI 每次 push 都跑；改完任何 docs/*.json 必跑）。
  *
  * 檢查項目：
- *   - todo.json / completed.json / mindmap.json 結構；todo ↔ completed 互斥；mindmap 懸空邊；
- *     主題層 prerequisite 環；completed 的發佈頁存在
+ *   - todo.json / completed.json / mindmap.json 結構；todo ↔ completed 互斥；todo / completed 的每個 id 都是 mindmap 節點；
+ *     mindmap 懸空邊；主題層 prerequisite 環；completed 的發佈頁存在
  *   - 首頁 books/index.html：payload topics 逐筆對照 mindmap 與 completed（title / category / completed / path / completed_at）
  *   - R1 categories.json 格式      R2 每個節點的分類都已登記      R3 登記表沒有無人使用的分類
  *   - R4 分類層 prerequisite 無環  R5／R6 completed／todo 每筆的分類等於 mindmap 節點的分類
@@ -197,7 +197,7 @@ function validateBooksIndexConsistency(completed, mindmap) {
   const html = fs.readFileSync(BOOKS_INDEX_PATH, 'utf8');
   const payload = extractLearningMapPayload(html);
   if (!payload) {
-    error('books/index.html 缺少可解析的 <script id="learning-map-data" type="application/json"> payload（首頁過時，請執行 node scripts/reindex-home.js 只重繪首頁，或 generate.js / rebuild-all.js）。');
+    error('books/index.html 缺少可解析的 <script id="learning-map-data" type="application/json"> payload（首頁過時，請執行 node scripts/reindex-home.js 重繪首頁）。');
     return;
   }
 
@@ -225,7 +225,7 @@ function validateBooksIndexConsistency(completed, mindmap) {
 
   expectedOnMap.forEach((href) => {
     if (!actual.has(href)) {
-      error(`books/index.html Learning Map payload 缺少 completed 路徑 "${href}"（首頁過時，請執行 node scripts/reindex-home.js 只重繪首頁，或 generate.js / rebuild-all.js）。`);
+      error(`books/index.html Learning Map payload 缺少 completed 路徑 "${href}"（首頁過時，請執行 node scripts/reindex-home.js 重繪首頁）。`);
     }
   });
   actual.forEach((href) => {
@@ -330,7 +330,7 @@ function validateBooksIndexLearningMapConsistency(completed, mindmap) {
   }
   ['stats', 'domains', 'categories', 'categoryPrereqs', 'layout'].forEach((key) => {
     if (JSON.stringify(payload[key]) !== JSON.stringify(expectedPayload[key])) {
-      error(`books/index.html Learning Map payload 的 "${key}" 與目前 docs/ 資料重算結果不符（首頁過時，請執行 node scripts/reindex-home.js 只重繪首頁，或 generate.js / rebuild-all.js）。`);
+      error(`books/index.html Learning Map payload 的 "${key}" 與目前 docs/ 資料重算結果不符（首頁過時，請執行 node scripts/reindex-home.js 重繪首頁）。`);
     }
   });
 }

@@ -19,6 +19,7 @@
 | 12 | `scripts/mindmap.js` | `mindmap.json` 解析失敗時靜默當成空圖 | 首頁可能被重繪成空地圖 | 輕 | 待處理 |
 | 13 | `scripts/lib/books.js` | `completed.json` 依 `localeCompare('zh-Hant')` 排序，與全站 code point 慣例不一致 | 本機與 CI 的排序可能不同 | 輕 | 待處理 |
 | 14 | `templates/base.html` | Mermaid CDN 只鎖到 major（`mermaid@10`） | 上游 minor 版更新可能改變文章圖表 | 輕 | 待處理 |
+| 15 | 前段工具鏈 | 沒有刪除 mindmap 節點的工具 | 下架主題只能手改 mindmap.json | 中 | 待處理 |
 
 ---
 
@@ -104,16 +105,19 @@ title 沒有比照辦理。
 `buildLearningMapData` 因此會照常產出「沒有任何分類與文章」的 payload。`generate.js` 自己會先解析 mindmap 並擋下，
 但 `reindex-home.js`、`rebuild-all.js`、`remove-completed.js` 會把空地圖寫進 `books/index.html`，要等 `validate.js` 才會發現。
 
-**做法**：讓 `buildLearningMapData` 使用的讀檔路徑在 mindmap.json 缺檔或解析失敗時 throw（呼叫端都已在寫檔前 catch 並 exit 1）；
+**做法**：讓 `buildLearningMapData` 使用的讀檔路徑在 mindmap.json 缺檔或解析失敗時 throw（generate.js 與 rebuild-all.js 會在寫任何檔案前失敗，remove-completed.js 會在交易內回滾）；
 `next`、`list-categories` 等 CLI action 是否也改為 fail-loud 一併決定。
 
 ### 13　completed.json 的排序依賴 ICU
 
 **現況**：`scripts/lib/books.js` 的 `upsertCompleted` 以 `a.title.localeCompare(b.title, 'zh-Hant')` 排序，
 其餘產物（categories.json、首頁 payload、排版）一律用 code point 比較，理由是本機與 CI 的 ICU 版本可能不同。
-目前 completed.json 只在本機由 `generate.js` 寫入、validate 也不檢查順序，所以沒有實際故障，但不同機器發佈可能讓整檔順序跳動、產生無意義的 diff。
+目前 completed.json 只在本機由 `generate.js` 寫入、validate 也不檢查順序，但不同機器發佈可能讓整檔順序跳動、產生無意義的 diff。
+另外有兩個消費者依賴這個順序：`completed-ledger.js --action get-recent` 是穩定排序，同一天發佈的條目沿用帳本順序；
+`scripts/quality/archetype-window.js` 再把這個結果當成「發佈序」。所以同日多篇的相對順序，目前其實是標題的 zh-Hant 排序。
 
 **做法**：改用 `lib/categories.js` 的 `compareCodePoint`（或改依 id 排序）；第一次套用時 completed.json 會整檔重排，宜單獨一個 commit。
+改完重跑 `node scripts/quality/archetype-window.js`，核對同日條目的發佈序變動是否改變 #6 記錄的撞形視窗。
 
 ### 14　Mermaid CDN 版本未鎖定
 
@@ -121,3 +125,12 @@ title 沒有比照辦理。
 只鎖到 major 版，jsDelivr 會解析到 10.x 的最新版。上游 minor 版的渲染差異會直接反映在所有文章的圖表上，且無法從 git 歷史追溯。
 
 **做法**：改為確切版本（例如 `mermaid@10.9.x` 的某一版），改完跑 `rebuild-all.js` 重建全站；之後升級 Mermaid 視為一次模板改動。
+
+### 15　沒有刪除 mindmap 節點的工具
+
+**現況**：`add-topic.js` 只能新增節點，`remove-completed.js` 刻意不動 mindmap，而全域鐵律禁止手改 `docs/mindmap.json`。
+主題要從圖譜下架時（例如撤回後不再重做、或規劃時建錯節點），目前沒有合規的做法。
+
+**做法**：新增 `remove-topic.js`（或擴充 `add-topic.js`），一次移除節點、所有相連的 edge 與 todo 條目；
+主題仍在 completed.json 時拒絕執行（先走 `remove-completed.js`）。寫入沿用多檔原子寫入＋回滾，完成後跑 `reindex-home.js` → `validate.js`。
+上線後把 topic-author「撤回」一節與 `remove-completed.js` 檔頭的 #15 引用改為指向新工具，並在 topic-explorer 補上刪節點流程。

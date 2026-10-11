@@ -118,12 +118,7 @@ function fresh()   panel = { op       -p-writable        -p-risk       -p-hwm
 
 ## 6. 附則：修訂既有文章時（`topic-reviser` 派工才適用）
 
-### 6.1 只補宣告的篇
-
-若指派寫「只補宣告」：只在 `content.html` 開頭加宣告註解，**不改任何其他內容**，除非指派另列「補 cap」清單。
-這類篇不要求新增 compute 函式；它們在 L1 第 11 項與 L2 的既有失敗已登錄於 `docs/tech-debt.md`。
-
-### 6.2 靜態圖換形式（chip row 類）
+### 6.1 靜態圖換形式（chip row 類）
 
 依 style-guide「圖表與示意圖規範」的選型表：時序／往返 → Mermaid `sequenceDiagram` 或 CSS grid swimlane；
 狀態＋轉移 → `stateDiagram-v2`；並列組合 → `.tbl-wrap` 表格。每張補 `<p class="cap">`。

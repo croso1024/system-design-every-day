@@ -87,7 +87,7 @@
 - [ ] 是否有同層互補/對照主題？→ 設為 `related`。
 - [ ] 加入這條邊會不會形成 prerequisite 循環？**分類層**呢（跨分類的 prerequisite 聚合後不得成環，validate R4 會擋）？
 - [ ] category 是否與既有命名一致（先 `mindmap.js --action list-categories`，避免同義分類碎片化，如 "Cache" vs "Caching"）？
-- [ ] 若是新分類：應歸到哪個領域（`--domain`：網路與通訊 / 資料與儲存 / 架構與維運 / AI 與 LLM）？
+- [ ] 若是新分類：應歸到哪個領域（`--domain <domain-id>`，可選的 id 見 `mindmap.js --action list-categories`）？
 
 ## 4. 領域知識：常見 System Design 主題與學習順序
 
