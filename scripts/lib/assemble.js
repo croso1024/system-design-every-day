@@ -3,18 +3,18 @@
 /**
  * assemble.js — 主題頁組裝的單一真相來源。
  *
- * 由 generate.js（發佈）、rebuild-all.js（全站重建）與 extract-drafts.js（反解）共用：
- *   - extractSections / buildTocHtml：掃描 content 章節、產生左側 Auto-TOC。
+ * 由 generate.js（發佈）與 rebuild-all.js（全站重建）共用：
+ *   - buildTocHtml：掃描 content 章節、產生左側 Auto-TOC。
  *   - assemblePageHtml：把 title / toc / content / script 逐字注入 templates/base.html。
  *
- * 「逐字注入、零轉換」是本專案內容流水線的核心不變量，故反解得以是確定性逆運算。
- * 章節掃描 regex 集中於此，避免與 generate.js 各自維護一份而漂移。
+ * 「逐字注入、零轉換」是本專案內容流水線的核心不變量：draft + 模板決定產物的每一個位元組。
+ * 章節掃描 regex 只定義在這裡。
  */
 
 const { escapeHtml } = require('./books');
 
 // 章節掃描：<section id="id"> ...(可選 <span class="sec-num">num</span>)... <h2>title</h2>
-// 與左側 Auto-TOC 的產生完全同源，是反解往返驗證的比對基準。
+// 左側 Auto-TOC 與產頁前的章節守門都以此為準。
 const SECTION_REGEX = /<section\s+id="([^"]+)"[^>]*>[\s\S]*?(?:<span\s+class="sec-num">([^<]*)<\/span>\s*)?<h2>([^<]+)<\/h2>/;
 
 /**
@@ -38,7 +38,7 @@ function extractSections(content) {
 
 /**
  * 由 content 產生左側 Auto-TOC 的內層 HTML（<a> 串接）。
- * 回傳空字串代表「找不到任何合法章節」——呼叫端（generate.js）據此守門並拒絕發佈。
+ * 回傳空字串代表「找不到任何合法章節」——呼叫端（generate.js / rebuild-all.js）據此守門並拒絕產頁。
  */
 function buildTocHtml(content) {
   const sections = extractSections(content);
@@ -54,8 +54,8 @@ function buildTocHtml(content) {
 }
 
 /**
- * 將各區塊逐字注入模板。與舊 generate.js 的 replace 語義完全一致（含 title 的全域替換、
- * script 前後補換行）。tocHtml 由呼叫端先算好傳入，讓呼叫端能在落檔前先做 TOC 守門。
+ * 將各區塊逐字注入模板：title 全域替換並 escape；toc、content 逐字注入；script 非空時前後各補一個換行。
+ * tocHtml 由呼叫端先算好傳入，讓呼叫端能在落檔前先做 TOC 守門。
  */
 function assemblePageHtml(template, { title, tocHtml, content, script }) {
   return template
@@ -65,4 +65,4 @@ function assemblePageHtml(template, { title, tocHtml, content, script }) {
     .replace('<!-- SCRIPT_PLACEHOLDER -->', script ? `\n${script}\n` : '');
 }
 
-module.exports = { extractSections, buildTocHtml, assemblePageHtml };
+module.exports = { buildTocHtml, assemblePageHtml };
