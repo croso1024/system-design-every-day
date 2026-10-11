@@ -26,7 +26,7 @@ function parseArchetypeDeclaration(content) {
 }
 
 // 讀出所有 draft 的主 archetype：{ "<topic-id>": "A".."F" | "?" }
-// "?" = 沒有 content.html、沒有宣告，或宣告裡抓不到代號
+// "?" = 沒有宣告，或宣告裡抓不到代號（沒有 content.html 的資料夾不列入）
 function readPrimaryArchetypes(draftsDir) {
   const out = {};
   fs.readdirSync(draftsDir).forEach(function (id) {
