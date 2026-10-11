@@ -5,7 +5,8 @@
 /**
  * rebuild-all.js — 從 drafts/ 全站（或指定）重建 books/<id>/index.html。
  *
- * 用於模板 / 全站樣式改動後的重生。與 generate.js 語義一致，共用同一組 lib：
+ * 用於 templates/base.html（含 :root token）或全站樣式改動後的重生，會一併重繪首頁。
+ * 與 generate.js 語義一致，共用同一組 lib：
  *   - 版面組裝：lib/assemble.js（buildTocHtml / assemblePageHtml）。
  *   - 首頁與 completed 輔助：lib/books.js。
  *   - 原子寫：lib/atomic.js。
@@ -14,8 +15,8 @@
  *   1. 保留既有 completed_at ── metadata（title / category / completed_at / path）一律自現有
  *      docs/completed.json 讀回，「絕不」以 new Date() 洗成當天。故本腳本「不異動」completed.json，
  *      是最強的保留：只重繪頁面與首頁。
- *   2. 缺 draft 或抽不到章節的主題「不靜默略過」──全部先掃描，任一異常即零副作用中止並明確報出，
- *      避免半重建的不一致狀態。
+ *   2. 缺 draft、抽不到章節，或首頁 payload 建構失敗時「不靜默略過」──文章頁與首頁全部先算好，
+ *      任一異常即零副作用中止並明確報出，避免半重建的不一致狀態。
  *   3. 重建後三檔（產物 / completed.json / books/index.html）維持一致，validate.js 需通過。
  *
  * Usage:
@@ -118,6 +119,14 @@ function main() {
     });
   }
 
+  // 首頁也在落檔前算好：payload 建構（登記表、分類層成環、edge 穿卡）失敗時，文章頁同樣不寫。
+  let indexHtml = null;
+  try {
+    indexHtml = buildBooksIndexHtml(completed);
+  } catch (e) {
+    problems.push(`books/index.html：${e.message}`);
+  }
+
   if (problems.length) {
     console.error('偵測到問題，為避免半重建的不一致狀態，未寫入任何檔案：');
     problems.forEach((p) => console.error(`  ✖ ${p}`));
@@ -140,9 +149,9 @@ function main() {
     console.log(`  ✔ ${p.relativeOutputPath}  (completed_at=${p.completed_at} 保留)`);
   });
 
-  // 重繪首頁：完整站台重建時，讓 lib/books.js / mindmap 的改動也傳遞到 books/index.html。
-  // 若只重建單篇，首頁由相同 completed 推導，重繪為冪等。
-  writeBooksIndex(buildBooksIndexHtml(completed));
+  // 重繪首頁：讓模板、lib/books.js 或 mindmap 的改動也傳遞到 books/index.html。
+  // 只重建單篇時，首頁由相同 completed 推導，重繪為冪等。
+  writeBooksIndex(indexHtml);
   console.log('  ✔ books/index.html（依現有 completed.json 重繪）');
 
   console.log(`\n重建完成：${plans.length} 篇。docs/completed.json 未異動（completed_at 全數保留）。`);

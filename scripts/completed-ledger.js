@@ -51,7 +51,7 @@ function loadJSON(filePath, fallback = []) {
 function getRecent(limit = 5) {
   const completed = loadJSON(COMPLETED_PATH, []);
   
-  // Sort by completed_at descending, fallback to index
+  // Sort by completed_at descending; same-day entries keep their ledger order (stable sort)
   const sorted = [...completed].sort((a, b) => {
     const dateA = a.completed_at || '';
     const dateB = b.completed_at || '';
@@ -80,7 +80,7 @@ function getStatus() {
   const pending = todo.filter(item => !completedIds.has(item.id));
 
   console.log(JSON.stringify({
-    total_pool_count: todo.length + completedIds.size - pending.length, // avoid duplicates if any
+    total_pool_count: completedIds.size + pending.length, // pending 已排除同時存在於 completed 的 id
     completed_count: completed.length,
     pending_count: pending.length,
     completion_rate: `${((completed.length / (completed.length + pending.length || 1)) * 100).toFixed(1)}%`

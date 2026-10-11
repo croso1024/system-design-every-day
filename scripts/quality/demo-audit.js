@@ -9,7 +9,7 @@
  *   任一篇有未過項目即 exit 1。第 6、9 項是啟發式，誤報時以人眼判讀為準。
  *
  * 檢查項：
- *   1  archetype 宣告在 content.html 第一行
+ *   1  archetype 宣告位於 content.html 開頭（前 20 行內）
  *   2  .seg 組數 <= 2
  *   3  三件組 .X-metric / .X-verdict / .X-wire（只看 markup 用量，不看 CSS 定義）
  *   4  舊 demo 骨架指紋（防複製上一篇）
@@ -90,7 +90,7 @@ function referencedIds(js) {
 
 function checkArchetype(content) {
   const decl = parseArchetypeDeclaration(content);
-  if (!decl.found) return { ok: false, note: '第一行沒有 demo-archetype 宣告' };
+  if (!decl.found) return { ok: false, note: '開頭（前 20 行內）沒有 demo-archetype 宣告' };
   const codes = decl.codes;
   if (!codes.length) return { ok: false, note: '宣告存在但抓不到 A-F 代號（格式應為 `X｜名稱 — 說明`）' };
   return { ok: true, codes: codes, note: codes.join('+') };
@@ -139,8 +139,8 @@ function checkSeg(content) {
   return { n: worst, total: total, perDemo: perDemo, demos: blocks.length, ok: ok, note: note };
 }
 
-// 三件組不能只靠 class 命名偵測：distributed-sql 的進度列叫 .sql-stepbar、log 捲軸叫 .sql-log，
-// data-sharding-in-practice 的進度列叫 .mg-phase——換個名字就漏測。
+// 三件組不能只靠 class 命名偵測：進度列可能叫 .X-stepbar / .X-phase、日誌捲軸可能叫 .X-log——
+// 只認 -metric / -verdict / -wire 命名，換個名字就漏測。
 // 因此除了命名，再加語意偵測：「步/階段 N / M」文字樣式，與 log/trace/wire 類捲軸容器。
 function checkChrome(content) {
   const cls = markupClasses(content);
@@ -270,7 +270,7 @@ function checkCaps(content) {
   const stripped = stripStyle(content);
   const missing = [];
 
-  // Mermaid 區塊：其後 120 字內須有 .cap
+  // Mermaid 區塊：其後 140 字內須有 .cap
   const mer = /<pre class="mermaid">[\s\S]*?<\/pre>([\s\S]{0,140})/g;
   let m;
   let idx = 0;
@@ -298,8 +298,7 @@ function checkCaps(content) {
 }
 
 function checkMermaidInDemo(content) {
-  const demos = content.match(/<div class="demo"[\s\S]*?<\/div>\s*<\/div>/g) || [];
-  const bad = demos.filter(function (d) { return d.indexOf('class="mermaid"') !== -1; }).length;
+  const bad = splitDemoBlocks(content).filter(function (d) { return d.indexOf('class="mermaid"') !== -1; }).length;
   return { ok: bad === 0, note: bad ? bad + ' 個 .demo 內含 mermaid（禁止）' : 'ok' };
 }
 
