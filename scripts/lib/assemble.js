@@ -55,14 +55,15 @@ function buildTocHtml(content) {
 
 /**
  * 將各區塊逐字注入模板：title 全域替換並 escape；toc、content 逐字注入；script 非空時前後各補一個換行。
+ * replacement 一律用函式形式：字串形式會把內容裡的 `$'`、`$&`、`$$` 等當成替換樣式展開（JS 字串裡的 `$` 很常見）。
  * tocHtml 由呼叫端先算好傳入，讓呼叫端能在落檔前先做 TOC 守門。
  */
 function assemblePageHtml(template, { title, tocHtml, content, script }) {
   return template
-    .replace(/<!-- TITLE_PLACEHOLDER -->/g, escapeHtml(title))
-    .replace('<!-- TOC_PLACEHOLDER -->', tocHtml)
-    .replace('<!-- CONTENT_PLACEHOLDER -->', content)
-    .replace('<!-- SCRIPT_PLACEHOLDER -->', script ? `\n${script}\n` : '');
+    .replace(/<!-- TITLE_PLACEHOLDER -->/g, () => escapeHtml(title))
+    .replace('<!-- TOC_PLACEHOLDER -->', () => tocHtml)
+    .replace('<!-- CONTENT_PLACEHOLDER -->', () => content)
+    .replace('<!-- SCRIPT_PLACEHOLDER -->', () => (script ? `\n${script}\n` : ''));
 }
 
 module.exports = { buildTocHtml, assemblePageHtml };
