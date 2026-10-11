@@ -52,9 +52,8 @@
    - `node scripts/completed-ledger.js --action status | get-recent --limit <n> | get-todo --topic <id>`（唯讀查詢）
    - `node scripts/mindmap.js --action next`（唯讀推薦）、`--action list-categories`（查已登記的分類與所屬領域）
    - 新增主題用 `node scripts/add-topic.js`（`--category` 必填；分類尚未登記時必須帶 `--domain`），不要手拼大型 JSON。
-   > **唯一例外：`docs/categories.json`**（分類 → 領域登記表，檔案很小）。**新增領域、調整分類所屬領域、改領域名稱**
-   > 可以直接編輯這個檔案；**新增分類**仍一律走 `add-topic.js --domain`。改完必須依序跑
-   > `node scripts/reindex-home.js`（首頁地圖的領域與排版由它推導）再 `node scripts/validate.js`。
+   > **唯一例外：`docs/categories.json`**（分類 → 領域登記表，檔案很小）可以直接編輯；
+   > 允許的操作與必跑步驟以 `.claude/skills/topic-explorer/reference.md`「docs/categories.json」為準。
 2. **改完任何 `docs/*.json` 必跑** `node scripts/validate.js`，未通過不可收工。
    後段發佈的 fail-safe 不變量：**`validate` 與 `git commit` 一律在 `remove-todo.js` 之後**；
    切勿在 `generate.js` 與 `remove-todo.js` 之間跑 validate——此時主題同時存在於 todo 與 completed，
@@ -68,7 +67,10 @@
    > generate 之前必須通過 `demo-audit.js`、`compute-probe.js` 與 `archetype-window.js --topic <id>`。
    > archetype 一律從各篇 `content.html` 開頭的宣告推導，不另外維護對照表。
 4. **不要從零撰寫 HTML 外殼**（header/footer 等），由 `templates/base.html` + `generate.js` 自動組裝。
-5. **`drafts/` 是內容原始碼**：draft (`content.html` / `script.html`) 是產物頁面的內容真相來源，隨產物一起 commit。內容改動改 draft、模板改動改 `templates/base.html`，兩者都靠重跑 `generate.js` 產頁；不要直接手改 `books/`。
+5. **`drafts/` 是內容原始碼**：draft (`content.html` / `script.html`) 是產物頁面的內容真相來源，隨產物一起 commit。不要直接手改 `books/`：
+   - 內容改動改 draft，重跑 `generate.js`（修訂既有文章帶 `--keep-date`）。
+   - 模板改動改 `templates/base.html`（含 `:root` token），跑 `rebuild-all.js` 重建全站文章頁與首頁（保留原發佈日期）；
+     只改 `templates/home-learning-map.{css,js}` 時跑 `reindex-home.js` 即可。
 
 ---
 
@@ -89,30 +91,31 @@
 
 ---
 
----
 ## 📂 相關路徑與工具對照表
 
 | 路徑 / 命令 | 用途 | 權限與異動規範 |
 | :--- | :--- | :--- |
 | `docs/todo.json` | 待辦主題池（可含 optional `brief` 撰文指引） | 由 `topic-explorer` skill 維護（`add-topic.js --brief` 寫入；發佈後由 author 收尾移除） |
 | `docs/mindmap.json` | 全站心智圖 (DAG) | 記錄 Prerequisites / Related 關係；經 `add-topic.js` 寫入，勿手拼 |
-| `docs/categories.json` | 分類 → 領域登記表（4 個領域；`categories` 依 name 的 code point 排序；首頁地圖的領域歸屬與圖例順序由此推導） | **鐵律 1 的例外**：新增領域、調整分類所屬領域、改領域名稱可直接編輯；新增分類走 `add-topic.js --domain`；改完必跑 `reindex-home.js` → `validate.js` |
+| `docs/categories.json` | 分類 → 領域登記表（首頁地圖的領域歸屬與圖例順序由此推導；領域清單以 `mindmap.js --action list-categories` 為準） | **鐵律 1 的例外**，可直接編輯；步驟見 topic-explorer `reference.md` |
 | `docs/completed.json` | 已完成主題 metadata | **自動維護**：發佈由 `generate.js` 寫入、**撤回**用 `remove-completed.js`；**仍禁止手動編輯本檔** |
 | `guidelines/style-guide.md` | 視覺、**圖表選型**與互動元件（**Demo Archetype**、compute／render 與 `@probe`）風格規範 | 撰稿前嚴格閱讀遵循 |
 | `guidelines/demo-agent-brief.md` | 派 Sub-Agent 實作 demo 時的共用 brief（約束、兩階段、11 欄設計說明） | 派工時逐字附在指派之後 |
 | `docs/tech-debt.md` | 已知、尚未處理的全站問題 | 人工維護；處理完一項就直接刪除該項，不留紀錄 |
-| `templates/base.html` | 全站 HTML 外殼範本 (Notion 淺色版) | 嚴格讀取，不建議手動更改 |
+| `templates/base.html` | 文章頁外殼範本 (Notion 淺色版)，也是全站 `:root` 設計 token 的唯一來源（首頁產頁時抽取） | 嚴格讀取，不建議手動更改；改了就跑 `rebuild-all.js` |
+| `templates/home-learning-map.{css,js}` | 首頁學習地圖的樣式（含各領域的 `[data-domain]` 顏色）與前端選取互動，產頁時內嵌進首頁 | 改了就跑 `reindex-home.js`；新增領域時 CSS 必須補規則（validate R8） |
 | `drafts/{topic-id}/` | **撰稿主要工作區（內容原始碼）** | AI 建立與寫入 content.html 和 script.html，隨產物一起提交 |
-| `books/{topic-id}/index.html` | 發佈後的最終主題網頁 | **自動生成**（由 `generate.js` 產出，勿手動編輯） |
-| `books/index.html` | 手冊首頁（目錄 + 可點擊學習地圖：產頁時在伺服器端排版輸出分類卡片、SVG 走線與路徑面板，零前端依賴，前端 JS 只做選取互動） | **自動生成**（由 `generate.js` / `reindex-home.js` 產出，勿手動編輯） |
+| `books/{topic-id}/index.html` | 發佈後的最終主題網頁 | **自動生成**（由 `generate.js` / `rebuild-all.js` 產出，勿手動編輯） |
+| `books/index.html` | 手冊首頁（目錄 + 可點擊學習地圖：產頁時在伺服器端排版輸出分類卡片、SVG 走線與路徑面板，零前端依賴，前端 JS 只做選取互動） | **自動生成**（由 `generate.js` / `reindex-home.js` / `rebuild-all.js` 產出，勿手動編輯） |
 | `node scripts/completed-ledger.js` | 完成日誌與 todo 條目查詢 CLI | **唯讀查詢** |
-| `node scripts/mindmap.js` | 心智圖推薦（`next`）、分類登記查詢（`list-categories`）、Mermaid（CLI）與首頁學習地圖 payload v2 編譯（`generate-learning-map`，含排版） | **唯讀查詢與編譯** |
+| `node scripts/mindmap.js` | 心智圖推薦（`next`）、分類登記查詢（`list-categories`）、排版報告（`layout-report`）、Mermaid（`generate-mermaid`，僅 CLI）與首頁學習地圖 payload v2 編譯（`generate-learning-map`，含排版） | **唯讀查詢與編譯** |
 | `node scripts/add-topic.js` | 新增主題到 mindmap+todo（新分類時連同 categories.json，多檔原子寫入＋回滾）；`--category` 必填、新分類須帶 `--domain` | **自動化執行**（前段選題） |
 | `node scripts/generate.js` | 範本組裝、首頁學習地圖 payload 編譯與索引更新；分類由 mindmap 節點帶出（`--category` 選填，有給必須一致，否則零副作用 exit 1） | **自動化執行** |
 | `node scripts/remove-todo.js` | 從 todo.json 移除已完成主題的 CLI 腳本 | **自動化執行** |
 | `node scripts/remove-completed.js` | 從 completed.json 撤回主題並重繪索引（三檔交易式寫入 + 回滾） | **自動化執行**（撤回/重做用） |
-| `node scripts/reindex-home.js` | 只重繪首頁 `books/index.html`（不動狀態檔與文章頁，冪等） | **自動化執行**（改完 mindmap／categories.json 後、validate 之前） |
-| `node scripts/validate.js` | 狀態檔一致性驗證（含 todo<->completed 互斥 + 文章層與分類層 prerequisite 環偵測 + categories.json 登記表格式與 mindmap/completed/todo 分類一致 + books/index 學習地圖 payload v2 <-> docs 重算結果同步） | **改完 JSON 必跑** |
+| `node scripts/reindex-home.js` | 只重繪首頁 `books/index.html`（不動狀態檔與文章頁，冪等） | **自動化執行**（改完 mindmap／categories.json／首頁模板後、validate 之前） |
+| `node scripts/rebuild-all.js [--topic <id>] [--dry-run]` | 從 drafts 重建全站（或單篇）文章頁並重繪首頁；保留 completed_at、不動 completed.json | **自動化執行**（改完 `templates/base.html` 後） |
+| `node scripts/validate.js` | 狀態檔與首頁一致性驗證（todo↔completed 互斥、prerequisite 環、分類登記 R1–R6、首頁 payload 同步 R7、領域 CSS R8；完整清單見檔頭） | **改完 JSON 必跑** |
 | `node scripts/quality/demo-audit.js <id>` | Demo L1：11 項機械檢查（archetype 宣告、`.seg`、三件組、舊骨架、語法、id 綁定、cap、compute 分離…） | **唯讀**；新寫／重做 demo 時 generate 前必過 |
 | `node scripts/quality/compute-probe.js <id>` | Demo L2：依 `@probe` 在無 DOM sandbox 推參數兩端，判定模擬器 vs 播放器 | **唯讀**；同上 |
 | `node scripts/quality/archetype-window.js [--topic <id>]` | 發佈序 × 主 archetype 撞形檢查（最近 3 篇）；`--topic` 為閘門模式 | **唯讀**；選型時與 generate 前各跑一次 |
