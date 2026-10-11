@@ -257,13 +257,4 @@ function renderLearningMapSection(payload) {
     </section>`;
 }
 
-module.exports = {
-  POP_WIDTH,
-  RECENT_LIMIT,
-  renderLearningMapSection,
-  renderHeader,
-  renderToolbar,
-  renderCanvas,
-  renderPanel,
-  renderMobileList,
-};
+module.exports = { renderLearningMapSection };

@@ -4,7 +4,8 @@
  * categories.js — 分類登記表 docs/categories.json 的共用邏輯。
  *
  * 登記表是「category → 領域 (domain)」對照的唯一真相來源；首頁 payload 裡的對照只是衍生副本，
- * 前端模板不放任何對照表。供 mindmap.js、validate.js、add-topic.js、generate.js 共用。
+ * 前端模板不放任何對照表。供 mindmap.js、validate.js、add-topic.js 使用；compareCodePoint 另供
+ * lib/learning-map-layout.js 與 lib/home-map-render.js 共用。
  *
  * 檔案格式：
  *   {
@@ -12,14 +13,14 @@
  *     "categories": [ { "name": "API Design", "domain": "network" }, ... ] // 依 name 的 code point 排序
  *   }
  *
- * 這裡的純計算函式（validate / build index / insert）都不碰磁碟；只有 read / write 兩支會。
+ * 這裡只有 readCategoryRegistry 讀磁碟；其餘（validate / build index / insert）都是純計算，
+ * 寫檔由呼叫端（add-topic.js）負責。
  * 所有排序一律用 code point 比較（compareCodePoint），不用 localeCompare，
  * 以確保本機與 CI 不同 ICU 版本下的結果完全一致。
  */
 
 const fs = require('fs');
 const path = require('path');
-const { writeJSONAtomic } = require('./atomic');
 
 const ROOT = path.resolve(__dirname, '..', '..');
 const CATEGORIES_PATH = path.join(ROOT, 'docs', 'categories.json');
@@ -65,11 +66,6 @@ function readCategoryRegistry(filePath = CATEGORIES_PATH) {
   } catch (e) {
     throw new Error(`docs/categories.json 解析失敗（檔案可能損壞）：${e.message}`);
   }
-}
-
-/** 原子寫入登記表（沿用專案 JSON 慣例）。 */
-function writeCategoryRegistry(registry, filePath = CATEGORIES_PATH) {
-  writeJSONAtomic(filePath, registry);
 }
 
 /**
@@ -163,8 +159,7 @@ function validateCategoryRegistry(registry) {
  *   domains: Array<{id:string,name:string}>,
  *   domainById: Map<string,{id:string,name:string}>,
  *   categories: Array<{id:string,name:string,domain:string}>,
- *   categoryByName: Map<string,{id:string,name:string,domain:string}>,
- *   categoryById: Map<string,{id:string,name:string,domain:string}>
+ *   categoryByName: Map<string,{id:string,name:string,domain:string}>
  * }}
  */
 function buildCategoryIndex(registry) {
@@ -179,14 +174,7 @@ function buildCategoryIndex(registry) {
     domainById: new Map(domains.map((domain) => [domain.id, domain])),
     categories,
     categoryByName: new Map(categories.map((category) => [category.name, category])),
-    categoryById: new Map(categories.map((category) => [category.id, category])),
   };
-}
-
-/** 查詢分類所屬領域 id；未登記回傳 null。 */
-function domainOfCategory(registry, categoryName) {
-  const entry = (registry.categories || []).find((category) => category && category.name === categoryName);
-  return entry ? entry.domain : null;
 }
 
 /**
@@ -209,11 +197,8 @@ function withCategory(registry, { name, domain }) {
 module.exports = {
   CATEGORIES_PATH,
   compareCodePoint,
-  slugify,
   readCategoryRegistry,
-  writeCategoryRegistry,
   validateCategoryRegistry,
   buildCategoryIndex,
-  domainOfCategory,
   withCategory,
 };

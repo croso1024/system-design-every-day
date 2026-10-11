@@ -9,8 +9,8 @@
  *
  * 寫入安全性：每個檔以 temp+rename 做「單檔原子寫入」；對 categories → mindmap → todo 這組
  * 多檔寫入採「任一步失敗就回滾已寫入的檔」，達成「全有或全無」。
- * 寫入後請務必執行 `node scripts/validate.js` 驗證結構一致性 (含懸空邊與 prerequisite 環)，
- * 並執行 `node scripts/reindex-home.js` 重繪首頁學習地圖。
+ * 寫入後請先執行 `node scripts/reindex-home.js` 重繪首頁學習地圖（否則首頁 payload 與 docs 不同步，validate 必定失敗），
+ * 再執行 `node scripts/validate.js` 驗證結構一致性 (含懸空邊與 prerequisite 環)。
  *
  * 用法:
  *   node scripts/add-topic.js \
@@ -91,8 +91,9 @@ function splitList(value) {
 const USAGE = '--id <topic-id> --title "標題" --category "分類" [--domain <domain-id>] [--prereq a,b] [--related c,d] [--brief "撰文重點"] [--no-todo] [--dry-run]';
 
 /**
- * 依 §決策 15／17 解析 --category / --domain 與登記表的關係。
- * @returns {{ registry: object, nextRegistry: object|null, domain: string }}
+ * 解析 --category / --domain 與登記表的關係：已登記的分類直接使用（--domain 有給就必須一致）；
+ * 未登記的分類必須帶已存在的 --domain。
+ * @returns {{ nextRegistry: object|null, domain: string }}
  *   nextRegistry 為 null 代表登記表不需變更；否則為插入新分類後的登記表副本。
  */
 function resolveCategoryRegistration(category, domainArg) {
@@ -115,7 +116,7 @@ function resolveCategoryRegistration(category, domainArg) {
     if (domain && domain !== registered.domain) {
       fail(`分類 "${category}" 已登記於領域 "${registered.domain}"，與 --domain "${domain}" 不一致。要調整分類所屬領域請直接編輯 docs/categories.json。`);
     }
-    return { registry, nextRegistry: null, domain: registered.domain };
+    return { nextRegistry: null, domain: registered.domain };
   }
 
   const knownDomains = index.domains.map((d) => d.id).join(', ');
@@ -123,9 +124,9 @@ function resolveCategoryRegistration(category, domainArg) {
     fail(`分類 "${category}" 尚未登記，新增分類必須帶 --domain <domain-id>（可選：${knownDomains}）。已登記的分類可用 node scripts/mindmap.js --action list-categories 查詢。`);
   }
   if (!index.domainById.has(domain)) {
-    fail(`--domain "${domain}" 不存在於 docs/categories.json（可選：${knownDomains}）。新增領域請直接編輯該檔。`);
+    fail(`--domain "${domain}" 不存在於 docs/categories.json（可選：${knownDomains}）。新增領域請直接編輯該檔，並在 templates/home-learning-map.css 補上對應的 [data-domain] 規則。`);
   }
-  return { registry, nextRegistry: withCategory(registry, { name: category, domain }), domain };
+  return { nextRegistry: withCategory(registry, { name: category, domain }), domain };
 }
 
 function main() {
@@ -244,7 +245,7 @@ function main() {
     added_node: newNode,
     added_edges: newEdges,
     added_to_todo: addTodo,
-    next_step: '請執行 `node scripts/validate.js` 驗證結構一致性，再執行 `node scripts/reindex-home.js` 重繪首頁。',
+    next_step: '請先執行 `node scripts/reindex-home.js` 重繪首頁，再執行 `node scripts/validate.js` 驗證一致性。',
   }, null, 2));
 }
 

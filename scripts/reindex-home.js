@@ -15,8 +15,8 @@
  * 保證（不變量）：
  *   1. 只讀 docs/{completed,mindmap,categories}.json 與 templates/{base.html,home-learning-map.css,home-learning-map.js}；
  *      只寫 books/index.html。
- *      「絕不」異動 completed.json / todo.json / mindmap.json / 任何 books/<id>/ 文章頁。
- *   2. 原子寫（temp+rename），與 generate.js / rebuild-all.js 共用同一組 lib/books。
+ *      「絕不」異動 docs/ 下任何狀態檔或任何 books/<id>/ 文章頁。
+ *   2. 原子寫（temp+rename），與其他產頁腳本共用同一組 lib/books。
  *   3. 冪等：相同輸入重跑產生相同 books/index.html。
  *
  * Usage:
@@ -68,7 +68,7 @@ function main() {
     payload = buildLearningMapData(completed);
     html = buildBooksIndexHtml(completed);
   } catch (e) {
-    // 多半是缺少 templates/home-learning-map.{css,js}（readTemplate 會 throw），fail-loud。
+    // payload 建構（登記表、分類層或同分類內成環、edge 穿卡）或模板讀取失敗時 throw；fail-loud，不落檔。
     console.error(`重繪 books/index.html 失敗：${e.message}`);
     process.exit(1);
   }

@@ -2,12 +2,12 @@
 
 /**
  * books.js — completed.json 與手冊首頁 books/index.html 的共用邏輯。
- * 由 generate.js (發佈) 與 remove-completed.js (撤回) 共用，使首頁渲染只有單一真相。
+ * 發佈（generate）、撤回（remove-completed）、重繪首頁（reindex-home）、全站重建（rebuild-all）共用，使首頁渲染只有單一真相。
  * 純計算 (build 系列) 與落檔 (save / write 系列) 拆開，便於呼叫端先算後寫、必要時回滾。
  *
  * 首頁知識地圖：payload v2 由 mindmap.js `buildLearningMapData` 產生（排版在產頁時算好），
  * 畫面由 lib/home-map-render.js 伺服器端輸出，前端 templates/home-learning-map.js 只做選取互動。
- * 零第三方依賴（不載入 Tailwind，也沒有圖形引擎 CDN）；手機寬度改顯示伺服器端分組清單，故不需要 <noscript> 後備。
+ * 零第三方依賴（只載入 Google Fonts）；地圖由伺服器端輸出，手機寬度（< 768px）顯示分組清單，停用 JavaScript 時地圖與文章連結仍可用。
  * 設計 token（:root）在產頁時從 templates/base.html 抽出（extractRootTokens），首頁與文章頁共用同一份真相；
  * 首頁殼層與地圖 CSS 只能用這些 token 或 .learning-map 內命名過的 --lm-* 顏色，不得寫 raw hex。
  */
@@ -78,7 +78,7 @@ function upsertCompleted(completed, entry) {
 
 function readTemplate(filePath, label) {
   if (!fs.existsSync(filePath)) {
-    throw new Error(`缺少首頁 Learning Map 模板：${label}（${filePath}）`);
+    throw new Error(`缺少首頁模板：${label}（${filePath}）`);
   }
   return fs.readFileSync(filePath, 'utf8');
 }
@@ -124,7 +124,7 @@ function buildBooksIndexHtml(completed) {
   <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@300;400;500;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
   <style>
 ${rootTokens}
-    /* 首頁不載入 Tailwind。以下是等價於其 preflight 的最小重置，讓地圖樣式的基準與改版前一致。 */
+    /* 最小基準重置（與 templates/base.html 的重置同一組基準值），提供地圖與殼層樣式共同的起點。 */
     *, *::before, *::after { box-sizing: border-box; border: 0 solid currentColor; }
     html { line-height: 1.5; -webkit-text-size-adjust: 100%; }
     body { margin: 0; min-height: 100vh; background: var(--bg); color: var(--text); font-family: var(--sans); }
@@ -183,16 +183,11 @@ function writeBooksIndex(html) {
 }
 
 module.exports = {
-  ROOT,
-  COMPLETED_PATH,
-  BOOKS_INDEX_PATH,
   ensureDir,
   escapeHtml,
-  escapeJsonForScript,
   loadCompleted,
   saveCompleted,
   upsertCompleted,
-  extractRootTokens,
   buildBooksIndexHtml,
   writeBooksIndex,
 };

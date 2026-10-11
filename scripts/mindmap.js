@@ -1,10 +1,13 @@
 #!/usr/bin/env node
 
 /**
- * Mindmap Graph Query and Compiler Utility
+ * mindmap.js — 心智圖查詢與首頁學習地圖編譯。
  *
- * Helps the Agent query neighbors of completed topics, recommend next actions,
- * and compiles the nodes & edges into a beautifully stylized, clickable Mermaid diagram.
+ *   next                   推薦下一篇（最多 5 筆，帶 prerequisites_satisfied / missing_prereqs）
+ *   list-categories        列出分類登記表與各分類文章數
+ *   layout-report          以文字印出首頁地圖的排版結果（唯讀，供人工核對）
+ *   generate-learning-map  輸出首頁學習地圖 payload v2（lib/books.js、reindex-home.js、validate.js 共用同一個 builder）
+ *   generate-mermaid       輸出整張 DAG 的 Mermaid 語法（僅供 CLI 查閱，首頁不使用）
  *
  * Usage:
  *   node scripts/mindmap.js --action next [--last-topic <topic-id>]
@@ -22,7 +25,7 @@ const {
   buildCategoryIndex,
   compareCodePoint,
 } = require('./lib/categories');
-const { buildLearningMapLayout } = require('./lib/learning-map-layout');
+const { buildLearningMapLayout, constants: LAYOUT_CONSTANTS } = require('./lib/learning-map-layout');
 
 const ROOT = path.resolve(__dirname, '..');
 const MINDMAP_PATH = path.join(ROOT, 'docs', 'mindmap.json');
@@ -283,7 +286,7 @@ function layoutReport() {
   const { layout } = result;
   const lines = [];
 
-  lines.push(`畫布：${layout.width} × ${layout.height}；卡片：${layout.card.w} × ${layout.card.h}（${layout.card.h === 62 ? '一列' : '兩列'}點點）`);
+  lines.push(`畫布：${layout.width} × ${layout.height}；卡片：${layout.card.w} × ${layout.card.h}（${layout.card.h === LAYOUT_CONSTANTS.CARD_H_ONE_ROW ? '一列' : '兩列'}點點）`);
   lines.push(`欄數：${result.columnCount}`);
   layout.columns.forEach((column) => {
     const members = graph.categories
@@ -361,20 +364,12 @@ function listCategories() {
 }
 
 /**
- * Compile the Mindmap DAG + Completed topics into an interactive, beautifully styled Mermaid diagram.
- *
- * ⚠️ 保留作為獨立 CLI 工具（`--action generate-mermaid`）。首頁知識地圖改由 `buildLearningMapData`
- *    的 payload v2 供給（產頁時排版、前端只做互動），`buildBooksIndexHtml` 已「不再」呼叫本函式；
- *    此處僅供命令列查閱 Mermaid 語法之用。
- *
- * @param {Array} [completedList] 已完成主題清單。呼叫端可傳入手上那份 in-memory 清單，讓節點狀態
- *   與呼叫端同源、與存檔時機解耦；省略時（如 CLI）才 fallback 讀磁碟。
- *   ── 沿用與 `buildLearningMapData` 相同的 off-by-one 契約：避免「尚未 saveCompleted」的呼叫端把
- *      最新主題節點讀成舊狀態（舊版無條件讀磁碟，而 generate.js 在 saveCompleted 之前就呼叫）。
+ * 把整張 mindmap DAG 與完成狀態輸出成 Mermaid flowchart 語法（`--action generate-mermaid`）。
+ * 僅供命令列查閱；首頁學習地圖不使用本輸出。
  */
-function generateMermaid(completedList) {
+function generateMermaid() {
   const mindmap = loadJSON(MINDMAP_PATH, { nodes: [], edges: [] });
-  const completed = completedList !== undefined ? completedList : loadJSON(COMPLETED_PATH, []);
+  const completed = loadJSON(COMPLETED_PATH, []);
 
   const completedIds = new Set(completed.map(item => item.id));
 
@@ -467,11 +462,11 @@ function computeReadingOrder(topicIds, edges) {
  *   }
  *
  * 輸出完全可重現：排序只比 code point，不用 localeCompare（本機與 CI 的 ICU 可能不同）。
- * 登記表缺檔／格式錯、節點分類未登記、分類層成環、edge 穿卡時一律 throw：
+ * 登記表缺檔／格式錯、節點分類未登記、分類層或同分類內成環、edge 穿卡時一律 throw：
  * generate.js 在寫任何檔案之前呼叫本函式，throw 即零副作用 exit 1。
  *
- * @param {Array} [completedList] in-memory completed ledger（與 generateMermaid 相同的 off-by-one 契約：
- *   呼叫端尚未 saveCompleted 時仍能把最新主題標成已發布；省略時才 fallback 讀磁碟）
+ * @param {Array} [completedList] in-memory completed ledger。generate.js 在 saveCompleted 之前就組首頁，
+ *   必須傳入手上的清單，最新主題才會標成已發布；省略時（CLI）才讀磁碟。
  */
 function buildLearningMapData(completedList) {
   const mindmap = loadJSON(MINDMAP_PATH, { nodes: [], edges: [] });
@@ -575,4 +570,4 @@ function main() {
 if (require.main === module) {
   main();
 }
-module.exports = { generateMermaid, buildLearningMapData, buildCategoryGraph, computeReadingOrder };
+module.exports = { buildLearningMapData };

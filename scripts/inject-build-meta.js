@@ -13,7 +13,8 @@
  *   # 讀取 GITHUB_SHA / GITHUB_REPOSITORY；時間用 UTC now
  *
  * Usage (local override):
- *   node scripts/inject-build-meta.js --sha <full-or-short> --repo owner/name --at <ISO8601>
+ *   node scripts/inject-build-meta.js --sha <full-or-short> --repo owner/name --at <ISO8601> [--file <path>]
+ *   # --at 也可用環境變數 BUILD_META_AT；--file 預設 books/index.html
  */
 
 const fs = require('fs');
