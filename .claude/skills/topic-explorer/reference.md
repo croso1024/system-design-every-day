@@ -56,7 +56,9 @@
 - `domains` 的順序 = 首頁圖例順序；`categories` 依 `name` 的 code point 排序（`add-topic.js` 插入時會維持）。
 - 分類的穩定 id 由 name slugify 而來（例 `"Network Protocols & Real-time Systems"` → `network-protocols-real-time-systems`），不另存欄位。
 - 領域顏色不放這裡，放在 `templates/home-learning-map.css` 的 `[data-domain="<id>"]` 規則（validate R8 會檢查每個領域都有）。
-- **可直接編輯的範圍**（全域鐵律 1 的例外）：新增領域、調整分類所屬領域、改領域名稱。新增分類一律走 `add-topic.js --domain`。改完必跑 `node scripts/reindex-home.js` → `node scripts/validate.js`。
+- **可直接編輯的範圍**（全域鐵律 1 的例外，本節為操作步驟的單一真相）：新增領域、調整分類所屬領域、改領域名稱。新增分類一律走 `add-topic.js --domain`。
+  - **新增領域時**，同步在 `templates/home-learning-map.css` 補一條 `.learning-map [data-domain="<id>"]` 規則（優先沿用既有 token，見 style-guide），否則 validate R8 失敗。
+  - 改完必跑 `node scripts/reindex-home.js` → `node scripts/validate.js`。
 
 ## 2. Edge 語義 (與 scripts/mindmap.js 行為對齊)
 

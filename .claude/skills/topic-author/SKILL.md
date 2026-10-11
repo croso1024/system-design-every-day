@@ -28,7 +28,7 @@ description: >-
 - [ ] 2a. 選型：archetype-window.js 查「下一篇不可用的主 archetype」，替本篇選一個不撞形的 archetype 與圖表形式
 - [ ] 2b. 撰寫草稿：drafts/<id>/content.html (必填) 與 script.html (互動 JS，compute/render 分離 + @probe)
 - [ ] 2c. 品質閘門：demo-audit.js / compute-probe.js / archetype-window.js --topic 皆 exit 0，未過不得 generate
-- [ ] 3. 組裝發佈：node scripts/generate.js --topic <id> --title "..."（分類由 mindmap 帶出）
+- [ ] 3. 組裝發佈：node scripts/generate.js --topic <id> --title "..."（分類由 mindmap 帶出；title 逐字沿用節點標題）
 - [ ] 4. 品質檢查：用 ReadLints 檢查產出的 books/<id>/index.html 有無 HTML/CSS 錯誤
 - [ ] 5. 收尾（順序不可顛倒）：remove-todo.js 移除 todo -> validate.js 驗證 -> git commit（單行規範）-> push origin main（僅 Cursor 自動化環境）
 ```
@@ -149,6 +149,8 @@ node scripts/generate.js --topic <id> --title "標題"
 
 分類由 `docs/mindmap.json` 的節點帶出（主題不在 mindmap 時 exit 1，請先交棒 `topic-explorer`）；
 `--category` 選填，有給就必須與節點一致，否則在寫任何檔案之前 exit 1。
+`--title` **逐字使用** `node scripts/completed-ledger.js --action get-todo --topic <id>` 回傳的 title：
+首頁地圖讀 mindmap 節點的標題、文章頁讀 `--title`，兩者不一致時目前沒有閘門會擋（見 `docs/tech-debt.md` #11）。
 
 它會：注入 `templates/base.html` → 掃描章節生成 TOC → 寫出 `books/<id>/index.html`
 → **自動 upsert `docs/completed.json`** → 重新編譯首頁學習地圖 payload v2（產頁時排版）並重寫 `books/index.html`。
@@ -168,13 +170,13 @@ node scripts/generate.js --topic <id> --title "標題"
 > 非錯誤）。CI 每次 push 都會跑 validate，遵守此順序即保證 commit 快照互斥乾淨、CI 必綠。
 > 若 Step 4 的 lint 發現問題，因尚未 remove-todo、尚未 commit，可安全回 Step 2 修草稿重跑 `generate.js`。
 
-- 確認 `docs/completed.json` 已新增該主題、`books/index.html` 的學習地圖已把該篇標成已發布（所屬分類卡片多一顆實心點）。
+- 確認 `docs/completed.json` 已新增該主題；首頁學習地圖上，該篇在所屬分類卡片的點會由虛線空心（準備中）轉為實心（已發布），validate 會一併驗證。
 - **移除待辦項目**：執行以下獨立腳本，將已完成的主題自 `docs/todo.json` 中自動移除：
   ```bash
   node scripts/remove-todo.js --topic <id>
   ```
-- **狀態一致性驗證**：移除後，**必須**執行驗證腳本，確保 `todo.json`、`completed.json`、`mindmap.json`
-  之間狀態完全一致且無語法錯誤；此腳本亦會比對 `books/index.html` 的 Learning Map payload 與 `completed.json` / `mindmap.json` 是否同步：
+- **狀態一致性驗證**：移除後，**必須**執行驗證腳本，確保狀態檔彼此一致，且 `books/index.html` 的 Learning Map payload
+  與以目前 `docs/` 重算的結果同步（檢查項目見 `scripts/validate.js` 檔頭）：
   ```bash
   node scripts/validate.js
   ```
@@ -182,7 +184,7 @@ node scripts/generate.js --topic <id> --title "標題"
   依據專案規範，Commit Message 必須為**單行（One-liner）描述**，不要條列 Bullet Points。
   自動化文件生成的 Commit 必須使用 `[automation]` 標籤：
   ```bash
-  git add .
+  git add drafts/<id>/ books/<id>/index.html books/index.html docs/completed.json docs/todo.json   # 明列路徑，勿 git add .
   git commit -m "[automation] Add <id> - publish <title> handbook"
   ```
 - **推送遠端（Cursor 自動化環境的任務結尾）**：
@@ -209,15 +211,16 @@ node scripts/remove-completed.js --topic <id> --dry-run       # 先預覽將發�
 撤回的三步寫入（completed.json → todo.json → books/index.html）為**單一交易**，任一步失敗即逆序回滾至撤回前；`--purge-page` 不可逆故獨立於交易、最後執行。
 
 > **`--no-reindex` 注意事項**：此旗標會**刻意不重繪 `books/index.html`**，使首頁與 `completed.json` 暫時不一致。
-> 由於 `validate.js` 現會比對「首頁 Learning Map payload ↔ completed/mindmap」，**用了 `--no-reindex` 後、跑 `validate` / `git commit` 之前，
-> 務必自行補一次重繪**（重跑一次不帶 `--no-reindex` 的 `remove-completed.js`，或執行 `generate.js`），否則 validate 會失敗。
+> `validate.js` 會比對首頁 Learning Map payload 與 `docs/` 重算結果，所以**用了 `--no-reindex` 後、跑 `validate` / `git commit` 之前，
+> 務必執行 `node scripts/reindex-home.js` 補一次重繪**，否則 validate 會失敗。
+> （不要重跑 `remove-completed.js`：主題已不在 completed.json，它會直接結束而不重繪；也不要跑 `generate.js`，那會把主題重新發佈。）
 
 撤回後一樣要跑 `node scripts/validate.js` 確認一致。本腳本**不動 mindmap**（刪節點屬 `topic-explorer` 職責）。
 
 ## 撰稿鐵律（讀者體驗）
 
 1. **`<section>` 結構**：見上方黃金公式，缺了 TOC 就壞。
-2. **Notion 淺色風格**：禁止 Dark Mode 樣式（如 `bg-slate-900`）。自訂 Canvas/SVG 背景用 `#ffffff` 或 `#fafaf9`，文字 `#262a2f`；Mermaid 主題為 `default`（base.html 已統一，勿改）。
+2. **Notion 淺色風格**：禁止 Dark Mode 樣式（如深色背景 `background:#1e293b`）。自訂 Canvas/SVG 背景用 `#ffffff` 或 `#fafaf9`，文字 `#262a2f`；Mermaid 主題為 `default`（base.html 已統一，勿改）。
 3. **善用質感組件**：`.callout.accent`（關鍵折衷/觀念）、`.callout.warn`（陷阱/誤區）、`.oneliner`（章節尾「一句話秒答法」）、`.tbl-wrap`（所有 `<table>` 必包）。
 4. **圖表依語意選型**（見 style-guide「圖表與示意圖規範」）：
    - 時序 / 因果 → Mermaid `sequenceDiagram` 或 grid swimlane；**絕對禁止**用一排 chip 表達時序。

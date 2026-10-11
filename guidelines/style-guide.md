@@ -49,7 +49,8 @@
 
 ## 🧱 基礎色彩系統 (CSS 變數)
 
-全站基於 CSS 變數進行視覺渲染。**全站不載入 Tailwind**（文章頁與首頁皆無，`templates/base.html` 自帶等價於 preflight 的最小重置），utility class 寫了不會生效；所有顏色一律使用下表變數，不要寫高飽和、隨機的 raw hex：
+全站基於 CSS 變數進行視覺渲染。**全站不載入 Tailwind**（文章頁與首頁皆無，`templates/base.html` 自帶等價於 preflight 的最小重置），utility class 寫了不會生效；所有顏色一律使用下表變數，不要寫高飽和、隨機的 raw hex。
+唯一例外：Canvas 繪圖或 SVG 屬性等無法使用 `var()` 的地方，直接寫下表的**等值色值**（例如 `#ffffff`、`#262a2f`），不要自創色值：
 
 | 變數名稱 | 顏色範例 | 具體色值 | 適用場景 |
 | :--- | :---: | :--- | :--- |
@@ -63,6 +64,7 @@
 | `--code-bg` | 💻 程式底色 | `#f6f5f3` | 行內與區塊程式碼背景色 |
 | `--accent` | 💙 主藍色 | `#3f6188` | 品牌主色、主按鈕、作用中狀態、高亮 |
 | `--accent-soft` | 🐳 淡藍底 | `#eef2f7` | 主色背景高亮、作用中 TOC 項目底色 |
+| `--accent-line` | 🧊 淡藍線 | `#cdd9e6` | 主色系細線、底線與虛線框 |
 | `--ok` | 🟢 成功綠 | `#4d7d68` | 成功狀態、已提交 (Committed) 狀態 |
 | `--ok-soft` | 🥬 淡綠底 | `#eef4f1` | 成功狀態的軟背景色 |
 | `--warn` | 🟡 警告黃 | `#a3743e` | 警告狀態、已預留/鎖定 (Prepared) 狀態 |
@@ -80,7 +82,7 @@
 
 ### 首頁殼層與學習地圖的 token 規則
 
-- **單一真相**：`:root` 只寫在 `templates/base.html`。首頁 `books/index.html` 的 token 由 `scripts/lib/books.js` 在產頁時從 base.html 抽出，不另外維護一份；改 token 後跑 `reindex-home.js`（首頁）或 `rebuild-all.js`（文章頁）即可同步。
+- **單一真相**：`:root` 只寫在 `templates/base.html`。首頁 `books/index.html` 的 token 由 `scripts/lib/books.js` 在產頁時從 base.html 抽出，不另外維護一份；改 token 後跑 `rebuild-all.js`（重建全站文章頁並一併重繪首頁）。只改 `templates/home-learning-map.css` 時跑 `reindex-home.js` 即可。
 - **首頁殼層只用 token**：header / footer / 最後更新列以少量自訂 class（`.site-*`）寫成，顏色全取自上表；不得使用 `stone-*` 等 Tailwind 色票或 utility class（全站已不載入 Tailwind）。
 - **地圖 CSS 不得出現 raw hex**：`templates/home-learning-map.css` 的規則一律 `var()`。全站 token 沒有對應語意的顏色（選取深灰 `--lm-ink`、步驟徽章 `--lm-step`、走線 `--lm-edge` / `--lm-edge-dim`、路徑卡片邊框 `--lm-path-border`）只在 `.learning-map` 區塊命名一次。
 - **領域色**：`network` → `--accent`、`data` → `--ok`、`platform` → `--warn`、`ai` → `--lm-domain-ai`（紫，全站無對應）。新增領域時在 `[data-domain="<id>"]` 補一條規則（validate R8 會檢查），優先沿用既有 token。
@@ -228,7 +230,7 @@
 
 #### 鐵律 2｜橫排節點超過 6 個，一律不准用 `flex-wrap`
 
-內文欄寬（含 Sticky TOC）約 720px。**7 個以上的節點必然折行**，而折行後 DOM 順序不再等於視覺閱讀順序——
+內文欄寬為 `--maxw`（760px）。**7 個以上的節點必然折行**，而折行後 DOM 順序不再等於視覺閱讀順序——
 時序語意當場歸零，最後一個節點會孤零零掉在第三列，與它所屬的流程完全斷開。
 
 超過 6 個節點時，**必須**改用下列之一：直向 `.<p>-lane`（每列一步）、Mermaid、或 inline `<svg>`。
@@ -367,16 +369,12 @@ sequenceDiagram
 站內範本：`drafts/consistent-hashing-handbook`（雜湊環）、`drafts/coordination-services`（鎖競態時間軸）、
 `drafts/leader-election-and-raft`（Raft 狀態機，log 矩陣與 quorum 票型由狀態機推導）。
 
-> ⚠️ 本節談的是**畫法**。`drafts/data-replication-basics` 曾列在這份清單上——它的 SVG 沿路徑動畫封包的寫法可以參考，
-> 但**它的模擬層是假的**（「Client 讀到舊值」是寫死的字串，不是去讀當下 follower 的狀態），所以已從清單移除。
-> 借用它的畫法時，不要一起借走它的資料層。
-
 規範：
 
 - 一律 `viewBox="0 0 W H"` + `style="width:100%; height:auto"`（不要寫死 px 寬）。
 - 背景 `#ffffff` 或 `#fafaf9`；文字 `#262a2f`；線條與狀態色用 `var(--border-strong)` / `var(--accent)` / `var(--ok)` / `var(--warn)` / `var(--bad)`。
 - 文字字級 **≥ 11px**（縮放後仍需可讀），字體 `var(--mono)`。
-- 加 `role="img"` 與 `<title>`，供無障礙與 CDN 失效時理解。
+- 加 `role="img"` 與 `<title>`，供無障礙與螢幕閱讀器理解。
 - 箭頭用 `<marker>` defs 定義一次重複使用，不要用文字 `→` 冒充。
 
 ---
