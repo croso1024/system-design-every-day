@@ -31,11 +31,8 @@ topic-reviser   →  修訂既有「已發佈」文件      （更新）← 你�
 
 > **草稿是內容真相來源**：`drafts/<id>/content.html`（與 `script.html`）是產物頁面的來源。
 > **一律改草稿再重跑 `generate.js`，禁止直接手改 `books/<id>/index.html`。**
-> 若 `drafts/<id>/` 缺失或疑似與線上不同步，先用反解腳本重建（確定性逆運算，非猜測）：
-> ```bash
-> node scripts/extract-drafts.js --topic <id> --dry-run   # 先預覽 + 驗證，不落檔
-> node scripts/extract-drafts.js --topic <id>             # 確認無誤後重建草稿
-> ```
+> draft 隨產物一起入庫：若 `drafts/<id>/` 在工作區缺失，用 `git log -- drafts/<id>` 找到版本後以 `git restore` 從歷史還原；
+> 若懷疑 `books/<id>/index.html` 與 draft 不一致，一律以 draft 為準，重跑 `generate.js --keep-date` 覆蓋產物。
 
 ## 兩種進入模式（先判斷，再進共同管線）
 
