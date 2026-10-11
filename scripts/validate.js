@@ -1,5 +1,21 @@
 #!/usr/bin/env node
 
+/**
+ * validate.js — 狀態檔與首頁的一致性驗證（CI 每次 push 都跑；改完任何 docs/*.json 必跑）。
+ *
+ * 檢查項目：
+ *   - todo.json / completed.json / mindmap.json 結構；todo ↔ completed 互斥；mindmap 懸空邊；
+ *     主題層 prerequisite 環；completed 的發佈頁存在
+ *   - 首頁 books/index.html：payload topics 逐筆對照 mindmap 與 completed（title / category / completed / path / completed_at）
+ *   - R1 categories.json 格式      R2 每個節點的分類都已登記      R3 登記表沒有無人使用的分類
+ *   - R4 分類層 prerequisite 無環  R5／R6 completed／todo 每筆的分類等於 mindmap 節點的分類
+ *   - R7 首頁 payload 衍生區塊與以目前 docs 重算的結果逐位元相同（不符就跑 reindex-home.js）
+ *   - R8 templates/home-learning-map.css 對每個 domain 都有 [data-domain="<id>"] 規則
+ *
+ * Usage:
+ *   node scripts/validate.js     # 任一項失敗即 exit 1
+ */
+
 const fs = require('fs');
 const path = require('path');
 
@@ -167,19 +183,14 @@ function extractLearningMapPayload(html) {
 
 /**
  * books/index.html embedded payload ↔ completed.json 路徑一致性。
- * 首頁不再渲染靜態卡片網格；以 payload 內 completed topics 的 path 作為訊號，
- * 偵測首頁過時（例如 remove-completed.js --no-reindex 後尚未補重繪）。
+ * 以首頁 payload 中 completed topics 的 path 集合對照 completed.json，
+ * 偵測首頁過時（例如 remove-completed.js --no-reindex 之後還沒重繪）。
  */
 function validateBooksIndexConsistency(completed, mindmap) {
-  const expected = new Set(
-    completed
-      .filter((item) => item && typeof item.path === 'string')
-      .map((item) => item.path.replace(/^books\//, ''))
-  );
-
   if (!fs.existsSync(BOOKS_INDEX_PATH)) {
-    if (expected.size === 0) return;
-    error(`books/index.html 不存在，但 completed.json 有 ${expected.size} 筆主題。請執行 node scripts/generate.js 重新生成首頁。`);
+    const publishedCount = completed.filter((item) => item && typeof item.path === 'string').length;
+    if (publishedCount === 0) return;
+    error(`books/index.html 不存在，但 completed.json 有 ${publishedCount} 筆主題。請執行 node scripts/reindex-home.js 重繪首頁。`);
     return;
   }
 

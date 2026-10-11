@@ -6,7 +6,7 @@
  * 輸入：分類（含所屬領域與文章 id 清單）、領域順序、分類層 prerequisite 邊。
  * 輸出：payload v2 的 `layout` 區塊（欄、卡片座標、獨立主題區塊、走線路徑）以及每個分類的欄號。
  *
- * 排版規則（對應設計稿 C-1）：
+ * 排版規則：
  *   - 欄 = 分類在 prerequisite DAG 上的最長路徑深度（拓撲排序後單趟計算；有循環直接 throw）。
  *   - 同欄順序只在 `compareSameColumn` 這一個 comparator 決定：先依「前驅卡片中心 y 的平均」(barycenter)，
  *     沒有前驅時依領域順序，最後一律比分類名稱的 code point。
@@ -14,22 +14,20 @@
  *   - 跨越多欄的 edge 在每個中間欄從卡片之間的空隙穿過（`gapCrossingY`），同一欄的穿越點彼此錯開。
  *   - 所有卡片等高：任一分類文章數超過 DOTS_PER_ROW 時，全部卡片改為兩列高度。
  *
- * 可重現性（決策 14）：排序只比數字與 code point、不用 localeCompare；座標只用加減乘除，
+ * 可重現性：排序只比數字與 code point、不用 localeCompare；座標只用加減乘除，
  * 輸出時才四捨五入到小數 1 位。相同輸入在任何 Node 版本都產生逐位元相同的結果。
  */
 
 const { compareCodePoint } = require('./categories');
 
-// ---- 尺寸常數（CSS 以 payload 帶出的值為準，模板不另外維護） ----
+// ---- 尺寸常數（卡片寬高經 payload.layout.card 帶給 CSS；欄標題的 top 由 CSS 自行決定） ----
 const CARD_W = 200;
 const CARD_H_ONE_ROW = 62;
 const CARD_H_TWO_ROWS = 76;
-const DOTS_PER_ROW = 11;        // 決策 7：點點一列最多 11 顆
+const DOTS_PER_ROW = 11;        // 卡片一列最多 11 顆點點；任一分類超過時全部卡片改兩列高
 const PAD_X = 24;               // 畫布左右內距
 const COL_STEP = 248;           // 欄距（CARD_W + 48px 走線溝槽）
-const GUTTER = COL_STEP - CARD_W;
 const CARD_GAP = 16;            // 同欄卡片間距
-const LABEL_TOP = 22;           // 欄標題的 y
 const ROUTE_TOP = 40;           // 走線可用區域上緣（欄標題之下）
 const DAG_Y0 = 56;              // 第一張卡片的 y
 const DAG_BOTTOM_PAD = 16;
@@ -195,7 +193,7 @@ function assignColumns(categoryById, edges) {
   return { columnById, predecessors, successors, columnCount };
 }
 
-// ---- 同欄排序：唯一的 comparator（決策 13／18） ----------------------------------
+// ---- 同欄排序：唯一的 comparator（固定順序的計畫見 docs/tech-debt.md #10） ----------
 
 /**
  * 同欄順序的唯一決定點。日後導入 rank 時只需在這裡加一個比較鍵。
@@ -319,7 +317,7 @@ function gapCrossingY(columnBoxes, wanted, used, top, bottom) {
       bestDistance = distance;
     }
   });
-  if (!best) return null; // §2.7：原設計稿此處會存取 null.y 而拋錯
+  if (!best) return null;
 
   const offsets = [0, 7, -7, 14, -14, 21, -21, 28, -28];
   for (let i = 0; i < offsets.length; i += 1) {
@@ -574,7 +572,6 @@ function buildLearningMapLayout(input, options = {}) {
 
 module.exports = {
   buildLearningMapLayout,
-  compareSameColumn,
   constants: {
     CARD_W,
     CARD_H_ONE_ROW,
@@ -582,9 +579,7 @@ module.exports = {
     DOTS_PER_ROW,
     PAD_X,
     COL_STEP,
-    GUTTER,
     CARD_GAP,
-    LABEL_TOP,
     ROUTE_TOP,
     DAG_Y0,
   },
