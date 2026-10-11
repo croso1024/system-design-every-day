@@ -87,6 +87,8 @@
 *   **擴充新的心智圖或待辦項目**（前段選題/圖譜維護）：使用 `[explore]` 標籤。
     *   *格式*：`[explore] {Brief description}`
     *   *範例*：`[explore] add data-replication-basics and advanced-replication-consistency to todo and mindmap`
+*   **修訂既有文章內容**（`topic-reviser`）：使用 `[docs]` 標籤。
+    *   *格式*：`[docs] {Brief description}`
 *   **不需添加Co-Author** : 保持提交訊息單行簡潔。
 
 ---
@@ -124,11 +126,11 @@
 
 ## Cursor Cloud specific instructions
 
-本專案是**零依賴的純 Node.js 靜態網站產生器**——沒有 `package.json`、沒有 `node_modules`，所有腳本只用 Node 內建模組（`fs`、`path`）。因此**不需要任何套件安裝步驟**（startup update script 為 no-op 的 `node --version` 健檢即可），有 Node 18+ 即可運作（CI 用 Node 24，本機驗證過 v22）。
+本專案是**零依賴的純 Node.js 靜態網站產生器**——沒有 `package.json`、沒有 `node_modules`，所有腳本只用 Node 內建模組（`fs`、`path` 等）。因此**不需要任何套件安裝步驟**（startup update script 為 no-op 的 `node --version` 健檢即可），有 Node 18+ 即可運作（CI 用 Node 24，本機驗證過 v22）。
 
 - **Lint / Test 檢查（唯一品質閘門）**：靜態檢查用 ReadLints 掃產出的 `books/<id>/index.html`；狀態一致性用 `node scripts/validate.js`；demo 品質用 `scripts/quality/` 的 `demo-audit.js`、`compute-probe.js`、`archetype-window.js --topic <id>`（新寫／重做 demo 時 generate 前必過，見 style-guide §0.6）。專案沒有單元測試框架、也沒有獨立 linter；CI（`.github/workflows/deploy.yml`）每次 push 到 `main` 都只跑 `validate.js`，通過後才部署（demo 閘門尚未進 CI：舊篇有既有失敗，登錄於 `docs/tech-debt.md`）。改完任何 `docs/*.json` 必跑 `validate.js`。改了 `scripts/quality/compute-probe.js` 本身時，另跑 `SDED_ROOT=scripts/quality/fixtures node scripts/quality/compute-probe.js --all` 回歸（good-sim、two-demos 應 PASS，fake-player 應 FAIL）。**瀏覽器點測不是品質閘門。**
 - **Build（產頁）**：先建立 `drafts/<topic-id>/content.html`（內容須含合法 `<section id="..."><h2>...</h2>` 結構，否則 `generate.js` 會零副作用 exit 1），再跑 `node scripts/generate.js --topic <id> --title "..."`（分類由 `docs/mindmap.json` 的節點帶出，主題必須已由 `add-topic.js` 建立節點；`--category` 選填，有給就必須與節點一致，否則零副作用 exit 1）。draft 是產物的內容原始碼，`generate.js` 只讀不刪，隨產物一起提交。
-- **Run（沒有 dev server；給人看的預覽說明，不是 Agent QA）**：產物是 `books/` 下的純靜態 HTML，無後端、無打包。人在本機可用任意靜態伺服器預覽，例如 `python3 -m http.server 8080 --directory books`，再開 `http://localhost:8080/index.html`。Cloud Agent **不得**把本段當成「必須開瀏覽器 / 啟動 Sub-Agent 點測」的收尾步驟。首頁的可點擊學習地圖在產頁時就由伺服器端排版、輸出成靜態 DOM 與 inline SVG，**不載入任何 CDN 或第三方函式庫**，離線也能完整顯示；瀏覽器停用 JavaScript 時地圖、hover 標題清單與文章連結仍可用，只有卡片選取與右側路徑面板的互動無作用。
+- **Run（沒有 dev server；給人看的預覽說明，不是 Agent QA）**：產物是 `books/` 下的純靜態 HTML，無後端、無打包。人在本機可用任意靜態伺服器預覽，例如 `python3 -m http.server 8080 --directory books`，再開 `http://localhost:8080/index.html`。Cloud Agent **不得**把本段當成「必須開瀏覽器 / 啟動 Sub-Agent 點測」的收尾步驟。首頁的可點擊學習地圖在產頁時就由伺服器端排版、輸出成靜態 DOM 與 inline SVG，**除 Google Fonts 外不載入任何外部資源或第三方函式庫**，離線也能完整顯示（字型退回系統字體）；瀏覽器停用 JavaScript 時地圖、hover 標題清單與文章連結仍可用，只有卡片選取與右側路徑面板的互動無作用。
 - **副作用提醒**：`generate.js` 會異動受版控的 `docs/completed.json`、`books/index.html` 與 `books/<id>/index.html`。若只是臨時測試流程，請事後用 git 還原這些檔案，避免把試打的主題誤留進手冊。
 
 ### Cloud Agent：禁止以 Sub-Agent / 瀏覽器做產文 QA

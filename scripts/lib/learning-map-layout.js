@@ -572,15 +572,5 @@ function buildLearningMapLayout(input, options = {}) {
 
 module.exports = {
   buildLearningMapLayout,
-  constants: {
-    CARD_W,
-    CARD_H_ONE_ROW,
-    CARD_H_TWO_ROWS,
-    DOTS_PER_ROW,
-    PAD_X,
-    COL_STEP,
-    CARD_GAP,
-    ROUTE_TOP,
-    DAG_Y0,
-  },
+  constants: { CARD_H_ONE_ROW },
 };

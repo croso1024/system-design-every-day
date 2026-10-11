@@ -83,7 +83,6 @@ function recommendNext(lastTopicId) {
   const todo = loadJSON(TODO_PATH, []);
 
   const completedIds = new Set(completed.map(item => item.id));
-  const todoIds = new Set(todo.map(item => item.id));
   const todoById = new Map(todo.map(item => [item.id, item]));
 
   function withBrief(rec) {

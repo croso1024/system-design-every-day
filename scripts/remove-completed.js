@@ -16,7 +16,7 @@
  *   --no-reindex   不重繪 books/index.html；預設會重繪 (讓首頁學習地圖與 completed 同步)
  *   --dry-run      只印出將發生的變更，不實際落檔
  *
- * 本腳本不動 mindmap.json (刪 node 會牽動 edges、可能產生懸空邊，屬 topic-explorer 職責)。
+ * 本腳本不動 mindmap.json (刪 node 會牽動 edges、可能產生懸空邊；目前沒有刪節點的工具，見 docs/tech-debt.md #15)。
  */
 
 const fs = require('fs');
