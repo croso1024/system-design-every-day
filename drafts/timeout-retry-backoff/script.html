@@ -1,0 +1,341 @@
+<script>
+(function () {
+  "use strict";
+
+  /* (1) 常數與參數表 */
+  var FAST_FAIL_MS = 5;
+
+  /* (2) compute* 純函式 */
+  // @probe fn       computeRetryRecord
+  // @probe baseline {"layers":3,"attempts":3,"baseMs":100,"capMs":140,"outageMs":450,"p99Ms":40,"clientQps":40,"budgetPct":20,"policy":1}
+  // @probe sweep    {"layers":[1,4],"attempts":[1,4],"baseMs":[20,400],"capMs":[100,2000],"outageMs":[0,8000],"p99Ms":[10,400],"clientQps":[5,160],"budgetPct":[0,80],"policy":[0,1]}
+
+  function clamp(n, lo, hi) {
+    if (n < lo) return lo;
+    if (n > hi) return hi;
+    return n;
+  }
+
+  function hashUnit(a, b, c) {
+    var x = (Math.imul(a, 374761393) + Math.imul(b, 668265263) + Math.imul(c, 1274126177)) >>> 0;
+    x ^= x >>> 13;
+    x = Math.imul(x, 1274126177) >>> 0;
+    x = (x ^ (x >>> 16)) >>> 0;
+    return x % 10000;
+  }
+
+  function backoffMs(baseMs, capMs, retryOrdinal, layer, reqIdx, policy) {
+    var exp = baseMs;
+    var i;
+    for (i = 1; i < retryOrdinal; i++) {
+      exp = exp * 2;
+      if (exp > capMs) exp = capMs;
+    }
+    if (exp > capMs) exp = capMs;
+    if (policy === 0) return exp;
+    return Math.floor((hashUnit(retryOrdinal, layer + 1, reqIdx + 1) / 10000) * (exp + 1));
+  }
+
+  function normalize(raw) {
+    var baseMs = clamp(Math.round(Number(raw.baseMs) || 0), 10, 800);
+    var capMs = clamp(Math.round(Number(raw.capMs) || 0), 10, 8000);
+    if (capMs < baseMs) capMs = baseMs;
+    return {
+      layers: clamp(Math.round(Number(raw.layers) || 0), 1, 4),
+      attempts: clamp(Math.round(Number(raw.attempts) || 0), 1, 4),
+      baseMs: baseMs,
+      capMs: capMs,
+      outageMs: clamp(Math.round(Number(raw.outageMs) || 0), 0, 20000),
+      p99Ms: clamp(Math.round(Number(raw.p99Ms) || 0), 5, 2000),
+      clientQps: clamp(Math.round(Number(raw.clientQps) || 0), 1, 200),
+      budgetPct: clamp(Math.round(Number(raw.budgetPct) || 0), 0, 100),
+      policy: Number(raw.policy) === 0 ? 0 : 1
+    };
+  }
+
+  function computeRetryRecord(raw) {
+    var p = normalize(raw);
+    var layers = p.layers;
+    var attempts = p.attempts;
+    var baseMs = p.baseMs;
+    var capMs = p.capMs;
+    var outageMs = p.outageMs;
+    var p99Ms = p.p99Ms;
+    var cohort = p.clientQps;
+    var budgetPct = p.budgetPct;
+    var policy = p.policy;
+    var attemptTimeoutMs = Math.max(20, p99Ms * 2);
+    var theoreticalAmp = 1;
+    var i;
+    var k;
+    for (i = 0; i < layers; i++) theoreticalAmp *= attempts;
+
+    var slowMs = attempts * attemptTimeoutMs;
+    for (k = 1; k < attempts; k++) slowMs += backoffMs(baseMs, capMs, k, 0, 0, 0);
+    var heldThreads = Math.round(cohort * slowMs / 1000);
+
+    function trace(reqIdx, collectLayers) {
+      var times = [];
+      var layerStarts = [0, 0, 0, 0];
+      var layerDelay = [0, 0, 0, 0];
+
+      function walk(layer, t) {
+        var endT = t;
+        var failed = true;
+        var attempt;
+        for (attempt = 0; attempt < attempts; attempt++) {
+          if (collectLayers) layerStarts[layer] += 1;
+          if (layer === layers - 1) {
+            times.push(t);
+            failed = t < outageMs;
+            endT = t;
+          } else {
+            var sub = walk(layer + 1, t);
+            failed = sub.failed;
+            endT = sub.endT;
+          }
+          if (!failed) break;
+          if (attempt + 1 < attempts) {
+            var delay = backoffMs(baseMs, capMs, attempt + 1, layer, reqIdx, policy);
+            if (collectLayers && attempt === 0) layerDelay[layer] = delay;
+            t = endT + delay;
+          }
+        }
+        return { endT: endT, failed: failed };
+      }
+
+      var top = walk(0, 0);
+      return {
+        times: times,
+        layerStarts: layerStarts,
+        layerDelay: layerDelay,
+        endT: top.endT,
+        failed: top.failed
+      };
+    }
+
+    var one = trace(0, true);
+    var lists = [];
+    var r;
+    for (r = 0; r < cohort; r++) {
+      if (r === 0) lists.push(one.times);
+      else lists.push(trace(r, false).times);
+    }
+
+    var unbudgeted = 0;
+    for (r = 0; r < cohort; r++) unbudgeted += lists[r].length;
+
+    var capLeaves = policy === 0 ? 1000000000 : cohort + Math.round(cohort * budgetPct / 100);
+    var cursor = [];
+    for (r = 0; r < cohort; r++) cursor.push(0);
+    var fleetLeaf = 0;
+    var maxT = 0;
+    var retryBins = {};
+    var pass = 0;
+    var guard = 0;
+    while (fleetLeaf < capLeaves && guard < 100000) {
+      var placed = 0;
+      guard += 1;
+      for (r = 0; r < cohort; r++) {
+        if (fleetLeaf >= capLeaves) break;
+        if (cursor[r] < lists[r].length) {
+          var t = lists[r][cursor[r]];
+          cursor[r] += 1;
+          fleetLeaf += 1;
+          placed += 1;
+          if (t > maxT) maxT = t;
+          if (pass > 0) {
+            var bin = Math.floor(t / 100);
+            retryBins[bin] = (retryBins[bin] || 0) + 1;
+          }
+        }
+      }
+      if (placed === 0) break;
+      pass += 1;
+    }
+
+    var denied = unbudgeted - fleetLeaf;
+    var retryPeak = 0;
+    var binKey;
+    for (binKey in retryBins) {
+      if (retryBins[binKey] > retryPeak) retryPeak = retryBins[binKey];
+    }
+
+    var marks = [0, 0, 0, 0, 0, 0, 0, 0];
+    var markCount = one.times.length < 8 ? one.times.length : 8;
+    for (i = 0; i < markCount; i++) marks[i] = one.times[i];
+
+    var last = one.times.length ? one.times[one.times.length - 1] : 0;
+    var succeeded = last >= outageMs ? 1 : 0;
+    var userVisibleMs = last + (succeeded ? p99Ms : FAST_FAIL_MS);
+    var recoveryMs = maxT > outageMs ? maxT - outageMs : 0;
+
+    return {
+      attemptTimeoutMs: attemptTimeoutMs,
+      theoreticalAmp: theoreticalAmp,
+      heldThreads: heldThreads,
+      oneLeaf: one.times.length,
+      oneEnd: last,
+      userVisibleMs: userVisibleMs,
+      succeeded: succeeded,
+      unbudgeted: unbudgeted,
+      fleetLeaf: fleetLeaf,
+      denied: denied,
+      retryPeak: retryPeak,
+      recoveryMs: recoveryMs,
+      layerStarts: one.layerStarts,
+      layerDelay: one.layerDelay,
+      marks: marks,
+      markCount: markCount
+    };
+  }
+
+  /* (3) DOM 參照 */
+  var elLayers = document.getElementById("trb-layers");
+  var elAttempts = document.getElementById("trb-attempts");
+  var elBase = document.getElementById("trb-base");
+  var elCap = document.getElementById("trb-cap");
+  var elOutage = document.getElementById("trb-outage");
+  var elP99 = document.getElementById("trb-p99");
+  var elQps = document.getElementById("trb-qps");
+  var elBudget = document.getElementById("trb-budget");
+  var elReset = document.getElementById("trb-reset");
+  var elAnno = document.getElementById("trb-anno");
+  var elSvg = document.getElementById("trb-svg");
+  var elStatus = document.getElementById("trb-status");
+  var policyButtons = document.querySelectorAll("#demo-retry-record .seg button");
+
+  /* (4) render —— 只把 compute 的結果畫出來 */
+  function readForm() {
+    var policy = 1;
+    var i;
+    for (i = 0; i < policyButtons.length; i++) {
+      if (policyButtons[i].getAttribute("aria-pressed") === "true") {
+        policy = Number(policyButtons[i].getAttribute("data-policy"));
+      }
+    }
+    return {
+      layers: elLayers.value,
+      attempts: elAttempts.value,
+      baseMs: elBase.value,
+      capMs: elCap.value,
+      outageMs: elOutage.value,
+      p99Ms: elP99.value,
+      clientQps: elQps.value,
+      budgetPct: elBudget.value,
+      policy: policy
+    };
+  }
+
+  function layerName(index, total) {
+    if (index === total - 1) return "直連下游";
+    if (index === 0) return "最外層";
+    return "中介 " + index;
+  }
+
+  function annoRow(name, value, note) {
+    return '<div class="trb-k">' + name + '</div><div class="trb-v">' + value + '</div><div class="trb-n">' + note + '</div>';
+  }
+
+  function renderSvg(p, st) {
+    var axis = Math.max(p.outageMs, st.oneEnd, 1);
+    var width = 640;
+    var padL = 18;
+    var padR = 18;
+    var y = 78;
+    var xOf = function (t) {
+      return Math.round(padL + (Math.min(t, axis) / axis) * (width - padL - padR));
+    };
+    var bandR = xOf(Math.min(p.outageMs, axis));
+    var parts = [];
+    parts.push('<rect width="640" height="128" fill="#fafaf9"></rect>');
+    parts.push('<rect x="' + padL + '" y="40" width="' + Math.max(0, bandR - padL) + '" height="52" fill="#f6ecea"></rect>');
+    parts.push('<line x1="' + padL + '" y1="' + y + '" x2="' + (width - padR) + '" y2="' + y + '" stroke="#dedcd8"></line>');
+    parts.push('<line x1="' + bandR + '" y1="34" x2="' + bandR + '" y2="98" stroke="#a8554f"></line>');
+    parts.push('<text x="' + bandR + '" y="24" text-anchor="middle" fill="#262a2f" font-size="11" font-family="ui-monospace,monospace">outage ' + p.outageMs + 'ms</text>');
+    var m;
+    for (m = 0; m < st.markCount; m++) {
+      var t = st.marks[m];
+      var fill = t < p.outageMs ? "#a3743e" : "#4d7d68";
+      parts.push('<circle cx="' + xOf(t) + '" cy="' + y + '" r="5" fill="' + fill + '"></circle>');
+    }
+    parts.push('<text x="' + padL + '" y="116" fill="#6b7078" font-size="11" font-family="ui-monospace,monospace">0</text>');
+    parts.push('<text x="' + (width - padR) + '" y="116" text-anchor="end" fill="#6b7078" font-size="11" font-family="ui-monospace,monospace">' + axis + ' ms</text>');
+    elSvg.innerHTML = '<title>這一筆失敗紀錄的葉呼叫落點</title>' + parts.join("");
+  }
+
+  function render() {
+    var raw = readForm();
+    var p = normalize(raw);
+    var st = computeRetryRecord(raw);
+    var html = "";
+    html += annoRow("單次逾時", st.attemptTimeoutMs + " ms", "成功延遲 p99 的 2 倍，下限 20 ms");
+    html += annoRow("慢逾時握住", st.heldThreads + " 條", "若每次嘗試都等到逾時，最外層大約同時握著這麼多執行緒");
+    html += annoRow("理論葉呼叫", st.theoreticalAmp + " 次", "故障蓋住整棵樹、每層都重試滿時，一筆請求打到底層的次數");
+    html += annoRow("這一筆葉呼叫", st.oneLeaf + " 次", st.succeeded ? "最後一發落在故障結束之後，算成功" : "整棵樹都在故障窗內結束，呼叫端放棄");
+    html += annoRow("這一筆等待", st.userVisibleMs + " ms", "最後一發的發出時刻，加上成功的 p99 或失敗的 5 ms");
+    var layer;
+    for (layer = 0; layer < p.layers; layer++) {
+      var starts = st.layerStarts[layer];
+      var delayNote;
+      if (starts <= 1) delayNote = "沒有排下一次嘗試";
+      else if (st.layerDelay[layer] === 0) delayNote = "下一次嘗試前睡 0 ms，全抖動可以抽到下界";
+      else delayNote = "下一次嘗試前睡 " + st.layerDelay[layer] + " ms";
+      html += annoRow("層 " + (layer + 1) + " " + layerName(layer, p.layers), starts + " 次", delayNote);
+    }
+    html += annoRow("群、未套預算", st.unbudgeted + " 次", "同一秒 " + p.clientQps + " 筆各自走完自己的樹");
+    html += annoRow("實際打到下游", st.fleetLeaf + " 次", p.policy === 0 ? "這筆紀錄不設預算，樹走完就全數發出" : "上限是群大小再加 " + p.budgetPct + "%，輪流發、先發第一發");
+    html += annoRow("預算擋下", st.denied + " 次", "擋下的是還沒發出的重試，不是資料損毀");
+    html += annoRow("重試尖峰", st.retryPeak + " / 100ms", "不含每人的第一發；鎖步會擠在同一個窗，抖動會散開");
+    html += annoRow("恢復尾巴", st.recoveryMs + " ms", st.recoveryMs === 0 ? "發出的呼叫都落在故障結束前" : "故障恢復之後，還有重試會陸續落地");
+    elAnno.innerHTML = html;
+    renderSvg(p, st);
+
+    var policyText = p.policy === 0 ? "鎖步、不設預算" : "全抖動加預算";
+    elStatus.textContent = "策略是" + policyText + "。這一筆拆出 " + st.oneLeaf + " 次葉呼叫，理論滿重試是 " + st.theoreticalAmp + " 次。同一秒 " + p.clientQps + " 筆一起失敗時，實際打到下游 " + st.fleetLeaf + " 次（擋下 " + st.denied + " 次）；重試最擠的 100 ms 有 " + st.retryPeak + " 次，恢復尾巴 " + st.recoveryMs + " ms。";
+  }
+
+  /* (5) 事件綁定 */
+  function bindInput(el) {
+    el.addEventListener("input", render);
+  }
+  bindInput(elLayers);
+  bindInput(elAttempts);
+  bindInput(elBase);
+  bindInput(elCap);
+  bindInput(elOutage);
+  bindInput(elP99);
+  bindInput(elQps);
+  bindInput(elBudget);
+
+  function onPolicyClick(ev) {
+    var i;
+    for (i = 0; i < policyButtons.length; i++) {
+      policyButtons[i].setAttribute("aria-pressed", policyButtons[i] === ev.currentTarget ? "true" : "false");
+    }
+    render();
+  }
+  var b;
+  for (b = 0; b < policyButtons.length; b++) {
+    policyButtons[b].addEventListener("click", onPolicyClick);
+  }
+
+  elReset.addEventListener("click", function () {
+    elLayers.value = "3";
+    elAttempts.value = "3";
+    elBase.value = "100";
+    elCap.value = "140";
+    elOutage.value = "450";
+    elP99.value = "40";
+    elQps.value = "40";
+    elBudget.value = "20";
+    var i;
+    for (i = 0; i < policyButtons.length; i++) {
+      policyButtons[i].setAttribute("aria-pressed", policyButtons[i].getAttribute("data-policy") === "1" ? "true" : "false");
+    }
+    render();
+  });
+
+  render();
+})();
+</script>

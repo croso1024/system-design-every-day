@@ -1,0 +1,477 @@
+<!-- demo-archetype: F｜拆解器 — 讀者改一筆失敗紀錄的層數、重試、p99、預算與策略，逐層拆開這一筆的呼叫樹，並算出同一群同時失敗時的下游尖峰與恢復尾巴。
+     brief 指定並排對照或參數掃描；兩者都被最近 3 篇封住，改為 F。 -->
+<style>
+  .trb-row {
+    display: flex; flex-wrap: wrap; gap: 10px;
+    align-items: stretch; justify-content: center;
+    margin: 14px 0 6px;
+  }
+  .trb-node {
+    border: 1px solid var(--border-strong); border-radius: 8px;
+    background: #fff; padding: 10px 12px;
+    min-width: 110px; max-width: 200px; text-align: center;
+  }
+  .trb-node .nn { font-family: var(--mono); font-size: 12px; font-weight: 700; color: var(--text); }
+  .trb-node .ns { font-size: 11px; color: var(--text-2); margin-top: 3px; line-height: 1.4; }
+  .trb-node.accent { border-top: 3px solid var(--accent); }
+  .trb-node.ok { border-top: 3px solid var(--ok); }
+  .trb-node.warn { border-top: 3px solid var(--warn); }
+  .trb-node.bad { border-top: 3px solid var(--bad); }
+  .trb-arrow {
+    display: flex; align-items: center;
+    font-family: var(--mono); font-size: 13px; color: var(--text-3);
+    white-space: nowrap;
+  }
+  .trb-stack {
+    display: flex; flex-direction: column; align-items: center; gap: 0;
+    margin: 14px 0 6px;
+  }
+  .trb-stack .trb-node { width: min(100%, 280px); max-width: 280px; }
+  .trb-down {
+    font-family: var(--mono); font-size: 12px; color: var(--text-3);
+    padding: 4px 0; letter-spacing: 0.02em;
+  }
+  .trb-lane {
+    display: grid; grid-template-columns: 72px repeat(3, 1fr); gap: 1px;
+    background: var(--border); border: 1px solid var(--border);
+    border-radius: 8px; overflow: hidden; margin: 14px 0 6px;
+  }
+  .trb-lane > div { background: #fff; padding: 8px 10px; font-size: 12px; line-height: 1.5; }
+  .trb-lane .lh { background: var(--bg-soft); font-family: var(--mono); font-size: 11px; font-weight: 700; color: var(--text-2); }
+  .trb-lane .lt { background: var(--bg-soft); font-family: var(--mono); font-size: 11px; color: var(--text-3); }
+  .trb-lane .lc.act { background: var(--accent-soft); }
+  .trb-lane .lc.ok { background: var(--ok-soft); }
+  .trb-lane .lc.bad { background: var(--bad-soft); }
+  .trb-lane .lc.warn { background: var(--warn-soft); }
+  @media (max-width: 720px) {
+    .trb-lane { grid-template-columns: 56px repeat(3, minmax(0, 1fr)); }
+    .trb-lane > div { font-size: 11px; padding: 6px; }
+  }
+
+  .trb-kicker {
+    font-family: var(--mono); font-size: 11px; color: var(--text-3);
+    margin: 0 0 8px;
+  }
+  .trb-record {
+    display: grid; grid-template-columns: 1fr 1fr; gap: 8px 14px;
+    margin: 0 0 12px;
+  }
+  .trb-field label { display: block; font-size: 12px; color: var(--text-2); }
+  .trb-field input {
+    width: 100%; box-sizing: border-box; margin-top: 4px;
+    padding: 6px 8px; border: 1px solid var(--border-strong);
+    border-radius: var(--radius-sm); background: #fff; color: var(--text);
+    font-family: var(--mono); font-size: 13px;
+  }
+  .trb-svg {
+    width: 100%; height: auto; display: block;
+    background: #fafaf9; border: 1px solid var(--border); border-radius: 8px;
+  }
+  .trb-anno {
+    display: grid; grid-template-columns: 132px 88px 1fr; gap: 1px;
+    background: var(--border); border: 1px solid var(--border);
+    border-radius: 8px; overflow: hidden; margin: 10px 0;
+  }
+  .trb-anno > div { background: #fff; padding: 7px 10px; font-size: 12px; line-height: 1.45; }
+  .trb-k { font-family: var(--mono); color: var(--text-2); }
+  .trb-v { font-family: var(--mono); font-weight: 700; color: var(--text); text-align: right; }
+  .trb-n { color: var(--text-2); }
+  @media (max-width: 720px) {
+    .trb-record { grid-template-columns: 1fr; }
+    .trb-anno { grid-template-columns: 96px 72px minmax(0, 1fr); }
+  }
+</style>
+
+<section id="s1">
+  <div class="sec-head">
+    <span class="sec-num">01</span>
+    <h2>失敗之後，決定在呼叫端</h2>
+  </div>
+  <p class="sec-sub">逾時、重試、退避是客戶端在一次呼叫失敗之後的三個決定，不是伺服器的容錯功能。</p>
+
+  <p>下游沒在期限內給出可用的結果時，呼叫端只有幾件事可做：繼續等、放棄、或晚一點再叫一次。逾時決定「還能等多久」，重試決定「要不要再叫」，退避決定「再叫之前睡多久」。三個旋鈕都在客戶端，因為只有客戶端知道使用者還剩多少耐心，也只有客戶端數得出自己已經多打了幾次。</p>
+
+  <div class="trb-row">
+    <div class="trb-node accent">
+      <div class="nn">呼叫端</div>
+      <div class="ns">握有使用者的期限</div>
+    </div>
+    <span class="trb-arrow">──剩餘預算──▸</span>
+    <div class="trb-node">
+      <div class="nn">中介</div>
+      <div class="ns">預設不自己重試</div>
+    </div>
+    <span class="trb-arrow">──一次嘗試──▸</span>
+    <div class="trb-node warn">
+      <div class="nn">下游</div>
+      <div class="ns">只看見打進來的呼叫</div>
+    </div>
+  </div>
+  <p class="cap">重試預設只放在握有使用者期限的那一端。中介每自作主張重試一次，下游看到的呼叫就再乘一層。</p>
+
+  <p>這三個決定要分開設。逾時設太短，健康的慢請求被當成失敗，重試開始製造第二份工作。逾時設太長，執行緒與連線先被握滿，重試還沒開始服務就已經過載。重試沒有上限，短故障會變成重試風暴。退避若全員相同，故障恢復的那一瞬間所有人一起醒來。</p>
+
+  <div class="callout accent">
+    <div class="c-title"><span class="ic">邊界</span>這篇沿用、但不重畫的結論</div>
+    <p>gRPC 與 Protocol Buffers 那篇已經示範 deadline 逐跳扣減，以及哪些狀態碼可以重試。這裡把同一套「剩餘預算」推到 HTTP 與非同步呼叫，不重畫扣減表與狀態碼表。操作是否冪等、Idempotency-Key 怎麼設計，由 API 設計風格與演進那篇負責。佇列的重新投遞與死信由訊息佇列基礎負責。故障已經持續、該停止呼叫時，由熔斷、艙壁隔離與降級負責。</p>
+  </div>
+
+  <div class="oneliner">
+    <b>一句話答法</b>逾時取自下游成功延遲的高分位，並且不得超過呼叫端剩下的期限；只對可重試的失敗做有上限的重試，用帶抖動的指數退避把重試錯開，並用重試預算在下游全壞時自動停手。
+  </div>
+</section>
+
+<section id="s2">
+  <div class="sec-head">
+    <span class="sec-num">02</span>
+    <h2>逾時取自成功延遲的高分位</h2>
+  </div>
+  <p class="sec-sub">平均值會把健康的尾巴切成失敗；比期限還長的逾時則會先把執行緒握滿。</p>
+
+  <p>延遲幾乎都是右偏的。平均值 8 ms、p99 40 ms 的下游很常見：大多數呼叫很快，少數呼叫撐出一條長尾巴。把單次逾時設在平均值附近，那 1% 的慢呼叫會被你自己判死。客戶端接著重試，下游的負載上升，尾巴變得更長，更多呼叫逾時。這是一個自己餵自己的迴圈，不是下游突然變慢。</p>
+
+  <p>樣本也要篩。只用<b>成功</b>呼叫的延遲來估分位。把已經逾時的樣本算進去，分位會被你自己的逾時拉長，下次你就把逾時再調大，永遠追著自己的尾巴跑。連線建立（TCP、TLS）與請求本身是兩段時間：連線逾時應該短，請求逾時才對著 p99。用同一個很大的數字覆蓋兩者，死連線會佔著連線池直到那個大數字用完。</p>
+
+  <div class="formula">單次逾時 = max(20 ms, 2 × p99)</div>
+
+  <p>2 倍是教學用的起點，不是每家公司的常數。實務上從成功樣本的 p99 或 p99.9 出發，再留一點餘裕。愈靠近 p99，健康尾巴被誤殺的比例愈高，重試愈多；愈遠，一次嘗試握住執行緒的時間愈長。第 6 節的紀錄把這個式子算成「單次逾時」，讓你看見 p99 一改，握住的執行緒跟著變。</p>
+
+  <p>單次逾時還要嵌進呼叫端剩下的期限，不能每跳各領一份新的。結帳這條鏈可以這樣對：使用者側的期限是 1 秒，邊緣自己還要留 200 ms，所以下游預算是 800 ms。付款服務的成功 p99 是 90 ms，單次逾時取 180 ms，最多 3 次嘗試，兩次退避是 50 ms 與 100 ms。三次等待加上兩次睡眠是 180 × 3 + 150 = 690 ms，塞得進 800 ms。若中介不理會剩餘預算、自己重設一個 200 ms，邊緣已經放棄時付款可能還在跑。</p>
+
+  <pre class="mermaid">
+sequenceDiagram
+  participant E as 邊緣
+  participant M as 中介
+  participant D as 下游
+  E->>M: 剩餘 80ms
+  M->>D: 重設 200ms
+  E-->>M: 逾時放棄
+  D-->>M: 稍後才成功
+</pre>
+  <p class="cap">看中介那一跳：它沒有繼承剩餘 80 ms，而是重領 200 ms。邊緣已經走了，下游的工作還在繼續，重試會再打出第二份。</p>
+
+  <div class="callout warn">
+    <div class="c-title"><span class="ic">陷阱</span>把閘道的上限當成建議逾時</div>
+    <p>AWS API Gateway 的整合逾時上限是 29 秒。那是平台天花板，不是 p99。邊緣把逾時放到這個長度，後面的服務會先把執行緒與連線握滿，重試甚至還沒開始。Little 定律在這裡就夠用：每秒 50 筆、每筆握住 30 秒，穩定時大約 1500 筆同時在飛。</p>
+  </div>
+
+  <p>非同步呼叫的「逾時」常常是租約，不是 RPC 逾時。訊息的可見性逾時（visibility timeout）是佇列把這筆訊息藏起來給工作者的時間。設得太短，工作者還在做事，另一個工作者就拿到副本；設得太長，死掉的工作者要很久才會被接手。那筆帳、以及失敗幾次之後進死信，由訊息佇列基礎負責。這篇只要求一件事：不要把 RPC 的重試旋鈕直接抄到租約上。</p>
+
+  <div class="oneliner">
+    <b>一句話答法</b>單次逾時對著成功延遲的高分位，整段重試加退避必須塞進呼叫端剩下的期限；每跳重領一份滿額逾時，等於把使用者的 deadline 放大。
+  </div>
+</section>
+
+<section id="s3">
+  <div class="sec-head">
+    <span class="sec-num">03</span>
+    <h2>先分類錯誤，再決定重試</h2>
+  </div>
+  <p class="sec-sub">重試只對「再叫一次可能變好，而且不會做第二次」的失敗有意義。</p>
+
+  <p>同一個 500 可能是行程剛重啟的瞬斷，也可能是資料庫已經飽和。分類看的是「再送一次，結果有沒有機會不同」，不是狀態碼數字好不好看。連線被拒、連線重置、逾時，通常值得在剩下的期限裡再試。429 與明確的節流也值得等，但必須遵守 <code>Retry-After</code>，而且這次等待要算進重試預算。立刻重送 429，是在幫對方把你關得更緊。</p>
+
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>失敗</th>
+          <th>再叫一次</th>
+          <th>為什麼</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>連線被拒、重置、逾時</td>
+          <td class="hl">可以，要退避</td>
+          <td>可能是瞬斷或單次丟包</td>
+        </tr>
+        <tr>
+          <td>429，帶 Retry-After</td>
+          <td class="hl">可以，先睡標頭寫的時間</td>
+          <td>立刻重送會加深節流</td>
+        </tr>
+        <tr>
+          <td>500、503</td>
+          <td>看是不是過載</td>
+          <td>過載時重試是在加負載，要有預算</td>
+        </tr>
+        <tr>
+          <td>400、401、403、404</td>
+          <td>不要</td>
+          <td>請求本身不對，再送結果相同</td>
+        </tr>
+        <tr>
+          <td>非冪等寫入，且沒有冪等鍵</td>
+          <td>不要</td>
+          <td>逾時不代表沒做完，可能做兩次</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="cap">「可以重試」的那兩列仍要受第 5 節的預算約束。下游若幾乎每筆都失敗，預算會自己耗盡，這張表不會強迫你繼續打。</p>
+
+  <p>寫入是否可以安全地做第二次，不是這篇能從狀態碼看出來的。PUT 整份替換、DELETE 收到「已刪」、以及帶 Idempotency-Key 的 POST，契約在 API 設計風格與演進那篇。沒有那份契約時，正確的逾時與退避仍然會重複扣款：第一次請求可能在你放棄之後才成功。</p>
+
+  <div class="callout warn">
+    <div class="c-title"><span class="ic">陷阱</span>逾時等於「下游沒做到」</div>
+    <p>逾時只表示你決定不再等。回應可能正在路上，交易可能已經提交。把逾時當成失敗然後立刻再送，是最便宜的重複寫入製造器。退避留出的那幾毫秒，有時就是在等這個已經在飛的回應。</p>
+  </div>
+
+  <p>AWS SDK 的 standard retry mode 對暫時性網路錯誤、它認定可重試的 5xx、以及節流做指數退避加 jitter，常見預設是最多 3 次嘗試（含第一次）。adaptive mode 在看到節流時再收緊客戶端的 token bucket。這是同一套分類的現成實作，不是另一套理論。各語言 SDK 的狀態碼清單不完全相同，以該 SDK 的文件為準，不要背一份「所有 5xx 都重試」。</p>
+
+  <div class="oneliner">
+    <b>一句話答法</b>只重試再叫一次可能變好、且契約允許做第二次的失敗；4xx 與沒有冪等鍵的寫入不重試，429 要先睡 Retry-After。
+  </div>
+</section>
+
+<section id="s4">
+  <div class="sec-head">
+    <span class="sec-num">04</span>
+    <h2>每一層都重試，下游看到乘積</h2>
+  </div>
+  <p class="sec-sub">快速失敗放大的是呼叫數；慢逾時放大的是同時握住的執行緒。兩種放大不要用同一個對策。</p>
+
+  <p>假設每一層最多做 <var>A</var> 次嘗試，鏈上有 <var>L</var> 層，而且每次嘗試都在故障窗裡很快失敗、每一層都把失敗重試滿。最外層的一次嘗試會讓下一層做最多 <var>A</var> 次，下一層的每一次又讓再下一層做 <var>A</var> 次。打到最底的葉呼叫是乘積，不是和。</p>
+
+  <div class="formula">葉呼叫 = A<sup>L</sup></div>
+
+  <div class="trb-stack">
+    <div class="trb-node accent">
+      <div class="nn">最外層 ×3</div>
+      <div class="ns">使用者的那一次請求</div>
+    </div>
+    <div class="trb-down">×3 ▾</div>
+    <div class="trb-node">
+      <div class="nn">中介 ×3</div>
+      <div class="ns">每一發再重試滿</div>
+    </div>
+    <div class="trb-down">×3 ▾</div>
+    <div class="trb-node warn">
+      <div class="nn">直連下游 ×3</div>
+      <div class="ns">一筆變成 27 發</div>
+    </div>
+  </div>
+  <p class="cap">三層、每層 3 次嘗試、故障長到每次都失敗：27 = 3<sup>3</sup>。同一秒若有 40 筆一起失敗，理論上是 1080 發，而不是 40 + 3。</p>
+
+  <p>這是快速失敗的放大：錯誤幾毫秒就回來，客戶端立刻排下一次，下游的 QPS 先爆。另一種是慢逾時：每次嘗試都把單次逾時等滿。最外層握住一筆請求的時間大約是「嘗試次數 × 單次逾時 + 退避總和」。每秒 40 筆、單次逾時 80 ms、3 次嘗試、退避 100 ms 與 140 ms，就是 40 × (240 + 240) / 1000 ≈ 19 條執行緒只為了等。層數再乘上去時，中介與下游的執行緒池會更早滿。</p>
+
+  <p>所以預設只在一層重試，而且是握有使用者期限的那一層。內層把錯誤往上交，讓剩餘預算繼續倒數。內層已經重試過，最外層不該再把整段重做一遍。對尾延遲提前發一份備份請求（hedged request）是另一種「還沒失敗就再打一份」，沒有預算時一樣會把 QPS 乘上一個大於 1 的係數。</p>
+
+  <div class="callout accent">
+    <div class="c-title"><span class="ic">關鍵</span>throughput 上升不代表系統變好</div>
+    <p>重試會讓下游的 throughput 變高，同時讓真正做完的 goodput 變低。看錯誤率的同時要看「有多少呼叫是重試」。重試佔比持續升高，就是第 5 節的預算該耗盡的時候，而不是把 max attempts 再調大。</p>
+  </div>
+
+  <div class="oneliner">
+    <b>一句話答法</b>L 層各重試到 A 次，底層看到的是 A 的 L 次方。快速失敗打爆 QPS，慢逾時打爆執行緒；重試只留在握有使用者期限的那一層。
+  </div>
+</section>
+
+<section id="s5">
+  <div class="sec-head">
+    <span class="sec-num">05</span>
+    <h2>指數退避、抖動與重試預算</h2>
+  </div>
+  <p class="sec-sub">退避把單一連線的重試拉開；抖動讓許多客戶端不要同一毫秒醒來；預算讓全壞的下游不要被越重試越狠。</p>
+
+  <p>第 <var>k</var> 次重試（<var>k</var> 從 1 起算）的上限是 <var>base × 2<sup>k−1</sup></var>，並且不超過 cap。第一次重試睡到 base，第二次到 2 base，然後 4 base，直到 cap 把它夾住。cap 的意義是：故障若要持續很久，你不希望單一客戶端的睡眠無上限，但你也不希望第 10 次重試還只睡 100 ms、變成對一個壞下游的緊迴圈。</p>
+
+  <div class="formula">上限 = min(cap, base × 2<sup>k−1</sup>)</div>
+
+  <p>只有上限不夠。一整群客戶端若在同一瞬間看到故障，又都睡同一個上限，他們會在同一個毫秒醒來，把剛恢復的下游再打一次。AWS Builders' Library 裡 Marc Brooker 的文章把幾種睡法放在一起比：沒有 jitter 時尖峰對齊；full jitter 把睡眠抽成 0 到上限之間的均勻值，尖峰最平，但有機會抽到 0、等於立刻再打；equal jitter 先保留上限的一半，另一半再抽，不會立刻重試，攤平效果較弱；decorrelated jitter 每次在 base 與「前一次睡眠的 3 倍」之間抽，連續重試不會鎖死在同一個節奏。那篇文章的結論是 full jitter 與 decorrelated jitter 都能拆掉同步，full jitter 通常最簡單。</p>
+
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>睡法</th>
+          <th>這一次睡多久</th>
+          <th>一群客戶端</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>無 jitter</td>
+          <td>等於上限</td>
+          <td class="hl">同時醒來</td>
+        </tr>
+        <tr>
+          <td>Full jitter</td>
+          <td>0 到上限，均勻</td>
+          <td>尖峰被攤開，可能抽到 0</td>
+        </tr>
+        <tr>
+          <td>Equal jitter</td>
+          <td>上限的一半，再加 0 到一半的亂數</td>
+          <td>不會立刻重試，攤得比較不夠</td>
+        </tr>
+        <tr>
+          <td>Decorrelated</td>
+          <td>base 到 3 倍前次睡眠之間</td>
+          <td>連續重試不會同一個節奏</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="cap">四種睡法都先算同一個上限，再決定要不要把這群人錯開。抖動不減少總工作量，它減少的是同一毫秒的相關性。</p>
+
+  <div class="trb-lane">
+    <div class="lh">時刻</div><div class="lh">鎖步</div><div class="lh">全抖動</div><div class="lh">預算 10%</div>
+    <div class="lt">t0</div>
+    <div class="lc bad">20 發一起失敗</div>
+    <div class="lc bad">20 發一起失敗</div>
+    <div class="lc bad">20 發一起失敗</div>
+    <div class="lt">+100ms</div>
+    <div class="lc warn">20 發同時重試</div>
+    <div class="lc act">散在 0–100 ms</div>
+    <div class="lc ok">只再放行 2 發</div>
+    <div class="lt">恢復後</div>
+    <div class="lc bad">尾巴仍是一整團</div>
+    <div class="lc ok">尾巴被攤開</div>
+    <div class="lc ok">沒有預算就停</div>
+  </div>
+  <p class="cap">這張是 20 筆、base 100 ms、只看第一次重試的示意。10% 預算是再 2 發，不是再 20 發。同一筆紀錄的精確落點在第 6 節，抖動用的是固定雜湊而不是這張表的約數。</p>
+
+  <p>抖動拆的是「同時醒來」。它不處理「下游已經全壞，每個人仍然各自把重試做滿」。那要靠重試預算：一段時間內，重試呼叫佔全部呼叫的比例有上限。Finagle 用的就是這個想法；流量穩定時，它等價於一個慢慢補充的 token bucket。這篇的紀錄把它算成一條硬上限，方便讀數字：</p>
+
+  <div class="formula">葉呼叫上限 = 群大小 + round(群大小 × 預算比例)</div>
+
+  <p>群大小是同一秒一起失敗的新請求數。預算 20%、群大小 40，上限是 48：每人先有一發，剩下 8 發才是重試，而且是輪流發，不讓第一筆把 8 發吃光。下游若幾乎每筆都失敗，這 8 發很快用完，後面的重試被擋下。被擋下是保護，不是資料損毀。鎖步且明確不設預算時，這條上限不套用，樹走完就全數發出——那是對照組，不是建議值。</p>
+
+  <div class="callout warn">
+    <div class="c-title"><span class="ic">陷阱</span>預算耗盡之後把次數調高</div>
+    <p>預算空了，代表失敗已經不是單次抖動能吸收的瞬斷。繼續加大 max attempts，只是把第 4 節的乘積做大。持續故障該做的是停止呼叫、隔開執行緒池、必要時降級，那是熔斷、艙壁隔離與降級的工作。重試預算是短故障的減震，不是長故障的對策。</p>
+  </div>
+
+  <div class="oneliner">
+    <b>一句話答法</b>指數退避加上 full jitter 用來錯開一群客戶端；重試預算用來在下游全壞時停止火上加油。抖動不減少總量，預算才減少。
+  </div>
+</section>
+
+<section id="s6">
+  <div class="sec-head">
+    <span class="sec-num">06</span>
+    <h2>拆開一筆失敗紀錄</h2>
+  </div>
+  <p class="sec-sub">一筆紀錄同時帶著層數、退避、p99 與預算。改一個欄位，呼叫樹與這一群的下游負載一起重算。</p>
+
+  <p>下面這筆紀錄描述的是：故障開始時，同一秒有一批新請求一起失敗。最底層每次嘗試若落在故障窗內，就視為快速失敗（5 ms 回錯）並排下一次；落在故障窗結束之後，就視為成功，這條分支停止。睡眠用第 5 節的上限。策略選「全抖動 + 預算」時，睡眠是 0 到上限的固定雜湊（同一筆紀錄每次拆開都相同），葉呼叫上限是群大小再加預算比例。選「鎖步、不設預算」時，每人睡滿同一個上限，上限不套用。理論放大 <var>A<sup>L</sup></var> 假設故障蓋住整棵樹；故障窗較短時，這一筆的實際葉呼叫會少於那個乘積。</p>
+
+  <div class="demo" id="demo-retry-record">
+    <div class="demo-bar">
+      <span class="label">互動 · 拆開一筆失敗</span>
+      <span class="label" style="text-transform:none;font-family:var(--sans);font-size:12px;color:var(--text-2)">改紀錄欄位，重算這一筆的樹與這一群的負載</span>
+    </div>
+    <div class="demo-body">
+      <div class="seg" role="group" aria-label="這筆紀錄的策略">
+        <button type="button" data-policy="0" aria-pressed="false">鎖步、不設預算</button>
+        <button type="button" data-policy="1" aria-pressed="true">全抖動 + 預算</button>
+      </div>
+      <p class="trb-kicker">failure-record · 同一秒一起失敗的那一群</p>
+      <div class="trb-record">
+        <div class="trb-field">
+          <label for="trb-layers">層數（1–4）</label>
+          <input id="trb-layers" type="number" min="1" max="4" step="1" value="3">
+        </div>
+        <div class="trb-field">
+          <label for="trb-attempts">每層嘗試次數（1–4，含第一次）</label>
+          <input id="trb-attempts" type="number" min="1" max="4" step="1" value="3">
+        </div>
+        <div class="trb-field">
+          <label for="trb-base">退避 base（ms）</label>
+          <input id="trb-base" type="number" min="10" max="800" step="10" value="100">
+        </div>
+        <div class="trb-field">
+          <label for="trb-cap">退避 cap（ms）</label>
+          <input id="trb-cap" type="number" min="10" max="8000" step="10" value="140">
+        </div>
+        <div class="trb-field">
+          <label for="trb-outage">故障長度（ms）</label>
+          <input id="trb-outage" type="number" min="0" max="20000" step="50" value="450">
+        </div>
+        <div class="trb-field">
+          <label for="trb-p99">下游成功 p99（ms）</label>
+          <input id="trb-p99" type="number" min="5" max="2000" step="5" value="40">
+        </div>
+        <div class="trb-field">
+          <label for="trb-qps">同時失敗的新請求</label>
+          <input id="trb-qps" type="number" min="1" max="200" step="1" value="40">
+        </div>
+        <div class="trb-field">
+          <label for="trb-budget">重試預算（%）</label>
+          <input id="trb-budget" type="number" min="0" max="100" step="5" value="20">
+        </div>
+      </div>
+      <svg id="trb-svg" class="trb-svg" viewBox="0 0 640 128" role="img" style="width:100%;height:auto">
+        <title>這一筆失敗紀錄的葉呼叫落點</title>
+      </svg>
+      <div class="legend">
+        <span><i class="dot ns-lock"></i>故障窗內發出</span>
+        <span><i class="dot ns-ok"></i>故障結束後落地</span>
+      </div>
+      <div id="trb-anno" class="trb-anno"></div>
+      <div class="status-line" id="trb-status">填好紀錄後會拆開這一筆。</div>
+      <button type="button" class="btn" id="trb-reset">重置</button>
+    </div>
+  </div>
+  <p class="cap">軸上的點是第 0 號請求的葉呼叫，紅線是故障結束。預設（全抖動 + 20% 預算）的恢復尾巴是 0：多出來的重試被預算擋在故障結束前。切到鎖步、不設預算，同一筆紀錄的重試尖峰與恢復尾巴會一起變大。慢逾時那一列是對照，不是這條快速失敗路徑握住的執行緒。</p>
+
+  <div class="oneliner">
+    <b>一句話答法</b>先看理論乘積與這一筆實際葉呼叫差多少（故障窗有沒有截斷），再看預算擋下多少、重試尖峰有沒有被抖動攤開、恢復之後還有沒有尾巴。
+  </div>
+</section>
+
+<section id="s7">
+  <div class="sec-head">
+    <span class="sec-num">07</span>
+    <h2>面試時怎麼講這筆取捨</h2>
+  </div>
+  <p class="sec-sub">面試官要聽的是旋鈕各自付的代價，以及你拒絕重試的那幾種失敗。</p>
+
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>旋鈕</th>
+          <th>調緊</th>
+          <th>調鬆</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>單次逾時</td>
+          <td>健康尾巴被重試，QPS 上升</td>
+          <td>執行緒與連線被握滿</td>
+        </tr>
+        <tr>
+          <td>嘗試次數</td>
+          <td>瞬斷更容易落到使用者</td>
+          <td>多層相乘，下游看到乘積</td>
+        </tr>
+        <tr>
+          <td>退避與 jitter</td>
+          <td>睡太短等於緊迴圈</td>
+          <td>沒有 jitter 時恢復瞬間再打爆</td>
+        </tr>
+        <tr>
+          <td>重試預算</td>
+          <td>短故障的重試也被擋</td>
+          <td>全壞時仍然火上加油</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="cap">四個旋鈕沒有同時最優的位置。講得出「調緊付什麼、調鬆付什麼」，比背一組魔法數字有用。</p>
+
+  <p>可以帶一個具體鏈，例如第 2 節的結帳：期限 800 ms、p99 90 ms、單次逾時 180 ms、最多 3 次嘗試、退避 50 ms 與 100 ms，總和 690 ms，塞得進期限。然後補上你不重試的清單：4xx、沒有冪等鍵的寫入、以及預算已經空了的 503。AWS SDK 的 standard 與 adaptive 可以當佐證，不要把它們講成唯一正確的參數。</p>
+
+  <div class="callout warn">
+    <div class="c-title"><span class="ic">陷阱</span>用重試代替其他三件事</div>
+    <p>重試不取代冪等鍵：沒有契約時，再聰明的退避也會做第二次。重試不取代佇列的死信：工作者死掉之後的重新投遞是租約問題。重試也不取代熔斷：預算耗盡之後還在調高次數，等於承認你沒有「停止呼叫」的機制。</p>
+  </div>
+
+  <div class="oneliner">
+    <b>一句話答法</b>逾時來自成功延遲的高分位並受期限約束，重試只打在一層且只打可重試的錯誤，退避用 full jitter，預算在下游全壞時停手。多層各自重試是乘積，不是保險。
+  </div>
+</section>
