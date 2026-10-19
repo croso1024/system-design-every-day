@@ -1,0 +1,522 @@
+<!-- demo-archetype: A｜時序推進（主）＋C｜並排對照（次） — 讀者編一串「若放行會不會失敗」並逐步套用 Closed／Open／Half-Open，看出擋下次數與真正打到下游的次數；另一個演示把同一負載同時送進共用池與艙壁。
+     選 A 作主是因為轉移條件要一筆一筆套規則才看得懂。參數掃描也能表達門檻，但最近 3 篇主 archetype 是 B、D、F，B 不能再當主演示，所以門檻放在這條逐步推演裡調。並排艙壁是 brief 的另一個演示。 -->
+<style>
+  .cb-lane {
+    display: grid;
+    grid-template-columns: 52px repeat(3, minmax(0, 1fr));
+    gap: 1px;
+    background: var(--border);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    overflow: hidden;
+    margin: 14px 0 6px;
+  }
+  .cb-lane > div { background: #fff; padding: 8px 10px; font-size: 12px; line-height: 1.5; }
+  .cb-lane .lh { background: var(--bg-soft); font-family: var(--mono); font-size: 11px; font-weight: 700; color: var(--text-2); }
+  .cb-lane .lt { background: var(--bg-soft); font-family: var(--mono); font-size: 11px; color: var(--text-3); }
+  .cb-lane .lc.act { background: var(--accent-soft); }
+  .cb-lane .lc.ok { background: var(--ok-soft); }
+  .cb-lane .lc.bad { background: var(--bad-soft); }
+  .cb-lane .lc.warn { background: var(--warn-soft); }
+  @media (max-width: 720px) {
+    .cb-lane { grid-template-columns: 44px repeat(3, minmax(0, 1fr)); }
+    .cb-lane > div { font-size: 11px; padding: 6px; }
+  }
+
+  .brk-fields, .bh-fields {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 10px 14px;
+    margin-bottom: 12px;
+  }
+  .brk-fields label, .bh-fields label {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    font-size: 12px;
+    color: var(--text-2);
+  }
+  .brk-fields input, .bh-fields input { width: 100%; accent-color: var(--accent); }
+  .brk-fields b, .bh-fields b {
+    font-family: var(--mono);
+    font-weight: 700;
+    color: var(--text);
+  }
+  .brk-seq {
+    display: grid;
+    grid-template-columns: repeat(12, minmax(0, 1fr));
+    gap: 4px;
+    margin: 4px 0 10px;
+  }
+  .brk-seq button {
+    border: 1px solid var(--border-strong);
+    background: var(--ok-soft);
+    color: var(--text);
+    border-radius: var(--radius-sm);
+    font-family: var(--mono);
+    font-size: 12px;
+    padding: 6px 0;
+    cursor: pointer;
+  }
+  .brk-seq button[aria-pressed="true"] {
+    background: var(--bad-soft);
+    border-color: var(--bad);
+  }
+  .brk-actions { display: flex; gap: 8px; margin: 0 0 10px; }
+  .brk-table {
+    display: grid;
+    grid-template-columns: 36px 1fr 1.3fr 1fr 88px;
+    gap: 1px;
+    background: var(--border);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    overflow: hidden;
+  }
+  .brk-table > div { background: #fff; padding: 6px 8px; font-size: 12px; line-height: 1.4; }
+  .brk-table > .brk-h { background: var(--bg-soft); font-family: var(--mono); font-size: 11px; font-weight: 700; color: var(--text-2); }
+  .brk-hint { margin: 0 0 6px; font-size: 12px; color: var(--text-2); }
+  .brk-c.brk-dim { color: var(--text-3); }
+  .brk-c.brk-now { box-shadow: inset 3px 0 0 var(--accent); }
+  .brk-c.ns-ok { background: var(--ok-soft); }
+  .brk-c.ns-bad { background: var(--bad-soft); }
+  .brk-c.ns-lock { background: var(--warn-soft); }
+  .brk-c.ns-wait { background: var(--accent-soft); }
+  @media (max-width: 720px) {
+    .brk-fields, .bh-fields { grid-template-columns: 1fr 1fr; }
+    .brk-table { grid-template-columns: 28px 0.8fr 1.2fr 0.9fr 64px; }
+    .brk-table > div { font-size: 11px; padding: 5px; }
+  }
+
+  .bh-panes {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 12px;
+  }
+  .bh-pane {
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--bg-soft);
+    padding: 8px;
+  }
+  .bh-name {
+    font-family: var(--mono);
+    font-size: 12px;
+    font-weight: 700;
+    color: var(--text);
+    margin-bottom: 6px;
+  }
+  .bh-round {
+    display: grid;
+    grid-template-columns: 28px 1fr auto;
+    gap: 6px;
+    align-items: center;
+    margin-bottom: 3px;
+  }
+  .bh-t { font-family: var(--mono); font-size: 11px; color: var(--text-3); }
+  .bh-slots { display: flex; flex-wrap: wrap; gap: 3px; }
+  .bh-slot {
+    width: 14px;
+    height: 14px;
+    border-radius: 3px;
+    display: inline-block;
+    border-width: 1px;
+    border-style: solid;
+  }
+  .bh-shed { font-family: var(--mono); font-size: 11px; color: var(--text-2); }
+  .bh-note { margin: 6px 0 0; font-size: 12px; color: var(--text-2); line-height: 1.45; }
+  .bh-split { display: flex; flex-direction: column; gap: 8px; }
+  @media (max-width: 720px) {
+    .bh-panes { grid-template-columns: 1fr; }
+  }
+</style>
+
+<section id="s1">
+  <div class="sec-head">
+    <span class="sec-num">01</span>
+    <h2>一個慢依賴如何拖垮整站</h2>
+  </div>
+  <p class="sec-sub">局部故障會沿著共用的執行緒、連線與重試預算擴散。熔斷、艙壁、丟棄與降級各自擋住一種擴散，沒有一個能代替另外三個。</p>
+  <p>結帳 API 同時叫付款與目錄。兩種呼叫共用同一個執行緒池。付款的延遲從 80ms 變成數秒，呼叫緒被占住直到逾時；目錄本身是健康的，卻拿不到執行緒。客戶端再依逾時重試，下游看到的到達率被乘上重試次數。池子滿了之後，連健康的目錄也開始逾時，重試再放大一輪，最後整站 503。</p>
+  <div class="formula">同時占住的執行緒 ≈ 到達率 × 持有時間</div>
+  <p>這是 Little's Law 的佔用形式。每秒 20 筆付款、每筆持有 4 秒，穩定時大約 80 條執行緒被付款單獨占住。池子只有 40 條時，不等失敗率上升，排隊已經開始。重試把到達率再乘上 <var>1 + 重試次數</var>，佔用跟著乘上去。逾時、重試與退避那篇負責預算、指數退避與 jitter 怎麼設；本篇假設那些數字已經存在，看的是它們如何跟熔斷互相放大或互相拆掉。</p>
+  <pre class="mermaid">
+flowchart LR
+  Client[客戶端] --> Pool[共用執行緒池]
+  Pool --> Pay[付款]
+  Pool --> Cat[目錄]
+  </pre>
+  <p class="cap">箭頭從同一個池子分出去：目錄沒有自己的容量，付款變慢時目錄一起停。</p>
+  <div class="callout accent">
+    <div class="c-title"><span class="ic">邊界</span>本篇不重講的四件事</div>
+    <p>重試間隔與退避曲線屬於逾時、重試與退避。依呼叫者配額拒絕請求屬於速率限制。快取同時失效、打穿資料庫屬於快取失效模式。跨模型供應商切換屬於 LLM 閘道。這裡只處理：一個依賴變慢或變錯時，如何避免它占滿呼叫方，以及主路徑死掉之後使用者還能看到什麼。</p>
+  </div>
+  <div class="oneliner">
+    <b>一句話答法</b>慢依賴先占滿共用執行緒，重試再把到達率乘上去；熔斷減少打到下游的次數，艙壁讓別的依賴還有執行緒，丟棄保護本機，降級決定使用者看到什麼。
+  </div>
+</section>
+
+<section id="s2">
+  <div class="sec-head">
+    <span class="sec-num">02</span>
+    <h2>Closed、Open、Half-Open</h2>
+  </div>
+  <p class="sec-sub">斷路器是包在單一依賴外面的狀態機。它不修復下游，只決定下一次呼叫要不要放行。</p>
+  <pre class="mermaid">
+stateDiagram-v2
+  [*] --> Closed
+  Closed --> Open: 失敗率達標
+  Open --> HalfOpen: 冷卻結束
+  HalfOpen --> Closed: 探測夠了
+  HalfOpen --> Open: 探測失敗
+  </pre>
+  <p class="cap">三態就這些。Closed 放行並記樣本，Open 直接拒絕，Half-Open 只放少數探測。被拒絕的呼叫不能再記成失敗，否則 Open 永遠走不出去。</p>
+  <p>Closed 時，每次放行的結果推進一個滑動視窗。本篇的演示用筆數視窗：只保留最近 <var>W</var> 次<b>真正打到下游</b>的結果。當視窗裡的樣本數達到最低次數，而且失敗率達到門檻，狀態轉成 Open。最低次數是為了避免「1 次裡的 1 次失敗」在低流量時誤跳。</p>
+  <div class="formula">失敗率 = 視窗內失敗次數 / 視窗內已放行次數</div>
+  <p>Open 期間呼叫方立刻得到拒絕，下游收到的請求應為零。冷卻在真實系統多用牆鐘（例如 30 秒）；流量一高，以筆數計的冷卻會很快被走完，流量一低則要等很久才有下一筆。演示把冷卻設成「接下來擋下幾筆」，讓每一筆都能對上狀態，不引入時鐘。</p>
+  <p>冷卻用完進入 Half-Open。此時若把累積的流量全部放行，正在恢復的下游會再被打垮一次。所以只允許連續 <var>P</var> 次探測：全部成功才回到 Closed 並清空視窗；任何一次失敗立刻回到 Open，冷卻重算。有的實作改看半開視窗的失敗率，而不是連續成功，門檻語意不同，面試時要講清楚你用哪一種。</p>
+  <div class="callout warn">
+    <div class="c-title"><span class="ic">陷阱</span>把拒絕也算進失敗率</div>
+    <p>Open 期間的快速失敗若寫回視窗，失敗率會停在 100%，Half-Open 的成功探測也被稀釋掉。拒絕是保護生效，不是下游又失敗了一次。同樣地，呼叫方自己的取消、或還沒送出的逾時，不該跟下游的 500 混在同一個計數器裡。</p>
+  </div>
+
+  <div class="demo" id="demo-breaker">
+    <div class="demo-bar">
+      <span class="label">互動 · 依規則推出斷路器</span>
+      <span class="label" style="text-transform:none;font-family:var(--sans);font-size:12px;color:var(--text-2)">點方塊切換「若放行會失敗」，再逐步套用</span>
+    </div>
+    <div class="demo-body">
+      <div class="brk-fields">
+        <label>視窗筆數 <b id="brk-window-val">4</b>
+          <input id="brk-window" type="range" min="2" max="12" step="1" value="4">
+        </label>
+        <label>最低樣本 <b id="brk-min-val">4</b>
+          <input id="brk-min" type="range" min="1" max="12" step="1" value="4">
+        </label>
+        <label>失敗率門檻 % <b id="brk-threshold-val">50</b>
+          <input id="brk-threshold" type="range" min="1" max="100" step="1" value="50">
+        </label>
+        <label>Open 擋下筆數 <b id="brk-open-val">2</b>
+          <input id="brk-open" type="range" min="1" max="8" step="1" value="2">
+        </label>
+        <label>半開需連續成功 <b id="brk-probes-val">2</b>
+          <input id="brk-probes" type="range" min="1" max="5" step="1" value="2">
+        </label>
+        <label>Closed 額外重試 <b id="brk-retries-val">0</b>
+          <input id="brk-retries" type="range" min="0" max="5" step="1" value="0">
+        </label>
+      </div>
+      <p class="brk-hint">紅色方塊表示：這筆如果被放行，依賴會逾時或回錯。它不是已經發生的事實。</p>
+      <div class="brk-seq" id="brk-seq">
+        <button type="button" data-call="0" aria-pressed="false">1</button>
+        <button type="button" data-call="1" aria-pressed="false">2</button>
+        <button type="button" data-call="2" aria-pressed="true">3</button>
+        <button type="button" data-call="3" aria-pressed="true">4</button>
+        <button type="button" data-call="4" aria-pressed="true">5</button>
+        <button type="button" data-call="5" aria-pressed="true">6</button>
+        <button type="button" data-call="6" aria-pressed="false">7</button>
+        <button type="button" data-call="7" aria-pressed="false">8</button>
+        <button type="button" data-call="8" aria-pressed="false">9</button>
+        <button type="button" data-call="9" aria-pressed="true">10</button>
+        <button type="button" data-call="10" aria-pressed="false">11</button>
+        <button type="button" data-call="11" aria-pressed="false">12</button>
+      </div>
+      <div class="brk-actions">
+        <button type="button" class="btn primary" id="brk-next">下一步</button>
+        <button type="button" class="btn" id="brk-prev">上一步</button>
+        <button type="button" class="btn" id="brk-reset">重置</button>
+      </div>
+      <div class="brk-table" id="brk-trace"></div>
+      <div class="legend">
+        <span><i class="dot ns-ok"></i>放行且成功</span>
+        <span><i class="dot ns-bad"></i>放行且失敗</span>
+        <span><i class="dot ns-lock"></i>被擋下（保護生效）</span>
+        <span><i class="dot ns-wait"></i>Half-Open</span>
+      </div>
+      <div class="status-line" id="brk-status"></div>
+    </div>
+  </div>
+  <p class="cap">預設序列是成功、成功、接著四筆失敗、三筆成功、一筆失敗、兩筆成功。演示停在第 4 筆：視窗剛好 50%，跳到 Open，但還沒有任何一筆被擋下。再走兩筆才會看到拒絕。</p>
+  <p>用預設門檻走到第 12 筆時，數字是固定的：打到下游 10 次，其中下游真的失敗 3 次（第 3、4、10 筆）；第 5 與第 6 筆雖然標記成失敗，卻被 Open 擋下，不進視窗。跳閘 1 次，半開在第 7、8 筆連續成功後恢復 1 次。第 10 筆的失敗率是 50%，但視窗裡只有 2 個樣本，低於最低次數 4，所以保持 Closed。</p>
+  <p>兩個容易誤判的旋鈕：失敗率門檻從 50 降到 30，這串序列的結果完全不變，因為第 3 筆只有 3 個樣本，規則根本還不允許跳閘。視窗從 4 拉到 8 也不變，跳閘當下視窗裡本來就只有 4 筆。視窗縮到 2 則永遠跳不了——裝不滿最低樣本數。最低樣本大於視窗，是設定錯誤，不是「比較保守」。</p>
+  <div class="oneliner">
+    <b>一句話答法</b>Closed 用視窗失敗率跳到 Open，Open 只拒絕不記樣本，Half-Open 用少量探測決定恢復或再跳；最低樣本數是為了壓住低流量誤判。
+  </div>
+</section>
+
+<section id="s3">
+  <div class="sec-head">
+    <span class="sec-num">03</span>
+    <h2>斷路器與重試怎麼疊</h2>
+  </div>
+  <p class="sec-sub">重試放大到達率，斷路器減少到達率。疊錯層的時候，兩邊會同時失效。</p>
+  <pre class="mermaid">
+sequenceDiagram
+  participant C as 客戶端
+  participant B as 斷路器
+  participant P as 付款
+  C->>B: 第 1 次
+  B->>P: 放行
+  P-->>B: 逾時
+  B-->>C: 失敗
+  Note over B: 視窗達標轉 Open
+  C->>B: 立刻重試
+  B-->>C: 直接拒絕
+  </pre>
+  <p class="cap">重試打在斷路器外面、而且每次嘗試都經過斷路器時，Open 之後的重試不會再碰到付款。拒絕發生在呼叫方進程裡。</p>
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>疊法</th>
+          <th>下游看到的嘗試</th>
+          <th>跳閘</th>
+          <th>典型後果</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>每次重試都經過斷路器</td>
+          <td>Closed 期間高，Open 之後為 0</td>
+          <td>快</td>
+          <td class="hl">重試幫視窗湊滿失敗，保護來得及</td>
+        </tr>
+        <tr>
+          <td>一整段重試只算斷路器的一次</td>
+          <td>高，斷路器看不見</td>
+          <td>慢</td>
+          <td>下游已被重試打滿，樣本還很少</td>
+        </tr>
+        <tr>
+          <td>Open 之後仍直連下游</td>
+          <td>應為 0，實際大於 0</td>
+          <td>無關</td>
+          <td>客戶端根本沒經過斷路器</td>
+        </tr>
+        <tr>
+          <td>重試落在退路上，退路又叫原依賴</td>
+          <td>再乘一次</td>
+          <td>可能被繞過</td>
+          <td>降級路徑變成第二條攻擊面</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="cap">四種疊法差在「誰被計數」。面試時先畫呼叫棧，再講計數器放在哪一層，不要只背「重試要搭配熔斷」。</p>
+  <p>演示裡的「Closed 額外重試」對應第一列。使用者呼叫在 Closed 失敗時，客戶端立刻再試，每一次失敗都推進視窗；一旦這一段裡跳閘，同一次呼叫剩下的重試被擋下，而且不消耗 Open 的冷卻筆數——冷卻是留給後續使用者呼叫的。把這個旋鈕從 0 調到 1，預設序列會更早跳閘，因為第 3 筆失敗被記成兩次。</p>
+  <p>不該重試的情況要在斷路器之前就停：業務上的 4xx、參數錯誤、餘額不足，重試只會把同一個錯誤寫進視窗，讓一個程式 bug 看起來像依賴掛了。可重試的是逾時、連線重置、以及你明確約定的 503。退避與 jitter 仍由逾時、重試與退避那篇的預算管，熔斷不是拿來取代預算的。</p>
+  <div class="oneliner">
+    <b>一句話答法</b>讓每一次會打到下游的嘗試都經過斷路器，Open 之後停止重試；把重試包在斷路器裡面卻只記一次，等於讓放大發生在計數器看不見的地方。
+  </div>
+</section>
+
+<section id="s4">
+  <div class="sec-head">
+    <span class="sec-num">04</span>
+    <h2>艙壁：把慢依賴關進自己的池子</h2>
+  </div>
+  <p class="sec-sub">斷路器看的是錯誤。執行緒是被「最後會成功、但很慢」的呼叫占住的。艙壁限制的是同時能占住多少資源。</p>
+  <p>付款每筆都在 4 秒後回 200，失敗率是 0，筆數視窗永遠不跳。目錄仍會死，因為共用池已被付款占滿。慢呼叫率門檻（超過某延遲就視同失敗）能補上這塊，但在門檻觸發之前，已經在飛的呼叫仍握著執行緒直到回來。艙壁是這個空窗的隔離，不是熔斷的另一個名字。</p>
+  <pre class="mermaid">
+flowchart LR
+  API[API] --> PayBox[付款艙壁]
+  API --> CatBox[目錄艙壁]
+  PayBox --> Pay[付款]
+  CatBox --> Cat[目錄]
+  </pre>
+  <p class="cap">兩邊槽位加總等於原來的共用池，不是多給一倍執行緒。隔離的代價是付款自己更容易被丟。</p>
+  <p>實作上有兩種艙壁。執行緒池艙壁把等待放進該依賴自己的池，呼叫緒可以回來做別的事，代價是上下文切換與池的佇列。信號量艙壁只限制同時進入的呼叫數，已經在跑的慢呼叫仍占著原來的執行緒，隔離的是許可而不是 CPU。同一個行程裡的信號量也隔離不了 GC 停頓與共用的資料庫連線。演示比的是槽位佔用：一條槽從被分配起連續忙碌「持有輪數」，下一輪開始才釋出，語意靠近執行緒池被一筆慢呼叫占住的時間。</p>
+
+  <div class="demo" id="demo-bulkhead">
+    <div class="demo-bar">
+      <span class="label">互動 · 共用池與艙壁</span>
+      <span class="label" style="text-transform:none;font-family:var(--sans);font-size:12px;color:var(--text-2)">同一負載，左邊共用、右邊隔離</span>
+    </div>
+    <div class="demo-body">
+      <div class="bh-fields">
+        <label>輪數 <b id="bh-ticks-val">6</b>
+          <input id="bh-ticks" type="range" min="2" max="12" step="1" value="6">
+        </label>
+        <label>每輪到達 <b id="bh-arrival-val">4</b>
+          <input id="bh-arrival" type="range" min="1" max="8" step="1" value="4">
+        </label>
+        <label>付款占比 % <b id="bh-share-val">50</b>
+          <input id="bh-share" type="range" min="0" max="100" step="1" value="50">
+        </label>
+        <label>付款持有輪數 <b id="bh-pay-hold-val">4</b>
+          <input id="bh-pay-hold" type="range" min="1" max="8" step="1" value="4">
+        </label>
+        <label>目錄持有輪數 <b id="bh-cat-hold-val">1</b>
+          <input id="bh-cat-hold" type="range" min="1" max="8" step="1" value="1">
+        </label>
+        <label>執行緒總數 <b id="bh-threads-val">4</b>
+          <input id="bh-threads" type="range" min="2" max="10" step="1" value="4">
+        </label>
+        <label>付款槽位 <b id="bh-slots-val">1</b>
+          <input id="bh-slots" type="range" min="1" max="9" step="1" value="1">
+        </label>
+        <label>佇列總容量 <b id="bh-queue-val">0</b>
+          <input id="bh-queue" type="range" min="0" max="8" step="1" value="0">
+        </label>
+      </div>
+      <div class="bh-panes">
+        <div class="bh-pane" id="bh-shared"></div>
+        <div class="bh-pane" id="bh-bulk"></div>
+      </div>
+      <div class="legend">
+        <span><i class="dot ns-lock"></i>付款占住</span>
+        <span><i class="dot ns-ok"></i>目錄占住</span>
+        <span><i class="dot ns-idle"></i>空閒</span>
+      </div>
+      <div class="status-line" id="bh-status"></div>
+      <div class="brk-actions">
+        <button type="button" class="btn" id="bh-reset">重置</button>
+      </div>
+    </div>
+  </div>
+  <p class="cap">每一輪先收付款、再收目錄。預設 6 輪、每輪 4 筆、一半是付款、付款持有 4 輪、目錄持有 1 輪、總共 4 條執行緒、付款艙壁只有 1 條、沒有佇列。橘色是付款，綠色是目錄。</p>
+  <p>這組預設下，共用池完成付款 8 筆、丟掉付款 4 筆，完成目錄只有 2 筆、丟掉目錄 10 筆。第一輪池子還是空的，四筆都進得去；從第二輪起，持有中的付款留下，剛釋出的目錄槽位又被新的付款先拿走，目錄開始被丟。艙壁把付款限制在 1 條：付款只完成 2 筆、被丟 10 筆，目錄 12 筆全部完成。目錄少丟 10 筆，付款多丟 6 筆。這 6 筆就是隔離的帳單，不是白賺的容量。</p>
+  <p>把付款槽位拉高，目錄艙壁變薄，少丟的目錄筆數會下降，甚至變成艙壁比共用池更傷目錄——總執行緒沒變，只是切法不利於那個短呼叫。佇列容量從兩邊同一個總數按槽位比例拆開，用來吸收突發，不是把丟棄藏起來；模擬結束時還沒排到的仍算留在佇列，不算成功。付款持有改成 1 輪之後，共用池的外溢幾乎消失，艙壁就沒有什麼好隔離的。艙壁值得做，是因為兩個依賴的持有時間差很多。</p>
+  <div class="oneliner">
+    <b>一句話答法</b>艙壁用固定槽位把慢依賴的佔用封頂，總資源不增加；它救的是隔壁依賴，代價是被隔離的那條路更早拒絕。
+  </div>
+</section>
+
+<section id="s5">
+  <div class="sec-head">
+    <span class="sec-num">05</span>
+    <h2>伺服器自保：依優先級丟棄</h2>
+  </div>
+  <p class="sec-sub">熔斷與艙壁是針對某個下游。Load Shedding 是這台機器發現自己接不住時，主動丟掉比較不重要的新工作。</p>
+  <p>速率限制回答的是「這個呼叫者超額了嗎」，配額跟身份走。丟棄回答的是「這台機器還活得下去嗎」，信號是自己的 in-flight、佇列深度、事件迴圈延遲或 p99。公平的限流在過載時仍會讓每個人都進來一點，於是所有請求一起變慢；依優先級丟棄則是先保住結帳，放棄推薦。</p>
+  <div class="cb-lane">
+    <div class="lh">輪次</div><div class="lh">閘道 in-flight</div><div class="lh">結帳（高）</div><div class="lh">推薦（低）</div>
+    <div class="lt">t1</div>
+    <div class="lc">40，低於 80</div>
+    <div class="lc ok">放行</div>
+    <div class="lc ok">放行</div>
+    <div class="lt">t2</div>
+    <div class="lc act">先收結帳，升到 86</div>
+    <div class="lc ok">放行</div>
+    <div class="lc warn">86 ≥ 80，丟掉</div>
+    <div class="lt">t3</div>
+    <div class="lc bad">已到 100</div>
+    <div class="lc bad">新的結帳也丟</div>
+    <div class="lc bad">繼續丟</div>
+    <div class="lt">t4</div>
+    <div class="lc">預算之外</div>
+    <div class="lc ok">健康檢查仍 200</div>
+    <div class="lc">不占這 100</div>
+  </div>
+  <p class="cap">預算 100。in-flight ≥ 80 只丟低優先，≥ 100 連高優先的新請求也丟。健康檢查走另一條路徑，避免負載平衡把還能排水的節點移走。</p>
+  <p>t2 的順序是政策的一部分：同一波裡先收高優先，再用收完之後的水位決定低優先。若先收推薦，結帳會看到一個被不重要工作墊高的水位，優先級就反了。t3 必須真的丟，包括結帳。過載時還把所有請求收進無界佇列，延遲會先打死所有人，丟棄等於沒有。拒絕要快，最好在反序列化之前，並帶一個短的 Retry-After，讓客戶端的退避有依據——那個退避算法仍不是本篇的主題。</p>
+  <div class="callout warn">
+    <div class="c-title"><span class="ic">陷阱</span>把健康檢查也丟了</div>
+    <p>探針若跟使用者流量共用同一個預算，過載時探針先失敗，負載平衡把節點摘掉，剩下的節點水位更高。探針要走獨立連接埠或獨立的並發上限，並且便宜到不會自己成為負載。同樣不要丟「用來把 in-flight 減下去」的取消與逾時路徑。</p>
+  </div>
+  <div class="oneliner">
+    <b>一句話答法</b>Load Shedding 用本機的水位依優先級拒絕新工作，限流則是依呼叫者配額；兩者都拒絕，但信號與公平性完全不同。
+  </div>
+</section>
+
+<section id="s6">
+  <div class="sec-head">
+    <span class="sec-num">06</span>
+    <h2>降級退路本身也會故障</h2>
+  </div>
+  <p class="sec-sub">Fallback 決定主路徑失敗時使用者看到什麼。沒演練過的退路，會在斷路器打開的那一秒變成第二個事故。</p>
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>退路</th>
+          <th>適合</th>
+          <th>會說謊的時候</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>過期快取</td>
+          <td>讀多、可標示資料時間</td>
+          <td>庫存、餘額、權限</td>
+        </tr>
+        <tr>
+          <td>靜態預設</td>
+          <td>功能可以消失</td>
+          <td>把失敗裝成空清單，上游以為成功</td>
+        </tr>
+        <tr>
+          <td>跳過非關鍵步驟</td>
+          <td>推薦、裝飾、計數</td>
+          <td>授權、扣款、寫入主檔</td>
+        </tr>
+        <tr>
+          <td>另一個依賴</td>
+          <td>備用路徑不共享故障域</td>
+          <td>備用也打同一顆資料庫或同一個執行緒池</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="cap">退路的成敗標準是「使用者能不能理解這個結果」，不是「HTTP 有沒有回到 200」。空的推薦可以，空的訂單不行。</p>
+  <p>斷路器一打開，原本分散的失敗會在同一刻全部打進退路。退路若再去呼叫那個已經生病的依賴，或跟主路徑共用執行緒池，第 4 節的艙壁等於白做。退路要有自己的逾時、自己的並發上限，而且逾時要比主路徑更短——它是備用，不是再等一次。跨供應商換一家模型，是 LLM 閘道的題目；這裡只要求備用路徑在故障域上真的分開。</p>
+  <div class="callout warn">
+    <div class="c-title"><span class="ic">陷阱</span>退路只在設計評審裡存在</div>
+    <p>平常 0.1% 的流量走不到退路，第一次全量打上去才發現快取鍵不對、靜態回應比主路徑更大、或退路裡還有一個沒設逾時的呼叫。演練要在預發環境強制把斷路器打成 Open，看退路的延遲、錯誤率與它自己的池子會不會滿。沒有這次演練，降級方案只是註解。</p>
+  </div>
+  <p>還有一類靜默的錯：退路回傳成功，呼叫方把這次記成主依賴的成功樣本，斷路器在下游仍然壞著的時候回到 Closed，流量再灌回去。探測必須打到真正的依賴，不能把退路的 200 算進視窗。</p>
+  <div class="oneliner">
+    <b>一句話答法</b>降級是產品決策加一個獨立的資源預算；退路與主路徑共享依賴或共享執行緒時，熔斷只會把事故搬到下一層。
+  </div>
+</section>
+
+<section id="s7">
+  <div class="sec-head">
+    <span class="sec-num">07</span>
+    <h2>四個機制各擋哪一種擴散</h2>
+  </div>
+  <p class="sec-sub">面試官描述「付款變慢、整站跟著慢」時，先分清占住的是哪一種資源，再決定要動熔斷、艙壁、丟棄還是降級。</p>
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>機制</th>
+          <th>保護對象</th>
+          <th>觸發信號</th>
+          <th>單獨使用時救不了</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>Circuit Breaker</td>
+          <td>呼叫方與下游</td>
+          <td>失敗率或慢呼叫率</td>
+          <td>尚未逾時、但一直占著執行緒的成功呼叫</td>
+        </tr>
+        <tr>
+          <td>Bulkhead</td>
+          <td>同一行程裡的其他依賴</td>
+          <td>該依賴的槽位滿了</td>
+          <td>依賴本身回錯；也隔離不了共用的資料庫</td>
+        </tr>
+        <tr>
+          <td>Load Shedding</td>
+          <td>本機容量</td>
+          <td>自身水位、佇列、延遲</td>
+          <td>下游已經壞、而本機看起來還有空</td>
+        </tr>
+        <tr>
+          <td>Fallback</td>
+          <td>使用者看到的結果</td>
+          <td>主路徑失敗或被熔斷</td>
+          <td>退路與主路徑落在同一個故障域</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="cap">四列不是替代關係。付款逾時用斷路器停止重試，付款變慢用艙壁保住目錄，API 自己的水位過高用丟棄保住結帳，目錄被丟之後用降級讓頁面少一塊推薦而不是整頁失敗。</p>
+  <p>常見的錯答是「加上熔斷就不會雪崩」。熔斷降低的是錯誤路徑的呼叫次數；佔用執行緒的慢成功、本機 CPU 被打滿、以及退路裡的第二次呼叫，都還在。另一個錯答是把艙壁的槽位設成跟原來的池一樣大，隔離比是 100%，等於沒有艙壁。槽位要用那個依賴的目標並發來估：<var>到達率 × 持有時間</var>，再留一點餘裕，並且接受超過的部分被拒絕。</p>
+  <p>mesh 或 proxy 上的 outlier detection、連線池上限，做的是同一組事的不同位置：前者像以實例為單位的斷路器，後者像艙壁。計數器若只在 sidecar 裡，行程內的重試仍可能繞過它。第 3 節的疊法問題，換到 proxy 後面還在。</p>
+  <div class="oneliner">
+    <b>一句話答法</b>先問資源被誰占住：錯誤呼叫用斷路器停、慢依賴用艙壁隔、本機過載用優先級丟、使用者體驗用獨立故障域的退路接。四個一起設計，才擋得住從一個依賴開始的全站故障。
+  </div>
+</section>

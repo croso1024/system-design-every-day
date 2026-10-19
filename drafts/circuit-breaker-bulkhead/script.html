@@ -1,0 +1,560 @@
+<script>
+(function () {
+  "use strict";
+
+  /* (1) 常數與參數表 */
+  var CALLS = 12;
+  var DEFAULT_MASK = 572;
+
+  function clamp(n, lo, hi) {
+    n = Number(n);
+    if (!Number.isFinite(n)) n = lo;
+    if (n < lo) return lo;
+    if (n > hi) return hi;
+    return Math.round(n);
+  }
+
+  /* (2) compute* 純函式 */
+  // @probe fn       computeBreaker
+  // @probe baseline {"window":4,"minCalls":4,"thresholdPct":50,"openFor":2,"probes":2,"extraRetries":0,"step":12,"failMask":572}
+  // @probe sweep    {"window":[2,8],"minCalls":[2,8],"thresholdPct":[30,80],"openFor":[1,6],"probes":[1,4],"extraRetries":[1,3],"step":[3,9],"failMask":[0,4095]}
+  function computeBreaker(p) {
+    var windowSize = clamp(p.window, 2, 12);
+    var minCalls = clamp(p.minCalls, 1, 12);
+    var threshold = clamp(p.thresholdPct, 1, 100);
+    var openFor = clamp(p.openFor, 1, 8);
+    var probesNeeded = clamp(p.probes, 1, 5);
+    var extra = clamp(p.extraRetries, 0, 5);
+    var step = clamp(p.step, 1, CALLS);
+    var mask = (Number(p.failMask) >>> 0);
+
+    var state = 0;
+    var samples = [];
+    var openLeft = 0;
+    var probeOk = 0;
+    var rejected = 0;
+    var sent = 0;
+    var trips = 0;
+    var recoveries = 0;
+    var peakPct = 0;
+    var probeFails = 0;
+    var downstreamFails = 0;
+    var trippedAt = 0;
+    var rows = [];
+
+    function pctOf(arr) {
+      if (!arr.length) return 0;
+      var f = 0;
+      var i;
+      for (i = 0; i < arr.length; i += 1) f += arr[i];
+      return Math.round(f * 100 / arr.length);
+    }
+
+    function noteTrip(atCall) {
+      state = 1;
+      openLeft = openFor;
+      trips += 1;
+      probeOk = 0;
+      samples = [];
+      if (!trippedAt) trippedAt = atCall;
+    }
+
+    var i;
+    for (i = 0; i < step; i += 1) {
+      var wantFail = ((mask >>> i) & 1) === 1;
+      var sentHere = 0;
+      var rejHere = 0;
+      var sawPct = 0;
+      var atCall = i + 1;
+
+      if (state === 1) {
+        rejected += 1;
+        rejHere += 1;
+        openLeft -= 1;
+        if (openLeft <= 0) {
+          state = 2;
+          probeOk = 0;
+        }
+      } else if (state === 2) {
+        sent += 1;
+        sentHere += 1;
+        if (wantFail) {
+          downstreamFails += 1;
+          probeFails += 1;
+          noteTrip(atCall);
+        } else {
+          probeOk += 1;
+          if (probeOk >= probesNeeded) {
+            state = 0;
+            recoveries += 1;
+            probeOk = 0;
+            samples = [];
+          }
+        }
+      } else if (!wantFail) {
+        sent += 1;
+        sentHere += 1;
+        samples.push(0);
+        if (samples.length > windowSize) samples.shift();
+        sawPct = pctOf(samples);
+        if (sawPct > peakPct) peakPct = sawPct;
+      } else {
+        var attempts = 1 + extra;
+        var a;
+        for (a = 0; a < attempts; a += 1) {
+          if (state !== 0) {
+            rejected += 1;
+            rejHere += 1;
+            continue;
+          }
+          sent += 1;
+          sentHere += 1;
+          downstreamFails += 1;
+          samples.push(1);
+          if (samples.length > windowSize) samples.shift();
+          sawPct = pctOf(samples);
+          if (sawPct > peakPct) peakPct = sawPct;
+          if (samples.length >= minCalls && sawPct >= threshold) noteTrip(atCall);
+        }
+      }
+
+      rows.push({
+        sentHere: sentHere,
+        rejHere: rejHere,
+        state: state,
+        pct: sawPct,
+        openLeft: openLeft
+      });
+    }
+
+    return {
+      stateAtStep: state,
+      rejected: rejected,
+      sent: sent,
+      trips: trips,
+      recoveries: recoveries,
+      probeFails: probeFails,
+      peakPct: peakPct,
+      canTrip: windowSize >= minCalls ? 1 : 0,
+      trippedAt: trippedAt,
+      downstreamFails: downstreamFails,
+      rows: rows
+    };
+  }
+
+  // @probe fn       computePools
+  // @probe baseline {"ticks":6,"arrival":4,"payShare":50,"payHold":4,"catHold":1,"threads":4,"paySlots":1,"queueCap":0}
+  // @probe sweep    {"ticks":[3,10],"arrival":[2,8],"payShare":[20,80],"payHold":[1,6],"catHold":[2,5],"threads":[2,8],"paySlots":[2,5],"queueCap":[2,6]}
+  function computePools(p) {
+    var ticks = clamp(p.ticks, 2, 12);
+    var arrival = clamp(p.arrival, 1, 8);
+    var payShare = clamp(p.payShare, 0, 100);
+    var payHold = clamp(p.payHold, 1, 8);
+    var catHold = clamp(p.catHold, 1, 8);
+    var threads = clamp(p.threads, 2, 10);
+    var paySlots = clamp(p.paySlots, 1, threads - 1);
+    var queueCap = clamp(p.queueCap, 0, 8);
+
+    function run(parts) {
+      var pools = parts.map(function (part) {
+        var busy = [];
+        var i;
+        for (i = 0; i < part.threads; i += 1) busy.push(0);
+        return {
+          busy: busy,
+          queue: [],
+          cap: part.queueCap,
+          payServed: 0,
+          catServed: 0,
+          payShed: 0,
+          catShed: 0,
+          peak: 0,
+          fullTick: -1,
+          grid: [],
+          shedTick: []
+        };
+      });
+
+      function freeSlot(busy) {
+        var i;
+        for (i = 0; i < busy.length; i += 1) {
+          if (busy[i] === 0) return i;
+        }
+        return -1;
+      }
+
+      function admit(pool, kind, hold) {
+        var slot = freeSlot(pool.busy);
+        if (slot >= 0) {
+          pool.busy[slot] = { left: hold, kind: kind };
+          if (kind === "pay") pool.payServed += 1;
+          else pool.catServed += 1;
+          return;
+        }
+        if (pool.queue.length < pool.cap) {
+          pool.queue.push({ kind: kind, hold: hold });
+          return;
+        }
+        if (kind === "pay") pool.payShed += 1;
+        else pool.catShed += 1;
+      }
+
+      function drain(pool) {
+        while (pool.queue.length) {
+          var slot = freeSlot(pool.busy);
+          if (slot < 0) break;
+          var job = pool.queue.shift();
+          pool.busy[slot] = { left: job.hold, kind: job.kind };
+          if (job.kind === "pay") pool.payServed += 1;
+          else pool.catServed += 1;
+        }
+      }
+
+      var shared = parts.length === 1;
+      var t;
+      for (t = 0; t < ticks; t += 1) {
+        var shedBefore = [];
+        var pi;
+        for (pi = 0; pi < pools.length; pi += 1) {
+          shedBefore.push(pools[pi].payShed + pools[pi].catShed);
+        }
+        for (pi = 0; pi < pools.length; pi += 1) {
+          var pool = pools[pi];
+          var b;
+          for (b = 0; b < pool.busy.length; b += 1) {
+            if (pool.busy[b] !== 0) {
+              pool.busy[b].left -= 1;
+              if (pool.busy[b].left <= 0) pool.busy[b] = 0;
+            }
+          }
+          drain(pool);
+        }
+        var payN = Math.round(arrival * payShare / 100);
+        var catN = arrival - payN;
+        var payPool = pools[0];
+        var catPool = shared ? pools[0] : pools[1];
+        var k;
+        for (k = 0; k < payN; k += 1) admit(payPool, "pay", payHold);
+        for (k = 0; k < catN; k += 1) admit(catPool, "cat", catHold);
+        for (pi = 0; pi < pools.length; pi += 1) {
+          pool = pools[pi];
+          var snap = [];
+          var used = 0;
+          for (b = 0; b < pool.busy.length; b += 1) {
+            if (pool.busy[b] === 0) snap.push(0);
+            else {
+              snap.push(pool.busy[b].kind === "pay" ? 1 : 2);
+              used += 1;
+            }
+          }
+          pool.grid.push(snap);
+          pool.shedTick.push((pool.payShed + pool.catShed) - shedBefore[pi]);
+          if (used > pool.peak) pool.peak = used;
+          var pressure = pool.queue.length + pool.payShed + pool.catShed;
+          if (pool.fullTick < 0 && used === pool.busy.length && pressure > 0) {
+            pool.fullTick = t;
+          }
+        }
+      }
+      return pools;
+    }
+
+    var payQ = queueCap === 0 ? 0 : Math.round(queueCap * paySlots / threads);
+    if (payQ > queueCap) payQ = queueCap;
+    var catQ = queueCap - payQ;
+    var shared = run([{ threads: threads, queueCap: queueCap }])[0];
+    var bulk = run([
+      { threads: paySlots, queueCap: payQ },
+      { threads: threads - paySlots, queueCap: catQ }
+    ]);
+    var bp = bulk[0];
+    var bc = bulk[1];
+
+    return {
+      sharedPayShed: shared.payShed,
+      sharedCatShed: shared.catShed,
+      sharedPayServed: shared.payServed,
+      sharedCatServed: shared.catServed,
+      bulkPayShed: bp.payShed,
+      bulkCatShed: bc.catShed,
+      bulkPayServed: bp.payServed,
+      bulkCatServed: bc.catServed,
+      catalogSaved: shared.catShed - bc.catShed,
+      payExtraShed: bp.payShed - shared.payShed,
+      sharedPeak: shared.peak,
+      bulkPayPeak: bp.peak,
+      bulkCatPeak: bc.peak,
+      sharedFullTick: shared.fullTick,
+      bulkPayFullTick: bp.fullTick,
+      sharedQueued: shared.queue.length,
+      bulkPayQueued: bp.queue.length,
+      bulkCatQueued: bc.queue.length,
+      sharedGrid: shared.grid,
+      bulkPayGrid: bp.grid,
+      bulkCatGrid: bc.grid,
+      sharedShedTick: shared.shedTick,
+      bulkPayShedTick: bp.shedTick,
+      bulkCatShedTick: bc.shedTick
+    };
+  }
+
+  /* (3) DOM 參照 */
+  var STATE_NAME = ["Closed", "Open", "Half-Open"];
+  var brkSeq = document.getElementById("brk-seq");
+  var brkTrace = document.getElementById("brk-trace");
+  var brkStatus = document.getElementById("brk-status");
+  var brkNext = document.getElementById("brk-next");
+  var brkPrev = document.getElementById("brk-prev");
+  var brkReset = document.getElementById("brk-reset");
+  var bhStatus = document.getElementById("bh-status");
+  var bhShared = document.getElementById("bh-shared");
+  var bhBulk = document.getElementById("bh-bulk");
+  var bhReset = document.getElementById("bh-reset");
+  var BRK_FIELDS = ["brk-window", "brk-min", "brk-threshold", "brk-open", "brk-probes", "brk-retries"];
+  var BH_FIELDS = ["bh-ticks", "bh-arrival", "bh-share", "bh-pay-hold", "bh-cat-hold", "bh-threads", "bh-slots", "bh-queue"];
+  var step = 4;
+
+  function field(id) {
+    return document.getElementById(id);
+  }
+
+  function readMask() {
+    var mask = 0;
+    var buttons = brkSeq.querySelectorAll("button[data-call]");
+    var i;
+    for (i = 0; i < buttons.length; i += 1) {
+      if (buttons[i].getAttribute("aria-pressed") === "true") {
+        mask = (mask | (1 << Number(buttons[i].getAttribute("data-call")))) >>> 0;
+      }
+    }
+    return mask;
+  }
+
+  function breakerParams() {
+    return {
+      window: Number(field("brk-window").value),
+      minCalls: Number(field("brk-min").value),
+      thresholdPct: Number(field("brk-threshold").value),
+      openFor: Number(field("brk-open").value),
+      probes: Number(field("brk-probes").value),
+      extraRetries: Number(field("brk-retries").value),
+      step: step,
+      failMask: readMask()
+    };
+  }
+
+  function poolParams() {
+    return {
+      ticks: Number(field("bh-ticks").value),
+      arrival: Number(field("bh-arrival").value),
+      payShare: Number(field("bh-share").value),
+      payHold: Number(field("bh-pay-hold").value),
+      catHold: Number(field("bh-cat-hold").value),
+      threads: Number(field("bh-threads").value),
+      paySlots: Number(field("bh-slots").value),
+      queueCap: Number(field("bh-queue").value)
+    };
+  }
+
+  /* (4) render —— 只把 compute 的結果畫出來 */
+  function cellClass(actionKind) {
+    if (actionKind === "rej") return "ns-lock";
+    if (actionKind === "fail") return "ns-bad";
+    if (actionKind === "ok") return "ns-ok";
+    return "ns-idle";
+  }
+
+  function stateClass(code) {
+    if (code === 1) return "ns-lock";
+    if (code === 2) return "ns-wait";
+    return "ns-idle";
+  }
+
+  function renderBreaker() {
+    var params = breakerParams();
+    var result = computeBreaker(params);
+    var buttons = brkSeq.querySelectorAll("button[data-call]");
+    var html = "";
+    var i;
+    html += "<div class=\"brk-h\">筆</div><div class=\"brk-h\">若放行</div><div class=\"brk-h\">實際動作</div><div class=\"brk-h\">之後狀態</div><div class=\"brk-h\">視窗失敗率</div>";
+    for (i = 0; i < CALLS; i += 1) {
+      var plannedFail = buttons[i] && buttons[i].getAttribute("aria-pressed") === "true";
+      var row = result.rows[i];
+      var now = i === result.rows.length - 1 ? " brk-now" : "";
+      var dim = row ? "" : " brk-dim";
+      html += "<div class=\"brk-c" + now + dim + "\">" + (i + 1) + "</div>";
+      html += "<div class=\"brk-c" + now + dim + "\">" + (plannedFail ? "會失敗" : "會成功") + "</div>";
+      if (!row) {
+        html += "<div class=\"brk-c brk-dim\">還沒走到</div><div class=\"brk-c brk-dim\">—</div><div class=\"brk-c brk-dim\">—</div>";
+        continue;
+      }
+      var action = "放行且成功";
+      var kind = "ok";
+      if (row.rejHere > 0 && row.sentHere === 0) {
+        action = "擋下 " + row.rejHere + " 次";
+        kind = "rej";
+      } else if (row.rejHere > 0) {
+        action = "打出 " + row.sentHere + "、擋下 " + row.rejHere;
+        kind = "fail";
+      } else if (plannedFail) {
+        action = "放行且失敗";
+        kind = "fail";
+      }
+      html += "<div class=\"brk-c " + cellClass(kind) + now + "\">" + action + "</div>";
+      html += "<div class=\"brk-c " + stateClass(row.state) + now + "\">" + STATE_NAME[row.state] + "</div>";
+      html += "<div class=\"brk-c" + now + "\">" + row.pct + "%</div>";
+    }
+    brkTrace.innerHTML = html;
+
+    var bits = ["window", "min", "threshold", "open", "probes", "retries"];
+    var keys = ["window", "minCalls", "thresholdPct", "openFor", "probes", "extraRetries"];
+    for (i = 0; i < bits.length; i += 1) {
+      field("brk-" + bits[i] + "-val").textContent = String(params[keys[i]]);
+    }
+
+    var cur = result.rows[result.rows.length - 1];
+    var line = "走到第 " + result.rows.length + " 筆，狀態 " + STATE_NAME[result.stateAtStep] + "。";
+    line += "已擋下 " + result.rejected + " 次，打到下游 " + result.sent + " 次，其中下游失敗 " + result.downstreamFails + " 次。";
+    line += "跳閘 " + result.trips + " 次，半開恢復 " + result.recoveries + " 次，探測失敗 " + result.probeFails + " 次，視窗失敗率峰值 " + result.peakPct + "%。";
+    if (!result.canTrip) {
+      line += "最低樣本數大於視窗，失敗率永遠湊不滿，斷路器不會跳閘。";
+    } else if (result.trippedAt) {
+      line += "第一次跳閘在第 " + result.trippedAt + " 筆。";
+    } else {
+      line += "這一段還沒跳閘。";
+    }
+    if (cur && cur.rejHere > 0 && cur.sentHere === 0) {
+      line += "這一筆是保護生效：請求沒有打到依賴，所以也不記入失敗率。";
+    }
+    brkStatus.textContent = line;
+  }
+
+  function slotHtml(code) {
+    var cls = "ns-idle";
+    if (code === 1) cls = "ns-lock";
+    if (code === 2) cls = "ns-ok";
+    return "<i class=\"bh-slot " + cls + "\"></i>";
+  }
+
+  function gridHtml(title, grid, shedTick, note) {
+    var html = "<div class=\"bh-name\">" + title + "</div>";
+    var t;
+    for (t = 0; t < grid.length; t += 1) {
+      var slots = "";
+      var s;
+      for (s = 0; s < grid[t].length; s += 1) slots += slotHtml(grid[t][s]);
+      html += "<div class=\"bh-round\"><span class=\"bh-t\">t" + (t + 1) + "</span><span class=\"bh-slots\">" + slots + "</span><span class=\"bh-shed\">丟 " + shedTick[t] + "</span></div>";
+    }
+    html += "<p class=\"bh-note\">" + note + "</p>";
+    return html;
+  }
+
+  function renderPools() {
+    var params = poolParams();
+    var result = computePools(params);
+    var i;
+    var ids = ["ticks", "arrival", "share", "pay-hold", "cat-hold", "threads", "slots", "queue"];
+    var keys = ["ticks", "arrival", "payShare", "payHold", "catHold", "threads", "paySlots", "queueCap"];
+    for (i = 0; i < ids.length; i += 1) {
+      field("bh-" + ids[i] + "-val").textContent = String(params[keys[i]]);
+    }
+    var full = result.sharedFullTick < 0 ? "這段裡共用池沒有在有人被丟時占滿" : "共用池從第 " + (result.sharedFullTick + 1) + " 輪起占滿並開始丟請求";
+    bhShared.innerHTML = gridHtml(
+      "共用池",
+      result.sharedGrid,
+      result.sharedShedTick,
+      "付款完成 " + result.sharedPayServed + "、被丟 " + result.sharedPayShed + "。目錄完成 " + result.sharedCatServed + "、被丟 " + result.sharedCatShed + "。佇列還留 " + result.sharedQueued + "。"
+    );
+    var bulkNote = "付款完成 " + result.bulkPayServed + "、被丟 " + result.bulkPayShed + "（佇列留 " + result.bulkPayQueued + "）。目錄完成 " + result.bulkCatServed + "、被丟 " + result.bulkCatShed + "（佇列留 " + result.bulkCatQueued + "）。";
+    bhBulk.innerHTML = "<div class=\"bh-split\">" +
+      gridHtml("艙壁 · 付款", result.bulkPayGrid, result.bulkPayShedTick, "") +
+      gridHtml("艙壁 · 目錄", result.bulkCatGrid, result.bulkCatShedTick, "") +
+      "</div><p class=\"bh-note\">" + bulkNote + "</p>";
+
+    var saved = result.catalogSaved;
+    var cost = result.payExtraShed;
+    var line = full + "。";
+    if (saved > 0) {
+      line += "艙壁比共用池少丟目錄 " + saved + " 筆";
+    } else if (saved < 0) {
+      line += "艙壁比共用池多丟目錄 " + (-saved) + " 筆";
+    } else {
+      line += "兩邊丟掉的目錄一樣多";
+    }
+    if (cost > 0) line += "，付款多丟 " + cost + " 筆";
+    else if (cost < 0) line += "，付款少丟 " + (-cost) + " 筆";
+    line += "。目錄艙壁尖峰占用 " + result.bulkCatPeak + " 條，付款艙壁尖峰占用 " + result.bulkPayPeak + " 條，共用池尖峰 " + result.sharedPeak + " 條。";
+    var slotCap = params.threads - 1;
+    if (slotCap < 1) slotCap = 1;
+    if (params.paySlots > slotCap) {
+      line += "付款槽位超過總數減 1，模擬收成 " + slotCap + "，目錄至少留 1 條。";
+    }
+    bhStatus.textContent = line;
+  }
+
+  function paint() {
+    renderBreaker();
+    renderPools();
+  }
+
+  /* (5) 事件綁定 */
+  function applyMask(mask) {
+    var buttons = brkSeq.querySelectorAll("button[data-call]");
+    var i;
+    for (i = 0; i < buttons.length; i += 1) {
+      var on = ((mask >>> i) & 1) === 1;
+      buttons[i].setAttribute("aria-pressed", on ? "true" : "false");
+    }
+  }
+
+  brkSeq.addEventListener("click", function (ev) {
+    var btn = ev.target.closest("button[data-call]");
+    if (!btn) return;
+    var on = btn.getAttribute("aria-pressed") === "true";
+    btn.setAttribute("aria-pressed", on ? "false" : "true");
+    renderBreaker();
+  });
+
+  brkNext.addEventListener("click", function () {
+    if (step < CALLS) step += 1;
+    renderBreaker();
+  });
+  brkPrev.addEventListener("click", function () {
+    if (step > 1) step -= 1;
+    renderBreaker();
+  });
+  brkReset.addEventListener("click", function () {
+    step = 4;
+    field("brk-window").value = "4";
+    field("brk-min").value = "4";
+    field("brk-threshold").value = "50";
+    field("brk-open").value = "2";
+    field("brk-probes").value = "2";
+    field("brk-retries").value = "0";
+    applyMask(DEFAULT_MASK);
+    renderBreaker();
+  });
+
+  var bi;
+  for (bi = 0; bi < BRK_FIELDS.length; bi += 1) {
+    field(BRK_FIELDS[bi]).addEventListener("input", renderBreaker);
+  }
+
+  bhReset.addEventListener("click", function () {
+    field("bh-ticks").value = "6";
+    field("bh-arrival").value = "4";
+    field("bh-share").value = "50";
+    field("bh-pay-hold").value = "4";
+    field("bh-cat-hold").value = "1";
+    field("bh-threads").value = "4";
+    field("bh-slots").value = "1";
+    field("bh-queue").value = "0";
+    renderPools();
+  });
+  for (bi = 0; bi < BH_FIELDS.length; bi += 1) {
+    field(BH_FIELDS[bi]).addEventListener("input", renderPools);
+  }
+
+  paint();
+})();
+</script>
