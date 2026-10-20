@@ -1,0 +1,2515 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>限流演算法 (Rate Limiting Algorithms) | System Design Every Day</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@300;400;500;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+  <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+  <script>
+    mermaid.initialize({
+      startOnLoad: true,
+      theme: 'default',
+      securityLevel: 'loose'
+    });
+  </script>
+  <style>
+    /* 全站設計 token 的唯一來源。scripts/lib/books.js 會把「第一個 :root 區塊」原樣抽進首頁：
+       請保持單一區塊、區塊內不得出現 `}`；首頁領域色依賴 --accent / --ok / --warn。 */
+    :root {
+      --bg: #ffffff;
+      --bg-soft: #fafaf9;
+      --text: #262a2f;
+      --text-2: #6b7078;
+      --text-3: #9aa0a8;
+      --border: #ecebe8;
+      --border-strong: #dedcd8;
+      --code-bg: #f6f5f3;
+      --accent: #3f6188;
+      --accent-soft: #eef2f7;
+      --accent-line: #cdd9e6;
+      --ok: #4d7d68;
+      --ok-soft: #eef4f1;
+      --warn: #a3743e;
+      --warn-soft: #f6f0e7;
+      --bad: #a8554f;
+      --bad-soft: #f6ecea;
+      --radius: 10px;
+      --radius-sm: 7px;
+      --maxw: 760px;
+      --sans: "Noto Sans TC", system-ui, -apple-system, "Segoe UI", sans-serif;
+      --mono: "JetBrains Mono", "SFMono-Regular", Menlo, Consolas, monospace;
+    }
+
+    /* ---------- base reset ----------
+       等價於 Tailwind preflight 的最小重置（頁面不載入 Tailwind，utility class 不會生效）。
+       文章頁與各篇 demo CSS 都以這組基準值撰寫，改動會讓所有產物的間距、清單、按鈕外觀一起變動。
+       新增規則請一律寫在這個區塊之後，並使用 :root 的 token。 */
+    *, *::before, *::after {
+      box-sizing: border-box;
+      border: 0 solid var(--border);
+    }
+
+    html {
+      line-height: 1.5;
+      -webkit-text-size-adjust: 100%;
+      tab-size: 4;
+    }
+
+    h1, h2, h3, h4, h5, h6 {
+      margin: 0;
+      font-size: inherit;
+      font-weight: inherit;
+    }
+
+    p, blockquote, dl, dd, figure, pre, hr {
+      margin: 0;
+    }
+
+    hr {
+      height: 0;
+      color: inherit;
+      border-top-width: 1px;
+    }
+
+    a {
+      color: inherit;
+      text-decoration: inherit;
+    }
+
+    b, strong {
+      font-weight: bolder;
+    }
+
+    code, kbd, samp, pre {
+      font-family: var(--mono);
+      font-size: 1em;
+    }
+
+    small {
+      font-size: 80%;
+    }
+
+    sub, sup {
+      position: relative;
+      font-size: 75%;
+      line-height: 0;
+      vertical-align: baseline;
+    }
+    sub { bottom: -0.25em; }
+    sup { top: -0.5em; }
+
+    table {
+      border-collapse: collapse;
+      border-color: inherit;
+      text-indent: 0;
+    }
+
+    ol, ul, menu {
+      list-style: none;
+      margin: 0;
+      padding: 0;
+    }
+
+    img, svg, video, canvas, audio, iframe, embed, object {
+      display: block;
+      vertical-align: middle;
+    }
+
+    img, video {
+      max-width: 100%;
+      height: auto;
+    }
+
+    button, input, optgroup, select, textarea {
+      margin: 0;
+      padding: 0;
+      font: inherit;
+      line-height: inherit;
+      color: inherit;
+    }
+
+    button, select {
+      text-transform: none;
+    }
+
+    button, [type="button"], [type="reset"], [type="submit"] {
+      -webkit-appearance: button;
+      background-color: transparent;
+      background-image: none;
+    }
+
+    button, [role="button"] {
+      cursor: pointer;
+    }
+
+    :disabled {
+      cursor: default;
+    }
+
+    input::placeholder, textarea::placeholder {
+      opacity: 1;
+      color: var(--text-3);
+    }
+
+    textarea {
+      resize: vertical;
+    }
+
+    fieldset {
+      margin: 0;
+      padding: 0;
+    }
+
+    legend {
+      padding: 0;
+    }
+
+    summary {
+      display: list-item;
+    }
+
+    [hidden] {
+      display: none;
+    }
+
+    html {
+      scroll-behavior: smooth;
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      html {
+        scroll-behavior: auto;
+      }
+      * {
+        animation-duration: .001ms !important;
+        transition-duration: .001ms !important;
+      }
+    }
+
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font-family: var(--sans);
+      font-weight: 400;
+      font-size: 16px;
+      line-height: 1.78;
+      -webkit-font-smoothing: antialiased;
+      letter-spacing: .005em;
+    }
+
+    ::selection {
+      background: var(--accent-soft);
+    }
+
+    /* ---------- layout ---------- */
+    .wrap {
+      display: flex;
+      max-width: 1180px;
+      margin: 0 auto;
+      gap: 0;
+    }
+
+    .toc {
+      width: 248px;
+      flex: 0 0 248px;
+      position: sticky;
+      top: 0;
+      height: 100vh;
+      padding: 54px 22px 40px 28px;
+      overflow-y: auto;
+      border-right: 1px solid var(--border);
+      transition: width .2s ease, flex-basis .2s ease, padding .2s ease, opacity .15s ease, border-color .15s ease;
+    }
+
+    .toc-kicker {
+      font-family: var(--mono);
+      font-size: 11px;
+      letter-spacing: .14em;
+      text-transform: uppercase;
+      color: var(--text-3);
+      margin-bottom: 20px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+    }
+
+    /* desktop：側欄內收合鈕；≤920px 隱藏，改由 .toc-toggle accordion 控制 */
+    .toc-collapse {
+      display: none;
+      flex: 0 0 auto;
+      align-items: center;
+      justify-content: center;
+      width: 28px;
+      height: 28px;
+      padding: 0;
+      border: none;
+      background: none;
+      border-radius: 6px;
+      color: var(--text-2);
+      line-height: 1;
+      cursor: pointer;
+    }
+
+    .toc-collapse:hover {
+      color: var(--text);
+      background: var(--bg-soft);
+    }
+
+    .toc-collapse:focus-visible {
+      outline: 2px solid var(--accent);
+      outline-offset: 2px;
+    }
+
+    .toc-collapse svg {
+      display: block;
+    }
+
+    /* desktop：側欄收合後的展開鈕（預設隱藏） */
+    .toc-reopen {
+      display: none;
+      position: fixed;
+      top: 18px;
+      left: 18px;
+      z-index: 900;
+      align-items: center;
+      gap: 7px;
+      font-size: 12.5px;
+      line-height: 1;
+      color: var(--text-2);
+      background: var(--bg);
+      border: 1px solid var(--border-strong);
+      border-radius: 999px;
+      padding: 7px 13px 7px 11px;
+      box-shadow: 0 1px 3px rgba(0, 0, 0, .06), 0 4px 12px rgba(0, 0, 0, .04);
+      cursor: pointer;
+      transition: background .15s, border-color .15s, color .15s;
+    }
+
+    .toc-reopen:hover {
+      background: var(--bg-soft);
+      color: var(--text);
+      border-color: var(--text-3);
+    }
+
+    .toc-reopen svg {
+      flex: 0 0 auto;
+      display: block;
+    }
+
+    @media (min-width: 921px) {
+      .toc-collapse {
+        display: inline-flex;
+      }
+
+      body.toc-collapsed .toc {
+        width: 0;
+        flex-basis: 0;
+        padding: 0;
+        opacity: 0;
+        overflow: hidden;
+        border-right-color: transparent;
+        pointer-events: none;
+      }
+
+      body.toc-collapsed .toc-reopen {
+        display: inline-flex;
+      }
+    }
+
+    .toc-kicker a {
+      color: var(--text-3);
+      text-decoration: none;
+      border-bottom: none;
+      transition: color .15s;
+    }
+
+    .toc-kicker a:hover {
+      color: var(--text);
+    }
+
+    .toc-title {
+      font-size: 15px;
+      font-weight: 700;
+      line-height: 1.4;
+      margin: 0 0 24px;
+    }
+
+    .toc a {
+      display: flex;
+      gap: 10px;
+      align-items: baseline;
+      text-decoration: none;
+      color: var(--text-2);
+      font-size: 13.5px;
+      padding: 6px 10px;
+      border-radius: 6px;
+      line-height: 1.45;
+      transition: background .15s, color .15s;
+      border-bottom: none;
+    }
+
+    .toc a:hover {
+      background: var(--bg-soft);
+      color: var(--text);
+      border-bottom: none;
+    }
+
+    .toc a.active {
+      color: var(--accent);
+      background: var(--accent-soft);
+      font-weight: 500;
+      border-bottom: none;
+    }
+
+    .toc a .n {
+      font-family: var(--mono);
+      font-size: 11px;
+      color: var(--text-3);
+      flex: 0 0 18px;
+    }
+
+    .toc a.active .n {
+      color: var(--accent);
+    }
+
+    main {
+      flex: 1 1 auto;
+      min-width: 0;
+      padding: 0 40px;
+    }
+
+    .inner {
+      max-width: var(--maxw);
+      margin: 0 auto;
+      padding: 72px 0 140px;
+    }
+
+    /* ---------- hero ---------- */
+    .hero {
+      margin-bottom: 64px;
+    }
+
+    .hero .eyebrow {
+      font-family: var(--mono);
+      font-size: 12px;
+      letter-spacing: .16em;
+      text-transform: uppercase;
+      color: var(--accent);
+      margin-bottom: 18px;
+    }
+
+    .hero h1 {
+      font-size: 40px;
+      line-height: 1.18;
+      font-weight: 700;
+      margin: 0 0 18px;
+      letter-spacing: -.01em;
+    }
+
+    .hero .lede {
+      font-size: 18px;
+      line-height: 1.7;
+      color: var(--text-2);
+      font-weight: 300;
+      margin: 0;
+      max-width: 620px;
+    }
+
+    .hero .meta {
+      margin-top: 28px;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+
+    .tag {
+      font-family: var(--mono);
+      font-size: 12px;
+      color: var(--text-2);
+      border: 1px solid var(--border-strong);
+      padding: 4px 11px;
+      border-radius: 999px;
+      background: var(--bg-soft);
+    }
+
+    /* ---------- sections ---------- */
+    section {
+      padding-top: 30px;
+      scroll-margin-top: 24px;
+    }
+
+    .sec-head {
+      display: flex;
+      align-items: baseline;
+      gap: 14px;
+      margin: 0 0 8px;
+    }
+
+    .sec-num {
+      font-family: var(--mono);
+      font-size: 13px;
+      color: var(--text-3);
+      font-weight: 500;
+      padding-top: 6px;
+      flex: 0 0 auto;
+    }
+
+    h2 {
+      font-size: 27px;
+      font-weight: 700;
+      line-height: 1.3;
+      margin: 0;
+      letter-spacing: -.01em;
+    }
+
+    .sec-sub {
+      color: var(--text-2);
+      font-size: 15px;
+      margin: 2px 0 28px 0;
+      font-weight: 300;
+    }
+
+    h3 {
+      font-size: 18.5px;
+      font-weight: 700;
+      margin: 38px 0 12px;
+      line-height: 1.45;
+    }
+
+    h4 {
+      font-size: 15.5px;
+      font-weight: 700;
+      margin: 26px 0 8px;
+      color: var(--text);
+    }
+
+    p {
+      margin: 0 0 16px;
+    }
+
+    a {
+      color: var(--accent);
+      text-decoration: none;
+      border-bottom: 1px solid var(--accent-line);
+      transition: border-color .15s;
+    }
+
+    a:hover {
+      border-color: var(--accent);
+    }
+
+    strong {
+      font-weight: 700;
+    }
+
+    em {
+      font-style: normal;
+      background: var(--accent-soft);
+      padding: 0 4px;
+      border-radius: 4px;
+      font-weight: 500;
+      color: #2f4d6e;
+    }
+
+    hr.div {
+      border: none;
+      border-top: 1px solid var(--border);
+      margin: 46px 0;
+    }
+
+    ul, ol {
+      margin: 0 0 18px;
+      padding-left: 22px;
+    }
+
+    li {
+      margin: 7px 0;
+      padding-left: 4px;
+    }
+
+    code {
+      font-family: var(--mono);
+      font-size: .86em;
+      background: var(--code-bg);
+      padding: 2px 6px;
+      border-radius: 5px;
+      color: #43494f;
+    }
+
+    pre {
+      background: var(--code-bg);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 16px 18px;
+      overflow-x: auto;
+      margin: 0 0 20px;
+      line-height: 1.6;
+    }
+
+    pre code {
+      background: none;
+      padding: 0;
+      font-size: 13px;
+    }
+
+    /* ---------- math notation ---------- */
+    /* 行內數學變數，如 W、R、N。本站不載入 MathJax/KaTeX，請勿使用 $...$ 或 \[...\] LaTeX 分隔符。 */
+    var {
+      font-family: var(--mono);
+      font-style: normal;
+      font-weight: 500;
+      color: var(--accent);
+    }
+
+    /* 區塊數學公式，置中等寬呈現，記得將 > < & 轉義為 &gt; &lt; &amp;。 */
+    .formula {
+      font-family: var(--mono);
+      font-size: 15px;
+      text-align: center;
+      background: var(--bg-soft);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      padding: 14px 18px;
+      margin: 0 0 20px;
+      color: var(--text);
+      letter-spacing: .03em;
+      overflow-x: auto;
+    }
+
+    /* ---------- callouts ---------- */
+    .callout {
+      border: 1px solid var(--border);
+      border-left: 3px solid var(--border-strong);
+      background: var(--bg-soft);
+      border-radius: var(--radius-sm);
+      padding: 15px 18px;
+      margin: 0 0 22px;
+      font-size: 14.5px;
+    }
+
+    .callout .c-title {
+      font-weight: 700;
+      font-size: 13px;
+      letter-spacing: .02em;
+      margin-bottom: 5px;
+      display: flex;
+      gap: 7px;
+      align-items: center;
+    }
+
+    .callout p:last-child {
+      margin-bottom: 0;
+    }
+
+    .callout.accent {
+      border-left-color: var(--accent);
+      background: var(--accent-soft);
+    }
+
+    .callout.accent .c-title {
+      color: #2f4d6e;
+    }
+
+    .callout.warn {
+      border-left-color: var(--warn);
+      background: var(--warn-soft);
+    }
+
+    .callout.warn .c-title {
+      color: var(--warn);
+    }
+
+    .callout .ic {
+      font-family: var(--mono);
+      font-size: 11px;
+      border: 1px solid currentColor;
+      border-radius: 4px;
+      padding: 0 4px;
+      line-height: 1.5;
+      opacity: .8;
+    }
+
+    .oneliner {
+      border: 1px dashed var(--accent-line);
+      border-radius: var(--radius-sm);
+      padding: 13px 16px;
+      margin: 0 0 22px;
+      font-size: 14.5px;
+      background: #fbfcfd;
+    }
+
+    .oneliner b {
+      font-family: var(--mono);
+      font-size: 11px;
+      letter-spacing: .08em;
+      color: var(--accent);
+      display: block;
+      margin-bottom: 4px;
+      text-transform: uppercase;
+    }
+
+    /* ---------- tables ---------- */
+    .tbl-wrap {
+      overflow-x: auto;
+      margin: 0 0 24px;
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+    }
+
+    table {
+      border-collapse: collapse;
+      width: 100%;
+      font-size: 14px;
+      min-width: 520px;
+    }
+
+    th, td {
+      text-align: left;
+      padding: 11px 14px;
+      border-bottom: 1px solid var(--border);
+      vertical-align: top;
+    }
+
+    th {
+      font-weight: 700;
+      background: var(--bg-soft);
+      font-size: 12.5px;
+      letter-spacing: .02em;
+      color: var(--text-2);
+      position: sticky;
+      top: 0;
+    }
+
+    tr:last-child td {
+      border-bottom: none;
+    }
+
+    td.hl {
+      background: var(--accent-soft);
+    }
+
+    .cap {
+      font-size: 12.5px;
+      color: var(--text-3);
+      margin: -12px 0 26px;
+      font-family: var(--mono);
+    }
+
+    /* ---------- interactive shell ---------- */
+    .demo {
+      border: 1px solid var(--border-strong);
+      border-radius: var(--radius);
+      background: var(--bg);
+      margin: 24px 0 26px;
+      overflow: hidden;
+    }
+
+    .demo-bar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      flex-wrap: wrap;
+      padding: 13px 16px;
+      border-bottom: 1px solid var(--border);
+      background: var(--bg-soft);
+    }
+
+    .demo-bar .label {
+      font-family: var(--mono);
+      font-size: 11px;
+      letter-spacing: .1em;
+      text-transform: uppercase;
+      color: var(--text-3);
+    }
+
+    .demo-body {
+      padding: 20px 18px;
+    }
+
+    .seg {
+      display: inline-flex;
+      border: 1px solid var(--border-strong);
+      border-radius: 999px;
+      overflow: hidden;
+      background: var(--bg);
+    }
+
+    .seg button {
+      border: none;
+      background: none;
+      font-family: var(--sans);
+      font-size: 12.5px;
+      color: var(--text-2);
+      padding: 6px 14px;
+      cursor: pointer;
+      transition: background .15s, color .15s;
+    }
+
+    .seg button:hover {
+      color: var(--text);
+    }
+
+    .seg button[aria-pressed="true"] {
+      background: var(--accent);
+      color: #fff;
+    }
+
+    .btn {
+      font-family: var(--sans);
+      font-size: 13px;
+      border: 1px solid var(--border-strong);
+      background: var(--bg);
+      color: var(--text);
+      padding: 7px 16px;
+      border-radius: 7px;
+      cursor: pointer;
+      transition: background .15s, border-color .15s;
+    }
+
+    .btn:hover {
+      background: var(--bg-soft);
+      border-color: var(--text-3);
+    }
+
+    .btn.primary {
+      background: var(--accent);
+      color: #fff;
+      border-color: var(--accent);
+    }
+
+    .btn.primary:hover {
+      background: #365578;
+    }
+
+    .btn:disabled {
+      opacity: .4;
+      cursor: not-allowed;
+    }
+
+    .btn:focus-visible, .seg button:focus-visible, .toc a:focus-visible, a:focus-visible,
+    summary:focus-visible {
+      outline: 2px solid var(--accent);
+      outline-offset: 2px;
+      border-radius: 4px;
+    }
+
+    .status-line {
+      font-size: 13.5px;
+      color: var(--text-2);
+      min-height: 42px;
+      margin-top: 14px;
+      background: var(--bg-soft);
+      border-radius: var(--radius-sm);
+      padding: 10px 13px;
+      border: 1px solid var(--border);
+    }
+
+    .status-line b {
+      color: var(--text);
+    }
+
+    .legend {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 14px;
+      font-size: 11.5px;
+      color: var(--text-2);
+      margin-top: 14px;
+      font-family: var(--mono);
+    }
+
+    .legend span {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .dot {
+      width: 9px;
+      height: 9px;
+      border-radius: 3px;
+      display: inline-block;
+      border: 1px solid rgba(0, 0, 0, .08);
+    }
+
+    /* node states used across diagrams */
+    .ns-idle {
+      background: #fff;
+      border-color: var(--border-strong);
+    }
+
+    .ns-lock {
+      background: var(--warn-soft);
+      border-color: var(--warn);
+    }
+
+    .ns-ok {
+      background: var(--ok-soft);
+      border-color: var(--ok);
+    }
+
+    .ns-bad {
+      background: var(--bad-soft);
+      border-color: var(--bad);
+    }
+
+    .ns-wait {
+      background: var(--accent-soft);
+      border-color: var(--accent);
+    }
+
+    /* FAQ */
+    details.faq {
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      margin-bottom: 10px;
+      background: #fff;
+      overflow: hidden;
+    }
+
+    details.faq summary {
+      cursor: pointer;
+      padding: 14px 16px;
+      font-weight: 600;
+      font-size: 14.5px;
+      list-style: none;
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      align-items: center;
+    }
+
+    details.faq summary::-webkit-details-marker {
+      display: none;
+    }
+
+    details.faq summary .q {
+      font-family: var(--mono);
+      font-size: 11px;
+      color: var(--accent);
+      flex: 0 0 auto;
+    }
+
+    details.faq summary .chev {
+      transition: transform .2s;
+      color: var(--text-3);
+      flex: 0 0 auto;
+      font-size: 13px;
+    }
+
+    details.faq[open] summary .chev {
+      transform: rotate(90deg);
+    }
+
+    details.faq .ans {
+      padding: 0 16px 16px;
+      font-size: 14px;
+      color: var(--text-2);
+    }
+
+    details.faq .ans p {
+      margin: 0 0 10px;
+    }
+
+    details.faq .ans p:last-child {
+      margin: 0;
+    }
+
+    .trap {
+      display: flex;
+      gap: 10px;
+      font-size: 14px;
+      margin: 9px 0;
+    }
+
+    .trap .tn {
+      font-family: var(--mono);
+      font-size: 11px;
+      color: var(--bad);
+      flex: 0 0 auto;
+      border: 1px solid var(--bad-soft);
+      background: var(--bad-soft);
+      border-radius: 4px;
+      padding: 1px 6px;
+      height: fit-content;
+      margin-top: 2px;
+    }
+
+    /* mobile responsive */
+    .toc-toggle {
+      display: none;
+    }
+
+    @media (max-width: 920px) {
+      .wrap {
+        flex-direction: column;
+      }
+      .toc {
+        position: static;
+        width: auto;
+        height: auto;
+        border-right: none;
+        border-bottom: 1px solid var(--border);
+        padding: 18px 22px;
+        transition: none;
+      }
+      .toc-title {
+        margin-bottom: 0;
+      }
+      .toc-kicker {
+        margin-bottom: 10px;
+      }
+      .toc-nav {
+        display: none;
+        margin-top: 16px;
+      }
+      .toc-nav.open {
+        display: block;
+      }
+      .toc-toggle {
+        display: inline-block;
+        margin-top: 10px;
+      }
+      .toc-collapse,
+      .toc-reopen {
+        display: none !important;
+      }
+      main {
+        padding: 0 22px;
+      }
+      .inner {
+        padding: 40px 0 100px;
+      }
+      .hero h1 {
+        font-size: 31px;
+      }
+    }
+
+    @media print {
+      .toc-reopen { display: none !important; }
+    }
+
+    @media (max-width: 480px) {
+      body {
+        font-size: 15px;
+      }
+      .hero h1 {
+        font-size: 27px;
+      }
+      h2 {
+        font-size: 23px;
+      }
+      .demo-body {
+        padding: 16px 13px;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <!-- ===================== TOC SIDEBAR ===================== -->
+    <nav class="toc" id="toc-panel" aria-label="目錄">
+      <div class="toc-kicker">
+        <a href="../index.html">← 返回目錄</a>
+        <button class="toc-collapse" type="button" aria-expanded="true" aria-controls="toc-panel"
+                aria-label="收合目錄" title="收合目錄">
+          <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor"
+               stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M15 18l-6-6 6-6"/>
+          </svg>
+        </button>
+      </div>
+      <div class="toc-title">限流演算法 (Rate Limiting Algorithms)</div>
+      <button class="btn toc-toggle" type="button" aria-expanded="false" aria-controls="toc-nav">目錄 ▾</button>
+      <div class="toc-nav" id="toc-nav">
+        <a href="#s1"><span class="n">01</span>先決定放不放，再讓上游開工</a>
+        <a href="#s2"><span class="n">02</span>對齊視窗：好寫，邊界會放兩倍</a>
+        <a href="#s3"><span class="n">03</span>滑動視窗：精確的日誌，或兩個整數的近似</a>
+        <a href="#s4"><span class="n">04</span>兩種桶：立刻送出，或排開再送</a>
+        <a href="#s5"><span class="n">05</span>同一條到達序列，兩種演算法並排</a>
+        <a href="#s6"><span class="n">06</span>多節點：原子扣額度，或先預取再承擔不公平</a>
+        <a href="#s7"><span class="n">07</span>面試時按這個順序講完</a>
+        <a href="#s8"><span class="n">08</span>Usage Plan 與 WAF 各管一種粒度</a>
+      </div>
+    </nav>
+    <button class="btn toc-reopen" type="button" aria-expanded="true" aria-controls="toc-panel"
+            aria-label="展開目錄" title="展開目錄">
+      <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor"
+           stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M9 18l6-6-6-6"/>
+      </svg>
+      <span>目錄</span>
+    </button>
+
+    <!-- ===================== MAIN CONTENT ===================== -->
+    <main>
+      <div class="inner">
+        <!-- demo-archetype: C｜並排對照（主，同一序列兩種演算法）＋C｜並排對照（次，原子加一與本地預取） — 讀者改同一組到達時間，左右同時重算兩種演算法的放行、超出與送出間隔；容量與每秒補充會改寫 Token／Leaky 的累計曲線。
+     brief 的另一種形式是只拖容量與補充速率（參數掃描）。那個形式被最近三篇的主 archetype 擋住，所以這兩個旋鈕放在並排對照裡，曲線由兩欄一起畫出來。 -->
+<style>
+  .rla-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    align-items: stretch;
+    justify-content: center;
+    margin: 14px 0 6px;
+  }
+  .rla-node {
+    border: 1px solid var(--border-strong);
+    border-radius: 8px;
+    background: #fff;
+    padding: 10px 12px;
+    min-width: 110px;
+    max-width: 200px;
+    text-align: center;
+  }
+  .rla-node .nn { font-family: var(--mono); font-size: 12px; font-weight: 700; color: var(--text); }
+  .rla-node .ns { font-size: 11px; color: var(--text-2); margin-top: 3px; line-height: 1.4; }
+  .rla-node.accent { border-top: 3px solid var(--accent); }
+  .rla-arrow {
+    display: flex;
+    align-items: center;
+    font-family: var(--mono);
+    font-size: 13px;
+    color: var(--text-3);
+    white-space: nowrap;
+  }
+  .rla-lane {
+    display: grid;
+    grid-template-columns: 52px repeat(2, minmax(0, 1fr));
+    gap: 1px;
+    background: var(--border);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    overflow: hidden;
+    margin: 14px 0 6px;
+  }
+  .rla-lane > div { background: #fff; padding: 8px 10px; font-size: 12px; line-height: 1.5; }
+  .rla-lane .lh {
+    background: var(--bg-soft);
+    font-family: var(--mono);
+    font-size: 11px;
+    font-weight: 700;
+    color: var(--text-2);
+  }
+  .rla-lane .lt {
+    background: var(--bg-soft);
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--text-3);
+  }
+  .rla-lane .lc.act { background: var(--accent-soft); }
+  .rla-lane .lc.ok { background: var(--ok-soft); }
+  .rla-lane .lc.bad { background: var(--bad-soft); }
+  .rla-split {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 12px;
+    margin: 14px 0 6px;
+  }
+  .rla-pane {
+    border: 1px solid var(--border-strong);
+    border-radius: 8px;
+    background: #fff;
+    padding: 12px 14px;
+  }
+  .rla-pane.token { border-top: 3px solid var(--accent); }
+  .rla-pane.leaky { border-top: 3px solid var(--ok); }
+  .rla-pane b { font-family: var(--mono); font-size: 12px; }
+  .rla-pane ol { margin: 8px 0 0; padding-left: 18px; font-family: var(--mono); font-size: 12px; color: var(--text); }
+  .rla-pane li { margin: 3px 0; }
+  .rla-controls, .rla-sliders, .rls-sliders {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 10px 16px;
+    margin-bottom: 12px;
+  }
+  .rla-controls label, .rla-sliders label, .rls-sliders label {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    font-size: 12px;
+    color: var(--text-2);
+  }
+  .rla-controls select, .rla-ledger input[type="number"] {
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--text);
+    background: #fff;
+    border: 1px solid var(--border-strong);
+    border-radius: 6px;
+    padding: 4px 6px;
+    width: 100%;
+  }
+  .rla-sliders input, .rls-sliders input { width: 100%; accent-color: var(--accent); }
+  .rla-sliders b, .rls-sliders b, .rla-controls b {
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--text);
+    font-weight: 650;
+  }
+  #rla-svg {
+    width: 100%;
+    height: auto;
+    display: block;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: #fafaf9;
+  }
+  .rla-score, .rls-cols {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 10px;
+    margin: 12px 0;
+  }
+  .rla-score article, .rls-cols article {
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--bg-soft);
+    padding: 10px 12px;
+  }
+  .rla-score h3, .rls-cols h3 {
+    margin: 0 0 8px;
+    font-family: var(--mono);
+    font-size: 13px;
+    color: var(--text);
+  }
+  .rla-score dl, .rls-cols dl {
+    display: grid;
+    grid-template-columns: 1fr auto;
+    gap: 3px 12px;
+    margin: 0;
+    font-size: 12px;
+  }
+  .rla-score dt, .rls-cols dt { color: var(--text-2); }
+  .rla-score dd, .rls-cols dd {
+    margin: 0;
+    font-family: var(--mono);
+    text-align: right;
+    color: var(--text);
+  }
+  .rla-score dd.hot, .rls-cols dd.hot { color: var(--bad); font-weight: 700; }
+  .rla-ledger { width: 100%; border-collapse: collapse; font-size: 12px; }
+  .rla-ledger th {
+    text-align: left;
+    font-size: 11px;
+    color: var(--text-2);
+    font-weight: 650;
+    padding: 4px 6px;
+  }
+  .rla-ledger td { border-top: 1px solid var(--border); padding: 4px 6px; }
+  .rla-ledger td.ns-ok, .rla-ledger td.ns-wait, .rla-ledger td.ns-lock {
+    font-family: var(--mono);
+    font-size: 11px;
+  }
+  .rls-rack {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(112px, 1fr));
+    gap: 8px;
+    margin-top: 4px;
+  }
+  .rls-cell {
+    border: 1px solid var(--border-strong);
+    border-radius: 8px;
+    background: #fff;
+    padding: 8px;
+    text-align: center;
+  }
+  .rls-id { font-family: var(--mono); font-size: 11px; color: var(--text-2); }
+  .rls-held { font-family: var(--mono); font-size: 22px; font-weight: 700; color: var(--text); line-height: 1.2; }
+  .rls-sub { font-size: 11px; color: var(--text-2); margin-top: 2px; }
+  .rla-fan { margin: 14px 0 6px; }
+  @media (max-width: 720px) {
+    .rla-lane { grid-template-columns: 44px repeat(2, minmax(0, 1fr)); }
+    .rla-lane > div { font-size: 11px; padding: 6px; }
+    .rla-split, .rla-score, .rls-cols, .rla-controls, .rla-sliders, .rls-sliders {
+      grid-template-columns: 1fr;
+    }
+  }
+</style>
+
+<section id="s1">
+  <div class="sec-head">
+    <span class="sec-num">01</span>
+    <h2>先決定放不放，再讓上游開工</h2>
+  </div>
+  <p class="sec-sub">限流器賣的是「在昂貴工作發生之前說不」。演算法選擇決定你允許什麼樣的突發，以及多節點時這句話還算不算數。</p>
+  <p>面試題 Design a Rate Limiter 容易被答成「用 Redis <code>INCR</code>」。那只是儲存。題目真正要的是四件事：限流器坐在哪、鍵是誰、一段時間內允許什麼形狀的流量、很多台機器時這個計數怎麼保持一個意思。演算法決定形狀；原子操作決定這個意思在多節點下還在不在。</p>
+  <div class="rla-row">
+    <div class="rla-node">
+      <div class="nn">客戶端</div>
+      <div class="ns">帶身份而來</div>
+    </div>
+    <span class="rla-arrow">▸</span>
+    <div class="rla-node accent">
+      <div class="nn">限流器</div>
+      <div class="ns">先決定放不放</div>
+    </div>
+    <span class="rla-arrow">▸</span>
+    <div class="rla-node">
+      <div class="nn">上游</div>
+      <div class="ns">昂貴的工作</div>
+    </div>
+  </div>
+  <p class="cap">限流器要在上游開工之前做完決定。決定本身必須比被保護的工作便宜，否則它就是另一個需要被保護的熱點。</p>
+  <p>身份通常是使用者、API key 或來源 IP，有時再乘上路由。驗證要做到「認得出這個鍵」就夠，不要等整個業務邏輯跑完才計數——否則超限的請求已經把資料庫打過一輪。不同端點的成本可以不同：上傳可以扣 5，讀取扣 1。Token Bucket 用扣減量表達這件事最自然；對齊視窗的計數器通常還是一筆算 1。</p>
+  <div class="callout accent">
+    <div class="c-title"><span class="ic">邊界</span>三道門不要答成同一道</div>
+    <p>限流是工作開始前，依「這個鍵最近打了多少」拒絕。熔斷、艙壁隔離與降級是依賴已經失敗或自己已經忙不過來之後的自保。逾時、重試與退避是客戶端在失敗之後怎麼再試——限流器要假設拒絕不是終點，被拒絕的客戶端常常馬上回來。429、Retry-After 與額度標頭的契約在 API 設計風格與演進；Redis 的資料結構在 Redis 架構與運維；以模型 token 計價的預算在 LLM Gateway。這篇只處理「怎麼數、數出來的形狀、多節點如何共用這一個數」。</p>
+  </div>
+  <div class="oneliner">
+    <b>一句話答法</b>限流器在上游之前、用便宜的原子計數拒絕超額。演算法決定允許的突發形狀；多節點若各數各的，等於把上限乘上台數。
+  </div>
+</section>
+
+<section id="s2">
+  <div class="sec-head">
+    <span class="sec-num">02</span>
+    <h2>對齊視窗：好寫，邊界會放兩倍</h2>
+  </div>
+  <p class="sec-sub">Fixed Window 把時間切成等寬的格子，每格一個計數。格子對齊絕對時間時，所有身份在同一條邊界上一起歸零。</p>
+  <p>規則很短：請求時刻 <var>t</var>、窗寬 <var>W</var>、上限 <var>L</var>，視窗編號是 <code>floor(t / W)</code>。該編號的計數未滿 <var>L</var> 就放行並加一，否則拒絕。熱路徑只留兩個數字：現在的編號、這個編號已經放了幾筆。實作用帶視窗編號的 key，到期時間設成一個窗寬，下一格自然換一把新 key。</p>
+  <p>代價出現在邊界。設 <var>L</var> = 2、<var>W</var> = 1000 ms。800 ms 與 900 ms 落在視窗 0，兩筆都放。1000 ms 起算視窗 1，計數從 0 再開，1100 ms 再放一筆。演算法覺得自己守住了「每窗 2 筆」。把尺改成「任意連續 1000 ms」，800 到 1100 這四筆全部還在同一段裡，實際是 <var>2 × L</var>。</p>
+  <div class="rla-lane">
+    <div class="lh">時刻</div><div class="lh">Fixed Window</div><div class="lh">往回 1000 ms</div>
+    <div class="lt">800</div><div class="lc ok">視窗 0，放行 1/2</div><div class="lc">1 筆</div>
+    <div class="lt">900</div><div class="lc ok">視窗 0，放行 2/2</div><div class="lc">2 筆</div>
+    <div class="lt">1000</div><div class="lc act">視窗 1，歸零後放行</div><div class="lc bad">3 筆，已超過 2</div>
+    <div class="lt">1100</div><div class="lc ok">視窗 1，放行 2/2</div><div class="lc bad">4 筆 = 2×limit</div>
+  </div>
+  <p class="cap">看 1000 這一列：對齊視窗認為新的一秒開始了，往回看 800 仍落在這一秒裡。突刺不是實作 bug，是格子邊界的定義。</p>
+  <div class="formula">邊界兩側合起來，最短約一個窗寬內可放進 2 × limit</div>
+  <p>還有一種常見寫法不把視窗編號放進 key：第一次 <code>INCR</code> 時把 TTL 設成 <var>W</var>，key 過期就等於重新開窗。邊界從「大家共用的整點」變成「這個鍵自己的第一筆」。單鍵仍然可以在過期前後各吃滿一次 <var>L</var>，所以 2 倍還在，只是每個身份的尖峰不對齊。時鐘若只靠各台應用自己算 <code>floor(t / W)</code>，歪 200 ms 在 60 秒窗裡無所謂，在 1 秒窗裡會讓相鄰兩台把同一筆請求算進不同格。要對齊就用計數器那台機器的時間來算編號。</p>
+  <div class="callout warn">
+    <div class="c-title"><span class="ic">陷阱</span>「固定視窗很簡單」不算答完</div>
+    <p>面試官下一句通常是：限制每秒 5 次，攻擊者能不能在某個瞬間打進 10 次？能。就在邊界兩側。你若接受這個突刺，要說得出來；你若不接受，就不要停在 Fixed Window。</p>
+  </div>
+  <div class="oneliner">
+    <b>一句話答法</b>Fixed Window 每格一個計數，好寫也好原子化。相鄰兩格各吃滿上限時，任意一個窗寬裡最多約兩倍。
+  </div>
+</section>
+
+<section id="s3">
+  <div class="sec-head">
+    <span class="sec-num">03</span>
+    <h2>滑動視窗：精確的日誌，或兩個整數的近似</h2>
+  </div>
+  <p class="sec-sub">Sliding Window 要守的是「任意一段 W 內不超過 L」，不是「每個對齊格子不超過 L」。精確與省記憶體在這裡分家。</p>
+  <p>Sliding Log 留下這個鍵在窗內每一次放行的時間戳。新請求進來，先丟掉年齡已經達到 <var>W</var> 的舊戳（年齡剛好等於 <var>W</var> 算窗外），剩下的筆數小於 <var>L</var> 才放行，並把自己的時間戳推進去。任意一段長度為 <var>W</var> 的區間都不會超過 <var>L</var>，邊界突刺消失。熱路徑的記憶體等於窗內放行筆數：上限 1 萬就是 1 萬個時間戳，每次還得在原子腳本裡刪舊的、數剩下的。低頻或上限很小的時候這很舒服；每秒幾萬筆的熱鍵會把腳本與記憶體一起撐大。</p>
+  <p>Sliding Counter 用兩個整數換這份精確。只留上一格的放行數 <var>prev</var> 與這一格已經放行的 <var>curr</var>。請求落在格子內的偏移是 <var>elapsed</var>，用上一格還「掛在」滑動窗裡的比例來估計：</p>
+  <div class="formula">estimate = prev × (W − elapsed) / W + curr</div>
+  <p><var>estimate</var> 小於 <var>L</var> 才放行，然後 <var>curr</var> 加一。它假設上一格的請求沿時間均勻鋪開——這通常不是真的。</p>
+  <p>上一格 5 筆若都擠在格子一開頭，新格子剛開始時它們的年齡已經到達 <var>W</var>，日誌會把它們全部丟掉、估計應為 0。加權仍然把 <var>prev</var> 整段算進去，<var>estimate</var> = 5，上限若也是 5 就會拒絕。這是偏嚴。反過來，5 筆若都擠在上一格的末端，過了半窗它們其實還全部活著；加權只算一半，<var>estimate</var> 偏低，可能在日誌已經超限時仍然放行。這是偏鬆。兩個整數買到的是「大多時候接近滑動窗」，不是證明。</p>
+  <div class="callout warn">
+    <div class="c-title"><span class="ic">陷阱</span>加權不是保守的下界</div>
+    <p>它會雙向偏。流量在格子裡越不均勻，偏得越多。需要「任意窗絕對不超過」當契約時，不要用它交差；需要「比 Fixed Window 少很多突刺、又不能存時間戳」時，它是實務上的妥協。</p>
+  </div>
+  <div class="oneliner">
+    <b>一句話答法</b>Sliding Log 用時間戳守住任意窗寬；Sliding Counter 用上一格加權，只留兩個整數，均勻假設不成立時會偏嚴或偏鬆。
+  </div>
+</section>
+
+<section id="s4">
+  <div class="sec-head">
+    <span class="sec-num">04</span>
+    <h2>兩種桶：立刻送出，或排開再送</h2>
+  </div>
+  <p class="sec-sub">Token Bucket 允許閒置後一次倒出容量。Leaky Bucket 把已接受的工作排成固定間隔。放行筆數可以一樣，上游看到的形狀不一樣。</p>
+  <p>Token Bucket 記兩個數：現在還有幾個 token、上次補充的時刻。閒置時以固定速率把 token 加到不超過容量。來一筆成本為 1 的請求，餘額至少是 1 就扣掉並立刻轉發，否則拒絕。容量是突發的寬度，每秒補充量是穩態速率。閒置夠久之後，下游會在很短的時間裡收到整整一桶——因為放行的當下請求就進了上游，桶並不幫你排隊。</p>
+  <div class="formula">tokens = min(capacity, tokens + 經過秒數 × 每秒補充)</div>
+  <p>Leaky Bucket 把同一組數字用來排隊。出發間隔是 <code>1 / 每秒補充</code>。桶深 <var>capacity</var> 表示最多有這麼多筆可以在途，最晚那筆要比到達時間晚 <code>(capacity − 1)</code> 個間隔。排不進去就拒絕，而不是先放行再祈禱上游撐住。已經排進去的請求，出發時刻彼此相隔一個間隔；上游看到的是平滑的流水，不是一桶倒下來。</p>
+  <p>同一組數字可以讓兩種桶放行同樣的筆數。容量 3、每秒補充 2，請求在 0、10、20、30 ms 到達：Token 立刻放行前三筆、拒絕第四筆，三筆在 30 ms 內都已進上游。Leaky 的間隔是 500 ms，前三筆的出發時刻是 0、500、1000 ms，第四筆要排到 1500 ms、超過桶深，拒絕。放行數都是 3。</p>
+  <div class="rla-split">
+    <div class="rla-pane token">
+      <b>Token Bucket · 立刻送出</b>
+      <ol>
+        <li>0 ms 送出</li>
+        <li>10 ms 送出</li>
+        <li>20 ms 送出</li>
+        <li>30 ms 拒絕</li>
+      </ol>
+    </div>
+    <div class="rla-pane leaky">
+      <b>Leaky Bucket · 排開再送</b>
+      <ol>
+        <li>0 ms 送出</li>
+        <li>500 ms 送出</li>
+        <li>1000 ms 送出</li>
+        <li>30 ms 那筆拒絕</li>
+      </ol>
+    </div>
+  </div>
+  <p class="cap">容量 3、每秒 2 筆、四筆擠在 30 ms 內。放行數相同；差在上游何時看見它們。沒有佇列就做不出右欄的延後。</p>
+  <p>所以選擇不在「哪個比較先進」，而在你有沒有地方讓請求等。同步的 HTTP 中介層通常只能現在放或現在拒絕，Token Bucket 跟這個模型一致，突發會真實打進上游——上游要另有容量或別的保護才接得住。前面若有佇列，Leaky Bucket 用延遲換輸出間隔。nginx 的 <code>limit_req</code> 就是漏桶：超出速率的請求預設被延後；<code>burst</code> 加上 <code>nodelay</code> 則把突發立刻轉發，再超出才拒絕。那是「有沒有排隊」的開關。Envoy 的本地限流配置用的是 token bucket，放行即走。</p>
+  <p>補充速率拉到 0 時兩種桶也不再是對偶：Token 仍能把初始那一桶倒完，Leaky 沒有出發間隔，一筆都排不出去。這是模型的邊界，不是生產參數。</p>
+  <div class="callout accent">
+    <div class="c-title"><span class="ic">關鍵</span>GCRA 不是第三種桶</div>
+    <p>GCRA（Generic Cell Rate Algorithm）記的是「下一筆理論上最早可以到的時刻」，而不是水位。和漏桶同一件事，只是記帳方向相反。面試聽到這個名字，把它歸到 Leaky Bucket，然後問對方：放行之後請求是立刻進上游，還是在佇列裡等到那個時刻。</p>
+  </div>
+  <div class="oneliner">
+    <b>一句話答法</b>Token Bucket 用閒置累積的容量換一次突發，放行就立刻打進上游。Leaky Bucket 把出發時間排開；沒有佇列時，它只能拒絕，不能延後。
+  </div>
+</section>
+
+<section id="s5">
+  <div class="sec-head">
+    <span class="sec-num">05</span>
+    <h2>同一條到達序列，兩種演算法並排</h2>
+  </div>
+  <p class="sec-sub">把窗寬、上限、容量、補充速率定成同一份預算，差異就只來自演算法，不來自你偷偷換了一組數字。</p>
+  <p>下面這把尺是：「任意一段窗寬裡最多放行 limit 筆」。它就是 Sliding Log 的契約。Fixed Window 會在邊界上超過它；Token 與 Leaky 根本不沿格子歸零，它們的穩態由每秒補充決定，突發由容量決定。要讓桶的穩態和這把尺對齊，把每秒補充設成 <code>limit / (窗寬秒數)</code>。預設是 1000 ms、3 筆、每秒補充 3、容量 4——比視窗上限多 1，用來看見多出來的那一點突發。表的每一列是你填的順序，不是時間順序；圖的橫軸才是時間。</p>
+  <p>暖色表示這一筆被拒絕，那是限流器在履行職務，不是故障。變紅的「任意視窗超出」才是相對精確契約多放的筆數。底線上的圓點是左欄、頂端的方點是右欄，實線與虛線是兩邊的累計放行。淡的直虛線是對齊視窗的邊界，只作對照：Token 與 Leaky 不會在那條線上歸零。</p>
+  <div class="demo" id="demo-pair">
+    <div class="demo-bar">
+      <span class="label">互動 · 同一序列、兩種演算法</span>
+      <span class="label" style="text-transform:none;font-family:var(--sans);font-size:12px;color:var(--text-2)">改到達時間、容量或補充速率，兩邊一起重算</span>
+    </div>
+    <div class="demo-body">
+      <div class="rla-controls">
+        <label>左欄
+          <select id="rla-algo-l" aria-label="左欄演算法">
+            <option value="0" selected>Fixed Window</option>
+            <option value="1">Sliding Counter</option>
+            <option value="2">Sliding Log</option>
+            <option value="3">Token Bucket</option>
+            <option value="4">Leaky Bucket</option>
+          </select>
+        </label>
+        <label>右欄
+          <select id="rla-algo-r" aria-label="右欄演算法">
+            <option value="0">Fixed Window</option>
+            <option value="1">Sliding Counter</option>
+            <option value="2">Sliding Log</option>
+            <option value="3" selected>Token Bucket</option>
+            <option value="4">Leaky Bucket</option>
+          </select>
+        </label>
+      </div>
+      <div class="rla-sliders">
+        <label>窗寬 <b id="rla-window-v">1000 ms</b>
+          <input id="rla-window" type="range" min="200" max="5000" step="50" value="1000">
+        </label>
+        <label>視窗上限 <b id="rla-limit-v">3 筆</b>
+          <input id="rla-limit" type="range" min="1" max="12" step="1" value="3">
+        </label>
+        <label>桶容量 <b id="rla-cap-v">4</b>
+          <input id="rla-cap" type="range" min="1" max="16" step="1" value="4">
+        </label>
+        <label>每秒補充 <b id="rla-refill-v">3 / 秒</b>
+          <input id="rla-refill" type="range" min="0" max="20" step="1" value="3">
+        </label>
+      </div>
+      <svg id="rla-svg" viewBox="0 0 720 200" role="img" style="width:100%;height:auto">
+        <title>兩種演算法的累計放行曲線</title>
+      </svg>
+      <p class="cap">折線往上跳的那一筆被接受。實線是左欄，虛線是右欄。把容量加大或把補充拉高，右欄的 Token 曲線會在突發處一次爬升。</p>
+      <div class="rla-score">
+        <article>
+          <h3 id="rla-l-name">Fixed Window</h3>
+          <dl>
+            <dt>放行</dt><dd id="rla-l-allowed">0</dd>
+            <dt>拒絕</dt><dd id="rla-l-denied">0</dd>
+            <dt>任意視窗超出</dt><dd id="rla-l-over">0</dd>
+            <dt>邊界半窗放行</dt><dd id="rla-l-cross">0</dd>
+            <dt>熱路徑數字</dt><dd id="rla-l-mem">0</dd>
+            <dt>零等待送出</dt><dd id="rla-l-imm">0</dd>
+            <dt>最大延後 ms</dt><dd id="rla-l-delay">0</dd>
+            <dt>送出最小間隔</dt><dd id="rla-l-gap">0</dd>
+          </dl>
+        </article>
+        <article>
+          <h3 id="rla-r-name">Token Bucket</h3>
+          <dl>
+            <dt>放行</dt><dd id="rla-r-allowed">0</dd>
+            <dt>拒絕</dt><dd id="rla-r-denied">0</dd>
+            <dt>任意視窗超出</dt><dd id="rla-r-over">0</dd>
+            <dt>邊界半窗放行</dt><dd id="rla-r-cross">0</dd>
+            <dt>熱路徑數字</dt><dd id="rla-r-mem">0</dd>
+            <dt>零等待送出</dt><dd id="rla-r-imm">0</dd>
+            <dt>最大延後 ms</dt><dd id="rla-r-delay">0</dd>
+            <dt>送出最小間隔</dt><dd id="rla-r-gap">0</dd>
+          </dl>
+        </article>
+      </div>
+      <div class="tbl-wrap">
+        <table class="rla-ledger">
+          <thead>
+            <tr><th>到達 ms</th><th>左欄</th><th>右欄</th></tr>
+          </thead>
+          <tbody>
+            <tr><td><input id="rla-t0" type="number" min="0" max="30000" step="10" value="200" aria-label="第 1 筆到達時間"></td><td id="rla-ld0"></td><td id="rla-rd0"></td></tr>
+            <tr><td><input id="rla-t1" type="number" min="0" max="30000" step="10" value="400" aria-label="第 2 筆到達時間"></td><td id="rla-ld1"></td><td id="rla-rd1"></td></tr>
+            <tr><td><input id="rla-t2" type="number" min="0" max="30000" step="10" value="700" aria-label="第 3 筆到達時間"></td><td id="rla-ld2"></td><td id="rla-rd2"></td></tr>
+            <tr><td><input id="rla-t3" type="number" min="0" max="30000" step="10" value="850" aria-label="第 4 筆到達時間"></td><td id="rla-ld3"></td><td id="rla-rd3"></td></tr>
+            <tr><td><input id="rla-t4" type="number" min="0" max="30000" step="10" value="950" aria-label="第 5 筆到達時間"></td><td id="rla-ld4"></td><td id="rla-rd4"></td></tr>
+            <tr><td><input id="rla-t5" type="number" min="0" max="30000" step="10" value="1000" aria-label="第 6 筆到達時間"></td><td id="rla-ld5"></td><td id="rla-rd5"></td></tr>
+            <tr><td><input id="rla-t6" type="number" min="0" max="30000" step="10" value="1100" aria-label="第 7 筆到達時間"></td><td id="rla-ld6"></td><td id="rla-rd6"></td></tr>
+            <tr><td><input id="rla-t7" type="number" min="0" max="30000" step="10" value="1200" aria-label="第 8 筆到達時間"></td><td id="rla-ld7"></td><td id="rla-rd7"></td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="legend">
+        <span><i class="dot ns-wait"></i>左欄放行</span>
+        <span><i class="dot ns-ok"></i>右欄放行</span>
+        <span><i class="dot ns-lock"></i>拒絕（保護生效）</span>
+      </div>
+      <div class="status-line" id="rla-status">調整參數後，兩邊會一起重算。</div>
+      <button class="btn" type="button" id="rla-reset">重置</button>
+    </div>
+  </div>
+  <p class="cap">預設左欄是 Fixed Window、右欄是 Token Bucket，請求擠在 1000 ms 邊界兩側。把右欄改成 Sliding Log，任意視窗超出應落到 0。再改成 Leaky Bucket，看最大延後與送出間隔。把前四筆改成 0、10、20、30，容量維持 4，就能看見一次倒出的突發。</p>
+  <div class="oneliner">
+    <b>一句話答法</b>比較演算法時先鎖同一份預算與同一條到達序列。超出精確視窗的筆數、零等待送出的筆數、送出間隔，三個數字就分開了五種演算法。
+  </div>
+</section>
+
+<section id="s6">
+  <div class="sec-head">
+    <span class="sec-num">06</span>
+    <h2>多節點：原子扣額度，或先預取再承擔不公平</h2>
+  </div>
+  <p class="sec-sub">每一台都在本地數，上限就被乘上台數。共用一個計數器之後，下一題才是：每筆請求都去問，還是一次借一批。</p>
+  <svg class="rla-fan" viewBox="0 0 660 210" role="img" style="width:100%;height:auto">
+    <title>三個節點共用一個計數器</title>
+    <defs>
+      <marker id="rla-mk" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+        <path d="M 0 1.2 L 8 5 L 0 8.8 z" fill="#9aa0a8"></path>
+      </marker>
+    </defs>
+    <rect x="0" y="0" width="660" height="210" fill="#fafaf9"></rect>
+    <line x1="105" y1="78" x2="310" y2="132" stroke="var(--border-strong)" stroke-width="1.5" marker-end="url(#rla-mk)"></line>
+    <line x1="330" y1="78" x2="330" y2="132" stroke="var(--border-strong)" stroke-width="1.5" marker-end="url(#rla-mk)"></line>
+    <line x1="555" y1="78" x2="350" y2="132" stroke="var(--border-strong)" stroke-width="1.5" marker-end="url(#rla-mk)"></line>
+    <rect x="30" y="22" width="150" height="56" rx="8" fill="#fff" stroke="var(--border-strong)"></rect>
+    <rect x="255" y="22" width="150" height="56" rx="8" fill="#fff" stroke="var(--border-strong)"></rect>
+    <rect x="480" y="22" width="150" height="56" rx="8" fill="#fff" stroke="var(--border-strong)"></rect>
+    <rect x="255" y="132" width="150" height="56" rx="8" fill="#fff" stroke="var(--accent)"></rect>
+    <text x="105" y="46" text-anchor="middle" font-size="12" fill="#262a2f" font-family="var(--mono)">節點 A</text>
+    <text x="105" y="64" text-anchor="middle" font-size="11" fill="#6b7078" font-family="var(--mono)">本地餘額</text>
+    <text x="330" y="46" text-anchor="middle" font-size="12" fill="#262a2f" font-family="var(--mono)">節點 B</text>
+    <text x="330" y="64" text-anchor="middle" font-size="11" fill="#6b7078" font-family="var(--mono)">本地餘額</text>
+    <text x="555" y="46" text-anchor="middle" font-size="12" fill="#262a2f" font-family="var(--mono)">節點 C</text>
+    <text x="555" y="64" text-anchor="middle" font-size="11" fill="#6b7078" font-family="var(--mono)">本地餘額</text>
+    <text x="330" y="156" text-anchor="middle" font-size="12" fill="#262a2f" font-family="var(--mono)">共用計數器</text>
+    <text x="330" y="174" text-anchor="middle" font-size="11" fill="#6b7078" font-family="var(--mono)">原子扣減</text>
+  </svg>
+  <p class="cap">三個行程可以各留一份本地餘額，但扣減要打到同一個計數器。各數各的，等於每個節點都擁有完整上限。</p>
+  <p>集中式的固定視窗是一次原子加一。key 帶規則、身份與視窗編號，值是這個格子已經放行的筆數。兩條命令拆開寫會留下一個經典洞：<code>INCR</code> 成功、行程在 <code>PEXPIRE</code> 之前死掉，key 沒有到期時間，這個身份之後每一筆都算在同一個永不歸零的計數上，等於被永久限流。修法是一支腳本：加一之後若發現沒有 TTL（<code>PTTL</code> 小於 0），就補上。視窗編號用計數器自己的時間來算，應用機器的時鐘歪了也不會把同一筆算進不同格。</p>
+  <pre><code>local t = redis.call('TIME')
+local ms = tonumber(t[1]) * 1000 + math.floor(tonumber(t[2]) / 1000)
+local wid = math.floor(ms / tonumber(ARGV[1]))
+local key = KEYS[1] .. ':' .. wid
+local c = redis.call('INCR', key)
+if redis.call('PTTL', key) &lt; 0 then
+  redis.call('PEXPIRE', key, ARGV[1])
+end
+return c</code></pre>
+  <p class="cap">腳本整段是一次往返。PTTL 小於 0 才補到期時間，避免「第一次設定 TTL 失敗後，這個 key 永遠不再被補上」。</p>
+  <p>Token Bucket 的競態更明顯：先讀餘額、本地扣、再寫回，兩個請求會讀到同一個餘額、各扣一次，最後一個 token 被花兩次。讀、算、寫必須在同一支腳本裡。Sliding Log 則是同一支腳本裡做刪除窗外時間戳、計數、條件寫入。這些都還是「儲存提供原子讀改寫」，不是 Redis 內部怎麼持久化。</p>
+  <pre class="mermaid">
+sequenceDiagram
+    participant C as 客戶端
+    participant L as 限流器
+    participant R as 計數器
+    C->>L: 帶身份
+    L->>R: 原子加一
+    R-->>L: 回傳計數
+    alt 未超過
+        L-->>C: 轉交上游
+    else 已超過
+        L-->>C: 直接拒絕
+    end
+  </pre>
+  <p class="cap">每筆請求都在關鍵路徑上等這一趟往返。計數器慢，限流器就比上游還慢。</p>
+  <p>本地預取是用公平性換往返。節點手上沒有餘額時，向中央一次原子借走 <code>min(批次, 剩餘)</code>，然後在本地花。借到 0 就記住這一窗已經空了，不要每筆都再打一次。全域計數不會超過上限，因為借走的當下已經從中央扣掉。吃虧的是額度會卡在借走它的那台機器上。</p>
+  <p>兩個節點、各兩筆請求、全域上限 6、一次借 4：節點 A 借走 4、用掉 2、手上還留 2；節點 B 只能再借到剩下的 2，兩筆都用掉。這一批四筆全部放行，但有 2 個額度鎖在 A 上直到視窗結束。此時若第 5 筆打到 B，中央已經是 0、B 手上也是 0，請求被拒絕——額度還在 A 手上，搬不過去。</p>
+  <div class="callout warn">
+    <div class="c-title"><span class="ic">陷阱</span>預取不是超發</div>
+    <p>上面這種原子預取，全域放行數不會超過上限。會超發的是另一種設計：每台用自己的本地計數放行，過一秒才回寫。4 台各允許每秒 10 筆、全域目標若是每秒 10，這一秒最多進去 40。預取解決的是往返與「額度卡在別台」；過期本地計數解決不了超發，它就是超發的來源。</p>
+  </div>
+  <p>熱鍵也不要幻想成「把同一個使用者的 key 拆成好幾片再加總」。不同身份本來就會落到不同 key，這已經把負載分開。單一熱身份若再拆片，每片各有一份上限，總和會超；若把每片上限調低，流量不均時又會提早拒絕。熱身份能做的是少打中央：批次借、接受卡額。計數器掛了要事先選邊。登入、驗證碼這類安全上限應失敗即拒絕，否則攻擊者只要打掛計數器就沒有門。讀取類的禮貌上限可以失敗即放行，但每台仍要一個很小的本地天花板，避免「中央失聯」變成無限放行。</p>
+  <p>下面把同一批請求同時送給兩種共用方式。請求以輪替順序到達各節點。集中式每筆都打一次中央；預取只在本地沒餘額時借一批。紅字是卡在節點上的餘額、最終少放行的筆數，以及拒絕發生時別的節點仍握有餘額的次數。後兩個不必相等：最終總量仍可能補滿，只是拿到額度的不是先被拒絕的那台。</p>
+  <div class="demo" id="demo-share">
+    <div class="demo-bar">
+      <span class="label">互動 · 集中計數與本地預取</span>
+      <span class="label" style="text-transform:none;font-family:var(--sans);font-size:12px;color:var(--text-2)">同一批請求，比較往返、卡額與少放行</span>
+    </div>
+    <div class="demo-body">
+      <div class="rls-sliders">
+        <label>節點數 <b id="rls-nodes-v">4</b>
+          <input id="rls-nodes" type="range" min="1" max="8" step="1" value="4">
+        </label>
+        <label>每節點請求 <b id="rls-arrivals-v">2 / 節點</b>
+          <input id="rls-arrivals" type="range" min="1" max="12" step="1" value="2">
+        </label>
+        <label>全域上限 <b id="rls-limit-v">20</b>
+          <input id="rls-limit" type="range" min="2" max="40" step="1" value="20">
+        </label>
+        <label>一次預取 <b id="rls-batch-v">8</b>
+          <input id="rls-batch" type="range" min="1" max="12" step="1" value="8">
+        </label>
+        <label>中央往返 <b id="rls-rtt-v">5 ms</b>
+          <input id="rls-rtt" type="range" min="0" max="40" step="1" value="5">
+        </label>
+      </div>
+      <div class="rls-cols">
+        <article>
+          <h3>每筆都原子加一</h3>
+          <dl>
+            <dt>放行</dt><dd id="rls-c-allowed">0</dd>
+            <dt>中央往返次數</dt><dd id="rls-c-redis">0</dd>
+            <dt>等待合計 ms</dt><dd id="rls-c-wait">0</dd>
+          </dl>
+        </article>
+        <article>
+          <h3>本地預取一批</h3>
+          <dl>
+            <dt>放行</dt><dd id="rls-p-allowed">0</dd>
+            <dt>中央往返次數</dt><dd id="rls-p-redis">0</dd>
+            <dt>等待合計 ms</dt><dd id="rls-p-wait">0</dd>
+            <dt>少打的往返</dt><dd id="rls-saved">0</dd>
+            <dt>卡在節點上</dt><dd id="rls-p-strand">0</dd>
+            <dt>最終少放行</dt><dd id="rls-p-short">0</dd>
+            <dt>拒絕時別處仍有餘額</dt><dd id="rls-p-false">0</dd>
+          </dl>
+        </article>
+      </div>
+      <div id="rls-rack" class="rls-rack"></div>
+      <div class="legend">
+        <span><i class="dot ns-ok"></i>數字是算出的結果</span>
+        <span><i class="dot ns-bad"></i>卡額、少放行、不公平的拒絕</span>
+      </div>
+      <div class="status-line" id="rls-status">調整節點、批次與上限後重算。</div>
+      <button class="btn" type="button" id="rls-reset">重置</button>
+    </div>
+  </div>
+  <p class="cap">預設 4 個節點、各 2 筆、上限 20、一次預取 8。把批次收到 1，卡額會消失，往返會靠近集中式。節點數拉高時，同一份上限被更多人同時預借。</p>
+  <div class="oneliner">
+    <b>一句話答法</b>多節點必須共用一個原子計數，否則上限乘上台數。每筆都問中央最準也最慢；一次預取省往返，但額度會卡在借走它的那台機器上，全域計數仍不超發。
+  </div>
+</section>
+
+<section id="s7">
+  <div class="sec-head">
+    <span class="sec-num">07</span>
+    <h2>面試時按這個順序講完</h2>
+  </div>
+  <p class="sec-sub">十五分鐘夠用的骨架：先鎖契約，再選演算法，再講多節點與計數器掛掉。不要從 Redis 命令開始。</p>
+  <p>先問清楚鍵是使用者、IP 還是 API key，上限是每秒幾筆還是任意窗，允不允許突發，有沒有多台應用。接著選演算法，用第 5 節那把精確契約說明你放棄了什麼。儲存只需要「單一 key 上的原子讀改寫與 TTL」。熱身份不拆 key，改預取。最後講計數器失聯時安全上限失敗即拒絕、禮貌上限失敗即放行並加上本地天花板。429 的本體與標頭不要在這裡發明，指到 API 設計風格與演進裡已經定的那一套。</p>
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>你要守住的契約</th>
+          <th>演算法</th>
+          <th>熱路徑留什麼</th>
+          <th>主要代價</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>好寫，接受邊界約 2 倍</td>
+          <td class="hl">Fixed Window</td>
+          <td>計數與視窗編號</td>
+          <td>邊界突刺</td>
+        </tr>
+        <tr>
+          <td>任意窗寬絕不超過上限</td>
+          <td class="hl">Sliding Log</td>
+          <td>窗內每個時間戳</td>
+          <td>記憶體與腳本長度</td>
+        </tr>
+        <tr>
+          <td>接近滑動窗，只能留幾個整數</td>
+          <td class="hl">Sliding Counter</td>
+          <td>上一格與這一格</td>
+          <td>不均勻時偏嚴或偏鬆</td>
+        </tr>
+        <tr>
+          <td>允許閒置後突發，放行即進上游</td>
+          <td class="hl">Token Bucket</td>
+          <td>餘額與上次補充時刻</td>
+          <td>不保證任意窗 ≤ 上限</td>
+        </tr>
+        <tr>
+          <td>上游要固定間隔，前面有佇列</td>
+          <td class="hl">Leaky Bucket</td>
+          <td>下次可出發時刻</td>
+          <td>延遲；沒有佇列就只能拒絕</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="cap">選型先看契約，再看熱路徑放得下幾個數字。同一張表也能用來檢查現成閘道：它實作的是哪一列，不是它叫不叫 rate limit。</p>
+  <div class="oneliner">
+    <b>一句話答法</b>先定鍵、上限與突發，再選上表的一列並說出放棄的那個性質。多節點用原子讀改寫；熱鍵預取而不拆 key；計數器掛掉時，安全上限與禮貌上限分開處理。
+  </div>
+</section>
+
+<section id="s8">
+  <div class="sec-head">
+    <span class="sec-num">08</span>
+    <h2>Usage Plan 與 WAF 各管一種粒度</h2>
+  </div>
+  <p class="sec-sub">AWS 已經有兩套現成限流。它們不是同一種演算法，也不能互相替代你服務內部的使用者級預算。</p>
+  <p>API Gateway 的 usage plan 把 throttle 與 quota 拆開。throttle 的 <code>rate</code> 是穩態每秒請求數，<code>burst</code> 是桶容量，也就是 token bucket：閒置時可以一次打進 burst 筆，然後回到 rate。quota 是另一個計數，按日、週或月歸零，不負責抹平秒級突發。計劃綁在 API key 與 stage 上。就算計劃寫得很寬，stage 與帳號層還有自己的 throttle，請求可能先死在那兩層。超限時請求已經到達閘道，回應是 429；標頭怎麼寫不在這篇。</p>
+  <p>WAF 的 rate-based rule 粗得多。評估視窗可以是 1、2、5 或 10 分鐘，預設 5 分鐘，依來源 IP、轉送過來的 IP，或你指定的自訂鍵計數。超過門檻就對該鍵執行動作，直到速率掉回門檻以下。門檻下限以帳號當下的限制為準：文件上的下限曾是每視窗 100，後來改成 10。它適合擋邊緣上的大量濫用，不適合「每個使用者每秒 5 次」這種契約——視窗最短 1 分鐘，而且被擋下的請求常常到不了你的應用，你的 429 本體不會出現。</p>
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th></th>
+          <th>Usage plan</th>
+          <th>WAF rate-based rule</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>粒度</td>
+          <td>秒級 rate + burst，另加日／週／月總量</td>
+          <td>1、2、5、10 分鐘的評估視窗</td>
+        </tr>
+        <tr>
+          <td>怎麼數</td>
+          <td class="hl">throttle 是 token bucket</td>
+          <td>視窗內的請求數</td>
+        </tr>
+        <tr>
+          <td>鍵</td>
+          <td>API key</td>
+          <td>IP 或自訂鍵</td>
+        </tr>
+        <tr>
+          <td>超限時</td>
+          <td>請求到了閘道，回 429</td>
+          <td>動作在邊緣執行，應用可能看不到</td>
+        </tr>
+        <tr>
+          <td>不要拿它做</td>
+          <td>服務內部的使用者 id、或依端點加權</td>
+          <td>每秒幾筆的合作夥伴契約</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="cap">兩套都叫限流。一個是合作夥伴的秒級 token bucket，一個是邊緣上以分鐘計的視窗。內部使用者的毫秒級預算仍然要自己數。</p>
+  <div class="callout warn">
+    <div class="c-title"><span class="ic">陷阱</span>閘道有了，服務裡那一層還在</div>
+    <p>Usage plan 看的是 API key，不是你資料庫裡的使用者。金鑰被共享、或流量從內部服務直接打進來時，閘道的桶根本看不到。WAF 擋住的是粗暴流量，擋不住已經通過認證、慢慢磨配額的客戶。自己的限流器仍要放在認得出身份的那一層前面。</p>
+  </div>
+  <div class="oneliner">
+    <b>一句話答法</b>API Gateway usage plan 用 token bucket 管 API key 的每秒速率與突發，quota 另算。WAF rate-based rule 用分鐘級視窗擋邊緣濫用。使用者級、加權、亞秒級的契約要自己做。
+  </div>
+</section>
+
+      </div>
+    </main>
+  </div>
+
+  <script>
+    "use strict";
+    document.addEventListener("DOMContentLoaded", function () {
+      /* ===== TOC scrollspy, mobile accordion & desktop collapse ===== */
+      (function () {
+        var links = Array.prototype.slice.call(document.querySelectorAll(".toc-nav a"));
+        var map = {};
+        links.forEach(function (a) {
+          var href = a.getAttribute("href");
+          if (href && href.startsWith("#")) {
+            map[href.slice(1)] = a;
+          }
+        });
+        var secs = links.map(function (a) {
+          var href = a.getAttribute("href");
+          return href && href.startsWith("#") ? document.getElementById(href.slice(1)) : null;
+        }).filter(Boolean);
+
+        if (secs.length > 0 && typeof IntersectionObserver !== "undefined") {
+          var obs = new IntersectionObserver(function (entries) {
+            entries.forEach(function (e) {
+              if (e.isIntersecting) {
+                links.forEach(function (l) { l.classList.remove("active"); });
+                var act = map[e.target.id];
+                if (act) act.classList.add("active");
+              }
+            });
+          }, { rootMargin: "-20% 0px -70% 0px", threshold: 0 });
+          secs.forEach(function (s) { obs.observe(s); });
+        }
+
+        /* mobile：目錄 accordion（≤920px） */
+        var toggle = document.querySelector(".toc-toggle");
+        var nav = document.querySelector(".toc-nav");
+        if (toggle && nav) {
+          toggle.addEventListener("click", function () {
+            var open = nav.classList.toggle("open");
+            toggle.setAttribute("aria-expanded", open ? "true" : "false");
+          });
+          nav.addEventListener("click", function (e) {
+            if (e.target.closest("a") && window.innerWidth <= 920) {
+              nav.classList.remove("open");
+              toggle.setAttribute("aria-expanded", "false");
+            }
+          });
+        }
+
+        /* desktop：收合側欄（預設展開；不持久化） */
+        var collapseBtn = document.querySelector(".toc-collapse");
+        var reopenBtn = document.querySelector(".toc-reopen");
+        function setTocCollapsed(collapsed) {
+          document.body.classList.toggle("toc-collapsed", collapsed);
+          if (collapseBtn) collapseBtn.setAttribute("aria-expanded", collapsed ? "false" : "true");
+          if (reopenBtn) reopenBtn.setAttribute("aria-expanded", collapsed ? "false" : "true");
+          if (collapsed && reopenBtn) reopenBtn.focus();
+          else if (!collapsed && collapseBtn) collapseBtn.focus();
+        }
+        if (collapseBtn) {
+          collapseBtn.addEventListener("click", function () { setTocCollapsed(true); });
+        }
+        if (reopenBtn) {
+          reopenBtn.addEventListener("click", function () { setTocCollapsed(false); });
+        }
+      })();
+    });
+  </script>
+
+  
+<script>
+(function () {
+  "use strict";
+
+  /* (1) 常數與參數表 */
+  var ALGO_NAME = [
+    "Fixed Window",
+    "Sliding Counter",
+    "Sliding Log",
+    "Token Bucket",
+    "Leaky Bucket"
+  ];
+  var TIME_DEFAULTS = [200, 400, 700, 850, 950, 1000, 1100, 1200];
+
+  function clampNum(n, lo, hi) {
+    n = Number(n);
+    if (!Number.isFinite(n)) n = lo;
+    if (n < lo) n = lo;
+    if (n > hi) n = hi;
+    return n;
+  }
+
+  function maxInWindow(ts, W) {
+    if (!ts.length || !(W > 0)) return 0;
+    var s = ts.slice().sort(function (a, b) { return a - b; });
+    var best = 0;
+    var i = 0;
+    for (var j = 0; j < s.length; j++) {
+      while (s[j] - s[i] >= W) i += 1;
+      var c = j - i + 1;
+      if (c > best) best = c;
+    }
+    return best;
+  }
+
+  function crossBurst(admitted, W) {
+    if (!admitted.length || !(W > 0)) return 0;
+    var minT = admitted[0];
+    var maxT = admitted[0];
+    var i;
+    for (i = 1; i < admitted.length; i++) {
+      if (admitted[i] < minT) minT = admitted[i];
+      if (admitted[i] > maxT) maxT = admitted[i];
+    }
+    var best = 0;
+    var k0 = Math.floor(minT / W);
+    var k1 = Math.floor(maxT / W);
+    for (var k = k0; k <= k1; k++) {
+      var b = k * W;
+      var lo = b - W / 2;
+      var hi = b + W / 2;
+      var c = 0;
+      for (i = 0; i < admitted.length; i++) {
+        if (admitted[i] >= lo && admitted[i] < hi) c += 1;
+      }
+      if (c > best) best = c;
+    }
+    return best;
+  }
+
+  function minDepartGap(times, allow, delay) {
+    var dep = [];
+    for (var i = 0; i < allow.length; i++) {
+      if (allow[i]) dep.push(times[i] + delay[i]);
+    }
+    if (dep.length < 2) return 0;
+    dep.sort(function (a, b) { return a - b; });
+    var best = dep[1] - dep[0];
+    for (var j = 2; j < dep.length; j++) {
+      var g = dep[j] - dep[j - 1];
+      if (g < best) best = g;
+    }
+    return Math.round(best);
+  }
+
+  function runAlgo(kind, times, W, L, B, R) {
+    var n = times.length;
+    var allow = [];
+    var delay = [];
+    var admittedTs = [];
+    var i;
+    for (i = 0; i < n; i++) {
+      allow.push(0);
+      delay.push(0);
+    }
+    var order = [];
+    for (i = 0; i < n; i++) order.push(i);
+    order.sort(function (a, b) {
+      if (times[a] !== times[b]) return times[a] - times[b];
+      return a - b;
+    });
+
+    var memory = 2;
+    var k;
+    var idx;
+    var t;
+
+    if (kind === 0) {
+      var counts = {};
+      for (k = 0; k < order.length; k++) {
+        idx = order[k];
+        t = times[idx];
+        var wid = Math.floor(t / W);
+        var c = counts[wid] || 0;
+        if (c < L) {
+          counts[wid] = c + 1;
+          allow[idx] = 1;
+          admittedTs.push(t);
+        }
+      }
+    } else if (kind === 1) {
+      memory = 4;
+      var prevC = 0;
+      var curW = null;
+      var curC = 0;
+      for (k = 0; k < order.length; k++) {
+        idx = order[k];
+        t = times[idx];
+        var w = Math.floor(t / W);
+        if (curW === null) {
+          curW = w;
+          curC = 0;
+        } else if (w !== curW) {
+          prevC = (w === curW + 1) ? curC : 0;
+          curW = w;
+          curC = 0;
+        }
+        var elapsed = t - w * W;
+        var estimate = prevC * ((W - elapsed) / W) + curC;
+        if (estimate < L) {
+          curC += 1;
+          allow[idx] = 1;
+          admittedTs.push(t);
+        }
+      }
+    } else if (kind === 2) {
+      var log = [];
+      var peak = 0;
+      for (k = 0; k < order.length; k++) {
+        idx = order[k];
+        t = times[idx];
+        var keep = [];
+        for (var j = 0; j < log.length; j++) {
+          if (t - log[j] < W) keep.push(log[j]);
+        }
+        log = keep;
+        if (log.length < L) {
+          log.push(t);
+          if (log.length > peak) peak = log.length;
+          allow[idx] = 1;
+          admittedTs.push(t);
+        }
+      }
+      memory = peak;
+    } else if (kind === 3) {
+      var tokens = B;
+      var last = null;
+      var rate = R / 1000;
+      for (k = 0; k < order.length; k++) {
+        idx = order[k];
+        t = times[idx];
+        if (last !== null && t > last) {
+          tokens = Math.min(B, tokens + (t - last) * rate);
+        }
+        last = t;
+        if (tokens >= 1) {
+          tokens -= 1;
+          allow[idx] = 1;
+          admittedTs.push(t);
+        }
+      }
+    } else {
+      var perMs = R / 1000;
+      var interval = perMs > 0 ? (1 / perMs) : 0;
+      var maxDelay = interval > 0 ? (B - 1) * interval : 0;
+      var nextSlot = -1e15;
+      for (k = 0; k < order.length; k++) {
+        idx = order[k];
+        t = times[idx];
+        if (!(perMs > 0) || !(B >= 1)) continue;
+        var slot = t > nextSlot ? t : nextSlot;
+        var dly = slot - t;
+        if (dly <= maxDelay + 1e-6) {
+          allow[idx] = 1;
+          delay[idx] = Math.round(dly);
+          admittedTs.push(t);
+          nextSlot = slot + interval;
+        }
+      }
+    }
+
+    return { allow: allow, delay: delay, admittedTs: admittedTs, memory: memory };
+  }
+
+  function summarize(run, times, W, L) {
+    var allowed = 0;
+    var immediate = 0;
+    var maxDelay = 0;
+    var mask = 0;
+    for (var i = 0; i < run.allow.length; i++) {
+      if (!run.allow[i]) continue;
+      allowed += 1;
+      mask += Math.pow(2, i);
+      if (run.delay[i] <= 0) immediate += 1;
+      if (run.delay[i] > maxDelay) maxDelay = run.delay[i];
+    }
+    var peak = maxInWindow(run.admittedTs, W);
+    var over = peak - L;
+    if (over < 0) over = 0;
+    return {
+      allowed: allowed,
+      denied: run.allow.length - allowed,
+      overshoot: over,
+      crossBurst: crossBurst(run.admittedTs, W),
+      memory: run.memory,
+      immediate: immediate,
+      maxDelay: maxDelay,
+      gap: minDepartGap(times, run.allow, run.delay),
+      mask: mask,
+      allow: run.allow,
+      delay: run.delay
+    };
+  }
+
+  /* (2) compute* 純函式 */
+  // @probe fn       computePair
+  // @probe baseline {"algoL":0,"algoR":3,"windowMs":1000,"limit":3,"capacity":4,"refillPerSec":3,"t0":200,"t1":400,"t2":700,"t3":850,"t4":950,"t5":1000,"t6":1100,"t7":1200}
+  // @probe sweep    {"algoL":[2,4],"algoR":[0,4],"windowMs":[200,5000],"limit":[1,12],"capacity":[1,16],"refillPerSec":[0,20],"t0":[0,8000],"t1":[0,8000],"t2":[0,8000],"t3":[0,8000],"t4":[0,8000],"t5":[0,8000],"t6":[0,8000],"t7":[0,8000]}
+  function computePair(p) {
+    var W = Math.round(clampNum(p.windowMs, 50, 20000));
+    var L = Math.round(clampNum(p.limit, 1, 30));
+    var B = Math.round(clampNum(p.capacity, 1, 40));
+    var R = Math.round(clampNum(p.refillPerSec, 0, 100));
+    var algoL = Math.round(clampNum(p.algoL, 0, 4));
+    var algoR = Math.round(clampNum(p.algoR, 0, 4));
+    var keys = ["t0", "t1", "t2", "t3", "t4", "t5", "t6", "t7"];
+    var times = [];
+    for (var i = 0; i < keys.length; i++) {
+      times.push(Math.round(clampNum(p[keys[i]], 0, 30000)));
+    }
+    var left = summarize(runAlgo(algoL, times, W, L, B, R), times, W, L);
+    var right = summarize(runAlgo(algoR, times, W, L, B, R), times, W, L);
+    var diverge = 0;
+    for (i = 0; i < times.length; i++) {
+      if (left.allow[i] !== right.allow[i]) diverge += 1;
+    }
+    return {
+      leftAllowed: left.allowed,
+      leftDenied: left.denied,
+      leftOvershoot: left.overshoot,
+      leftCross: left.crossBurst,
+      leftMemory: left.memory,
+      leftImmediate: left.immediate,
+      leftMaxDelay: left.maxDelay,
+      leftGap: left.gap,
+      leftMask: left.mask,
+      rightAllowed: right.allowed,
+      rightDenied: right.denied,
+      rightOvershoot: right.overshoot,
+      rightCross: right.crossBurst,
+      rightMemory: right.memory,
+      rightImmediate: right.immediate,
+      rightMaxDelay: right.maxDelay,
+      rightGap: right.gap,
+      rightMask: right.mask,
+      diverge: diverge,
+      leftAllow: left.allow,
+      rightAllow: right.allow,
+      leftDelay: left.delay,
+      rightDelay: right.delay
+    };
+  }
+
+  // @probe fn       computeShare
+  // @probe baseline {"nodes":4,"arrivals":2,"limit":20,"batch":8,"rttMs":5}
+  // @probe sweep    {"nodes":[1,8],"arrivals":[1,12],"limit":[2,40],"batch":[1,12],"rttMs":[0,40]}
+  function computeShare(p) {
+    var nodes = Math.round(clampNum(p.nodes, 1, 12));
+    var arrivals = Math.round(clampNum(p.arrivals, 0, 40));
+    var limit = Math.round(clampNum(p.limit, 0, 500));
+    var batch = Math.round(clampNum(p.batch, 1, 40));
+    var rtt = Math.round(clampNum(p.rttMs, 0, 500));
+    var total = nodes * arrivals;
+    var centralAllowed = total < limit ? total : limit;
+    var centralRedis = total;
+
+    var remaining = limit;
+    var local = [];
+    var served = [];
+    var deniedByNode = [];
+    var i;
+    for (i = 0; i < nodes; i++) {
+      local.push(0);
+      served.push(0);
+      deniedByNode.push(0);
+    }
+    var prefAllowed = 0;
+    var redisOps = 0;
+    var waited = 0;
+    var falseReject = 0;
+    var exhausted = false;
+    var a;
+    var heldNow;
+    var h;
+
+    for (a = 0; a < arrivals; a++) {
+      for (i = 0; i < nodes; i++) {
+        if (local[i] > 0) {
+          local[i] -= 1;
+          served[i] += 1;
+          prefAllowed += 1;
+        } else if (exhausted) {
+          deniedByNode[i] += 1;
+          heldNow = 0;
+          for (h = 0; h < nodes; h++) heldNow += local[h];
+          if (heldNow > 0) falseReject += 1;
+        } else {
+          waited += 1;
+          redisOps += 1;
+          var take = remaining < batch ? remaining : batch;
+          remaining -= take;
+          if (take <= 0) {
+            exhausted = true;
+            deniedByNode[i] += 1;
+            heldNow = 0;
+            for (h = 0; h < nodes; h++) heldNow += local[h];
+            if (heldNow > 0) falseReject += 1;
+          } else {
+            local[i] = take - 1;
+            served[i] += 1;
+            prefAllowed += 1;
+          }
+        }
+      }
+    }
+
+    var stranded = 0;
+    for (i = 0; i < nodes; i++) stranded += local[i];
+    var optimal = total < limit ? total : limit;
+    var shortfall = optimal - prefAllowed;
+    if (shortfall < 0) shortfall = 0;
+
+    return {
+      centralAllowed: centralAllowed,
+      prefetchAllowed: prefAllowed,
+      shortfall: shortfall,
+      stranded: stranded,
+      falseReject: falseReject,
+      centralRedis: centralRedis,
+      prefetchRedis: redisOps,
+      centralWaitSum: rtt * centralRedis,
+      prefetchWaitSum: rtt * waited,
+      savedRoundTrips: centralRedis - redisOps,
+      held: local,
+      served: served,
+      deniedByNode: deniedByNode
+    };
+  }
+
+  /* (3) DOM 參照 */
+  function el(id) { return document.getElementById(id); }
+
+  var timeEls = [
+    el("rla-t0"), el("rla-t1"), el("rla-t2"), el("rla-t3"),
+    el("rla-t4"), el("rla-t5"), el("rla-t6"), el("rla-t7")
+  ];
+  var leftCells = [
+    el("rla-ld0"), el("rla-ld1"), el("rla-ld2"), el("rla-ld3"),
+    el("rla-ld4"), el("rla-ld5"), el("rla-ld6"), el("rla-ld7")
+  ];
+  var rightCells = [
+    el("rla-rd0"), el("rla-rd1"), el("rla-rd2"), el("rla-rd3"),
+    el("rla-rd4"), el("rla-rd5"), el("rla-rd6"), el("rla-rd7")
+  ];
+
+  /* (4) render —— 只把 compute 的結果畫出來 */
+  function selectedName(id) {
+    var sel = el(id);
+    return sel.options[sel.selectedIndex].text;
+  }
+
+  function setNum(id, n, hot) {
+    var node = el(id);
+    node.textContent = String(n);
+    if (hot && n > 0) node.classList.add("hot");
+    else node.classList.remove("hot");
+  }
+
+  function paintCell(cell, allow, delay, side) {
+    if (!allow) {
+      cell.className = "ns-lock";
+      cell.textContent = "拒絕";
+      return;
+    }
+    cell.className = side === "l" ? "ns-wait" : "ns-ok";
+    cell.textContent = delay > 0 ? ("放行 · 延後 " + delay + " ms") : "放行 · 立刻";
+  }
+
+  function readPair() {
+    return {
+      algoL: Number(el("rla-algo-l").value),
+      algoR: Number(el("rla-algo-r").value),
+      windowMs: Number(el("rla-window").value),
+      limit: Number(el("rla-limit").value),
+      capacity: Number(el("rla-cap").value),
+      refillPerSec: Number(el("rla-refill").value),
+      t0: Number(timeEls[0].value),
+      t1: Number(timeEls[1].value),
+      t2: Number(timeEls[2].value),
+      t3: Number(timeEls[3].value),
+      t4: Number(timeEls[4].value),
+      t5: Number(timeEls[5].value),
+      t6: Number(timeEls[6].value),
+      t7: Number(timeEls[7].value)
+    };
+  }
+
+  function stepPoints(times, allow, tMax, yMax) {
+    var order = [];
+    var i;
+    for (i = 0; i < times.length; i++) order.push(i);
+    order.sort(function (a, b) {
+      if (times[a] !== times[b]) return times[a] - times[b];
+      return a - b;
+    });
+    function xOf(t) { return 44 + (t / tMax) * 650; }
+    function yOf(c) { return 168 - (c / yMax) * 136; }
+    var pts = [];
+    var cum = 0;
+    pts.push(xOf(0).toFixed(1) + "," + yOf(0).toFixed(1));
+    for (i = 0; i < order.length; i++) {
+      var idx = order[i];
+      var x = xOf(times[idx]);
+      pts.push(x.toFixed(1) + "," + yOf(cum).toFixed(1));
+      if (allow[idx]) {
+        cum += 1;
+        pts.push(x.toFixed(1) + "," + yOf(cum).toFixed(1));
+      }
+    }
+    pts.push(xOf(tMax).toFixed(1) + "," + yOf(cum).toFixed(1));
+    return pts.join(" ");
+  }
+
+  function renderChart(times, state) {
+    var tMax = 1;
+    var i;
+    for (i = 0; i < times.length; i++) if (times[i] > tMax) tMax = times[i];
+    var W = Math.round(clampNum(Number(el("rla-window").value), 50, 20000));
+    if (W > tMax) tMax = W;
+    var yMax = state.leftAllowed > state.rightAllowed ? state.leftAllowed : state.rightAllowed;
+    if (yMax < 1) yMax = 1;
+    function xOf(t) { return 44 + (t / tMax) * 650; }
+
+    var grid = "";
+    var lines = Math.floor(tMax / W);
+    if (lines > 24) lines = 24;
+    for (var k = 0; k <= lines; k++) {
+      var x = xOf(k * W).toFixed(1);
+      grid += '<line x1="' + x + '" y1="22" x2="' + x + '" y2="172" stroke="var(--border-strong)" stroke-dasharray="3 4" />';
+    }
+
+    var dots = "";
+    for (i = 0; i < times.length; i++) {
+      var cx = xOf(times[i]).toFixed(1);
+      if (state.leftAllow[i]) {
+        dots += '<circle cx="' + cx + '" cy="172" r="3.5" fill="var(--accent)" />';
+      } else {
+        dots += '<circle cx="' + cx + '" cy="172" r="3.5" fill="#fff" stroke="var(--warn)" stroke-width="1.5" />';
+      }
+      if (state.rightAllow[i]) {
+        dots += '<rect x="' + (Number(cx) - 3) + '" y="16" width="6" height="6" fill="var(--ok)" />';
+      } else {
+        dots += '<rect x="' + (Number(cx) - 3) + '" y="16" width="6" height="6" fill="#fff" stroke="var(--warn)" stroke-width="1.5" />';
+      }
+    }
+
+    var leftPts = stepPoints(times, state.leftAllow, tMax, yMax);
+    var rightPts = stepPoints(times, state.rightAllow, tMax, yMax);
+    el("rla-svg").innerHTML =
+      '<title>兩種演算法的累計放行曲線</title>' +
+      '<rect x="0" y="0" width="720" height="200" fill="#fafaf9"></rect>' +
+      grid +
+      '<polyline fill="none" stroke="var(--ok)" stroke-width="2" stroke-dasharray="5 4" points="' + rightPts + '" />' +
+      '<polyline fill="none" stroke="var(--accent)" stroke-width="2" points="' + leftPts + '" />' +
+      dots +
+      '<text x="44" y="192" font-size="11" fill="#6b7078" font-family="var(--mono)">0</text>' +
+      '<text x="680" y="192" font-size="11" fill="#6b7078" font-family="var(--mono)" text-anchor="end">' + tMax + ' ms</text>' +
+      '<text x="8" y="36" font-size="11" fill="#6b7078" font-family="var(--mono)">' + yMax + '</text>';
+  }
+
+  function renderPair() {
+    var p = readPair();
+    var s = computePair(p);
+    var times = [p.t0, p.t1, p.t2, p.t3, p.t4, p.t5, p.t6, p.t7];
+    el("rla-window-v").textContent = el("rla-window").value + " ms";
+    el("rla-limit-v").textContent = el("rla-limit").value + " 筆";
+    el("rla-cap-v").textContent = el("rla-cap").value;
+    el("rla-refill-v").textContent = el("rla-refill").value + " / 秒";
+    el("rla-l-name").textContent = selectedName("rla-algo-l");
+    el("rla-r-name").textContent = selectedName("rla-algo-r");
+    setNum("rla-l-allowed", s.leftAllowed, false);
+    setNum("rla-l-denied", s.leftDenied, false);
+    setNum("rla-l-over", s.leftOvershoot, true);
+    setNum("rla-l-cross", s.leftCross, false);
+    setNum("rla-l-mem", s.leftMemory, false);
+    setNum("rla-l-imm", s.leftImmediate, false);
+    setNum("rla-l-delay", s.leftMaxDelay, false);
+    setNum("rla-l-gap", s.leftGap, false);
+    setNum("rla-r-allowed", s.rightAllowed, false);
+    setNum("rla-r-denied", s.rightDenied, false);
+    setNum("rla-r-over", s.rightOvershoot, true);
+    setNum("rla-r-cross", s.rightCross, false);
+    setNum("rla-r-mem", s.rightMemory, false);
+    setNum("rla-r-imm", s.rightImmediate, false);
+    setNum("rla-r-delay", s.rightMaxDelay, false);
+    setNum("rla-r-gap", s.rightGap, false);
+    var i;
+    for (i = 0; i < 8; i++) {
+      paintCell(leftCells[i], s.leftAllow[i], s.leftDelay[i], "l");
+      paintCell(rightCells[i], s.rightAllow[i], s.rightDelay[i], "r");
+    }
+    renderChart(times, s);
+    el("rla-status").innerHTML =
+      "兩邊有 <b>" + s.diverge + "</b> 筆決策不同。以 " +
+      el("rla-window").value + " ms、上限 " + el("rla-limit").value +
+      " 筆這份精確契約來看，左欄任意一段視窗最多超出 <b>" + s.leftOvershoot +
+      "</b> 筆，右欄超出 <b>" + s.rightOvershoot +
+      "</b> 筆。零等待送出：左 " + s.leftImmediate + "、右 " + s.rightImmediate + "。";
+  }
+
+  function readShare() {
+    return {
+      nodes: Number(el("rls-nodes").value),
+      arrivals: Number(el("rls-arrivals").value),
+      limit: Number(el("rls-limit").value),
+      batch: Number(el("rls-batch").value),
+      rttMs: Number(el("rls-rtt").value)
+    };
+  }
+
+  function renderShare() {
+    var p = readShare();
+    var s = computeShare(p);
+    el("rls-nodes-v").textContent = el("rls-nodes").value;
+    el("rls-arrivals-v").textContent = el("rls-arrivals").value + " / 節點";
+    el("rls-limit-v").textContent = el("rls-limit").value;
+    el("rls-batch-v").textContent = el("rls-batch").value;
+    el("rls-rtt-v").textContent = el("rls-rtt").value + " ms";
+    setNum("rls-c-allowed", s.centralAllowed, false);
+    setNum("rls-c-redis", s.centralRedis, false);
+    setNum("rls-c-wait", s.centralWaitSum, false);
+    setNum("rls-p-allowed", s.prefetchAllowed, false);
+    setNum("rls-p-redis", s.prefetchRedis, false);
+    setNum("rls-p-wait", s.prefetchWaitSum, false);
+    setNum("rls-p-strand", s.stranded, true);
+    setNum("rls-p-short", s.shortfall, true);
+    setNum("rls-p-false", s.falseReject, true);
+    setNum("rls-saved", s.savedRoundTrips, false);
+    var html = "";
+    for (var i = 0; i < s.held.length; i++) {
+      html += '<div class="rls-cell">' +
+        '<div class="rls-id">節點 ' + (i + 1) + "</div>" +
+        '<div class="rls-held">' + s.held[i] + "</div>" +
+        '<div class="rls-sub">留在手上</div>' +
+        '<div class="rls-sub">放行 ' + s.served[i] + " · 拒絕 " + s.deniedByNode[i] + "</div>" +
+        "</div>";
+    }
+    el("rls-rack").innerHTML = html;
+    el("rls-status").innerHTML =
+      "相對全域上限內能服務的筆數，預取最終少放行 <b>" + s.shortfall +
+      "</b> 筆；拒絕發生的當下、別的節點仍握有餘額的有 <b>" + s.falseReject +
+      "</b> 筆。少打的往返是 <b>" + s.savedRoundTrips + "</b> 次。";
+  }
+
+  function resetPair() {
+    el("rla-algo-l").value = "0";
+    el("rla-algo-r").value = "3";
+    el("rla-window").value = "1000";
+    el("rla-limit").value = "3";
+    el("rla-cap").value = "4";
+    el("rla-refill").value = "3";
+    for (var i = 0; i < timeEls.length; i++) timeEls[i].value = String(TIME_DEFAULTS[i]);
+    renderPair();
+  }
+
+  function resetShare() {
+    el("rls-nodes").value = "4";
+    el("rls-arrivals").value = "2";
+    el("rls-limit").value = "20";
+    el("rls-batch").value = "8";
+    el("rls-rtt").value = "5";
+    renderShare();
+  }
+
+  /* (5) 事件綁定 */
+  [
+    "rla-algo-l", "rla-algo-r", "rla-window", "rla-limit", "rla-cap", "rla-refill",
+    "rla-t0", "rla-t1", "rla-t2", "rla-t3", "rla-t4", "rla-t5", "rla-t6", "rla-t7"
+  ].forEach(function (id) {
+    el(id).addEventListener("input", renderPair);
+    el(id).addEventListener("change", renderPair);
+  });
+  [
+    "rls-nodes", "rls-arrivals", "rls-limit", "rls-batch", "rls-rtt"
+  ].forEach(function (id) {
+    el(id).addEventListener("input", renderShare);
+  });
+  el("rla-reset").addEventListener("click", resetPair);
+  el("rls-reset").addEventListener("click", resetShare);
+  renderPair();
+  renderShare();
+})();
+</script>
+
+
+<!-- 全螢幕檢視：切換按鈕、樣式與 F 鍵快捷鍵 -->
+<style>
+  .fs-toggle {
+    position: fixed;
+    top: 18px;
+    right: 18px;
+    z-index: 1000;
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    font-family: var(--sans);
+    font-size: 12.5px;
+    line-height: 1;
+    color: var(--text-2);
+    background: var(--bg);
+    border: 1px solid var(--border-strong);
+    border-radius: 999px;
+    padding: 7px 13px 7px 11px;
+    cursor: pointer;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, .06), 0 4px 12px rgba(0, 0, 0, .04);
+    transition: background .15s, border-color .15s, color .15s;
+  }
+
+  .fs-toggle:hover {
+    background: var(--bg-soft);
+    color: var(--text);
+    border-color: var(--text-3);
+  }
+
+  .fs-toggle:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+
+  .fs-toggle[aria-pressed="true"] {
+    background: var(--accent);
+    color: #fff;
+    border-color: var(--accent);
+  }
+
+  .fs-toggle .fs-ic {
+    flex: 0 0 auto;
+    display: block;
+  }
+
+  @media print {
+    .fs-toggle { display: none !important; }
+  }
+
+  @media (max-width: 480px) {
+    .fs-toggle { padding: 8px; }
+    .fs-toggle .fs-label { display: none; }
+  }
+</style>
+<button id="fs-toggle-btn" class="fs-toggle" type="button" aria-pressed="false"
+        aria-label="切換全螢幕檢視 (快捷鍵 F)" title="全螢幕檢視 (F)">
+  <svg class="fs-ic fs-ic-expand" viewBox="0 0 24 24" width="15" height="15" fill="none"
+       stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+    <path d="M8 3H5a2 2 0 0 0-2 2v3m18 0V5a2 2 0 0 0-2-2h-3m0 18h3a2 2 0 0 0 2-2v-3M3 16v3a2 2 0 0 0 2 2h3"/>
+  </svg>
+  <svg class="fs-ic fs-ic-compress" viewBox="0 0 24 24" width="15" height="15" fill="none"
+       stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="display:none">
+    <path d="M8 3v3a2 2 0 0 1-2 2H3m18 0h-3a2 2 0 0 1-2-2V3m0 18v-3a2 2 0 0 1 2-2h3M3 16h3a2 2 0 0 1 2 2v3"/>
+  </svg>
+  <span class="fs-label">全螢幕</span>
+</button>
+<script>
+  "use strict";
+  (function () {
+    var btn = document.getElementById("fs-toggle-btn");
+    if (!btn) return;
+    var docEl = document.documentElement;
+    var canFs = !!(docEl.requestFullscreen || docEl.webkitRequestFullscreen);
+    // 不支援 Fullscreen API (如 iPhone Safari) → 隱藏按鈕，避免壞掉的 UI
+    if (!canFs) { btn.style.display = "none"; return; }
+
+    var expandIc = btn.querySelector(".fs-ic-expand");
+    var compressIc = btn.querySelector(".fs-ic-compress");
+    var label = btn.querySelector(".fs-label");
+
+    function isFs() {
+      return !!(document.fullscreenElement || document.webkitFullscreenElement);
+    }
+    function enter() {
+      if (docEl.requestFullscreen) docEl.requestFullscreen();
+      else if (docEl.webkitRequestFullscreen) docEl.webkitRequestFullscreen();
+    }
+    function exit() {
+      if (document.exitFullscreen) document.exitFullscreen();
+      else if (document.webkitExitFullscreen) document.webkitExitFullscreen();
+    }
+    function toggle() { isFs() ? exit() : enter(); }
+    function sync() {
+      var on = isFs();
+      btn.setAttribute("aria-pressed", on ? "true" : "false");
+      if (label) label.textContent = on ? "離開全螢幕" : "全螢幕";
+      if (expandIc) expandIc.style.display = on ? "none" : "block";
+      if (compressIc) compressIc.style.display = on ? "block" : "none";
+    }
+
+    btn.addEventListener("click", toggle);
+    document.addEventListener("fullscreenchange", sync);
+    document.addEventListener("webkitfullscreenchange", sync);
+    document.addEventListener("keydown", function (e) {
+      if (e.key !== "f" && e.key !== "F") return;
+      if (e.metaKey || e.ctrlKey || e.altKey) return;
+      var t = e.target;
+      var tag = t && t.tagName ? t.tagName.toUpperCase() : "";
+      if (tag === "INPUT" || tag === "TEXTAREA" || (t && t.isContentEditable)) return;
+      e.preventDefault();
+      toggle();
+    });
+    sync();
+  })();
+</script>
+</body>
+</html>

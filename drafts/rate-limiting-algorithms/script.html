@@ -1,0 +1,613 @@
+<script>
+(function () {
+  "use strict";
+
+  /* (1) 常數與參數表 */
+  var ALGO_NAME = [
+    "Fixed Window",
+    "Sliding Counter",
+    "Sliding Log",
+    "Token Bucket",
+    "Leaky Bucket"
+  ];
+  var TIME_DEFAULTS = [200, 400, 700, 850, 950, 1000, 1100, 1200];
+
+  function clampNum(n, lo, hi) {
+    n = Number(n);
+    if (!Number.isFinite(n)) n = lo;
+    if (n < lo) n = lo;
+    if (n > hi) n = hi;
+    return n;
+  }
+
+  function maxInWindow(ts, W) {
+    if (!ts.length || !(W > 0)) return 0;
+    var s = ts.slice().sort(function (a, b) { return a - b; });
+    var best = 0;
+    var i = 0;
+    for (var j = 0; j < s.length; j++) {
+      while (s[j] - s[i] >= W) i += 1;
+      var c = j - i + 1;
+      if (c > best) best = c;
+    }
+    return best;
+  }
+
+  function crossBurst(admitted, W) {
+    if (!admitted.length || !(W > 0)) return 0;
+    var minT = admitted[0];
+    var maxT = admitted[0];
+    var i;
+    for (i = 1; i < admitted.length; i++) {
+      if (admitted[i] < minT) minT = admitted[i];
+      if (admitted[i] > maxT) maxT = admitted[i];
+    }
+    var best = 0;
+    var k0 = Math.floor(minT / W);
+    var k1 = Math.floor(maxT / W);
+    for (var k = k0; k <= k1; k++) {
+      var b = k * W;
+      var lo = b - W / 2;
+      var hi = b + W / 2;
+      var c = 0;
+      for (i = 0; i < admitted.length; i++) {
+        if (admitted[i] >= lo && admitted[i] < hi) c += 1;
+      }
+      if (c > best) best = c;
+    }
+    return best;
+  }
+
+  function minDepartGap(times, allow, delay) {
+    var dep = [];
+    for (var i = 0; i < allow.length; i++) {
+      if (allow[i]) dep.push(times[i] + delay[i]);
+    }
+    if (dep.length < 2) return 0;
+    dep.sort(function (a, b) { return a - b; });
+    var best = dep[1] - dep[0];
+    for (var j = 2; j < dep.length; j++) {
+      var g = dep[j] - dep[j - 1];
+      if (g < best) best = g;
+    }
+    return Math.round(best);
+  }
+
+  function runAlgo(kind, times, W, L, B, R) {
+    var n = times.length;
+    var allow = [];
+    var delay = [];
+    var admittedTs = [];
+    var i;
+    for (i = 0; i < n; i++) {
+      allow.push(0);
+      delay.push(0);
+    }
+    var order = [];
+    for (i = 0; i < n; i++) order.push(i);
+    order.sort(function (a, b) {
+      if (times[a] !== times[b]) return times[a] - times[b];
+      return a - b;
+    });
+
+    var memory = 2;
+    var k;
+    var idx;
+    var t;
+
+    if (kind === 0) {
+      var counts = {};
+      for (k = 0; k < order.length; k++) {
+        idx = order[k];
+        t = times[idx];
+        var wid = Math.floor(t / W);
+        var c = counts[wid] || 0;
+        if (c < L) {
+          counts[wid] = c + 1;
+          allow[idx] = 1;
+          admittedTs.push(t);
+        }
+      }
+    } else if (kind === 1) {
+      memory = 4;
+      var prevC = 0;
+      var curW = null;
+      var curC = 0;
+      for (k = 0; k < order.length; k++) {
+        idx = order[k];
+        t = times[idx];
+        var w = Math.floor(t / W);
+        if (curW === null) {
+          curW = w;
+          curC = 0;
+        } else if (w !== curW) {
+          prevC = (w === curW + 1) ? curC : 0;
+          curW = w;
+          curC = 0;
+        }
+        var elapsed = t - w * W;
+        var estimate = prevC * ((W - elapsed) / W) + curC;
+        if (estimate < L) {
+          curC += 1;
+          allow[idx] = 1;
+          admittedTs.push(t);
+        }
+      }
+    } else if (kind === 2) {
+      var log = [];
+      var peak = 0;
+      for (k = 0; k < order.length; k++) {
+        idx = order[k];
+        t = times[idx];
+        var keep = [];
+        for (var j = 0; j < log.length; j++) {
+          if (t - log[j] < W) keep.push(log[j]);
+        }
+        log = keep;
+        if (log.length < L) {
+          log.push(t);
+          if (log.length > peak) peak = log.length;
+          allow[idx] = 1;
+          admittedTs.push(t);
+        }
+      }
+      memory = peak;
+    } else if (kind === 3) {
+      var tokens = B;
+      var last = null;
+      var rate = R / 1000;
+      for (k = 0; k < order.length; k++) {
+        idx = order[k];
+        t = times[idx];
+        if (last !== null && t > last) {
+          tokens = Math.min(B, tokens + (t - last) * rate);
+        }
+        last = t;
+        if (tokens >= 1) {
+          tokens -= 1;
+          allow[idx] = 1;
+          admittedTs.push(t);
+        }
+      }
+    } else {
+      var perMs = R / 1000;
+      var interval = perMs > 0 ? (1 / perMs) : 0;
+      var maxDelay = interval > 0 ? (B - 1) * interval : 0;
+      var nextSlot = -1e15;
+      for (k = 0; k < order.length; k++) {
+        idx = order[k];
+        t = times[idx];
+        if (!(perMs > 0) || !(B >= 1)) continue;
+        var slot = t > nextSlot ? t : nextSlot;
+        var dly = slot - t;
+        if (dly <= maxDelay + 1e-6) {
+          allow[idx] = 1;
+          delay[idx] = Math.round(dly);
+          admittedTs.push(t);
+          nextSlot = slot + interval;
+        }
+      }
+    }
+
+    return { allow: allow, delay: delay, admittedTs: admittedTs, memory: memory };
+  }
+
+  function summarize(run, times, W, L) {
+    var allowed = 0;
+    var immediate = 0;
+    var maxDelay = 0;
+    var mask = 0;
+    for (var i = 0; i < run.allow.length; i++) {
+      if (!run.allow[i]) continue;
+      allowed += 1;
+      mask += Math.pow(2, i);
+      if (run.delay[i] <= 0) immediate += 1;
+      if (run.delay[i] > maxDelay) maxDelay = run.delay[i];
+    }
+    var peak = maxInWindow(run.admittedTs, W);
+    var over = peak - L;
+    if (over < 0) over = 0;
+    return {
+      allowed: allowed,
+      denied: run.allow.length - allowed,
+      overshoot: over,
+      crossBurst: crossBurst(run.admittedTs, W),
+      memory: run.memory,
+      immediate: immediate,
+      maxDelay: maxDelay,
+      gap: minDepartGap(times, run.allow, run.delay),
+      mask: mask,
+      allow: run.allow,
+      delay: run.delay
+    };
+  }
+
+  /* (2) compute* 純函式 */
+  // @probe fn       computePair
+  // @probe baseline {"algoL":0,"algoR":3,"windowMs":1000,"limit":3,"capacity":4,"refillPerSec":3,"t0":200,"t1":400,"t2":700,"t3":850,"t4":950,"t5":1000,"t6":1100,"t7":1200}
+  // @probe sweep    {"algoL":[2,4],"algoR":[0,4],"windowMs":[200,5000],"limit":[1,12],"capacity":[1,16],"refillPerSec":[0,20],"t0":[0,8000],"t1":[0,8000],"t2":[0,8000],"t3":[0,8000],"t4":[0,8000],"t5":[0,8000],"t6":[0,8000],"t7":[0,8000]}
+  function computePair(p) {
+    var W = Math.round(clampNum(p.windowMs, 50, 20000));
+    var L = Math.round(clampNum(p.limit, 1, 30));
+    var B = Math.round(clampNum(p.capacity, 1, 40));
+    var R = Math.round(clampNum(p.refillPerSec, 0, 100));
+    var algoL = Math.round(clampNum(p.algoL, 0, 4));
+    var algoR = Math.round(clampNum(p.algoR, 0, 4));
+    var keys = ["t0", "t1", "t2", "t3", "t4", "t5", "t6", "t7"];
+    var times = [];
+    for (var i = 0; i < keys.length; i++) {
+      times.push(Math.round(clampNum(p[keys[i]], 0, 30000)));
+    }
+    var left = summarize(runAlgo(algoL, times, W, L, B, R), times, W, L);
+    var right = summarize(runAlgo(algoR, times, W, L, B, R), times, W, L);
+    var diverge = 0;
+    for (i = 0; i < times.length; i++) {
+      if (left.allow[i] !== right.allow[i]) diverge += 1;
+    }
+    return {
+      leftAllowed: left.allowed,
+      leftDenied: left.denied,
+      leftOvershoot: left.overshoot,
+      leftCross: left.crossBurst,
+      leftMemory: left.memory,
+      leftImmediate: left.immediate,
+      leftMaxDelay: left.maxDelay,
+      leftGap: left.gap,
+      leftMask: left.mask,
+      rightAllowed: right.allowed,
+      rightDenied: right.denied,
+      rightOvershoot: right.overshoot,
+      rightCross: right.crossBurst,
+      rightMemory: right.memory,
+      rightImmediate: right.immediate,
+      rightMaxDelay: right.maxDelay,
+      rightGap: right.gap,
+      rightMask: right.mask,
+      diverge: diverge,
+      leftAllow: left.allow,
+      rightAllow: right.allow,
+      leftDelay: left.delay,
+      rightDelay: right.delay
+    };
+  }
+
+  // @probe fn       computeShare
+  // @probe baseline {"nodes":4,"arrivals":2,"limit":20,"batch":8,"rttMs":5}
+  // @probe sweep    {"nodes":[1,8],"arrivals":[1,12],"limit":[2,40],"batch":[1,12],"rttMs":[0,40]}
+  function computeShare(p) {
+    var nodes = Math.round(clampNum(p.nodes, 1, 12));
+    var arrivals = Math.round(clampNum(p.arrivals, 0, 40));
+    var limit = Math.round(clampNum(p.limit, 0, 500));
+    var batch = Math.round(clampNum(p.batch, 1, 40));
+    var rtt = Math.round(clampNum(p.rttMs, 0, 500));
+    var total = nodes * arrivals;
+    var centralAllowed = total < limit ? total : limit;
+    var centralRedis = total;
+
+    var remaining = limit;
+    var local = [];
+    var served = [];
+    var deniedByNode = [];
+    var i;
+    for (i = 0; i < nodes; i++) {
+      local.push(0);
+      served.push(0);
+      deniedByNode.push(0);
+    }
+    var prefAllowed = 0;
+    var redisOps = 0;
+    var waited = 0;
+    var falseReject = 0;
+    var exhausted = false;
+    var a;
+    var heldNow;
+    var h;
+
+    for (a = 0; a < arrivals; a++) {
+      for (i = 0; i < nodes; i++) {
+        if (local[i] > 0) {
+          local[i] -= 1;
+          served[i] += 1;
+          prefAllowed += 1;
+        } else if (exhausted) {
+          deniedByNode[i] += 1;
+          heldNow = 0;
+          for (h = 0; h < nodes; h++) heldNow += local[h];
+          if (heldNow > 0) falseReject += 1;
+        } else {
+          waited += 1;
+          redisOps += 1;
+          var take = remaining < batch ? remaining : batch;
+          remaining -= take;
+          if (take <= 0) {
+            exhausted = true;
+            deniedByNode[i] += 1;
+            heldNow = 0;
+            for (h = 0; h < nodes; h++) heldNow += local[h];
+            if (heldNow > 0) falseReject += 1;
+          } else {
+            local[i] = take - 1;
+            served[i] += 1;
+            prefAllowed += 1;
+          }
+        }
+      }
+    }
+
+    var stranded = 0;
+    for (i = 0; i < nodes; i++) stranded += local[i];
+    var optimal = total < limit ? total : limit;
+    var shortfall = optimal - prefAllowed;
+    if (shortfall < 0) shortfall = 0;
+
+    return {
+      centralAllowed: centralAllowed,
+      prefetchAllowed: prefAllowed,
+      shortfall: shortfall,
+      stranded: stranded,
+      falseReject: falseReject,
+      centralRedis: centralRedis,
+      prefetchRedis: redisOps,
+      centralWaitSum: rtt * centralRedis,
+      prefetchWaitSum: rtt * waited,
+      savedRoundTrips: centralRedis - redisOps,
+      held: local,
+      served: served,
+      deniedByNode: deniedByNode
+    };
+  }
+
+  /* (3) DOM 參照 */
+  function el(id) { return document.getElementById(id); }
+
+  var timeEls = [
+    el("rla-t0"), el("rla-t1"), el("rla-t2"), el("rla-t3"),
+    el("rla-t4"), el("rla-t5"), el("rla-t6"), el("rla-t7")
+  ];
+  var leftCells = [
+    el("rla-ld0"), el("rla-ld1"), el("rla-ld2"), el("rla-ld3"),
+    el("rla-ld4"), el("rla-ld5"), el("rla-ld6"), el("rla-ld7")
+  ];
+  var rightCells = [
+    el("rla-rd0"), el("rla-rd1"), el("rla-rd2"), el("rla-rd3"),
+    el("rla-rd4"), el("rla-rd5"), el("rla-rd6"), el("rla-rd7")
+  ];
+
+  /* (4) render —— 只把 compute 的結果畫出來 */
+  function selectedName(id) {
+    var sel = el(id);
+    return sel.options[sel.selectedIndex].text;
+  }
+
+  function setNum(id, n, hot) {
+    var node = el(id);
+    node.textContent = String(n);
+    if (hot && n > 0) node.classList.add("hot");
+    else node.classList.remove("hot");
+  }
+
+  function paintCell(cell, allow, delay, side) {
+    if (!allow) {
+      cell.className = "ns-lock";
+      cell.textContent = "拒絕";
+      return;
+    }
+    cell.className = side === "l" ? "ns-wait" : "ns-ok";
+    cell.textContent = delay > 0 ? ("放行 · 延後 " + delay + " ms") : "放行 · 立刻";
+  }
+
+  function readPair() {
+    return {
+      algoL: Number(el("rla-algo-l").value),
+      algoR: Number(el("rla-algo-r").value),
+      windowMs: Number(el("rla-window").value),
+      limit: Number(el("rla-limit").value),
+      capacity: Number(el("rla-cap").value),
+      refillPerSec: Number(el("rla-refill").value),
+      t0: Number(timeEls[0].value),
+      t1: Number(timeEls[1].value),
+      t2: Number(timeEls[2].value),
+      t3: Number(timeEls[3].value),
+      t4: Number(timeEls[4].value),
+      t5: Number(timeEls[5].value),
+      t6: Number(timeEls[6].value),
+      t7: Number(timeEls[7].value)
+    };
+  }
+
+  function stepPoints(times, allow, tMax, yMax) {
+    var order = [];
+    var i;
+    for (i = 0; i < times.length; i++) order.push(i);
+    order.sort(function (a, b) {
+      if (times[a] !== times[b]) return times[a] - times[b];
+      return a - b;
+    });
+    function xOf(t) { return 44 + (t / tMax) * 650; }
+    function yOf(c) { return 168 - (c / yMax) * 136; }
+    var pts = [];
+    var cum = 0;
+    pts.push(xOf(0).toFixed(1) + "," + yOf(0).toFixed(1));
+    for (i = 0; i < order.length; i++) {
+      var idx = order[i];
+      var x = xOf(times[idx]);
+      pts.push(x.toFixed(1) + "," + yOf(cum).toFixed(1));
+      if (allow[idx]) {
+        cum += 1;
+        pts.push(x.toFixed(1) + "," + yOf(cum).toFixed(1));
+      }
+    }
+    pts.push(xOf(tMax).toFixed(1) + "," + yOf(cum).toFixed(1));
+    return pts.join(" ");
+  }
+
+  function renderChart(times, state) {
+    var tMax = 1;
+    var i;
+    for (i = 0; i < times.length; i++) if (times[i] > tMax) tMax = times[i];
+    var W = Math.round(clampNum(Number(el("rla-window").value), 50, 20000));
+    if (W > tMax) tMax = W;
+    var yMax = state.leftAllowed > state.rightAllowed ? state.leftAllowed : state.rightAllowed;
+    if (yMax < 1) yMax = 1;
+    function xOf(t) { return 44 + (t / tMax) * 650; }
+
+    var grid = "";
+    var lines = Math.floor(tMax / W);
+    if (lines > 24) lines = 24;
+    for (var k = 0; k <= lines; k++) {
+      var x = xOf(k * W).toFixed(1);
+      grid += '<line x1="' + x + '" y1="22" x2="' + x + '" y2="172" stroke="var(--border-strong)" stroke-dasharray="3 4" />';
+    }
+
+    var dots = "";
+    for (i = 0; i < times.length; i++) {
+      var cx = xOf(times[i]).toFixed(1);
+      if (state.leftAllow[i]) {
+        dots += '<circle cx="' + cx + '" cy="172" r="3.5" fill="var(--accent)" />';
+      } else {
+        dots += '<circle cx="' + cx + '" cy="172" r="3.5" fill="#fff" stroke="var(--warn)" stroke-width="1.5" />';
+      }
+      if (state.rightAllow[i]) {
+        dots += '<rect x="' + (Number(cx) - 3) + '" y="16" width="6" height="6" fill="var(--ok)" />';
+      } else {
+        dots += '<rect x="' + (Number(cx) - 3) + '" y="16" width="6" height="6" fill="#fff" stroke="var(--warn)" stroke-width="1.5" />';
+      }
+    }
+
+    var leftPts = stepPoints(times, state.leftAllow, tMax, yMax);
+    var rightPts = stepPoints(times, state.rightAllow, tMax, yMax);
+    el("rla-svg").innerHTML =
+      '<title>兩種演算法的累計放行曲線</title>' +
+      '<rect x="0" y="0" width="720" height="200" fill="#fafaf9"></rect>' +
+      grid +
+      '<polyline fill="none" stroke="var(--ok)" stroke-width="2" stroke-dasharray="5 4" points="' + rightPts + '" />' +
+      '<polyline fill="none" stroke="var(--accent)" stroke-width="2" points="' + leftPts + '" />' +
+      dots +
+      '<text x="44" y="192" font-size="11" fill="#6b7078" font-family="var(--mono)">0</text>' +
+      '<text x="680" y="192" font-size="11" fill="#6b7078" font-family="var(--mono)" text-anchor="end">' + tMax + ' ms</text>' +
+      '<text x="8" y="36" font-size="11" fill="#6b7078" font-family="var(--mono)">' + yMax + '</text>';
+  }
+
+  function renderPair() {
+    var p = readPair();
+    var s = computePair(p);
+    var times = [p.t0, p.t1, p.t2, p.t3, p.t4, p.t5, p.t6, p.t7];
+    el("rla-window-v").textContent = el("rla-window").value + " ms";
+    el("rla-limit-v").textContent = el("rla-limit").value + " 筆";
+    el("rla-cap-v").textContent = el("rla-cap").value;
+    el("rla-refill-v").textContent = el("rla-refill").value + " / 秒";
+    el("rla-l-name").textContent = selectedName("rla-algo-l");
+    el("rla-r-name").textContent = selectedName("rla-algo-r");
+    setNum("rla-l-allowed", s.leftAllowed, false);
+    setNum("rla-l-denied", s.leftDenied, false);
+    setNum("rla-l-over", s.leftOvershoot, true);
+    setNum("rla-l-cross", s.leftCross, false);
+    setNum("rla-l-mem", s.leftMemory, false);
+    setNum("rla-l-imm", s.leftImmediate, false);
+    setNum("rla-l-delay", s.leftMaxDelay, false);
+    setNum("rla-l-gap", s.leftGap, false);
+    setNum("rla-r-allowed", s.rightAllowed, false);
+    setNum("rla-r-denied", s.rightDenied, false);
+    setNum("rla-r-over", s.rightOvershoot, true);
+    setNum("rla-r-cross", s.rightCross, false);
+    setNum("rla-r-mem", s.rightMemory, false);
+    setNum("rla-r-imm", s.rightImmediate, false);
+    setNum("rla-r-delay", s.rightMaxDelay, false);
+    setNum("rla-r-gap", s.rightGap, false);
+    var i;
+    for (i = 0; i < 8; i++) {
+      paintCell(leftCells[i], s.leftAllow[i], s.leftDelay[i], "l");
+      paintCell(rightCells[i], s.rightAllow[i], s.rightDelay[i], "r");
+    }
+    renderChart(times, s);
+    el("rla-status").innerHTML =
+      "兩邊有 <b>" + s.diverge + "</b> 筆決策不同。以 " +
+      el("rla-window").value + " ms、上限 " + el("rla-limit").value +
+      " 筆這份精確契約來看，左欄任意一段視窗最多超出 <b>" + s.leftOvershoot +
+      "</b> 筆，右欄超出 <b>" + s.rightOvershoot +
+      "</b> 筆。零等待送出：左 " + s.leftImmediate + "、右 " + s.rightImmediate + "。";
+  }
+
+  function readShare() {
+    return {
+      nodes: Number(el("rls-nodes").value),
+      arrivals: Number(el("rls-arrivals").value),
+      limit: Number(el("rls-limit").value),
+      batch: Number(el("rls-batch").value),
+      rttMs: Number(el("rls-rtt").value)
+    };
+  }
+
+  function renderShare() {
+    var p = readShare();
+    var s = computeShare(p);
+    el("rls-nodes-v").textContent = el("rls-nodes").value;
+    el("rls-arrivals-v").textContent = el("rls-arrivals").value + " / 節點";
+    el("rls-limit-v").textContent = el("rls-limit").value;
+    el("rls-batch-v").textContent = el("rls-batch").value;
+    el("rls-rtt-v").textContent = el("rls-rtt").value + " ms";
+    setNum("rls-c-allowed", s.centralAllowed, false);
+    setNum("rls-c-redis", s.centralRedis, false);
+    setNum("rls-c-wait", s.centralWaitSum, false);
+    setNum("rls-p-allowed", s.prefetchAllowed, false);
+    setNum("rls-p-redis", s.prefetchRedis, false);
+    setNum("rls-p-wait", s.prefetchWaitSum, false);
+    setNum("rls-p-strand", s.stranded, true);
+    setNum("rls-p-short", s.shortfall, true);
+    setNum("rls-p-false", s.falseReject, true);
+    setNum("rls-saved", s.savedRoundTrips, false);
+    var html = "";
+    for (var i = 0; i < s.held.length; i++) {
+      html += '<div class="rls-cell">' +
+        '<div class="rls-id">節點 ' + (i + 1) + "</div>" +
+        '<div class="rls-held">' + s.held[i] + "</div>" +
+        '<div class="rls-sub">留在手上</div>' +
+        '<div class="rls-sub">放行 ' + s.served[i] + " · 拒絕 " + s.deniedByNode[i] + "</div>" +
+        "</div>";
+    }
+    el("rls-rack").innerHTML = html;
+    el("rls-status").innerHTML =
+      "相對全域上限內能服務的筆數，預取最終少放行 <b>" + s.shortfall +
+      "</b> 筆；拒絕發生的當下、別的節點仍握有餘額的有 <b>" + s.falseReject +
+      "</b> 筆。少打的往返是 <b>" + s.savedRoundTrips + "</b> 次。";
+  }
+
+  function resetPair() {
+    el("rla-algo-l").value = "0";
+    el("rla-algo-r").value = "3";
+    el("rla-window").value = "1000";
+    el("rla-limit").value = "3";
+    el("rla-cap").value = "4";
+    el("rla-refill").value = "3";
+    for (var i = 0; i < timeEls.length; i++) timeEls[i].value = String(TIME_DEFAULTS[i]);
+    renderPair();
+  }
+
+  function resetShare() {
+    el("rls-nodes").value = "4";
+    el("rls-arrivals").value = "2";
+    el("rls-limit").value = "20";
+    el("rls-batch").value = "8";
+    el("rls-rtt").value = "5";
+    renderShare();
+  }
+
+  /* (5) 事件綁定 */
+  [
+    "rla-algo-l", "rla-algo-r", "rla-window", "rla-limit", "rla-cap", "rla-refill",
+    "rla-t0", "rla-t1", "rla-t2", "rla-t3", "rla-t4", "rla-t5", "rla-t6", "rla-t7"
+  ].forEach(function (id) {
+    el(id).addEventListener("input", renderPair);
+    el(id).addEventListener("change", renderPair);
+  });
+  [
+    "rls-nodes", "rls-arrivals", "rls-limit", "rls-batch", "rls-rtt"
+  ].forEach(function (id) {
+    el(id).addEventListener("input", renderShare);
+  });
+  el("rla-reset").addEventListener("click", resetPair);
+  el("rls-reset").addEventListener("click", resetShare);
+  renderPair();
+  renderShare();
+})();
+</script>
