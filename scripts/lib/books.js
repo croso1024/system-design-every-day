@@ -143,8 +143,8 @@ ${rootTokens}
     .site-title { margin-top: 12px; font-size: 36px; line-height: 40px; font-weight: 700; letter-spacing: -0.025em; color: var(--text); }
     .site-lede { margin-top: 16px; max-width: 42rem; font-weight: 300; line-height: 1.625; color: var(--text-2); }
     .site-meta { margin-top: 12px; font-family: var(--mono); font-size: 12px; line-height: 16px; color: var(--text-3); }
-    .site-meta a { text-underline-offset: 2px; }
-    .site-meta a:hover { color: var(--text-2); text-decoration: underline; }
+    .site-meta a, .site-footer a { text-underline-offset: 2px; }
+    .site-meta a:hover, .site-footer a:hover { color: var(--text-2); text-decoration: underline; }
     .site-footer { border-top: 1px solid var(--border); text-align: center; font-family: var(--mono); font-size: 12px; line-height: 16px; color: var(--text-3); }
 ${learningMapCss}
   </style>
@@ -166,7 +166,7 @@ ${learningMapCss}
   </main>
 
   <footer class="site-footer">
-    <p>Generated with 🤍 by System Design Every Day</p>
+    <p>© 2026 Created by Ian Li · <a href="https://ian-li.dev" target="_blank" rel="noopener noreferrer">https://ian-li.dev</a></p>
   </footer>
 
   <script id="learning-map-data" type="application/json">${learningMapJson}</script>
