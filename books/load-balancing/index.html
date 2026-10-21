@@ -1,0 +1,2044 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>負載平衡 (L4 / L7 Load Balancing) | System Design Every Day</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@300;400;500;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+  <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+  <script>
+    mermaid.initialize({
+      startOnLoad: true,
+      theme: 'default',
+      securityLevel: 'loose'
+    });
+  </script>
+  <style>
+    /* 全站設計 token 的唯一來源。scripts/lib/books.js 會把「第一個 :root 區塊」原樣抽進首頁：
+       請保持單一區塊、區塊內不得出現 `}`；首頁領域色依賴 --accent / --ok / --warn。 */
+    :root {
+      --bg: #ffffff;
+      --bg-soft: #fafaf9;
+      --text: #262a2f;
+      --text-2: #6b7078;
+      --text-3: #9aa0a8;
+      --border: #ecebe8;
+      --border-strong: #dedcd8;
+      --code-bg: #f6f5f3;
+      --accent: #3f6188;
+      --accent-soft: #eef2f7;
+      --accent-line: #cdd9e6;
+      --ok: #4d7d68;
+      --ok-soft: #eef4f1;
+      --warn: #a3743e;
+      --warn-soft: #f6f0e7;
+      --bad: #a8554f;
+      --bad-soft: #f6ecea;
+      --radius: 10px;
+      --radius-sm: 7px;
+      --maxw: 760px;
+      --sans: "Noto Sans TC", system-ui, -apple-system, "Segoe UI", sans-serif;
+      --mono: "JetBrains Mono", "SFMono-Regular", Menlo, Consolas, monospace;
+    }
+
+    /* ---------- base reset ----------
+       等價於 Tailwind preflight 的最小重置（頁面不載入 Tailwind，utility class 不會生效）。
+       文章頁與各篇 demo CSS 都以這組基準值撰寫，改動會讓所有產物的間距、清單、按鈕外觀一起變動。
+       新增規則請一律寫在這個區塊之後，並使用 :root 的 token。 */
+    *, *::before, *::after {
+      box-sizing: border-box;
+      border: 0 solid var(--border);
+    }
+
+    html {
+      line-height: 1.5;
+      -webkit-text-size-adjust: 100%;
+      tab-size: 4;
+    }
+
+    h1, h2, h3, h4, h5, h6 {
+      margin: 0;
+      font-size: inherit;
+      font-weight: inherit;
+    }
+
+    p, blockquote, dl, dd, figure, pre, hr {
+      margin: 0;
+    }
+
+    hr {
+      height: 0;
+      color: inherit;
+      border-top-width: 1px;
+    }
+
+    a {
+      color: inherit;
+      text-decoration: inherit;
+    }
+
+    b, strong {
+      font-weight: bolder;
+    }
+
+    code, kbd, samp, pre {
+      font-family: var(--mono);
+      font-size: 1em;
+    }
+
+    small {
+      font-size: 80%;
+    }
+
+    sub, sup {
+      position: relative;
+      font-size: 75%;
+      line-height: 0;
+      vertical-align: baseline;
+    }
+    sub { bottom: -0.25em; }
+    sup { top: -0.5em; }
+
+    table {
+      border-collapse: collapse;
+      border-color: inherit;
+      text-indent: 0;
+    }
+
+    ol, ul, menu {
+      list-style: none;
+      margin: 0;
+      padding: 0;
+    }
+
+    img, svg, video, canvas, audio, iframe, embed, object {
+      display: block;
+      vertical-align: middle;
+    }
+
+    img, video {
+      max-width: 100%;
+      height: auto;
+    }
+
+    button, input, optgroup, select, textarea {
+      margin: 0;
+      padding: 0;
+      font: inherit;
+      line-height: inherit;
+      color: inherit;
+    }
+
+    button, select {
+      text-transform: none;
+    }
+
+    button, [type="button"], [type="reset"], [type="submit"] {
+      -webkit-appearance: button;
+      background-color: transparent;
+      background-image: none;
+    }
+
+    button, [role="button"] {
+      cursor: pointer;
+    }
+
+    :disabled {
+      cursor: default;
+    }
+
+    input::placeholder, textarea::placeholder {
+      opacity: 1;
+      color: var(--text-3);
+    }
+
+    textarea {
+      resize: vertical;
+    }
+
+    fieldset {
+      margin: 0;
+      padding: 0;
+    }
+
+    legend {
+      padding: 0;
+    }
+
+    summary {
+      display: list-item;
+    }
+
+    [hidden] {
+      display: none;
+    }
+
+    html {
+      scroll-behavior: smooth;
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      html {
+        scroll-behavior: auto;
+      }
+      * {
+        animation-duration: .001ms !important;
+        transition-duration: .001ms !important;
+      }
+    }
+
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font-family: var(--sans);
+      font-weight: 400;
+      font-size: 16px;
+      line-height: 1.78;
+      -webkit-font-smoothing: antialiased;
+      letter-spacing: .005em;
+    }
+
+    ::selection {
+      background: var(--accent-soft);
+    }
+
+    /* ---------- layout ---------- */
+    .wrap {
+      display: flex;
+      max-width: 1180px;
+      margin: 0 auto;
+      gap: 0;
+    }
+
+    .toc {
+      width: 248px;
+      flex: 0 0 248px;
+      position: sticky;
+      top: 0;
+      height: 100vh;
+      padding: 54px 22px 40px 28px;
+      overflow-y: auto;
+      border-right: 1px solid var(--border);
+      transition: width .2s ease, flex-basis .2s ease, padding .2s ease, opacity .15s ease, border-color .15s ease;
+    }
+
+    .toc-kicker {
+      font-family: var(--mono);
+      font-size: 11px;
+      letter-spacing: .14em;
+      text-transform: uppercase;
+      color: var(--text-3);
+      margin-bottom: 20px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+    }
+
+    /* desktop：側欄內收合鈕；≤920px 隱藏，改由 .toc-toggle accordion 控制 */
+    .toc-collapse {
+      display: none;
+      flex: 0 0 auto;
+      align-items: center;
+      justify-content: center;
+      width: 28px;
+      height: 28px;
+      padding: 0;
+      border: none;
+      background: none;
+      border-radius: 6px;
+      color: var(--text-2);
+      line-height: 1;
+      cursor: pointer;
+    }
+
+    .toc-collapse:hover {
+      color: var(--text);
+      background: var(--bg-soft);
+    }
+
+    .toc-collapse:focus-visible {
+      outline: 2px solid var(--accent);
+      outline-offset: 2px;
+    }
+
+    .toc-collapse svg {
+      display: block;
+    }
+
+    /* desktop：側欄收合後的展開鈕（預設隱藏） */
+    .toc-reopen {
+      display: none;
+      position: fixed;
+      top: 18px;
+      left: 18px;
+      z-index: 900;
+      align-items: center;
+      gap: 7px;
+      font-size: 12.5px;
+      line-height: 1;
+      color: var(--text-2);
+      background: var(--bg);
+      border: 1px solid var(--border-strong);
+      border-radius: 999px;
+      padding: 7px 13px 7px 11px;
+      box-shadow: 0 1px 3px rgba(0, 0, 0, .06), 0 4px 12px rgba(0, 0, 0, .04);
+      cursor: pointer;
+      transition: background .15s, border-color .15s, color .15s;
+    }
+
+    .toc-reopen:hover {
+      background: var(--bg-soft);
+      color: var(--text);
+      border-color: var(--text-3);
+    }
+
+    .toc-reopen svg {
+      flex: 0 0 auto;
+      display: block;
+    }
+
+    @media (min-width: 921px) {
+      .toc-collapse {
+        display: inline-flex;
+      }
+
+      body.toc-collapsed .toc {
+        width: 0;
+        flex-basis: 0;
+        padding: 0;
+        opacity: 0;
+        overflow: hidden;
+        border-right-color: transparent;
+        pointer-events: none;
+      }
+
+      body.toc-collapsed .toc-reopen {
+        display: inline-flex;
+      }
+    }
+
+    .toc-kicker a {
+      color: var(--text-3);
+      text-decoration: none;
+      border-bottom: none;
+      transition: color .15s;
+    }
+
+    .toc-kicker a:hover {
+      color: var(--text);
+    }
+
+    .toc-title {
+      font-size: 15px;
+      font-weight: 700;
+      line-height: 1.4;
+      margin: 0 0 24px;
+    }
+
+    .toc a {
+      display: flex;
+      gap: 10px;
+      align-items: baseline;
+      text-decoration: none;
+      color: var(--text-2);
+      font-size: 13.5px;
+      padding: 6px 10px;
+      border-radius: 6px;
+      line-height: 1.45;
+      transition: background .15s, color .15s;
+      border-bottom: none;
+    }
+
+    .toc a:hover {
+      background: var(--bg-soft);
+      color: var(--text);
+      border-bottom: none;
+    }
+
+    .toc a.active {
+      color: var(--accent);
+      background: var(--accent-soft);
+      font-weight: 500;
+      border-bottom: none;
+    }
+
+    .toc a .n {
+      font-family: var(--mono);
+      font-size: 11px;
+      color: var(--text-3);
+      flex: 0 0 18px;
+    }
+
+    .toc a.active .n {
+      color: var(--accent);
+    }
+
+    main {
+      flex: 1 1 auto;
+      min-width: 0;
+      padding: 0 40px;
+    }
+
+    .inner {
+      max-width: var(--maxw);
+      margin: 0 auto;
+      padding: 72px 0 140px;
+    }
+
+    /* ---------- hero ---------- */
+    .hero {
+      margin-bottom: 64px;
+    }
+
+    .hero .eyebrow {
+      font-family: var(--mono);
+      font-size: 12px;
+      letter-spacing: .16em;
+      text-transform: uppercase;
+      color: var(--accent);
+      margin-bottom: 18px;
+    }
+
+    .hero h1 {
+      font-size: 40px;
+      line-height: 1.18;
+      font-weight: 700;
+      margin: 0 0 18px;
+      letter-spacing: -.01em;
+    }
+
+    .hero .lede {
+      font-size: 18px;
+      line-height: 1.7;
+      color: var(--text-2);
+      font-weight: 300;
+      margin: 0;
+      max-width: 620px;
+    }
+
+    .hero .meta {
+      margin-top: 28px;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+
+    .tag {
+      font-family: var(--mono);
+      font-size: 12px;
+      color: var(--text-2);
+      border: 1px solid var(--border-strong);
+      padding: 4px 11px;
+      border-radius: 999px;
+      background: var(--bg-soft);
+    }
+
+    /* ---------- sections ---------- */
+    section {
+      padding-top: 30px;
+      scroll-margin-top: 24px;
+    }
+
+    .sec-head {
+      display: flex;
+      align-items: baseline;
+      gap: 14px;
+      margin: 0 0 8px;
+    }
+
+    .sec-num {
+      font-family: var(--mono);
+      font-size: 13px;
+      color: var(--text-3);
+      font-weight: 500;
+      padding-top: 6px;
+      flex: 0 0 auto;
+    }
+
+    h2 {
+      font-size: 27px;
+      font-weight: 700;
+      line-height: 1.3;
+      margin: 0;
+      letter-spacing: -.01em;
+    }
+
+    .sec-sub {
+      color: var(--text-2);
+      font-size: 15px;
+      margin: 2px 0 28px 0;
+      font-weight: 300;
+    }
+
+    h3 {
+      font-size: 18.5px;
+      font-weight: 700;
+      margin: 38px 0 12px;
+      line-height: 1.45;
+    }
+
+    h4 {
+      font-size: 15.5px;
+      font-weight: 700;
+      margin: 26px 0 8px;
+      color: var(--text);
+    }
+
+    p {
+      margin: 0 0 16px;
+    }
+
+    a {
+      color: var(--accent);
+      text-decoration: none;
+      border-bottom: 1px solid var(--accent-line);
+      transition: border-color .15s;
+    }
+
+    a:hover {
+      border-color: var(--accent);
+    }
+
+    strong {
+      font-weight: 700;
+    }
+
+    em {
+      font-style: normal;
+      background: var(--accent-soft);
+      padding: 0 4px;
+      border-radius: 4px;
+      font-weight: 500;
+      color: #2f4d6e;
+    }
+
+    hr.div {
+      border: none;
+      border-top: 1px solid var(--border);
+      margin: 46px 0;
+    }
+
+    ul, ol {
+      margin: 0 0 18px;
+      padding-left: 22px;
+    }
+
+    li {
+      margin: 7px 0;
+      padding-left: 4px;
+    }
+
+    code {
+      font-family: var(--mono);
+      font-size: .86em;
+      background: var(--code-bg);
+      padding: 2px 6px;
+      border-radius: 5px;
+      color: #43494f;
+    }
+
+    pre {
+      background: var(--code-bg);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 16px 18px;
+      overflow-x: auto;
+      margin: 0 0 20px;
+      line-height: 1.6;
+    }
+
+    pre code {
+      background: none;
+      padding: 0;
+      font-size: 13px;
+    }
+
+    /* ---------- math notation ---------- */
+    /* 行內數學變數，如 W、R、N。本站不載入 MathJax/KaTeX，請勿使用 $...$ 或 \[...\] LaTeX 分隔符。 */
+    var {
+      font-family: var(--mono);
+      font-style: normal;
+      font-weight: 500;
+      color: var(--accent);
+    }
+
+    /* 區塊數學公式，置中等寬呈現，記得將 > < & 轉義為 &gt; &lt; &amp;。 */
+    .formula {
+      font-family: var(--mono);
+      font-size: 15px;
+      text-align: center;
+      background: var(--bg-soft);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      padding: 14px 18px;
+      margin: 0 0 20px;
+      color: var(--text);
+      letter-spacing: .03em;
+      overflow-x: auto;
+    }
+
+    /* ---------- callouts ---------- */
+    .callout {
+      border: 1px solid var(--border);
+      border-left: 3px solid var(--border-strong);
+      background: var(--bg-soft);
+      border-radius: var(--radius-sm);
+      padding: 15px 18px;
+      margin: 0 0 22px;
+      font-size: 14.5px;
+    }
+
+    .callout .c-title {
+      font-weight: 700;
+      font-size: 13px;
+      letter-spacing: .02em;
+      margin-bottom: 5px;
+      display: flex;
+      gap: 7px;
+      align-items: center;
+    }
+
+    .callout p:last-child {
+      margin-bottom: 0;
+    }
+
+    .callout.accent {
+      border-left-color: var(--accent);
+      background: var(--accent-soft);
+    }
+
+    .callout.accent .c-title {
+      color: #2f4d6e;
+    }
+
+    .callout.warn {
+      border-left-color: var(--warn);
+      background: var(--warn-soft);
+    }
+
+    .callout.warn .c-title {
+      color: var(--warn);
+    }
+
+    .callout .ic {
+      font-family: var(--mono);
+      font-size: 11px;
+      border: 1px solid currentColor;
+      border-radius: 4px;
+      padding: 0 4px;
+      line-height: 1.5;
+      opacity: .8;
+    }
+
+    .oneliner {
+      border: 1px dashed var(--accent-line);
+      border-radius: var(--radius-sm);
+      padding: 13px 16px;
+      margin: 0 0 22px;
+      font-size: 14.5px;
+      background: #fbfcfd;
+    }
+
+    .oneliner b {
+      font-family: var(--mono);
+      font-size: 11px;
+      letter-spacing: .08em;
+      color: var(--accent);
+      display: block;
+      margin-bottom: 4px;
+      text-transform: uppercase;
+    }
+
+    /* ---------- tables ---------- */
+    .tbl-wrap {
+      overflow-x: auto;
+      margin: 0 0 24px;
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+    }
+
+    table {
+      border-collapse: collapse;
+      width: 100%;
+      font-size: 14px;
+      min-width: 520px;
+    }
+
+    th, td {
+      text-align: left;
+      padding: 11px 14px;
+      border-bottom: 1px solid var(--border);
+      vertical-align: top;
+    }
+
+    th {
+      font-weight: 700;
+      background: var(--bg-soft);
+      font-size: 12.5px;
+      letter-spacing: .02em;
+      color: var(--text-2);
+      position: sticky;
+      top: 0;
+    }
+
+    tr:last-child td {
+      border-bottom: none;
+    }
+
+    td.hl {
+      background: var(--accent-soft);
+    }
+
+    .cap {
+      font-size: 12.5px;
+      color: var(--text-3);
+      margin: -12px 0 26px;
+      font-family: var(--mono);
+    }
+
+    /* ---------- interactive shell ---------- */
+    .demo {
+      border: 1px solid var(--border-strong);
+      border-radius: var(--radius);
+      background: var(--bg);
+      margin: 24px 0 26px;
+      overflow: hidden;
+    }
+
+    .demo-bar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      flex-wrap: wrap;
+      padding: 13px 16px;
+      border-bottom: 1px solid var(--border);
+      background: var(--bg-soft);
+    }
+
+    .demo-bar .label {
+      font-family: var(--mono);
+      font-size: 11px;
+      letter-spacing: .1em;
+      text-transform: uppercase;
+      color: var(--text-3);
+    }
+
+    .demo-body {
+      padding: 20px 18px;
+    }
+
+    .seg {
+      display: inline-flex;
+      border: 1px solid var(--border-strong);
+      border-radius: 999px;
+      overflow: hidden;
+      background: var(--bg);
+    }
+
+    .seg button {
+      border: none;
+      background: none;
+      font-family: var(--sans);
+      font-size: 12.5px;
+      color: var(--text-2);
+      padding: 6px 14px;
+      cursor: pointer;
+      transition: background .15s, color .15s;
+    }
+
+    .seg button:hover {
+      color: var(--text);
+    }
+
+    .seg button[aria-pressed="true"] {
+      background: var(--accent);
+      color: #fff;
+    }
+
+    .btn {
+      font-family: var(--sans);
+      font-size: 13px;
+      border: 1px solid var(--border-strong);
+      background: var(--bg);
+      color: var(--text);
+      padding: 7px 16px;
+      border-radius: 7px;
+      cursor: pointer;
+      transition: background .15s, border-color .15s;
+    }
+
+    .btn:hover {
+      background: var(--bg-soft);
+      border-color: var(--text-3);
+    }
+
+    .btn.primary {
+      background: var(--accent);
+      color: #fff;
+      border-color: var(--accent);
+    }
+
+    .btn.primary:hover {
+      background: #365578;
+    }
+
+    .btn:disabled {
+      opacity: .4;
+      cursor: not-allowed;
+    }
+
+    .btn:focus-visible, .seg button:focus-visible, .toc a:focus-visible, a:focus-visible,
+    summary:focus-visible {
+      outline: 2px solid var(--accent);
+      outline-offset: 2px;
+      border-radius: 4px;
+    }
+
+    .status-line {
+      font-size: 13.5px;
+      color: var(--text-2);
+      min-height: 42px;
+      margin-top: 14px;
+      background: var(--bg-soft);
+      border-radius: var(--radius-sm);
+      padding: 10px 13px;
+      border: 1px solid var(--border);
+    }
+
+    .status-line b {
+      color: var(--text);
+    }
+
+    .legend {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 14px;
+      font-size: 11.5px;
+      color: var(--text-2);
+      margin-top: 14px;
+      font-family: var(--mono);
+    }
+
+    .legend span {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .dot {
+      width: 9px;
+      height: 9px;
+      border-radius: 3px;
+      display: inline-block;
+      border: 1px solid rgba(0, 0, 0, .08);
+    }
+
+    /* node states used across diagrams */
+    .ns-idle {
+      background: #fff;
+      border-color: var(--border-strong);
+    }
+
+    .ns-lock {
+      background: var(--warn-soft);
+      border-color: var(--warn);
+    }
+
+    .ns-ok {
+      background: var(--ok-soft);
+      border-color: var(--ok);
+    }
+
+    .ns-bad {
+      background: var(--bad-soft);
+      border-color: var(--bad);
+    }
+
+    .ns-wait {
+      background: var(--accent-soft);
+      border-color: var(--accent);
+    }
+
+    /* FAQ */
+    details.faq {
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      margin-bottom: 10px;
+      background: #fff;
+      overflow: hidden;
+    }
+
+    details.faq summary {
+      cursor: pointer;
+      padding: 14px 16px;
+      font-weight: 600;
+      font-size: 14.5px;
+      list-style: none;
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      align-items: center;
+    }
+
+    details.faq summary::-webkit-details-marker {
+      display: none;
+    }
+
+    details.faq summary .q {
+      font-family: var(--mono);
+      font-size: 11px;
+      color: var(--accent);
+      flex: 0 0 auto;
+    }
+
+    details.faq summary .chev {
+      transition: transform .2s;
+      color: var(--text-3);
+      flex: 0 0 auto;
+      font-size: 13px;
+    }
+
+    details.faq[open] summary .chev {
+      transform: rotate(90deg);
+    }
+
+    details.faq .ans {
+      padding: 0 16px 16px;
+      font-size: 14px;
+      color: var(--text-2);
+    }
+
+    details.faq .ans p {
+      margin: 0 0 10px;
+    }
+
+    details.faq .ans p:last-child {
+      margin: 0;
+    }
+
+    .trap {
+      display: flex;
+      gap: 10px;
+      font-size: 14px;
+      margin: 9px 0;
+    }
+
+    .trap .tn {
+      font-family: var(--mono);
+      font-size: 11px;
+      color: var(--bad);
+      flex: 0 0 auto;
+      border: 1px solid var(--bad-soft);
+      background: var(--bad-soft);
+      border-radius: 4px;
+      padding: 1px 6px;
+      height: fit-content;
+      margin-top: 2px;
+    }
+
+    /* mobile responsive */
+    .toc-toggle {
+      display: none;
+    }
+
+    @media (max-width: 920px) {
+      .wrap {
+        flex-direction: column;
+      }
+      .toc {
+        position: static;
+        width: auto;
+        height: auto;
+        border-right: none;
+        border-bottom: 1px solid var(--border);
+        padding: 18px 22px;
+        transition: none;
+      }
+      .toc-title {
+        margin-bottom: 0;
+      }
+      .toc-kicker {
+        margin-bottom: 10px;
+      }
+      .toc-nav {
+        display: none;
+        margin-top: 16px;
+      }
+      .toc-nav.open {
+        display: block;
+      }
+      .toc-toggle {
+        display: inline-block;
+        margin-top: 10px;
+      }
+      .toc-collapse,
+      .toc-reopen {
+        display: none !important;
+      }
+      main {
+        padding: 0 22px;
+      }
+      .inner {
+        padding: 40px 0 100px;
+      }
+      .hero h1 {
+        font-size: 31px;
+      }
+    }
+
+    @media print {
+      .toc-reopen { display: none !important; }
+    }
+
+    @media (max-width: 480px) {
+      body {
+        font-size: 15px;
+      }
+      .hero h1 {
+        font-size: 27px;
+      }
+      h2 {
+        font-size: 23px;
+      }
+      .demo-body {
+        padding: 16px 13px;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <!-- ===================== TOC SIDEBAR ===================== -->
+    <nav class="toc" id="toc-panel" aria-label="目錄">
+      <div class="toc-kicker">
+        <a href="../index.html">← 返回目錄</a>
+        <button class="toc-collapse" type="button" aria-expanded="true" aria-controls="toc-panel"
+                aria-label="收合目錄" title="收合目錄">
+          <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor"
+               stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M15 18l-6-6 6-6"/>
+          </svg>
+        </button>
+      </div>
+      <div class="toc-title">負載平衡 (L4 / L7 Load Balancing)</div>
+      <button class="btn toc-toggle" type="button" aria-expanded="false" aria-controls="toc-nav">目錄 ▾</button>
+      <div class="toc-nav" id="toc-nav">
+        <a href="#s1"><span class="n">01</span>一個請求如何被分到某一台後端</a>
+        <a href="#s2"><span class="n">02</span>L4 與 L7 各自能做的決策</a>
+        <a href="#s3"><span class="n">03</span>異質後端時分配演算法怎麼傷到尾延遲</a>
+        <a href="#s4"><span class="n">04</span>健康檢查，以及平衡器自己的單點</a>
+        <a href="#s5"><span class="n">05</span>客戶端平衡，以及不該放進平衡器的事</a>
+      </div>
+    </nav>
+    <button class="btn toc-reopen" type="button" aria-expanded="true" aria-controls="toc-panel"
+            aria-label="展開目錄" title="展開目錄">
+      <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor"
+           stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M9 18l6-6-6-6"/>
+      </svg>
+      <span>目錄</span>
+    </button>
+
+    <!-- ===================== MAIN CONTENT ===================== -->
+    <main>
+      <div class="inner">
+        <!-- demo-archetype: B｜參數掃描 — 讀者拖動慢節點的服務時間倍數、權重與這一批請求數，即時重算 Round Robin、加權、兩次抽樣與全看最短佇列的尾延遲、平均延遲與各節點峰值。
+     選 B 是因為本篇要看的是這些參數怎麼改寫分配結果。並排對照那種呈現與最近三篇撞形，改由同一組參數即時重算。 -->
+<style>
+  .lbt-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    align-items: stretch;
+    justify-content: center;
+    margin: 14px 0 6px;
+  }
+  .lbt-node {
+    border: 1px solid var(--border-strong);
+    border-radius: 8px;
+    background: #fff;
+    padding: 10px 12px;
+    min-width: 110px;
+    max-width: 200px;
+    text-align: center;
+  }
+  .lbt-node .nn {
+    font-family: var(--mono);
+    font-size: 12px;
+    font-weight: 700;
+    color: var(--text);
+  }
+  .lbt-node .ns {
+    font-size: 11px;
+    color: var(--text-2);
+    margin-top: 3px;
+    line-height: 1.4;
+  }
+  .lbt-node.accent { border-top: 3px solid var(--accent); }
+  .lbt-arrow {
+    display: flex;
+    align-items: center;
+    font-family: var(--mono);
+    font-size: 13px;
+    color: var(--text-3);
+    white-space: nowrap;
+  }
+  .lbt-split {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 12px;
+    margin: 14px 0 6px;
+  }
+  .lbt-col {
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: #fff;
+    padding: 12px 12px 8px;
+  }
+  .lbt-col .lbt-node { max-width: none; width: 100%; }
+  .lbt-see {
+    margin: 10px 0 4px;
+    padding-left: 18px;
+  }
+  .lbt-see li {
+    font-size: 13px;
+    color: var(--text-2);
+    margin: 4px 0;
+    line-height: 1.45;
+  }
+  .pool-lead {
+    font-size: 13px;
+    color: var(--text-2);
+    margin: 0 0 12px;
+    line-height: 1.55;
+  }
+  .pool-controls {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 10px;
+  }
+  .pool-field {
+    background: var(--bg-soft);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    padding: 8px 10px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .pool-field input[type="range"] { width: 100%; accent-color: var(--accent); }
+  .pool-k { font-size: 12px; color: var(--text-2); }
+  .pool-v { font-family: var(--mono); font-size: 13px; color: var(--text); }
+  .pool-stats {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 8px;
+    margin: 12px 0;
+  }
+  .pool-stat {
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    padding: 8px;
+    background: #fff;
+  }
+  .pool-stat.is-on {
+    border-color: var(--accent-line);
+    background: var(--accent-soft);
+  }
+  .pool-stat .k {
+    display: block;
+    font-size: 11px;
+    color: var(--text-2);
+    line-height: 1.35;
+  }
+  .pool-stat .n {
+    font-family: var(--mono);
+    font-size: 20px;
+    font-weight: 700;
+    color: var(--text);
+    line-height: 1.2;
+  }
+  .pool-stat .u {
+    font-family: var(--sans);
+    font-size: 11px;
+    font-weight: 500;
+    color: var(--text-3);
+  }
+  .pool-stat .s {
+    display: block;
+    margin-top: 2px;
+    font-size: 11px;
+    color: var(--text-2);
+    line-height: 1.35;
+  }
+  .pool-bars {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    margin-top: 4px;
+  }
+  .pool-meter {
+    display: grid;
+    grid-template-columns: 52px minmax(0, 1fr) 108px;
+    gap: 8px;
+    align-items: center;
+  }
+  .pool-name { font-family: var(--mono); font-size: 12px; color: var(--text); }
+  .pool-track {
+    height: 10px;
+    background: var(--bg-soft);
+    border-radius: 99px;
+    overflow: hidden;
+    border: 1px solid var(--border);
+  }
+  .pool-fill {
+    display: block;
+    height: 100%;
+    width: 0;
+    background: var(--accent);
+  }
+  .pool-meter.is-slow .pool-fill { background: var(--warn); }
+  .pool-ms {
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--text-2);
+    text-align: right;
+  }
+  .pool-actions { margin-top: 10px; }
+  @media (max-width: 720px) {
+    .lbt-split { grid-template-columns: 1fr; }
+    .pool-controls { grid-template-columns: 1fr; }
+    .pool-stats { grid-template-columns: 1fr 1fr; }
+    .pool-meter { grid-template-columns: 40px minmax(0, 1fr) 96px; }
+  }
+</style>
+
+<section id="s1">
+  <div class="sec-head">
+    <span class="sec-num">01</span>
+    <h2>一個請求如何被分到某一台後端</h2>
+  </div>
+  <p class="sec-sub">負載平衡解決的是「多台都能做這件事時，這一筆該進哪一台」，不是 API 該長什麼樣。</p>
+  <p>一台機器的 CPU、連線數或記憶體先到頂時，垂直加大規格有上限，也有單點。水平擴展是再放幾台做同一件事的後端。客戶端不該自己寫死 IP：那一台死了，所有人都跟著失敗；那一台比較閒，也沒有人知道。負載平衡器站在客戶端與後端池之間，對每一筆新工作選一台<b>目前被認為健康</b>的後端，並在後端增減時讓呼叫端不用改設定。</p>
+  <div class="lbt-row">
+    <div class="lbt-node">
+      <div class="nn">Client</div>
+      <div class="ns">只認得平衡器的位址</div>
+    </div>
+    <span class="lbt-arrow">▸</span>
+    <div class="lbt-node">
+      <div class="nn">DNS</div>
+      <div class="ns">把名字解成平衡器位址</div>
+    </div>
+    <span class="lbt-arrow">▸</span>
+    <div class="lbt-node accent">
+      <div class="nn">Load Balancer</div>
+      <div class="ns">在健康後端裡選一台</div>
+    </div>
+    <span class="lbt-arrow">▸</span>
+    <div class="lbt-node">
+      <div class="nn">Backend</div>
+      <div class="ns">真正執行請求</div>
+    </div>
+  </div>
+  <p class="cap">客戶端的設定裡通常只有平衡器。後端 IP 可以換、可以增減，只要平衡器的目標群組跟著更新。</p>
+  <p>這條路徑上有三個容易混在一起的角色。應用程式處理業務。負載平衡器決定<b>同一服務的哪一台複本</b>接到這一筆。API Gateway 決定<b>哪一個服務、哪一版契約、要不要先認證</b>。路由規則與認證留給 API Gateway 與反向代理。這篇只處理複本之間的分配、健康檢查，以及平衡器自己怎麼不變成單點。</p>
+  <p>面試時先把決策拆成兩層，後面兩節各自展開。第一層是平衡器看得到封包的哪一段：只看到 TCP／UDP 的五元組，還是已經終止連線、看得到 HTTP。第二層是在看得到的資訊上用哪一種分配規則。規則選錯時，後端規格再齊，慢的那一台仍會把尾延遲拉上去。健康檢查通常只會把「沒回應」的摘掉，不會把「還在回 200、只是很慢」的摘掉。</p>
+  <div class="oneliner">
+    <b>一句話答法</b>負載平衡是在一組等價後端之間為每一筆工作選一台，並把不健康的排除；它不決定 API 契約，也不取代業務服務。
+  </div>
+</section>
+
+<section id="s2">
+  <div class="sec-head">
+    <span class="sec-num">02</span>
+    <h2>L4 與 L7 各自能做的決策</h2>
+  </div>
+  <p class="sec-sub">看得到的欄位決定了排程能用什麼訊號。AWS 用 NLB 與 ALB 拆開這兩層，GCP 用 passthrough Network Load Balancer 與 Application Load Balancer 對照。</p>
+  <p>L4 平衡器轉送的是連線。它看協議、來源 IP、來源 port、目的 IP、目的 port，用這個五元組做雜湊，讓同一條連線的後續封包回到同一台後端。它不解析 HTTP，因此不能依路徑或標頭把請求分到不同的目標群組，也不能在同一條連線的每個請求上重選後端。L7 平衡器終止客戶端連線（HTTPS 時也終止 TLS），讀到請求列與標頭之後，再替這一筆向後端另開或復用連線。</p>
+  <div class="lbt-split">
+    <div class="lbt-col">
+      <div class="lbt-node">
+        <div class="nn">L4 · 連線</div>
+        <div class="ns">五元組雜湊，連線期間不改道</div>
+      </div>
+      <ul class="lbt-see">
+        <li>看得到協議與兩端的 IP、port</li>
+        <li>看不到 URL、Header、HTTP 方法</li>
+        <li>執行個體目標上可以保留客戶端來源 IP</li>
+        <li>單條長連線的所有請求釘在同一台</li>
+      </ul>
+    </div>
+    <div class="lbt-col">
+      <div class="lbt-node">
+        <div class="nn">L7 · 請求</div>
+        <div class="ns">每個請求都能重選後端</div>
+      </div>
+      <ul class="lbt-see">
+        <li>看得到 Host、路徑、方法與標頭</li>
+        <li>HTTP/1.1 常輪詢；HTTP/2、gRPC 改看未完成請求數</li>
+        <li>來源 IP 變成平衡器的，客戶端 IP 放進轉送標頭</li>
+        <li>同一條連線上的 stream 可以落到不同後端</li>
+      </ul>
+    </div>
+  </div>
+  <p class="cap">左欄的決策在連線建立時做完；右欄的決策可以發生在每一個請求。長連線一多，兩邊的尾延遲會差在這裡。</p>
+  <p>TLS 的分界沿用 HTTP/1.1 與 HTTP/2 那篇的結論就夠：L4 可以在不解密的情況下讀到 ClientHello 裡的 SNI，用來挑憑證或轉送目標；L7 則終止 TLS，看得到明文 HTTP。這篇不再往下拆握手。</p>
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>要比較的點</th>
+          <th>AWS NLB（L4）</th>
+          <th>AWS ALB（L7）</th>
+          <th>GCP 的對照</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>分配單位</td>
+          <td>連線（TCP／UDP／TLS）</td>
+          <td>HTTP／HTTPS／gRPC 請求</td>
+          <td>passthrough NLB 對連線；Application LB 對請求</td>
+        </tr>
+        <tr>
+          <td>預設怎麼選</td>
+          <td>五元組雜湊</td>
+          <td class="hl">HTTP/1.1 輪詢；HTTP/2 與 gRPC 用最少未完成請求</td>
+          <td>passthrough 用雜湊；Application LB 先依 URL map 選後端服務</td>
+        </tr>
+        <tr>
+          <td>位址</td>
+          <td>每個啟用的 AZ 一個可固定的 IP</td>
+          <td>沒有自己的靜態 IP</td>
+          <td>全球外部 Application LB 用 anycast，一個入口</td>
+        </tr>
+        <tr>
+          <td>客戶端 IP</td>
+          <td>打到執行個體目標時保留來源 IP</td>
+          <td>來源變成平衡器，原 IP 在轉送標頭</td>
+          <td>passthrough 保留來源；代理型會改寫</td>
+        </tr>
+        <tr>
+          <td>跨 AZ</td>
+          <td>預設關閉，打開才把連線送到別的 AZ，並產生跨 AZ 流量</td>
+          <td>一律跨 AZ</td>
+          <td>全球 Application LB 本來就跨區域後端；區域型 NLB 預設留在區域內</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="cap">選型先看「決策需要連線還是請求」。需要靜態 IP、極高封包速率、或後端必須看到真實來源 IP 時偏 NLB；需要依請求重新分配、或同一服務上要看 Host／路徑時偏 ALB。URL map 把流量分到不同服務，是閘道的工作，不是這篇的排程。</p>
+  <div class="callout accent">
+    <div class="c-title"><span class="ic">關鍵</span>HTTP/2 不能沿用連線級輪詢</div>
+    <p>HTTP/2 與 gRPC 用一條連線承載很多 stream。平衡器若只在連線建立時選一次後端，這位客戶端之後的請求全部釘在同一台，池子裡其他複本幫不上忙。ALB 對這兩種協議改成最少未完成請求（least outstanding requests）：每一筆請求都看目前誰手上的請求較少。NLB 看不到請求，做不到這件事。</p>
+  </div>
+  <p>長連線還有另一個後果：五元組雜湊在連線活著的時候不會因為後端變慢而改道。連線怎麼排空、目標進入 draining 時已建立的連線還能活多久，是即時連線擴展那篇的範圍。這裡只需記住，L4 的「平衡」發生在新連線，不發生在連線中途。</p>
+  <div class="oneliner">
+    <b>一句話答法</b>L4 用五元組把整條連線釘死，換來源 IP 與高 pps；L7 終止連線後按請求重選，HTTP/2 必須用未完成請求數，否則多路復用會把一個客戶端釘在一台後端上。
+  </div>
+</section>
+
+<section id="s3">
+  <div class="sec-head">
+    <span class="sec-num">03</span>
+    <h2>異質後端時分配演算法怎麼傷到尾延遲</h2>
+  </div>
+  <p class="sec-sub">後端一樣快時，輪詢就夠。有一台變慢、卻還沒被健康檢查摘除時，輪詢會把尾延遲交給那一台。</p>
+  <p>Round Robin 依序把新工作分給下一台，筆數幾乎相同。權重（weighted round-robin）改的是筆數比例：Nginx 的 smooth weighted round-robin 會把高權重的主機散開，而不是一口氣塞完再跳過。權重是設定值，不會因為這台突然變慢而自己下降。最少未完成請求看的是此刻誰手上的請求較少；一台變慢時，它的請求停留更久，計數自然升高，新請求就會避開它。Join-the-Shortest-Queue 是對池子裡每一台取最小。Power of Two Choices 只隨機看兩台，把工作放到這兩台裡負載較低的那台。</p>
+  <div class="formula">d = 2 時，最滿箱子的負載約為 ln ln n / ln 2</div>
+  <p>完全隨機只抽一台時，最滿約是 <var>ln n / ln ln n</var>。多看的那一次抽樣拿走了大部分好處，成本仍是常數。平衡器看得到整個目標群組時，直接做最少未完成請求即可，ALB 在 HTTP/2 就是這樣。客戶端或 sidecar 面對大量 replica、不該每次都詢問全部時，才用兩次抽樣：Envoy 的 <code>least_request</code> 預設 <code>n_choices = 2</code>。一致性雜湊是另一個問題——同一個鍵跨連線都要落到同一台——環與虛擬節點在一致性雜湊那篇，這裡不重推。</p>
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>演算法</th>
+          <th>選擇時看什麼</th>
+          <th>一台變慢但仍回成功</th>
+          <th>常見落點</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>Round Robin</td>
+          <td>輪到誰</td>
+          <td class="hl">慢節點拿到同樣筆數，尾延遲被它綁住</td>
+          <td>ALB 的 HTTP/1.1</td>
+        </tr>
+        <tr>
+          <td>加權輪詢</td>
+          <td>設定的權重</td>
+          <td>權重若跟不上變慢的程度，可以比不加權更差</td>
+          <td>Nginx upstream、ALB 轉送動作上的 target group 權重</td>
+        </tr>
+        <tr>
+          <td>最少未完成請求</td>
+          <td>此刻還沒做完的請求數</td>
+          <td>慢請求佔著名額，新請求自然少給它</td>
+          <td>ALB 的 HTTP/2 與 gRPC</td>
+        </tr>
+        <tr>
+          <td>Power of Two Choices</td>
+          <td>隨機兩台，取負載較低者</td>
+          <td>大叢集上接近全看，觀察成本固定</td>
+          <td>Envoy least_request、Finagle</td>
+        </tr>
+        <tr>
+          <td>五元組雜湊</td>
+          <td>連線的五元組</td>
+          <td>這條連線不會改道，慢就慢到連線結束</td>
+          <td>NLB、GCP passthrough Network LB</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="cap">健康檢查通過、只是變慢的後端，五元組雜湊與 Round Robin 都不會少分給它。少分給它的是「看負載」的那一列，不是「看設定」的那一列。</p>
+  <div class="callout warn">
+    <div class="c-title"><span class="ic">陷阱</span>權重跟著規格走，不跟著速度走</div>
+    <p>機器比較大就給比較高的權重，這句只在它比較快時成立。規格大但正在 GC、磁碟打滿或鎖競爭的節點，權重越高，分到的筆數越多，尾延遲比 Round Robin 更糟。權重補的是已知的容量差，補不了健康檢查還沒判死的那一段延遲。</p>
+  </div>
+
+  <div class="demo" id="pool-demo">
+    <div class="demo-bar">
+      <span class="label">互動 · 一台變慢之後的尾延遲</span>
+      <span class="label" style="text-transform:none;font-family:var(--sans);font-size:12px;color:var(--text-2)">拖動倍數、權重與筆數，數字會重算</span>
+    </div>
+    <div class="demo-body">
+      <p class="pool-lead">六台後端同時在服務。A 是慢節點，B 到 F 每次服務 5 ms。請求每隔 2 ms 到一筆，而且每一筆都能改派——這是 L7 或客戶端平衡，不是 NLB 的五元組。尾延遲是這一批裡最慢那一筆的等待加服務時間。長條是目前這一種演算法下，各台自己的峰值延遲。</p>
+      <div class="pool-controls">
+        <label class="pool-field" for="pool-slow">
+          <span class="pool-k">慢節點相對其餘節點的倍數</span>
+          <input id="pool-slow" type="range" min="1" max="12" step="1" value="4">
+          <span class="pool-v" id="pool-slow-val">4× · 20 ms</span>
+        </label>
+        <label class="pool-field" for="pool-weight">
+          <span class="pool-k">慢節點權重，其餘五台固定為 4</span>
+          <input id="pool-weight" type="range" min="1" max="8" step="1" value="1">
+          <span class="pool-v" id="pool-weight-val">1 : 4</span>
+        </label>
+        <label class="pool-field" for="pool-arrivals">
+          <span class="pool-k">這一批請求數</span>
+          <input id="pool-arrivals" type="range" min="48" max="360" step="24" value="120">
+          <span class="pool-v" id="pool-arrivals-val">120 筆</span>
+        </label>
+      </div>
+      <div class="seg" role="group" aria-label="長條圖顯示哪一種分配">
+        <button type="button" data-view="rr" aria-pressed="false">Round Robin</button>
+        <button type="button" data-view="wrr" aria-pressed="false">加權</button>
+        <button type="button" data-view="p2c" aria-pressed="true">兩次抽樣</button>
+        <button type="button" data-view="jsq" aria-pressed="false">全看</button>
+      </div>
+      <div class="pool-stats">
+        <div class="pool-stat" id="pool-stat-rr">
+          <span class="k">Round Robin 尾延遲</span>
+          <span class="n" id="pool-rr-tail">0</span><span class="u"> ms</span>
+          <span class="s" id="pool-rr-sub"></span>
+        </div>
+        <div class="pool-stat" id="pool-stat-wrr">
+          <span class="k">加權尾延遲</span>
+          <span class="n" id="pool-wrr-tail">0</span><span class="u"> ms</span>
+          <span class="s" id="pool-wrr-sub"></span>
+        </div>
+        <div class="pool-stat is-on" id="pool-stat-p2c">
+          <span class="k">兩次抽樣尾延遲</span>
+          <span class="n" id="pool-p2c-tail">0</span><span class="u"> ms</span>
+          <span class="s" id="pool-p2c-sub"></span>
+        </div>
+        <div class="pool-stat" id="pool-stat-jsq">
+          <span class="k">全看最短佇列尾延遲</span>
+          <span class="n" id="pool-jsq-tail">0</span><span class="u"> ms</span>
+          <span class="s" id="pool-jsq-sub"></span>
+        </div>
+      </div>
+      <div class="legend">
+        <span><i class="dot ns-lock"></i>A · 慢節點的峰值</span>
+        <span><i class="dot ns-wait"></i>其餘後端的峰值</span>
+      </div>
+      <div class="pool-bars">
+        <div class="pool-meter is-slow">
+          <span class="pool-name">A</span>
+          <span class="pool-track"><span class="pool-fill" id="pool-fill-0"></span></span>
+          <span class="pool-ms" id="pool-ms-0">0</span>
+        </div>
+        <div class="pool-meter">
+          <span class="pool-name">B</span>
+          <span class="pool-track"><span class="pool-fill" id="pool-fill-1"></span></span>
+          <span class="pool-ms" id="pool-ms-1">0</span>
+        </div>
+        <div class="pool-meter">
+          <span class="pool-name">C</span>
+          <span class="pool-track"><span class="pool-fill" id="pool-fill-2"></span></span>
+          <span class="pool-ms" id="pool-ms-2">0</span>
+        </div>
+        <div class="pool-meter">
+          <span class="pool-name">D</span>
+          <span class="pool-track"><span class="pool-fill" id="pool-fill-3"></span></span>
+          <span class="pool-ms" id="pool-ms-3">0</span>
+        </div>
+        <div class="pool-meter">
+          <span class="pool-name">E</span>
+          <span class="pool-track"><span class="pool-fill" id="pool-fill-4"></span></span>
+          <span class="pool-ms" id="pool-ms-4">0</span>
+        </div>
+        <div class="pool-meter">
+          <span class="pool-name">F</span>
+          <span class="pool-track"><span class="pool-fill" id="pool-fill-5"></span></span>
+          <span class="pool-ms" id="pool-ms-5">0</span>
+        </div>
+      </div>
+      <div class="status-line" id="pool-status"></div>
+      <div class="pool-actions">
+        <button type="button" class="btn" id="pool-reset">重置</button>
+      </div>
+    </div>
+  </div>
+  <p class="cap">預設倍數 4、慢節點權重 1、120 筆時，Round Robin 的尾延遲會遠高於兩次抽樣。把權重拉到 8，加權會反過來比 Round Robin 更差。六台很少，所以兩次抽樣和全看常常一樣；叢集變大時，全看的成本才會逼你改抽兩台。</p>
+  <div class="callout accent">
+    <div class="c-title"><span class="ic">關鍵</span>兩次抽樣在小池子裡看起來「沒有比全看好」</div>
+    <p>模擬只有六台，隨機兩台很容易就包含較空的那台，尾延遲會和把六台都看過幾乎相同。這是規模，不是公式失效。<var>ln ln n</var> 的優勢在上百台、而且觀察每一台都要付網路成本時才明顯。中央平衡器付得起全看；客戶端平衡通常付不起。</p>
+  </div>
+  <div class="oneliner">
+    <b>一句話答法</b>後端速度不同時，輪詢把同樣筆數送給慢節點，尾延遲被它決定；看未完成工作或只抽兩台取較空者，會少分給它。權重是靜態的，設反了比不加重更糟。
+  </div>
+</section>
+
+<section id="s4">
+  <div class="sec-head">
+    <span class="sec-num">04</span>
+    <h2>健康檢查，以及平衡器自己的單點</h2>
+  </div>
+  <p class="sec-sub">檢查回答的是「還通不通」。平衡器若只有一台，後端池再健康，入口死了全部請求都進不來。</p>
+  <p>主動健康檢查由平衡器週期性探測目標：TCP 能否握手，或 HTTP 是否回期望的狀態碼。連續失敗達到不健康門檻就停止送新工作；連續成功達到健康門檻才加回。被動檢查則是看真實流量的連續錯誤（Envoy 的 outlier detection），不必乾等下一輪探測。AWS 的目標群組以主動檢查為主。</p>
+  <div class="formula">T<sub>detect</sub> ≈ unhealthy threshold × interval</div>
+  <p>Application Load Balancer 目標群組的常見預設是間隔 30 秒、連續失敗 2 次摘除、連續成功 5 次才加回。偵測窗口大約一分鐘，恢復比摘除更慢，這是故意的：剛恢復的節點不要立刻吃回全部流量。NLB 的 TCP 檢查逾時通常比 HTTP 長，門檻不要照抄 ALB 的數字，以那個目標群組的現值為準。摘除之後，已經接上的請求還能做完的時間是 deregistration delay（目標群組預設常常是 300 秒）。長連線怎麼排空見即時連線擴展。</p>
+  <pre class="mermaid">
+sequenceDiagram
+  participant LB as 平衡器
+  participant T as 後端
+  LB->>T: 主動探測
+  T--xLB: 逾時
+  Note over LB: 失敗計數加一
+  LB->>LB: 達門檻就摘除
+  LB->>T: 間隔後再探
+  T-->>LB: 回應成功
+  LB->>LB: 達門檻就加回
+  </pre>
+  <p class="cap">摘除與加回都看連續次數，不看單一次。中間那台後端在被摘除期間不再收到新請求，但探測仍繼續打。</p>
+  <div class="callout warn">
+    <div class="c-title"><span class="ic">陷阱</span>把檢查調到跟 SLO 一樣敏感</div>
+    <p>不健康門檻設成 1、間隔設成 1 秒，一次 GC pause 就會摘除節點。剩下的節點瞬間變忙，它們的檢查也開始逾時，摘除會連鎖。慢但仍回 200 的節點不該用縮短 timeout 來「判死」——檢查回答的是失敗，第 3 節的排程才回答慢。真的要依延遲摘除，得另做延遲異常的門檻，並且加回要慢、要抖動，避免所有客戶端同一秒湧回。</p>
+  </div>
+  <p>平衡器自己的可用性分兩種做法。託管服務把資料面鋪在你啟用的每個可用區：NLB 每個 AZ 一個 IP，DNS 回多筆位址；某一區的節點故障時，還握著那個 IP 的客戶端會失敗，必須改連另一個位址。這段重試屬於逾時、重試與退避，不是把 NLB 再做成主備兩台虛擬 IP 就結束。ALB 的 DNS 回的是 AWS 持有的位址，位址會變、TTL 短，客戶端同樣要能重連。自建單台 HAProxy 或 Nginx 則是真的單點：要嘛兩台加 VRRP，要嘛前面再放一層會做健康檢查的 DNS／anycast。控制面短暫故障時，既有連線多半還在；新目標註冊與健康狀態的更新會停，這和資料面整台消失不是同一種事故。</p>
+  <p>跨 AZ 是流量與故障域的交換。NLB 預設不跨 AZ：一個 AZ 的目標少，打到該 AZ IP 的連線就集中在較少的目標上，單機更熱，但流量不跨區計費。打開跨 AZ 後負載較勻，跨區流量要付錢，而且一個 AZ 的目標故障時另一個 AZ 會立刻多接。ALB 沒有這個開關，一律跨 AZ。目標群組若只放在一個 AZ，多 AZ 的平衡器仍然是單邊後端，入口的冗餘是假的。</p>
+  <div class="oneliner">
+    <b>一句話答法</b>健康檢查用連續失敗次數乘上間隔換偵測時間，門檻太低會連鎖摘除；託管平衡器的單點在「客戶端握著一個已經死掉的 AZ 位址」，自建單行程式才是整台入口只有一個行程。
+  </div>
+</section>
+
+<section id="s5">
+  <div class="sec-head">
+    <span class="sec-num">05</span>
+    <h2>客戶端平衡，以及不該放進平衡器的事</h2>
+  </div>
+  <p class="sec-sub">呼叫端自己選複本可以少一跳，但每個客戶端只看得到自己的視角。業務路由與認證不應因此塞進平衡器。</p>
+  <p>客戶端平衡把第 3 節的選擇搬進呼叫端或旁邊的 sidecar。服務發現（Cloud Map、DNS、或控制面下發的端點清單）告訴它目前有哪些複本，它再用最少未完成請求或兩次抽樣挑一台。少掉集中式代理的那一跳，也少一個必須容量規劃的入口。代價是視角不完整：每個客戶端的未完成請求數只統計自己發出的連線，叢集的真實負載它看不到，容易一起湧向剛恢復、看起來最空的那台。端點清單若靠 DNS，TTL 內仍會打到已摘除的 IP。清單要嘛短 TTL 加客戶端重試，要嘛改由會推送健康狀態的控制面更新。</p>
+  <p>Mesh sidecar 在這個題目裡就是貼在行程旁的客戶端平衡器。私有 CA、SPIFFE、mTLS 屬於服務間安全，不要在選複本的時候一併設計信任域。</p>
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>面試官問</th>
+          <th>先給的取捨</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>什麼時候用 NLB，不使用 ALB？</td>
+          <td>要靜態 IP、保留來源 IP、非 HTTP、或連線速率高到不想解析請求。不要用它做路徑路由。</td>
+        </tr>
+        <tr>
+          <td>HTTP/2 為什麼不能 Round Robin？</td>
+          <td>輪詢若發生在連線上，一條連線的所有 stream 釘死一台。要在請求層做最少未完成請求。</td>
+        </tr>
+        <tr>
+          <td>一台變慢但健康檢查是綠的？</td>
+          <td>檢查只看通不通。改看負載的排程，或另做延遲摘除；不要把探測 timeout 縮到 SLO。</td>
+        </tr>
+        <tr>
+          <td>平衡器掛了怎麼辦？</td>
+          <td>託管的資料面在多個 AZ。客戶端要能換掉失敗的位址。自建則不要只留一個行程。</td>
+        </tr>
+        <tr>
+          <td>權重怎麼設？</td>
+          <td>對已知的容量差設權重。權重不會跟著瞬間延遲走；設反了比 Round Robin 更糟。</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="cap">這五題都落在「連線還是請求、筆數還是負載、通不通還是慢不慢」。認證、配額與多服務編排不在表裡。</p>
+  <p>不該放進負載平衡器的，是會讓它變成業務系統的那一層：依身分決定能不能呼叫、把多個後端的回應組裝成一個 API、依租戶做配額。配額的演算法在限流演算法。契約與版本在 API 設計風格與演進。這些放進平衡器之後，每一次規則變更都要動資料面，故障域也從「某一台複本」變成「所有服務的入口」。</p>
+  <div class="oneliner">
+    <b>一句話答法</b>客戶端平衡用服務發現加本地的兩次抽樣或最少未完成請求，省下一跳，但每個客戶端只有局部負載；集中式 L4／L7 平衡器只負責等價複本的選擇與健康，認證與多服務路由留給閘道。
+  </div>
+</section>
+
+      </div>
+    </main>
+  </div>
+
+  <script>
+    "use strict";
+    document.addEventListener("DOMContentLoaded", function () {
+      /* ===== TOC scrollspy, mobile accordion & desktop collapse ===== */
+      (function () {
+        var links = Array.prototype.slice.call(document.querySelectorAll(".toc-nav a"));
+        var map = {};
+        links.forEach(function (a) {
+          var href = a.getAttribute("href");
+          if (href && href.startsWith("#")) {
+            map[href.slice(1)] = a;
+          }
+        });
+        var secs = links.map(function (a) {
+          var href = a.getAttribute("href");
+          return href && href.startsWith("#") ? document.getElementById(href.slice(1)) : null;
+        }).filter(Boolean);
+
+        if (secs.length > 0 && typeof IntersectionObserver !== "undefined") {
+          var obs = new IntersectionObserver(function (entries) {
+            entries.forEach(function (e) {
+              if (e.isIntersecting) {
+                links.forEach(function (l) { l.classList.remove("active"); });
+                var act = map[e.target.id];
+                if (act) act.classList.add("active");
+              }
+            });
+          }, { rootMargin: "-20% 0px -70% 0px", threshold: 0 });
+          secs.forEach(function (s) { obs.observe(s); });
+        }
+
+        /* mobile：目錄 accordion（≤920px） */
+        var toggle = document.querySelector(".toc-toggle");
+        var nav = document.querySelector(".toc-nav");
+        if (toggle && nav) {
+          toggle.addEventListener("click", function () {
+            var open = nav.classList.toggle("open");
+            toggle.setAttribute("aria-expanded", open ? "true" : "false");
+          });
+          nav.addEventListener("click", function (e) {
+            if (e.target.closest("a") && window.innerWidth <= 920) {
+              nav.classList.remove("open");
+              toggle.setAttribute("aria-expanded", "false");
+            }
+          });
+        }
+
+        /* desktop：收合側欄（預設展開；不持久化） */
+        var collapseBtn = document.querySelector(".toc-collapse");
+        var reopenBtn = document.querySelector(".toc-reopen");
+        function setTocCollapsed(collapsed) {
+          document.body.classList.toggle("toc-collapsed", collapsed);
+          if (collapseBtn) collapseBtn.setAttribute("aria-expanded", collapsed ? "false" : "true");
+          if (reopenBtn) reopenBtn.setAttribute("aria-expanded", collapsed ? "false" : "true");
+          if (collapsed && reopenBtn) reopenBtn.focus();
+          else if (!collapsed && collapseBtn) collapseBtn.focus();
+        }
+        if (collapseBtn) {
+          collapseBtn.addEventListener("click", function () { setTocCollapsed(true); });
+        }
+        if (reopenBtn) {
+          reopenBtn.addEventListener("click", function () { setTocCollapsed(false); });
+        }
+      })();
+    });
+  </script>
+
+  
+<script>
+(function () {
+  "use strict";
+
+  /* (1) 常數：六台後端、固定到達間隔。慢節點是第 0 台。 */
+  var SERVERS = 6;
+  var BASE_MS = 5;
+  var GAP_MS = 2;
+  var PEER_WEIGHT = 4;
+  var NAME = ["A", "B", "C", "D", "E", "F"];
+
+  /* (2) compute* 與它呼叫的 helper。這一段不能碰 DOM。 */
+  function clampInt(value, lo, hi) {
+    var n = value | 0;
+    if (n < lo) return lo;
+    if (n > hi) return hi;
+    return n;
+  }
+
+  function mix32(n) {
+    var x = Math.imul((n + 1) | 0, 0x9E3779B1);
+    x = Math.imul(x ^ (x >>> 16), 0x7FEB352D);
+    x = Math.imul(x ^ (x >>> 15), 0x846CA68B);
+    return (x ^ (x >>> 16)) >>> 0;
+  }
+
+  function pickTwo(k) {
+    var a = mix32(k) % SERVERS;
+    var b = mix32(k + 7919) % SERVERS;
+    if (b === a) b = (a + 1 + (mix32(k + 17) % (SERVERS - 1))) % SERVERS;
+    return [a, b];
+  }
+
+  function zeros() {
+    var out = [];
+    for (var i = 0; i < SERVERS; i++) out.push(0);
+    return out;
+  }
+
+  function simulate(kind, arrivals, svc, weights) {
+    var ready = zeros();
+    var cursor = zeros();
+    var counts = zeros();
+    var peak = zeros();
+    var totalW = 0;
+    var maxLat = 0;
+    var sum = 0;
+    var i;
+    for (i = 0; i < SERVERS; i++) totalW += weights[i];
+
+    for (var k = 0; k < arrivals; k++) {
+      var t = k * GAP_MS;
+      var s = 0;
+      if (kind === "rr") {
+        s = k % SERVERS;
+      } else if (kind === "wrr") {
+        var best = 0;
+        for (i = 0; i < SERVERS; i++) {
+          cursor[i] += weights[i];
+          if (cursor[i] > cursor[best]) best = i;
+        }
+        cursor[best] -= totalW;
+        s = best;
+      } else if (kind === "p2c") {
+        var pair = pickTwo(k);
+        s = ready[pair[0]] <= ready[pair[1]] ? pair[0] : pair[1];
+      } else {
+        for (i = 1; i < SERVERS; i++) {
+          if (ready[i] < ready[s]) s = i;
+        }
+      }
+      var start = t > ready[s] ? t : ready[s];
+      var finish = start + svc[s];
+      var lat = finish - t;
+      ready[s] = finish;
+      counts[s] += 1;
+      if (lat > peak[s]) peak[s] = lat;
+      if (lat > maxLat) maxLat = lat;
+      sum += lat;
+    }
+
+    return {
+      tailMs: maxLat,
+      meanMs: Math.round(sum / arrivals),
+      slowCount: counts[0],
+      counts: counts,
+      peak: peak
+    };
+  }
+
+  // @probe fn       computeDispatch
+  // @probe baseline {"slowFactor":4,"slowWeight":1,"arrivals":120}
+  // @probe sweep    {"slowFactor":[1,12],"slowWeight":[1,8],"arrivals":[48,360]}
+  function computeDispatch(p) {
+    var slowFactor = clampInt(p.slowFactor, 1, 12);
+    var slowWeight = clampInt(p.slowWeight, 1, 8);
+    var arrivals = clampInt(p.arrivals, 1, 5000);
+    var svc = [];
+    var weights = [];
+    for (var i = 0; i < SERVERS; i++) {
+      svc.push(i === 0 ? BASE_MS * slowFactor : BASE_MS);
+      weights.push(i === 0 ? slowWeight : PEER_WEIGHT);
+    }
+    var rr = simulate("rr", arrivals, svc, weights);
+    var wrr = simulate("wrr", arrivals, svc, weights);
+    var p2c = simulate("p2c", arrivals, svc, weights);
+    var jsq = simulate("jsq", arrivals, svc, weights);
+    return {
+      rrTailMs: rr.tailMs,
+      wrrTailMs: wrr.tailMs,
+      p2cTailMs: p2c.tailMs,
+      jsqTailMs: jsq.tailMs,
+      rrMeanMs: rr.meanMs,
+      wrrMeanMs: wrr.meanMs,
+      p2cMeanMs: p2c.meanMs,
+      jsqMeanMs: jsq.meanMs,
+      rrSlow: rr.slowCount,
+      wrrSlow: wrr.slowCount,
+      p2cSlow: p2c.slowCount,
+      jsqSlow: jsq.slowCount,
+      weightGapMs: wrr.tailMs - rr.tailMs,
+      rrPeak: rr.peak,
+      wrrPeak: wrr.peak,
+      p2cPeak: p2c.peak,
+      jsqPeak: jsq.peak,
+      rrCounts: rr.counts,
+      wrrCounts: wrr.counts,
+      p2cCounts: p2c.counts,
+      jsqCounts: jsq.counts
+    };
+  }
+
+  /* (3) DOM 參照 */
+  var elSlow = document.getElementById("pool-slow");
+  var elWeight = document.getElementById("pool-weight");
+  var elArrivals = document.getElementById("pool-arrivals");
+  var elReset = document.getElementById("pool-reset");
+  var elSlowVal = document.getElementById("pool-slow-val");
+  var elWeightVal = document.getElementById("pool-weight-val");
+  var elArrivalsVal = document.getElementById("pool-arrivals-val");
+  var elStatus = document.getElementById("pool-status");
+  var FILL = ["pool-fill-0", "pool-fill-1", "pool-fill-2", "pool-fill-3", "pool-fill-4", "pool-fill-5"];
+  var MS = ["pool-ms-0", "pool-ms-1", "pool-ms-2", "pool-ms-3", "pool-ms-4", "pool-ms-5"];
+  var fillEl = FILL.map(function (id) { return document.getElementById(id); });
+  var msEl = MS.map(function (id) { return document.getElementById(id); });
+  var statTail = {
+    rr: document.getElementById("pool-rr-tail"),
+    wrr: document.getElementById("pool-wrr-tail"),
+    p2c: document.getElementById("pool-p2c-tail"),
+    jsq: document.getElementById("pool-jsq-tail")
+  };
+  var statSub = {
+    rr: document.getElementById("pool-rr-sub"),
+    wrr: document.getElementById("pool-wrr-sub"),
+    p2c: document.getElementById("pool-p2c-sub"),
+    jsq: document.getElementById("pool-jsq-sub")
+  };
+  var statCard = {
+    rr: document.getElementById("pool-stat-rr"),
+    wrr: document.getElementById("pool-stat-wrr"),
+    p2c: document.getElementById("pool-stat-p2c"),
+    jsq: document.getElementById("pool-stat-jsq")
+  };
+  var segButtons = document.querySelectorAll("#pool-demo .seg button");
+
+  /* (4) render：只把 computeDispatch 的結果畫出來 */
+  function currentView() {
+    var view = "p2c";
+    for (var i = 0; i < segButtons.length; i++) {
+      if (segButtons[i].getAttribute("aria-pressed") === "true") {
+        view = segButtons[i].getAttribute("data-view");
+      }
+    }
+    return view;
+  }
+
+  function seriesFor(state, view) {
+    if (view === "rr") return { peak: state.rrPeak, counts: state.rrCounts };
+    if (view === "wrr") return { peak: state.wrrPeak, counts: state.wrrCounts };
+    if (view === "jsq") return { peak: state.jsqPeak, counts: state.jsqCounts };
+    return { peak: state.p2cPeak, counts: state.p2cCounts };
+  }
+
+  function render() {
+    var slowFactor = Number(elSlow.value);
+    var slowWeight = Number(elWeight.value);
+    var arrivals = Number(elArrivals.value);
+    var state = computeDispatch({
+      slowFactor: slowFactor,
+      slowWeight: slowWeight,
+      arrivals: arrivals
+    });
+    var view = currentView();
+    var series = seriesFor(state, view);
+    var maxPeak = 1;
+    var i;
+
+    elSlowVal.textContent = String(slowFactor) + "× · " + (BASE_MS * slowFactor) + " ms";
+    elWeightVal.textContent = String(slowWeight) + " : " + String(PEER_WEIGHT);
+    elArrivalsVal.textContent = String(arrivals) + " 筆";
+
+    statTail.rr.textContent = String(state.rrTailMs);
+    statTail.wrr.textContent = String(state.wrrTailMs);
+    statTail.p2c.textContent = String(state.p2cTailMs);
+    statTail.jsq.textContent = String(state.jsqTailMs);
+    statSub.rr.textContent = "平均 " + state.rrMeanMs + " ms · 慢節點 " + state.rrSlow + " 筆";
+    statSub.wrr.textContent = "平均 " + state.wrrMeanMs + " ms · 慢節點 " + state.wrrSlow + " 筆";
+    statSub.p2c.textContent = "平均 " + state.p2cMeanMs + " ms · 慢節點 " + state.p2cSlow + " 筆";
+    statSub.jsq.textContent = "平均 " + state.jsqMeanMs + " ms · 慢節點 " + state.jsqSlow + " 筆";
+
+    Object.keys(statCard).forEach(function (key) {
+      statCard[key].classList.toggle("is-on", key === view);
+    });
+
+    for (i = 0; i < SERVERS; i++) {
+      if (series.peak[i] > maxPeak) maxPeak = series.peak[i];
+    }
+    for (i = 0; i < SERVERS; i++) {
+      var pct = Math.round((series.peak[i] / maxPeak) * 1000) / 10;
+      fillEl[i].style.width = pct + "%";
+      msEl[i].textContent = series.peak[i] + " ms · " + series.counts[i] + " 筆";
+    }
+
+    elStatus.textContent =
+      "請求每 " + GAP_MS + " ms 到一筆，可各自改派（L7 或客戶端平衡）。慢節點一次要 " +
+      (BASE_MS * slowFactor) + " ms，其餘 " + BASE_MS + " ms。Round Robin 的尾延遲是 " +
+      state.rrTailMs + " ms，比就緒時間的兩次抽樣是 " + state.p2cTailMs +
+      " ms，全看六台是 " + state.jsqTailMs + " ms。慢節點權重 " + slowWeight +
+      "、其餘各 " + PEER_WEIGHT + " 時，加權的尾延遲是 " + state.wrrTailMs + " ms。";
+  }
+
+  /* (5) 事件：滑桿只改文字與長條，不重建控制項 */
+  function onSlide() {
+    render();
+  }
+
+  elSlow.addEventListener("input", onSlide);
+  elWeight.addEventListener("input", onSlide);
+  elArrivals.addEventListener("input", onSlide);
+
+  for (var b = 0; b < segButtons.length; b++) {
+    segButtons[b].addEventListener("click", function (event) {
+      var button = event.currentTarget;
+      for (var i = 0; i < segButtons.length; i++) {
+        segButtons[i].setAttribute("aria-pressed", segButtons[i] === button ? "true" : "false");
+      }
+      render();
+    });
+  }
+
+  elReset.addEventListener("click", function () {
+    elSlow.value = "4";
+    elWeight.value = "1";
+    elArrivals.value = "120";
+    for (var i = 0; i < segButtons.length; i++) {
+      var on = segButtons[i].getAttribute("data-view") === "p2c";
+      segButtons[i].setAttribute("aria-pressed", on ? "true" : "false");
+    }
+    render();
+  });
+
+  render();
+})();
+</script>
+
+
+<!-- 全螢幕檢視：切換按鈕、樣式與 F 鍵快捷鍵 -->
+<style>
+  .fs-toggle {
+    position: fixed;
+    top: 18px;
+    right: 18px;
+    z-index: 1000;
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    font-family: var(--sans);
+    font-size: 12.5px;
+    line-height: 1;
+    color: var(--text-2);
+    background: var(--bg);
+    border: 1px solid var(--border-strong);
+    border-radius: 999px;
+    padding: 7px 13px 7px 11px;
+    cursor: pointer;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, .06), 0 4px 12px rgba(0, 0, 0, .04);
+    transition: background .15s, border-color .15s, color .15s;
+  }
+
+  .fs-toggle:hover {
+    background: var(--bg-soft);
+    color: var(--text);
+    border-color: var(--text-3);
+  }
+
+  .fs-toggle:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+
+  .fs-toggle[aria-pressed="true"] {
+    background: var(--accent);
+    color: #fff;
+    border-color: var(--accent);
+  }
+
+  .fs-toggle .fs-ic {
+    flex: 0 0 auto;
+    display: block;
+  }
+
+  @media print {
+    .fs-toggle { display: none !important; }
+  }
+
+  @media (max-width: 480px) {
+    .fs-toggle { padding: 8px; }
+    .fs-toggle .fs-label { display: none; }
+  }
+</style>
+<button id="fs-toggle-btn" class="fs-toggle" type="button" aria-pressed="false"
+        aria-label="切換全螢幕檢視 (快捷鍵 F)" title="全螢幕檢視 (F)">
+  <svg class="fs-ic fs-ic-expand" viewBox="0 0 24 24" width="15" height="15" fill="none"
+       stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+    <path d="M8 3H5a2 2 0 0 0-2 2v3m18 0V5a2 2 0 0 0-2-2h-3m0 18h3a2 2 0 0 0 2-2v-3M3 16v3a2 2 0 0 0 2 2h3"/>
+  </svg>
+  <svg class="fs-ic fs-ic-compress" viewBox="0 0 24 24" width="15" height="15" fill="none"
+       stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="display:none">
+    <path d="M8 3v3a2 2 0 0 1-2 2H3m18 0h-3a2 2 0 0 1-2-2V3m0 18v-3a2 2 0 0 1 2-2h3M3 16h3a2 2 0 0 1 2 2v3"/>
+  </svg>
+  <span class="fs-label">全螢幕</span>
+</button>
+<script>
+  "use strict";
+  (function () {
+    var btn = document.getElementById("fs-toggle-btn");
+    if (!btn) return;
+    var docEl = document.documentElement;
+    var canFs = !!(docEl.requestFullscreen || docEl.webkitRequestFullscreen);
+    // 不支援 Fullscreen API (如 iPhone Safari) → 隱藏按鈕，避免壞掉的 UI
+    if (!canFs) { btn.style.display = "none"; return; }
+
+    var expandIc = btn.querySelector(".fs-ic-expand");
+    var compressIc = btn.querySelector(".fs-ic-compress");
+    var label = btn.querySelector(".fs-label");
+
+    function isFs() {
+      return !!(document.fullscreenElement || document.webkitFullscreenElement);
+    }
+    function enter() {
+      if (docEl.requestFullscreen) docEl.requestFullscreen();
+      else if (docEl.webkitRequestFullscreen) docEl.webkitRequestFullscreen();
+    }
+    function exit() {
+      if (document.exitFullscreen) document.exitFullscreen();
+      else if (document.webkitExitFullscreen) document.webkitExitFullscreen();
+    }
+    function toggle() { isFs() ? exit() : enter(); }
+    function sync() {
+      var on = isFs();
+      btn.setAttribute("aria-pressed", on ? "true" : "false");
+      if (label) label.textContent = on ? "離開全螢幕" : "全螢幕";
+      if (expandIc) expandIc.style.display = on ? "none" : "block";
+      if (compressIc) compressIc.style.display = on ? "block" : "none";
+    }
+
+    btn.addEventListener("click", toggle);
+    document.addEventListener("fullscreenchange", sync);
+    document.addEventListener("webkitfullscreenchange", sync);
+    document.addEventListener("keydown", function (e) {
+      if (e.key !== "f" && e.key !== "F") return;
+      if (e.metaKey || e.ctrlKey || e.altKey) return;
+      var t = e.target;
+      var tag = t && t.tagName ? t.tagName.toUpperCase() : "";
+      if (tag === "INPUT" || tag === "TEXTAREA" || (t && t.isContentEditable)) return;
+      e.preventDefault();
+      toggle();
+    });
+    sync();
+  })();
+</script>
+</body>
+</html>
