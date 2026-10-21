@@ -1,0 +1,539 @@
+<!-- demo-archetype: B｜參數掃描 — 讀者拖動慢節點的服務時間倍數、權重與這一批請求數，即時重算 Round Robin、加權、兩次抽樣與全看最短佇列的尾延遲、平均延遲與各節點峰值。
+     選 B 是因為本篇要看的是這些參數怎麼改寫分配結果。並排對照那種呈現與最近三篇撞形，改由同一組參數即時重算。 -->
+<style>
+  .lbt-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    align-items: stretch;
+    justify-content: center;
+    margin: 14px 0 6px;
+  }
+  .lbt-node {
+    border: 1px solid var(--border-strong);
+    border-radius: 8px;
+    background: #fff;
+    padding: 10px 12px;
+    min-width: 110px;
+    max-width: 200px;
+    text-align: center;
+  }
+  .lbt-node .nn {
+    font-family: var(--mono);
+    font-size: 12px;
+    font-weight: 700;
+    color: var(--text);
+  }
+  .lbt-node .ns {
+    font-size: 11px;
+    color: var(--text-2);
+    margin-top: 3px;
+    line-height: 1.4;
+  }
+  .lbt-node.accent { border-top: 3px solid var(--accent); }
+  .lbt-arrow {
+    display: flex;
+    align-items: center;
+    font-family: var(--mono);
+    font-size: 13px;
+    color: var(--text-3);
+    white-space: nowrap;
+  }
+  .lbt-split {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 12px;
+    margin: 14px 0 6px;
+  }
+  .lbt-col {
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: #fff;
+    padding: 12px 12px 8px;
+  }
+  .lbt-col .lbt-node { max-width: none; width: 100%; }
+  .lbt-see {
+    margin: 10px 0 4px;
+    padding-left: 18px;
+  }
+  .lbt-see li {
+    font-size: 13px;
+    color: var(--text-2);
+    margin: 4px 0;
+    line-height: 1.45;
+  }
+  .pool-lead {
+    font-size: 13px;
+    color: var(--text-2);
+    margin: 0 0 12px;
+    line-height: 1.55;
+  }
+  .pool-controls {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 10px;
+  }
+  .pool-field {
+    background: var(--bg-soft);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    padding: 8px 10px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .pool-field input[type="range"] { width: 100%; accent-color: var(--accent); }
+  .pool-k { font-size: 12px; color: var(--text-2); }
+  .pool-v { font-family: var(--mono); font-size: 13px; color: var(--text); }
+  .pool-stats {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 8px;
+    margin: 12px 0;
+  }
+  .pool-stat {
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    padding: 8px;
+    background: #fff;
+  }
+  .pool-stat.is-on {
+    border-color: var(--accent-line);
+    background: var(--accent-soft);
+  }
+  .pool-stat .k {
+    display: block;
+    font-size: 11px;
+    color: var(--text-2);
+    line-height: 1.35;
+  }
+  .pool-stat .n {
+    font-family: var(--mono);
+    font-size: 20px;
+    font-weight: 700;
+    color: var(--text);
+    line-height: 1.2;
+  }
+  .pool-stat .u {
+    font-family: var(--sans);
+    font-size: 11px;
+    font-weight: 500;
+    color: var(--text-3);
+  }
+  .pool-stat .s {
+    display: block;
+    margin-top: 2px;
+    font-size: 11px;
+    color: var(--text-2);
+    line-height: 1.35;
+  }
+  .pool-bars {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    margin-top: 4px;
+  }
+  .pool-meter {
+    display: grid;
+    grid-template-columns: 52px minmax(0, 1fr) 108px;
+    gap: 8px;
+    align-items: center;
+  }
+  .pool-name { font-family: var(--mono); font-size: 12px; color: var(--text); }
+  .pool-track {
+    height: 10px;
+    background: var(--bg-soft);
+    border-radius: 99px;
+    overflow: hidden;
+    border: 1px solid var(--border);
+  }
+  .pool-fill {
+    display: block;
+    height: 100%;
+    width: 0;
+    background: var(--accent);
+  }
+  .pool-meter.is-slow .pool-fill { background: var(--warn); }
+  .pool-ms {
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--text-2);
+    text-align: right;
+  }
+  .pool-actions { margin-top: 10px; }
+  @media (max-width: 720px) {
+    .lbt-split { grid-template-columns: 1fr; }
+    .pool-controls { grid-template-columns: 1fr; }
+    .pool-stats { grid-template-columns: 1fr 1fr; }
+    .pool-meter { grid-template-columns: 40px minmax(0, 1fr) 96px; }
+  }
+</style>
+
+<section id="s1">
+  <div class="sec-head">
+    <span class="sec-num">01</span>
+    <h2>一個請求如何被分到某一台後端</h2>
+  </div>
+  <p class="sec-sub">負載平衡解決的是「多台都能做這件事時，這一筆該進哪一台」，不是 API 該長什麼樣。</p>
+  <p>一台機器的 CPU、連線數或記憶體先到頂時，垂直加大規格有上限，也有單點。水平擴展是再放幾台做同一件事的後端。客戶端不該自己寫死 IP：那一台死了，所有人都跟著失敗；那一台比較閒，也沒有人知道。負載平衡器站在客戶端與後端池之間，對每一筆新工作選一台<b>目前被認為健康</b>的後端，並在後端增減時讓呼叫端不用改設定。</p>
+  <div class="lbt-row">
+    <div class="lbt-node">
+      <div class="nn">Client</div>
+      <div class="ns">只認得平衡器的位址</div>
+    </div>
+    <span class="lbt-arrow">▸</span>
+    <div class="lbt-node">
+      <div class="nn">DNS</div>
+      <div class="ns">把名字解成平衡器位址</div>
+    </div>
+    <span class="lbt-arrow">▸</span>
+    <div class="lbt-node accent">
+      <div class="nn">Load Balancer</div>
+      <div class="ns">在健康後端裡選一台</div>
+    </div>
+    <span class="lbt-arrow">▸</span>
+    <div class="lbt-node">
+      <div class="nn">Backend</div>
+      <div class="ns">真正執行請求</div>
+    </div>
+  </div>
+  <p class="cap">客戶端的設定裡通常只有平衡器。後端 IP 可以換、可以增減，只要平衡器的目標群組跟著更新。</p>
+  <p>這條路徑上有三個容易混在一起的角色。應用程式處理業務。負載平衡器決定<b>同一服務的哪一台複本</b>接到這一筆。API Gateway 決定<b>哪一個服務、哪一版契約、要不要先認證</b>。路由規則與認證留給 API Gateway 與反向代理。這篇只處理複本之間的分配、健康檢查，以及平衡器自己怎麼不變成單點。</p>
+  <p>面試時先把決策拆成兩層，後面兩節各自展開。第一層是平衡器看得到封包的哪一段：只看到 TCP／UDP 的五元組，還是已經終止連線、看得到 HTTP。第二層是在看得到的資訊上用哪一種分配規則。規則選錯時，後端規格再齊，慢的那一台仍會把尾延遲拉上去。健康檢查通常只會把「沒回應」的摘掉，不會把「還在回 200、只是很慢」的摘掉。</p>
+  <div class="oneliner">
+    <b>一句話答法</b>負載平衡是在一組等價後端之間為每一筆工作選一台，並把不健康的排除；它不決定 API 契約，也不取代業務服務。
+  </div>
+</section>
+
+<section id="s2">
+  <div class="sec-head">
+    <span class="sec-num">02</span>
+    <h2>L4 與 L7 各自能做的決策</h2>
+  </div>
+  <p class="sec-sub">看得到的欄位決定了排程能用什麼訊號。AWS 用 NLB 與 ALB 拆開這兩層，GCP 用 passthrough Network Load Balancer 與 Application Load Balancer 對照。</p>
+  <p>L4 平衡器轉送的是連線。它看協議、來源 IP、來源 port、目的 IP、目的 port，用這個五元組做雜湊，讓同一條連線的後續封包回到同一台後端。它不解析 HTTP，因此不能依路徑或標頭把請求分到不同的目標群組，也不能在同一條連線的每個請求上重選後端。L7 平衡器終止客戶端連線（HTTPS 時也終止 TLS），讀到請求列與標頭之後，再替這一筆向後端另開或復用連線。</p>
+  <div class="lbt-split">
+    <div class="lbt-col">
+      <div class="lbt-node">
+        <div class="nn">L4 · 連線</div>
+        <div class="ns">五元組雜湊，連線期間不改道</div>
+      </div>
+      <ul class="lbt-see">
+        <li>看得到協議與兩端的 IP、port</li>
+        <li>看不到 URL、Header、HTTP 方法</li>
+        <li>執行個體目標上可以保留客戶端來源 IP</li>
+        <li>單條長連線的所有請求釘在同一台</li>
+      </ul>
+    </div>
+    <div class="lbt-col">
+      <div class="lbt-node">
+        <div class="nn">L7 · 請求</div>
+        <div class="ns">每個請求都能重選後端</div>
+      </div>
+      <ul class="lbt-see">
+        <li>看得到 Host、路徑、方法與標頭</li>
+        <li>HTTP/1.1 常輪詢；HTTP/2、gRPC 改看未完成請求數</li>
+        <li>來源 IP 變成平衡器的，客戶端 IP 放進轉送標頭</li>
+        <li>同一條連線上的 stream 可以落到不同後端</li>
+      </ul>
+    </div>
+  </div>
+  <p class="cap">左欄的決策在連線建立時做完；右欄的決策可以發生在每一個請求。長連線一多，兩邊的尾延遲會差在這裡。</p>
+  <p>TLS 的分界沿用 HTTP/1.1 與 HTTP/2 那篇的結論就夠：L4 可以在不解密的情況下讀到 ClientHello 裡的 SNI，用來挑憑證或轉送目標；L7 則終止 TLS，看得到明文 HTTP。這篇不再往下拆握手。</p>
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>要比較的點</th>
+          <th>AWS NLB（L4）</th>
+          <th>AWS ALB（L7）</th>
+          <th>GCP 的對照</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>分配單位</td>
+          <td>連線（TCP／UDP／TLS）</td>
+          <td>HTTP／HTTPS／gRPC 請求</td>
+          <td>passthrough NLB 對連線；Application LB 對請求</td>
+        </tr>
+        <tr>
+          <td>預設怎麼選</td>
+          <td>五元組雜湊</td>
+          <td class="hl">HTTP/1.1 輪詢；HTTP/2 與 gRPC 用最少未完成請求</td>
+          <td>passthrough 用雜湊；Application LB 先依 URL map 選後端服務</td>
+        </tr>
+        <tr>
+          <td>位址</td>
+          <td>每個啟用的 AZ 一個可固定的 IP</td>
+          <td>沒有自己的靜態 IP</td>
+          <td>全球外部 Application LB 用 anycast，一個入口</td>
+        </tr>
+        <tr>
+          <td>客戶端 IP</td>
+          <td>打到執行個體目標時保留來源 IP</td>
+          <td>來源變成平衡器，原 IP 在轉送標頭</td>
+          <td>passthrough 保留來源；代理型會改寫</td>
+        </tr>
+        <tr>
+          <td>跨 AZ</td>
+          <td>預設關閉，打開才把連線送到別的 AZ，並產生跨 AZ 流量</td>
+          <td>一律跨 AZ</td>
+          <td>全球 Application LB 本來就跨區域後端；區域型 NLB 預設留在區域內</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="cap">選型先看「決策需要連線還是請求」。需要靜態 IP、極高封包速率、或後端必須看到真實來源 IP 時偏 NLB；需要依請求重新分配、或同一服務上要看 Host／路徑時偏 ALB。URL map 把流量分到不同服務，是閘道的工作，不是這篇的排程。</p>
+  <div class="callout accent">
+    <div class="c-title"><span class="ic">關鍵</span>HTTP/2 不能沿用連線級輪詢</div>
+    <p>HTTP/2 與 gRPC 用一條連線承載很多 stream。平衡器若只在連線建立時選一次後端，這位客戶端之後的請求全部釘在同一台，池子裡其他複本幫不上忙。ALB 對這兩種協議改成最少未完成請求（least outstanding requests）：每一筆請求都看目前誰手上的請求較少。NLB 看不到請求，做不到這件事。</p>
+  </div>
+  <p>長連線還有另一個後果：五元組雜湊在連線活著的時候不會因為後端變慢而改道。連線怎麼排空、目標進入 draining 時已建立的連線還能活多久，是即時連線擴展那篇的範圍。這裡只需記住，L4 的「平衡」發生在新連線，不發生在連線中途。</p>
+  <div class="oneliner">
+    <b>一句話答法</b>L4 用五元組把整條連線釘死，換來源 IP 與高 pps；L7 終止連線後按請求重選，HTTP/2 必須用未完成請求數，否則多路復用會把一個客戶端釘在一台後端上。
+  </div>
+</section>
+
+<section id="s3">
+  <div class="sec-head">
+    <span class="sec-num">03</span>
+    <h2>異質後端時分配演算法怎麼傷到尾延遲</h2>
+  </div>
+  <p class="sec-sub">後端一樣快時，輪詢就夠。有一台變慢、卻還沒被健康檢查摘除時，輪詢會把尾延遲交給那一台。</p>
+  <p>Round Robin 依序把新工作分給下一台，筆數幾乎相同。權重（weighted round-robin）改的是筆數比例：Nginx 的 smooth weighted round-robin 會把高權重的主機散開，而不是一口氣塞完再跳過。權重是設定值，不會因為這台突然變慢而自己下降。最少未完成請求看的是此刻誰手上的請求較少；一台變慢時，它的請求停留更久，計數自然升高，新請求就會避開它。Join-the-Shortest-Queue 是對池子裡每一台取最小。Power of Two Choices 只隨機看兩台，把工作放到這兩台裡負載較低的那台。</p>
+  <div class="formula">d = 2 時，最滿箱子的負載約為 ln ln n / ln 2</div>
+  <p>完全隨機只抽一台時，最滿約是 <var>ln n / ln ln n</var>。多看的那一次抽樣拿走了大部分好處，成本仍是常數。平衡器看得到整個目標群組時，直接做最少未完成請求即可，ALB 在 HTTP/2 就是這樣。客戶端或 sidecar 面對大量 replica、不該每次都詢問全部時，才用兩次抽樣：Envoy 的 <code>least_request</code> 預設 <code>n_choices = 2</code>。一致性雜湊是另一個問題——同一個鍵跨連線都要落到同一台——環與虛擬節點在一致性雜湊那篇，這裡不重推。</p>
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>演算法</th>
+          <th>選擇時看什麼</th>
+          <th>一台變慢但仍回成功</th>
+          <th>常見落點</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>Round Robin</td>
+          <td>輪到誰</td>
+          <td class="hl">慢節點拿到同樣筆數，尾延遲被它綁住</td>
+          <td>ALB 的 HTTP/1.1</td>
+        </tr>
+        <tr>
+          <td>加權輪詢</td>
+          <td>設定的權重</td>
+          <td>權重若跟不上變慢的程度，可以比不加權更差</td>
+          <td>Nginx upstream、ALB 轉送動作上的 target group 權重</td>
+        </tr>
+        <tr>
+          <td>最少未完成請求</td>
+          <td>此刻還沒做完的請求數</td>
+          <td>慢請求佔著名額，新請求自然少給它</td>
+          <td>ALB 的 HTTP/2 與 gRPC</td>
+        </tr>
+        <tr>
+          <td>Power of Two Choices</td>
+          <td>隨機兩台，取負載較低者</td>
+          <td>大叢集上接近全看，觀察成本固定</td>
+          <td>Envoy least_request、Finagle</td>
+        </tr>
+        <tr>
+          <td>五元組雜湊</td>
+          <td>連線的五元組</td>
+          <td>這條連線不會改道，慢就慢到連線結束</td>
+          <td>NLB、GCP passthrough Network LB</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="cap">健康檢查通過、只是變慢的後端，五元組雜湊與 Round Robin 都不會少分給它。少分給它的是「看負載」的那一列，不是「看設定」的那一列。</p>
+  <div class="callout warn">
+    <div class="c-title"><span class="ic">陷阱</span>權重跟著規格走，不跟著速度走</div>
+    <p>機器比較大就給比較高的權重，這句只在它比較快時成立。規格大但正在 GC、磁碟打滿或鎖競爭的節點，權重越高，分到的筆數越多，尾延遲比 Round Robin 更糟。權重補的是已知的容量差，補不了健康檢查還沒判死的那一段延遲。</p>
+  </div>
+
+  <div class="demo" id="pool-demo">
+    <div class="demo-bar">
+      <span class="label">互動 · 一台變慢之後的尾延遲</span>
+      <span class="label" style="text-transform:none;font-family:var(--sans);font-size:12px;color:var(--text-2)">拖動倍數、權重與筆數，數字會重算</span>
+    </div>
+    <div class="demo-body">
+      <p class="pool-lead">六台後端同時在服務。A 是慢節點，B 到 F 每次服務 5 ms。請求每隔 2 ms 到一筆，而且每一筆都能改派——這是 L7 或客戶端平衡，不是 NLB 的五元組。尾延遲是這一批裡最慢那一筆的等待加服務時間。長條是目前這一種演算法下，各台自己的峰值延遲。</p>
+      <div class="pool-controls">
+        <label class="pool-field" for="pool-slow">
+          <span class="pool-k">慢節點相對其餘節點的倍數</span>
+          <input id="pool-slow" type="range" min="1" max="12" step="1" value="4">
+          <span class="pool-v" id="pool-slow-val">4× · 20 ms</span>
+        </label>
+        <label class="pool-field" for="pool-weight">
+          <span class="pool-k">慢節點權重，其餘五台固定為 4</span>
+          <input id="pool-weight" type="range" min="1" max="8" step="1" value="1">
+          <span class="pool-v" id="pool-weight-val">1 : 4</span>
+        </label>
+        <label class="pool-field" for="pool-arrivals">
+          <span class="pool-k">這一批請求數</span>
+          <input id="pool-arrivals" type="range" min="48" max="360" step="24" value="120">
+          <span class="pool-v" id="pool-arrivals-val">120 筆</span>
+        </label>
+      </div>
+      <div class="seg" role="group" aria-label="長條圖顯示哪一種分配">
+        <button type="button" data-view="rr" aria-pressed="false">Round Robin</button>
+        <button type="button" data-view="wrr" aria-pressed="false">加權</button>
+        <button type="button" data-view="p2c" aria-pressed="true">兩次抽樣</button>
+        <button type="button" data-view="jsq" aria-pressed="false">全看</button>
+      </div>
+      <div class="pool-stats">
+        <div class="pool-stat" id="pool-stat-rr">
+          <span class="k">Round Robin 尾延遲</span>
+          <span class="n" id="pool-rr-tail">0</span><span class="u"> ms</span>
+          <span class="s" id="pool-rr-sub"></span>
+        </div>
+        <div class="pool-stat" id="pool-stat-wrr">
+          <span class="k">加權尾延遲</span>
+          <span class="n" id="pool-wrr-tail">0</span><span class="u"> ms</span>
+          <span class="s" id="pool-wrr-sub"></span>
+        </div>
+        <div class="pool-stat is-on" id="pool-stat-p2c">
+          <span class="k">兩次抽樣尾延遲</span>
+          <span class="n" id="pool-p2c-tail">0</span><span class="u"> ms</span>
+          <span class="s" id="pool-p2c-sub"></span>
+        </div>
+        <div class="pool-stat" id="pool-stat-jsq">
+          <span class="k">全看最短佇列尾延遲</span>
+          <span class="n" id="pool-jsq-tail">0</span><span class="u"> ms</span>
+          <span class="s" id="pool-jsq-sub"></span>
+        </div>
+      </div>
+      <div class="legend">
+        <span><i class="dot ns-lock"></i>A · 慢節點的峰值</span>
+        <span><i class="dot ns-wait"></i>其餘後端的峰值</span>
+      </div>
+      <div class="pool-bars">
+        <div class="pool-meter is-slow">
+          <span class="pool-name">A</span>
+          <span class="pool-track"><span class="pool-fill" id="pool-fill-0"></span></span>
+          <span class="pool-ms" id="pool-ms-0">0</span>
+        </div>
+        <div class="pool-meter">
+          <span class="pool-name">B</span>
+          <span class="pool-track"><span class="pool-fill" id="pool-fill-1"></span></span>
+          <span class="pool-ms" id="pool-ms-1">0</span>
+        </div>
+        <div class="pool-meter">
+          <span class="pool-name">C</span>
+          <span class="pool-track"><span class="pool-fill" id="pool-fill-2"></span></span>
+          <span class="pool-ms" id="pool-ms-2">0</span>
+        </div>
+        <div class="pool-meter">
+          <span class="pool-name">D</span>
+          <span class="pool-track"><span class="pool-fill" id="pool-fill-3"></span></span>
+          <span class="pool-ms" id="pool-ms-3">0</span>
+        </div>
+        <div class="pool-meter">
+          <span class="pool-name">E</span>
+          <span class="pool-track"><span class="pool-fill" id="pool-fill-4"></span></span>
+          <span class="pool-ms" id="pool-ms-4">0</span>
+        </div>
+        <div class="pool-meter">
+          <span class="pool-name">F</span>
+          <span class="pool-track"><span class="pool-fill" id="pool-fill-5"></span></span>
+          <span class="pool-ms" id="pool-ms-5">0</span>
+        </div>
+      </div>
+      <div class="status-line" id="pool-status"></div>
+      <div class="pool-actions">
+        <button type="button" class="btn" id="pool-reset">重置</button>
+      </div>
+    </div>
+  </div>
+  <p class="cap">預設倍數 4、慢節點權重 1、120 筆時，Round Robin 的尾延遲會遠高於兩次抽樣。把權重拉到 8，加權會反過來比 Round Robin 更差。六台很少，所以兩次抽樣和全看常常一樣；叢集變大時，全看的成本才會逼你改抽兩台。</p>
+  <div class="callout accent">
+    <div class="c-title"><span class="ic">關鍵</span>兩次抽樣在小池子裡看起來「沒有比全看好」</div>
+    <p>模擬只有六台，隨機兩台很容易就包含較空的那台，尾延遲會和把六台都看過幾乎相同。這是規模，不是公式失效。<var>ln ln n</var> 的優勢在上百台、而且觀察每一台都要付網路成本時才明顯。中央平衡器付得起全看；客戶端平衡通常付不起。</p>
+  </div>
+  <div class="oneliner">
+    <b>一句話答法</b>後端速度不同時，輪詢把同樣筆數送給慢節點，尾延遲被它決定；看未完成工作或只抽兩台取較空者，會少分給它。權重是靜態的，設反了比不加重更糟。
+  </div>
+</section>
+
+<section id="s4">
+  <div class="sec-head">
+    <span class="sec-num">04</span>
+    <h2>健康檢查，以及平衡器自己的單點</h2>
+  </div>
+  <p class="sec-sub">檢查回答的是「還通不通」。平衡器若只有一台，後端池再健康，入口死了全部請求都進不來。</p>
+  <p>主動健康檢查由平衡器週期性探測目標：TCP 能否握手，或 HTTP 是否回期望的狀態碼。連續失敗達到不健康門檻就停止送新工作；連續成功達到健康門檻才加回。被動檢查則是看真實流量的連續錯誤（Envoy 的 outlier detection），不必乾等下一輪探測。AWS 的目標群組以主動檢查為主。</p>
+  <div class="formula">T<sub>detect</sub> ≈ unhealthy threshold × interval</div>
+  <p>Application Load Balancer 目標群組的常見預設是間隔 30 秒、連續失敗 2 次摘除、連續成功 5 次才加回。偵測窗口大約一分鐘，恢復比摘除更慢，這是故意的：剛恢復的節點不要立刻吃回全部流量。NLB 的 TCP 檢查逾時通常比 HTTP 長，門檻不要照抄 ALB 的數字，以那個目標群組的現值為準。摘除之後，已經接上的請求還能做完的時間是 deregistration delay（目標群組預設常常是 300 秒）。長連線怎麼排空見即時連線擴展。</p>
+  <pre class="mermaid">
+sequenceDiagram
+  participant LB as 平衡器
+  participant T as 後端
+  LB->>T: 主動探測
+  T--xLB: 逾時
+  Note over LB: 失敗計數加一
+  LB->>LB: 達門檻就摘除
+  LB->>T: 間隔後再探
+  T-->>LB: 回應成功
+  LB->>LB: 達門檻就加回
+  </pre>
+  <p class="cap">摘除與加回都看連續次數，不看單一次。中間那台後端在被摘除期間不再收到新請求，但探測仍繼續打。</p>
+  <div class="callout warn">
+    <div class="c-title"><span class="ic">陷阱</span>把檢查調到跟 SLO 一樣敏感</div>
+    <p>不健康門檻設成 1、間隔設成 1 秒，一次 GC pause 就會摘除節點。剩下的節點瞬間變忙，它們的檢查也開始逾時，摘除會連鎖。慢但仍回 200 的節點不該用縮短 timeout 來「判死」——檢查回答的是失敗，第 3 節的排程才回答慢。真的要依延遲摘除，得另做延遲異常的門檻，並且加回要慢、要抖動，避免所有客戶端同一秒湧回。</p>
+  </div>
+  <p>平衡器自己的可用性分兩種做法。託管服務把資料面鋪在你啟用的每個可用區：NLB 每個 AZ 一個 IP，DNS 回多筆位址；某一區的節點故障時，還握著那個 IP 的客戶端會失敗，必須改連另一個位址。這段重試屬於逾時、重試與退避，不是把 NLB 再做成主備兩台虛擬 IP 就結束。ALB 的 DNS 回的是 AWS 持有的位址，位址會變、TTL 短，客戶端同樣要能重連。自建單台 HAProxy 或 Nginx 則是真的單點：要嘛兩台加 VRRP，要嘛前面再放一層會做健康檢查的 DNS／anycast。控制面短暫故障時，既有連線多半還在；新目標註冊與健康狀態的更新會停，這和資料面整台消失不是同一種事故。</p>
+  <p>跨 AZ 是流量與故障域的交換。NLB 預設不跨 AZ：一個 AZ 的目標少，打到該 AZ IP 的連線就集中在較少的目標上，單機更熱，但流量不跨區計費。打開跨 AZ 後負載較勻，跨區流量要付錢，而且一個 AZ 的目標故障時另一個 AZ 會立刻多接。ALB 沒有這個開關，一律跨 AZ。目標群組若只放在一個 AZ，多 AZ 的平衡器仍然是單邊後端，入口的冗餘是假的。</p>
+  <div class="oneliner">
+    <b>一句話答法</b>健康檢查用連續失敗次數乘上間隔換偵測時間，門檻太低會連鎖摘除；託管平衡器的單點在「客戶端握著一個已經死掉的 AZ 位址」，自建單行程式才是整台入口只有一個行程。
+  </div>
+</section>
+
+<section id="s5">
+  <div class="sec-head">
+    <span class="sec-num">05</span>
+    <h2>客戶端平衡，以及不該放進平衡器的事</h2>
+  </div>
+  <p class="sec-sub">呼叫端自己選複本可以少一跳，但每個客戶端只看得到自己的視角。業務路由與認證不應因此塞進平衡器。</p>
+  <p>客戶端平衡把第 3 節的選擇搬進呼叫端或旁邊的 sidecar。服務發現（Cloud Map、DNS、或控制面下發的端點清單）告訴它目前有哪些複本，它再用最少未完成請求或兩次抽樣挑一台。少掉集中式代理的那一跳，也少一個必須容量規劃的入口。代價是視角不完整：每個客戶端的未完成請求數只統計自己發出的連線，叢集的真實負載它看不到，容易一起湧向剛恢復、看起來最空的那台。端點清單若靠 DNS，TTL 內仍會打到已摘除的 IP。清單要嘛短 TTL 加客戶端重試，要嘛改由會推送健康狀態的控制面更新。</p>
+  <p>Mesh sidecar 在這個題目裡就是貼在行程旁的客戶端平衡器。私有 CA、SPIFFE、mTLS 屬於服務間安全，不要在選複本的時候一併設計信任域。</p>
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>面試官問</th>
+          <th>先給的取捨</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>什麼時候用 NLB，不使用 ALB？</td>
+          <td>要靜態 IP、保留來源 IP、非 HTTP、或連線速率高到不想解析請求。不要用它做路徑路由。</td>
+        </tr>
+        <tr>
+          <td>HTTP/2 為什麼不能 Round Robin？</td>
+          <td>輪詢若發生在連線上，一條連線的所有 stream 釘死一台。要在請求層做最少未完成請求。</td>
+        </tr>
+        <tr>
+          <td>一台變慢但健康檢查是綠的？</td>
+          <td>檢查只看通不通。改看負載的排程，或另做延遲摘除；不要把探測 timeout 縮到 SLO。</td>
+        </tr>
+        <tr>
+          <td>平衡器掛了怎麼辦？</td>
+          <td>託管的資料面在多個 AZ。客戶端要能換掉失敗的位址。自建則不要只留一個行程。</td>
+        </tr>
+        <tr>
+          <td>權重怎麼設？</td>
+          <td>對已知的容量差設權重。權重不會跟著瞬間延遲走；設反了比 Round Robin 更糟。</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="cap">這五題都落在「連線還是請求、筆數還是負載、通不通還是慢不慢」。認證、配額與多服務編排不在表裡。</p>
+  <p>不該放進負載平衡器的，是會讓它變成業務系統的那一層：依身分決定能不能呼叫、把多個後端的回應組裝成一個 API、依租戶做配額。配額的演算法在限流演算法。契約與版本在 API 設計風格與演進。這些放進平衡器之後，每一次規則變更都要動資料面，故障域也從「某一台複本」變成「所有服務的入口」。</p>
+  <div class="oneliner">
+    <b>一句話答法</b>客戶端平衡用服務發現加本地的兩次抽樣或最少未完成請求，省下一跳，但每個客戶端只有局部負載；集中式 L4／L7 平衡器只負責等價複本的選擇與健康，認證與多服務路由留給閘道。
+  </div>
+</section>
