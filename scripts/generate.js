@@ -17,7 +17,7 @@
  *   drafts/<topic-id>/script.html    - Optional extra scripts (injected into SCRIPT_PLACEHOLDER)
  *
  * Output:
- *   books/<topic-id>/index.html      - the assembled topic page
+ *   books/<topic-id>/index.html      - the assembled topic page (--topic injected into TOPIC_ID_PLACEHOLDER)
  *   docs/completed.json              - upserted (auto-maintained, do not hand-edit)
  *   books/index.html                 - re-rendered handbook index
  *
@@ -152,7 +152,7 @@ function main() {
   }
 
   // ---- 階段一：純計算 (不落任何檔) ----
-  const pageHtml = assemblePageHtml(template, { title, tocHtml, content, script });
+  const pageHtml = assemblePageHtml(template, { topicId, title, tocHtml, content, script });
 
   const today = new Date().toISOString().slice(0, 10);
   const prevCompleted = loadCompleted();
