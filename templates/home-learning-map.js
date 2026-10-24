@@ -294,12 +294,11 @@
   }
 
   function topicItem(topic, rank) {
-    const read = topic.completed && isRead(topic.id);
     const children = [h('span', { className: 'lm-rank', text: String(rank) }), dot(topic)];
     if (topic.completed && topic.path) {
       children.push(h('a', { href: topic.path, text: topic.title }));
       children.push(readToggleBtn(topic));
-      return h('li', { className: read ? 'is-read' : null, dataset: { topicId: topic.id } }, children);
+      return h('li', null, children);
     }
     children.push(h('span', { text: topic.title }));
     children.push(h('em', { className: 'lm-pending-tag', text: PENDING_LABEL }));
@@ -497,11 +496,6 @@
       if (topic && topic.completed) {
         dotEl.classList.toggle('is-read', isRead(id));
       }
-    });
-
-    root.querySelectorAll('li[data-topic-id]').forEach((li) => {
-      const id = li.dataset.topicId;
-      li.classList.toggle('is-read', isRead(id));
     });
 
     root.querySelectorAll('[data-toggle-topic]').forEach((btn) => {

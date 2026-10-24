@@ -61,7 +61,7 @@ function renderTopicItem(topic, rank, options = {}) {
   const dot = `<i class="lm-dot ${topic.completed ? 'is-published' : 'is-pending'}" data-topic-dot="${id}" aria-hidden="true"></i>`;
   const tabindex = options.unfocusable ? ' tabindex="-1"' : '';
   if (topic.completed && topic.path) {
-    return `<li data-topic-id="${id}">${rankHtml}${dot}<a href="${escapeHtml(topic.path)}"${tabindex}>${title}</a><button type="button" class="lm-read-toggle" data-toggle-topic="${id}" aria-pressed="false" aria-label="標記為已讀：「${title}」"${tabindex}>標記已讀</button></li>`;
+    return `<li>${rankHtml}${dot}<a href="${escapeHtml(topic.path)}"${tabindex}>${title}</a><button type="button" class="lm-read-toggle" data-toggle-topic="${id}" aria-pressed="false" aria-label="標記為已讀：「${title}」"${tabindex}>標記已讀</button></li>`;
   }
   return `<li class="is-pending">${rankHtml}${dot}<span>${title}</span><em class="lm-pending-tag">${PENDING_LABEL}</em></li>`;
 }
@@ -185,7 +185,7 @@ function recentTopics(model) {
 function renderPanel(model) {
   const recent = recentTopics(model);
   const recentHtml = recent.length
-    ? `<ol class="lm-recent">${recent.map((topic) => `<li data-topic-id="${escapeHtml(topic.id)}"><div class="lm-recent-row"><a href="${escapeHtml(topic.path)}">${escapeHtml(topic.title)}</a><button type="button" class="lm-read-toggle" data-toggle-topic="${escapeHtml(topic.id)}" aria-pressed="false" aria-label="標記為已讀：「${escapeHtml(topic.title)}」">標記已讀</button></div><span class="lm-recent-meta">${escapeHtml(topic.category)} · ${escapeHtml(topic.completed_at || 'N/A')}</span></li>`).join('')}</ol>`
+    ? `<ol class="lm-recent">${recent.map((topic) => `<li><div class="lm-recent-row"><a href="${escapeHtml(topic.path)}">${escapeHtml(topic.title)}</a><button type="button" class="lm-read-toggle" data-toggle-topic="${escapeHtml(topic.id)}" aria-pressed="false" aria-label="標記為已讀：「${escapeHtml(topic.title)}」">標記已讀</button></div><span class="lm-recent-meta">${escapeHtml(topic.category)} · ${escapeHtml(topic.completed_at || 'N/A')}</span></li>`).join('')}</ol>`
     : '<p class="lm-hint">尚無已發布文章。</p>';
   return `<aside id="lm-panel" class="lm-panel" aria-labelledby="lm-panel-title">
           <p class="lm-kicker">Learning Path</p>
