@@ -53,14 +53,15 @@ function buildModel(payload) {
 
 // ---- 共用片段 ----------------------------------------------------------------
 
-/** 文章一列：已發布 = 連結；準備中 = 純文字 + 標籤。`tabindex` 供 hover 清單用（鍵盤使用者改走面板）。 */
+/** 文章一列：已發布 = 連結 + 已讀切換鈕；準備中 = 純文字 + 標籤。`tabindex` 供 hover 清單用（鍵盤使用者改走面板）。 */
 function renderTopicItem(topic, rank, options = {}) {
+  const id = escapeHtml(topic.id);
   const title = escapeHtml(topic.title || topic.id);
   const rankHtml = rank ? `<span class="lm-rank">${rank}</span>` : '';
-  const dot = `<i class="lm-dot ${topic.completed ? 'is-published' : 'is-pending'}" aria-hidden="true"></i>`;
+  const dot = `<i class="lm-dot ${topic.completed ? 'is-published' : 'is-pending'}" data-topic-dot="${id}" aria-hidden="true"></i>`;
   const tabindex = options.unfocusable ? ' tabindex="-1"' : '';
   if (topic.completed && topic.path) {
-    return `<li>${rankHtml}${dot}<a href="${escapeHtml(topic.path)}"${tabindex}>${title}</a></li>`;
+    return `<li data-topic-id="${id}">${rankHtml}${dot}<a href="${escapeHtml(topic.path)}"${tabindex}>${title}</a><button type="button" class="lm-read-toggle" data-toggle-topic="${id}" aria-pressed="false" aria-label="標記為已讀：「${title}」"${tabindex}>標記已讀</button></li>`;
   }
   return `<li class="is-pending">${rankHtml}${dot}<span>${title}</span><em class="lm-pending-tag">${PENDING_LABEL}</em></li>`;
 }
@@ -78,11 +79,11 @@ function renderHeader(model) {
         <div class="lm-head-text">
           <p class="lm-kicker">Learning Map</p>
           <h2 id="learning-map-heading" class="lm-title">系統設計知識地圖</h2>
-          <p class="lm-desc">每張卡片是一個分類，點點是分類內的文章；箭頭是分類之間的先備關係。點選卡片，面板會列出它的學習路徑與閱讀順序；滑鼠移到卡片上可直接看到文章標題。</p>
+          <p class="lm-desc">每張卡片是一個分類，點點是分類內的文章（實心＝已讀、空心實線＝已發布未讀、虛線＝準備中）；箭頭是分類之間的先備關係。點選卡片可檢視學習路徑，在清單或文章內皆可標記已讀。</p>
         </div>
         <div class="lm-stats">
-          <p class="lm-stats-line"><span class="lm-stats-label">${PUBLISHED_LABEL}</span><span class="lm-stats-num">${published}</span><span class="lm-stats-total">/ ${total}</span></p>
-          <div class="lm-progress" role="progressbar" aria-label="整體發布進度" aria-valuemin="0" aria-valuemax="${total}" aria-valuenow="${published}"><span style="width: ${pct}%"></span></div>
+          <p class="lm-stats-line"><span id="lm-read-stat" class="lm-stats-read" hidden><span class="lm-stats-label">已讀</span><span id="lm-read-num" class="lm-stats-read-num">0</span><span class="lm-stats-sep">·</span></span><span class="lm-stats-label">${PUBLISHED_LABEL}</span><span class="lm-stats-num">${published}</span><span class="lm-stats-total">/ ${total}</span></p>
+          <div class="lm-progress" role="progressbar" aria-label="整體發布與閱讀進度" aria-valuemin="0" aria-valuemax="${total}" aria-valuenow="${published}" aria-valuetext="已發布 ${published} / ${total} 篇"><span style="width: ${pct}%"></span><span id="lm-read-progress" class="lm-progress-read" style="width: 0%"></span></div>
         </div>
       </div>`;
 }
@@ -97,7 +98,8 @@ function renderToolbar(model) {
           <ul class="lm-legend" aria-label="圖例">
             ${domainItems}
             <li class="lm-legend-sep" aria-hidden="true"></li>
-            <li><i class="lm-dot is-published" aria-hidden="true"></i>${PUBLISHED_LABEL}</li>
+            <li><i class="lm-dot is-read" aria-hidden="true"></i>已讀</li>
+            <li><i class="lm-dot is-published" aria-hidden="true"></i>${PUBLISHED_LABEL}（未讀）</li>
             <li><i class="lm-dot is-pending" aria-hidden="true"></i>${PENDING_LABEL}</li>
           </ul>
           <button type="button" id="lm-clear" class="lm-clear" hidden>清除選取</button>
@@ -130,7 +132,7 @@ function renderCard(model, category) {
   const topics = categoryTopics(model, category);
   const name = escapeHtml(category.name);
   const dots = topics
-    .map((topic) => `<i class="lm-dot ${topic.completed ? 'is-published' : 'is-pending'}" title="${escapeHtml(topic.title)}"></i>`)
+    .map((topic) => `<i class="lm-dot ${topic.completed ? 'is-published' : 'is-pending'}" data-topic-dot="${escapeHtml(topic.id)}" title="${escapeHtml(topic.title)}"></i>`)
     .join('');
   const popItems = topics.map((topic, index) => renderTopicItem(topic, index + 1, { unfocusable: true })).join('');
   const popSide = box.pop === 'above' ? 'lm-pop-above' : 'lm-pop-below';
@@ -183,7 +185,7 @@ function recentTopics(model) {
 function renderPanel(model) {
   const recent = recentTopics(model);
   const recentHtml = recent.length
-    ? `<ol class="lm-recent">${recent.map((topic) => `<li><a href="${escapeHtml(topic.path)}">${escapeHtml(topic.title)}</a><span class="lm-recent-meta">${escapeHtml(topic.category)} · ${escapeHtml(topic.completed_at || 'N/A')}</span></li>`).join('')}</ol>`
+    ? `<ol class="lm-recent">${recent.map((topic) => `<li data-topic-id="${escapeHtml(topic.id)}"><div class="lm-recent-row"><a href="${escapeHtml(topic.path)}">${escapeHtml(topic.title)}</a><button type="button" class="lm-read-toggle" data-toggle-topic="${escapeHtml(topic.id)}" aria-pressed="false" aria-label="標記為已讀：「${escapeHtml(topic.title)}」">標記已讀</button></div><span class="lm-recent-meta">${escapeHtml(topic.category)} · ${escapeHtml(topic.completed_at || 'N/A')}</span></li>`).join('')}</ol>`
     : '<p class="lm-hint">尚無已發布文章。</p>';
   return `<aside id="lm-panel" class="lm-panel" aria-labelledby="lm-panel-title">
           <p class="lm-kicker">Learning Path</p>
@@ -218,7 +220,7 @@ function renderMobileList(model) {
     .map((group) => {
       const details = group.members.map((category) => {
         const items = categoryTopics(model, category).map((topic, index) => renderTopicItem(topic, index + 1)).join('');
-        return `<details class="lm-mobile-cat" data-domain="${escapeHtml(category.domain)}">
+        return `<details class="lm-mobile-cat" data-mobile-cat="${escapeHtml(category.id)}" data-domain="${escapeHtml(category.domain)}">
               <summary><i class="lm-legend-swatch" aria-hidden="true"></i><span class="lm-mobile-name">${escapeHtml(category.name)}</span><span class="lm-mobile-count">${category.published}/${category.total}</span></summary>
               <ol class="lm-topic-list">${items}</ol>
             </details>`;

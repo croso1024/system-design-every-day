@@ -107,7 +107,7 @@ function main() {
     }
 
     const relativeOutputPath = path.posix.join('books', item.id, 'index.html');
-    const html = assemblePageHtml(template, { title: item.title, tocHtml, content, script });
+    const html = assemblePageHtml(template, { topicId: item.id, title: item.title, tocHtml, content, script });
     plans.push({
       id: item.id,
       title: item.title,

@@ -5,7 +5,7 @@
  *
  * 由 generate.js（發佈）與 rebuild-all.js（全站重建）共用：
  *   - buildTocHtml：掃描 content 章節、產生左側 Auto-TOC。
- *   - assemblePageHtml：把 title / toc / content / script 逐字注入 templates/base.html。
+ *   - assemblePageHtml：把 topicId / title / toc / content / script 逐字注入 templates/base.html。
  *
  * 「逐字注入、零轉換」是本專案內容流水線的核心不變量：draft + 模板決定產物的每一個位元組。
  * 章節掃描 regex 只定義在這裡。
@@ -54,12 +54,14 @@ function buildTocHtml(content) {
 }
 
 /**
- * 將各區塊逐字注入模板：title 全域替換並 escape；toc、content 逐字注入；script 非空時前後各補一個換行。
+ * 將各區塊逐字注入模板：topicId（<body data-topic-id>，文章頁已讀狀態的 key）與 title 全域替換並 escape；
+ * toc、content 逐字注入；script 非空時前後各補一個換行。
  * replacement 一律用函式形式：字串形式會把內容裡的 `$'`、`$&`、`$$` 等當成替換樣式展開（JS 字串裡的 `$` 很常見）。
  * tocHtml 由呼叫端先算好傳入，讓呼叫端能在落檔前先做 TOC 守門。
  */
-function assemblePageHtml(template, { title, tocHtml, content, script }) {
+function assemblePageHtml(template, { topicId, title, tocHtml, content, script }) {
   return template
+    .replace(/<!-- TOPIC_ID_PLACEHOLDER -->/g, () => escapeHtml(topicId || ''))
     .replace(/<!-- TITLE_PLACEHOLDER -->/g, () => escapeHtml(title))
     .replace('<!-- TOC_PLACEHOLDER -->', () => tocHtml)
     .replace('<!-- CONTENT_PLACEHOLDER -->', () => content)
