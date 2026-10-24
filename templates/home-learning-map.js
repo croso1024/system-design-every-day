@@ -115,6 +115,7 @@
   // ---- DOM ----
   const el = {
     clear: document.getElementById('lm-clear'),
+    clearRead: document.getElementById('lm-clear-read'),
     panelDefault: document.getElementById('lm-panel-default'),
     panelSelected: document.getElementById('lm-panel-selected'),
     live: document.getElementById('lm-live'),
@@ -482,6 +483,7 @@
     });
 
     if (el.readStat) el.readStat.hidden = false;
+    if (el.clearRead) el.clearRead.hidden = totalRead === 0;
     if (el.readNum) el.readNum.textContent = String(totalRead);
     if (el.readProgress) {
       const readPct = totalTopics ? Math.round((totalRead / totalTopics) * 1000) / 10 : 0;
@@ -567,6 +569,16 @@
     announce(`${topic.title}：${nowRead ? '已標記為已讀' : '已取消已讀'}。`);
   }
 
+  /** 清空全部已讀紀錄。寫入空的 envelope（而非 removeItem），新的 updatedAt 才能蓋過 file:// 下 window.name 的舊紀錄。 */
+  function clearAllRead() {
+    const count = (payload.topics || []).filter((t) => t.completed && isRead(t.id)).length;
+    if (!window.confirm(`確定要清除全部 ${count} 篇的已讀紀錄嗎？此動作無法復原。`)) return;
+    saveReadMap({});
+    applyReadState();
+    if (el.clear && !el.clear.hidden) el.clear.focus();
+    announce('已清除全部已讀紀錄。');
+  }
+
   // ---- 事件 ----
 
   el.cards.forEach((entry, id) => {
@@ -574,6 +586,9 @@
   });
   if (el.clear) {
     el.clear.addEventListener('click', () => clearSelection({ announce: true, restoreFocus: true }));
+  }
+  if (el.clearRead) {
+    el.clearRead.addEventListener('click', clearAllRead);
   }
   root.addEventListener('click', (event) => {
     const btn = event.target.closest('[data-toggle-topic]');

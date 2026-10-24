@@ -102,7 +102,10 @@ function renderToolbar(model) {
             <li><i class="lm-dot is-published" aria-hidden="true"></i>${PUBLISHED_LABEL}（未讀）</li>
             <li><i class="lm-dot is-pending" aria-hidden="true"></i>${PENDING_LABEL}</li>
           </ul>
-          <button type="button" id="lm-clear" class="lm-clear" hidden>清除選取</button>
+          <div class="lm-toolbar-actions">
+            <button type="button" id="lm-clear" class="lm-clear" hidden>清除選取</button>
+            <button type="button" id="lm-clear-read" class="lm-clear-read" hidden>清除已讀</button>
+          </div>
         </div>`;
 }
 
