@@ -1,0 +1,438 @@
+<script>
+(function () {
+  "use strict";
+
+  /* (1) 常數與參數表。牌價：us-east-1、Linux on-demand。 */
+  var MONTH_H = 730;
+  var MONTH_S = 730 * 3600;
+  var LAMBDA_REQ = 0.20 / 1e6;
+  var LAMBDA_GBS = 0.0000166667;
+  var LAMBDA_MAX_MS = 900000;
+  var FREE_REQ = 1000000;
+  var FREE_GBS = 400000;
+  var FG_VCPU_H = 0.04048;
+  var FG_GB_H = 0.004445;
+  var FG_MIN_S = 60;
+  var EC2_H = 0.096;
+  var EC2_VCPU = 2;
+  var GPU_H = 1.006;
+  var GPU_VCPU = 4;
+  var UTIL = 0.6;
+  var CONNS_PER_VCPU = 2500;
+  var BOOT_S = 45;
+  var BAND = 1.15;
+
+  var SHAPE = {
+    rpc: { busyMs: 80, cpuShare: 0.25, memMb: 256, holdSec: 0 },
+    job: { busyMs: 1200000, cpuShare: 0.85, memMb: 3008, holdSec: 0 },
+    socket: { busyMs: 30, cpuShare: 0.05, memMb: 128, holdSec: 1800 }
+  };
+
+  var LOAD = {
+    sparse: {
+      rpc: { reqMonth: 8000, peakRps: 1, isolated: 1 },
+      job: { reqMonth: 40, peakRps: 0.0004, isolated: 1 },
+      socket: { avgConns: 4, peakConns: 4, isolated: 1 }
+    },
+    diurnal: {
+      rpc: { avgRps: 20, peakRps: 80, duty: 0.25 },
+      job: { reqMonth: 900, peakRps: 0.004, duty: 0.35 },
+      socket: { avgConns: 120, peakConns: 500 }
+    },
+    flat: {
+      rpc: { avgRps: 150, peakRps: 165, duty: 1 },
+      job: { reqMonth: 1460, peakRps: 0.0008, duty: 1 },
+      socket: { avgConns: 8000, peakConns: 8000 }
+    }
+  };
+
+  /* 陣列愈前面愈想要。0 VM、1 編排、2 Fargate、3 FaaS。 */
+  var PREFER = {
+    runtime: [3, 2, 1, 0],
+    cluster: [1, 2, 0, 3],
+    machine: [0, 1, 2, 3]
+  };
+
+  function shapeOf(name) {
+    return SHAPE[name] || SHAPE.rpc;
+  }
+
+  function loadOf(pattern, shapeName) {
+    var row = LOAD[pattern] || LOAD.diurnal;
+    var cell = row[shapeName] || row.rpc;
+    var out = {
+      isolated: cell.isolated ? 1 : 0,
+      peakRps: cell.peakRps || 0,
+      avgRps: cell.avgRps,
+      duty: cell.duty,
+      reqMonth: cell.reqMonth,
+      avgConns: cell.avgConns || 0,
+      peakConns: cell.peakConns || 0
+    };
+    if (out.reqMonth == null && out.avgRps != null) out.reqMonth = out.avgRps * MONTH_S;
+    return out;
+  }
+
+  function billedMs(shape) {
+    return shape.holdSec > 0 ? shape.holdSec * 1000 : shape.busyMs;
+  }
+
+  function faasBlock(shape, gpu) {
+    if (gpu) return 2;
+    if (billedMs(shape) > LAMBDA_MAX_MS) return 1;
+    if (shape.memMb > 10240) return 3;
+    return 0;
+  }
+
+  function faasOpen(shape, gpu) {
+    return faasBlock(shape, gpu) === 0 ? 1 : 0;
+  }
+
+  function ec2Unit(gpu) {
+    if (gpu) return { hourly: GPU_H, vcpu: GPU_VCPU, conns: 8000 };
+    return { hourly: EC2_H, vcpu: EC2_VCPU, conns: 5000 };
+  }
+
+  function unitsForRps(rps, shape, gpu) {
+    if (!(rps > 0)) return 0;
+    var unit = ec2Unit(gpu);
+    var cpuSec = (shape.busyMs / 1000) * shape.cpuShare;
+    var byCpu = Math.ceil((rps * cpuSec / UTIL) / unit.vcpu);
+    var byConn = shape.holdSec > 0 ? Math.ceil((rps * shape.holdSec) / unit.conns) : 0;
+    var byGpu = 0;
+    if (gpu && shape.holdSec === 0) {
+      var per = UTIL / (shape.busyMs / 1000);
+      byGpu = Math.ceil(rps / per);
+    }
+    return Math.max(1, byCpu, byConn, byGpu);
+  }
+
+  function faasRawCost(reqMonth, shape) {
+    var sec = billedMs(shape) / 1000;
+    var memGb = shape.memMb / 1024;
+    var gb = reqMonth * sec * memGb;
+    var billReq = Math.max(0, reqMonth - FREE_REQ);
+    var billGb = Math.max(0, gb - FREE_GBS);
+    return billReq * LAMBDA_REQ + billGb * LAMBDA_GBS;
+  }
+
+  function taskSize(shape) {
+    var gbNeed = shape.memMb / 1024;
+    var vcpuNeed = Math.max(0.25, shape.cpuShare);
+    var vcpu = 0.25;
+    if (vcpuNeed > 0.25 || gbNeed > 2) vcpu = 0.5;
+    if (vcpuNeed > 0.5 || gbNeed > 4) vcpu = 1;
+    if (vcpuNeed > 1 || gbNeed > 8) vcpu = 2;
+    if (vcpuNeed > 2 || gbNeed > 16) vcpu = 4;
+    var gbMax = { 0.25: 2, 0.5: 4, 1: 8, 2: 16, 4: 30 };
+    var gbMin = { 0.25: 0.5, 0.5: 1, 1: 2, 2: 4, 4: 8 };
+    var gb = Math.min(gbMax[vcpu], Math.max(gbMin[vcpu], Math.ceil(gbNeed * 2) / 2));
+    return { vcpu: vcpu, gb: gb };
+  }
+
+  function vmQuote(load, shape, gpu) {
+    var unit = ec2Unit(gpu);
+    if (shape.holdSec > 0) {
+      var peakU = Math.max(1, Math.ceil(load.peakConns / unit.conns));
+      if (load.isolated) return { usd: peakU * unit.hourly * MONTH_H, units: peakU, cycling: 0 };
+      var avgU = Math.max(1, Math.ceil(load.avgConns / unit.conns));
+      var duty = load.peakConns > 0 ? load.avgConns / load.peakConns : 1;
+      var usd = (peakU * duty + avgU * (1 - duty)) * unit.hourly * MONTH_H;
+      return { usd: usd, units: peakU, cycling: 0 };
+    }
+    var units = unitsForRps(Math.max(load.peakRps, 1e-9), shape, gpu);
+    if (load.isolated) {
+      var sec = Math.max(shape.busyMs / 1000 + BOOT_S, 60);
+      var startStop = load.reqMonth * (sec / 3600) * unit.hourly * units;
+      var keep = units * unit.hourly * MONTH_H;
+      if (startStop < keep) return { usd: startStop, units: units, cycling: 1 };
+      return { usd: keep, units: units, cycling: 0 };
+    }
+    var dutyH = load.duty == null ? 1 : load.duty;
+    if (dutyH >= 0.999) return { usd: units * unit.hourly * MONTH_H, units: units, cycling: 0 };
+    var avgRps = load.avgRps != null ? load.avgRps : load.reqMonth / MONTH_S;
+    var valleyRps = (avgRps - dutyH * load.peakRps) / (1 - dutyH);
+    if (valleyRps < 0) valleyRps = 0;
+    var valleyU = valleyRps <= 0.001 ? 0 : unitsForRps(valleyRps, shape, gpu);
+    var blended = (units * dutyH + valleyU * (1 - dutyH)) * unit.hourly * MONTH_H;
+    return { usd: blended, units: units, cycling: 0 };
+  }
+
+  function fgQuote(load, shape) {
+    var task = taskSize(shape);
+    var hourly = task.vcpu * FG_VCPU_H + task.gb * FG_GB_H;
+    if (shape.holdSec > 0) {
+      var cap = Math.max(1, Math.floor(task.vcpu * CONNS_PER_VCPU));
+      var peakT = Math.max(1, Math.ceil(load.peakConns / cap));
+      if (load.isolated) return { usd: hourly * peakT * MONTH_H, tasks: peakT, cycling: 0 };
+      var avgT = Math.max(1, Math.ceil(load.avgConns / cap));
+      var duty = load.peakConns > 0 ? load.avgConns / load.peakConns : 1;
+      var usdHold = (peakT * duty + avgT * (1 - duty)) * hourly * MONTH_H;
+      return { usd: usdHold, tasks: peakT, cycling: 0 };
+    }
+    var cpuSec = (shape.busyMs / 1000) * shape.cpuShare;
+    var rpsPer = (task.vcpu * UTIL) / Math.max(cpuSec, 1e-6);
+    var burstTasks = Math.max(1, Math.ceil(Math.max(load.peakRps, 1e-9) / rpsPer));
+    if (load.isolated) {
+      var sec = Math.max(shape.busyMs / 1000, FG_MIN_S);
+      var cold = load.reqMonth * (sec / 3600) * hourly * burstTasks;
+      var warm = hourly * burstTasks * MONTH_H;
+      if (cold < warm) return { usd: cold, tasks: burstTasks, cycling: 1 };
+      return { usd: warm, tasks: burstTasks, cycling: 0 };
+    }
+    var dutyH = load.duty == null ? 1 : load.duty;
+    var peakT = Math.max(1, Math.ceil(load.peakRps / rpsPer));
+    if (dutyH >= 0.999) return { usd: hourly * peakT * MONTH_H, tasks: peakT, cycling: 0 };
+    var avgRps = load.avgRps != null ? load.avgRps : load.reqMonth / MONTH_S;
+    var valleyRps = (avgRps - dutyH * load.peakRps) / (1 - dutyH);
+    if (valleyRps < 0) valleyRps = 0;
+    var valleyT = valleyRps <= 0.001 ? 0 : Math.max(1, Math.ceil(valleyRps / rpsPer));
+    var blended = (peakT * dutyH + valleyT * (1 - dutyH)) * hourly * MONTH_H;
+    return { usd: blended, tasks: peakT, cycling: 0 };
+  }
+
+  function crossRps(shape, gpu) {
+    if (gpu || !faasOpen(shape, 0)) return -1;
+    var rps;
+    for (rps = 1; rps <= 2000; rps += 1) {
+      var load = {
+        isolated: 0, peakRps: rps, avgRps: rps, duty: 1,
+        reqMonth: rps * MONTH_S, avgConns: 0, peakConns: 0
+      };
+      var fa = faasRawCost(load.reqMonth, shape);
+      var vm = vmQuote(load, shape, 0).usd;
+      if (vm + 0.01 < fa) return rps;
+    }
+    return -1;
+  }
+
+  function round2(n) {
+    return Math.round(n * 100) / 100;
+  }
+
+  function choose(sticker, open, ops) {
+    var prefer = PREFER[ops];
+    var cheapest = -1;
+    var i;
+    for (i = 0; i < 4; i += 1) {
+      if (!open[i]) continue;
+      if (cheapest < 0 || sticker[i] < sticker[cheapest]) cheapest = i;
+    }
+    var band = sticker[cheapest] * BAND;
+    var best = cheapest;
+    for (i = 0; i < 4; i += 1) {
+      if (!open[i]) continue;
+      if (sticker[i] <= band + 1e-9 && prefer.indexOf(i) < prefer.indexOf(best)) best = i;
+    }
+    return {
+      winner: best,
+      cheapest: cheapest,
+      premiumUsd: round2(sticker[best] - sticker[cheapest])
+    };
+  }
+
+  /* (2) compute* 純函式 */
+  // @probe fn       computeSpectrum
+  // @probe baseline {"pattern":"flat","shape":"rpc","gpu":0,"ops":"cluster"}
+  // @probe sweep    {"pattern":["sparse","diurnal"],"shape":["job","socket"],"gpu":[1],"ops":["runtime","machine"]}
+  function computeSpectrum(p) {
+    var shapeName = SHAPE[p.shape] ? p.shape : "rpc";
+    var pattern = LOAD[p.pattern] ? p.pattern : "diurnal";
+    var ops = PREFER[p.ops] ? p.ops : "cluster";
+    var gpu = p.gpu ? 1 : 0;
+    var shape = shapeOf(shapeName);
+    var load = loadOf(pattern, shapeName);
+    var openF = faasOpen(shape, gpu);
+    var openG = gpu ? 0 : 1;
+    var vm = vmQuote(load, shape, gpu);
+    var fg = openG ? fgQuote(load, shape) : { usd: 0, tasks: 0, cycling: 0 };
+    var vmUsd = round2(vm.usd);
+    var fgUsd = openG ? round2(fg.usd) : 0;
+    var faasUsd = openF ? round2(faasRawCost(load.reqMonth, shape)) : 0;
+    var sticker = [vmUsd, vmUsd, fgUsd, faasUsd];
+    var open = [1, 1, openG, openF];
+    var pick = choose(sticker, open, ops);
+    var inflight = shape.holdSec > 0 ? load.peakConns : load.peakRps * (shape.busyMs / 1000);
+    var dutyPct = 0;
+    if (!load.isolated && shape.holdSec === 0 && load.duty != null) dutyPct = Math.round(load.duty * 100);
+    var avgShow = shape.holdSec > 0 ? load.avgConns : (load.avgRps != null ? load.avgRps : 0);
+    var peakShow = shape.holdSec > 0 ? load.peakConns : load.peakRps;
+    return {
+      vmUsd: vmUsd,
+      orchUsd: vmUsd,
+      fgUsd: fgUsd,
+      faasUsd: faasUsd,
+      fgOpen: openG,
+      faasOpen: openF,
+      faasBlock: faasBlock(shape, gpu),
+      vmUnits: vm.units,
+      fgTasks: fg.tasks,
+      vmCycling: vm.cycling,
+      fgCycling: fg.cycling,
+      unitHourly: gpu ? GPU_H : EC2_H,
+      winner: pick.winner,
+      cheapest: pick.cheapest,
+      premiumUsd: pick.premiumUsd,
+      crossRps: crossRps(shape, gpu),
+      reqMonth: Math.round(load.reqMonth || 0),
+      avgShow: Math.round(avgShow * 1000) / 1000,
+      peakShow: Math.round(peakShow * 1000) / 1000,
+      inflight: Math.round(inflight * 10) / 10,
+      holdSec: shape.holdSec,
+      busyMs: shape.busyMs,
+      isolated: load.isolated,
+      dutyPct: dutyPct
+    };
+  }
+
+  /* (3) DOM 參照 */
+  function el(id) { return document.getElementById(id); }
+
+  var patIds = ["cms-pat-sparse", "cms-pat-diurnal", "cms-pat-flat"];
+  var shapeIds = ["cms-sh-rpc", "cms-sh-job", "cms-sh-socket"];
+  var cards = [el("cms-card-0"), el("cms-card-1"), el("cms-card-2"), el("cms-card-3")];
+  var prices = [el("cms-usd-0"), el("cms-usd-1"), el("cms-usd-2"), el("cms-usd-3")];
+  var subs = [el("cms-sub-0"), el("cms-sub-1"), el("cms-sub-2"), el("cms-sub-3")];
+  var factsEl = el("cms-facts");
+  var sayEl = el("cms-say");
+  var gpuEl = el("cms-gpu");
+  var opsEl = el("cms-ops");
+  var resetEl = el("cms-reset");
+
+  var TIER = ["VM", "編排容器", "Fargate", "FaaS"];
+  var state = { pattern: "flat", shape: "rpc", gpu: 0, ops: "cluster" };
+
+  /* (4) render —— 只讀 compute 的結果 */
+  function money(n) {
+    var v = Math.abs(n);
+    var parts = v.toFixed(2).split(".");
+    parts[0] = parts[0].replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+    return (n < 0 ? "-$" : "$") + parts.join(".");
+  }
+
+  function fmtInt(n) {
+    return String(Math.round(n)).replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+  }
+
+  function trimNum(n) {
+    if (Math.abs(n - Math.round(n)) < 0.05) return fmtInt(n);
+    return String(Math.round(n * 10) / 10);
+  }
+
+  function subLine(i, r) {
+    if (i === 3 && !r.faasOpen) {
+      if (r.faasBlock === 2) return "出局：這一格沒有 GPU";
+      if (r.faasBlock === 1) return "出局：單次超過 15 分鐘";
+      return "出局";
+    }
+    if (i === 2 && !r.fgOpen) return "出局：Fargate 沒有 GPU";
+    if (i === 0) {
+      var sku = r.unitHourly > 0.5 ? "g5.xlarge" : "m6i.large";
+      return (r.vmCycling ? "用完即停 · " : "尖峰 ") + r.vmUnits + " 台 " + sku;
+    }
+    if (i === 1) return "與 VM 同一張運算帳單";
+    if (i === 2) {
+      return (r.fgCycling ? "用完即停 · 每次 " : "尖峰 ") + r.fgTasks + " 個任務";
+    }
+    return "請求 + GB·s，已扣免費額度";
+  }
+
+  function factLine(r) {
+    var line;
+    if (r.holdSec > 0) {
+      line = "長連線：尖峰 " + fmtInt(r.peakShow) + " 條、平均 " + fmtInt(r.avgShow) + " 條，握滿 " + fmtInt(r.holdSec / 60) + " 分鐘。";
+    } else if (r.isolated) {
+      line = "這個月 " + fmtInt(r.reqMonth) + " 次，彼此隔開；尖峰同時約 " + trimNum(r.inflight) + " 支在跑。";
+    } else if (r.busyMs >= 600000) {
+      line = "這個月 " + fmtInt(r.reqMonth) + " 次長作業，尖峰同時約 " + trimNum(r.inflight) + " 支。";
+      if (r.dutyPct > 0 && r.dutyPct < 100) line += "尖峰編成約覆蓋 " + r.dutyPct + "% 的時間。";
+    } else {
+      line = "平均 " + trimNum(r.avgShow) + " rps，尖峰 " + trimNum(r.peakShow) + " rps，尖峰同時約 " + trimNum(r.inflight) + " 個請求在飛。";
+      if (r.dutyPct > 0 && r.dutyPct < 100) line += "尖峰編成約覆蓋 " + r.dutyPct + "% 的時間。";
+    }
+    if (r.unitHourly > 0.5) line += " GPU 以 g5.xlarge 計價。";
+    return line;
+  }
+
+  function sayLine(r) {
+    var sticker = [r.vmUsd, r.orchUsd, r.fgUsd, r.faasUsd];
+    var msg = "建議落在" + TIER[r.winner] + "，裸月費 " + money(sticker[r.winner]) + "。";
+    if (r.premiumUsd > 0.009) {
+      msg += "最便宜是 " + TIER[r.cheapest] + " " + money(sticker[r.cheapest]) + "，多付 " + money(r.premiumUsd) + "。這一層在最便宜者的 15% 以內，維運胃口改寫了建議。";
+    } else if (r.winner !== r.cheapest) {
+      msg += "與 " + TIER[r.cheapest] + " 同價，維運胃口在平手時選了這一層。";
+    } else {
+      msg += "它就是裸月費最低的一層。";
+    }
+    if (r.crossRps > 0) {
+      msg += "以這個工作形狀走平穩流量時，Event Functions 大約從 " + r.crossRps + " rps 起會貴過一台起跳的 VM。";
+    }
+    return msg;
+  }
+
+  function render(r) {
+    var sticker = [r.vmUsd, r.orchUsd, r.fgUsd, r.faasUsd];
+    var open = [1, 1, r.fgOpen, r.faasOpen];
+    var i;
+    for (i = 0; i < 4; i += 1) {
+      cards[i].classList.toggle("is-pick", r.winner === i);
+      cards[i].classList.toggle("is-shut", !open[i]);
+      prices[i].textContent = open[i] ? money(sticker[i]) : "—";
+      subs[i].textContent = subLine(i, r);
+    }
+    factsEl.textContent = factLine(r);
+    sayEl.textContent = sayLine(r);
+  }
+
+  function draw() {
+    render(computeSpectrum(state));
+  }
+
+  /* (5) 事件綁定 */
+  function pressOnly(ids, current) {
+    ids.forEach(function (id) {
+      el(id).setAttribute("aria-pressed", id === current ? "true" : "false");
+    });
+  }
+
+  patIds.forEach(function (id) {
+    el(id).addEventListener("click", function () {
+      state.pattern = id.replace("cms-pat-", "");
+      pressOnly(patIds, id);
+      draw();
+    });
+  });
+
+  shapeIds.forEach(function (id) {
+    el(id).addEventListener("click", function () {
+      state.shape = id.replace("cms-sh-", "");
+      pressOnly(shapeIds, id);
+      draw();
+    });
+  });
+
+  gpuEl.addEventListener("change", function () {
+    state.gpu = gpuEl.checked ? 1 : 0;
+    draw();
+  });
+
+  opsEl.addEventListener("change", function () {
+    state.ops = opsEl.value;
+    draw();
+  });
+
+  resetEl.addEventListener("click", function () {
+    state.pattern = "flat";
+    state.shape = "rpc";
+    state.gpu = 0;
+    state.ops = "cluster";
+    pressOnly(patIds, "cms-pat-flat");
+    pressOnly(shapeIds, "cms-sh-rpc");
+    gpuEl.checked = false;
+    opsEl.value = "cluster";
+    draw();
+  });
+
+  draw();
+})();
+</script>

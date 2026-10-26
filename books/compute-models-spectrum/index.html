@@ -1,0 +1,2374 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>運算模型光譜 (EC2 / ECS / Fargate / Lambda) | System Design Every Day</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@300;400;500;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+  <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+  <script>
+    mermaid.initialize({
+      startOnLoad: true,
+      theme: 'default',
+      securityLevel: 'loose'
+    });
+  </script>
+  <style>
+    /* 全站設計 token 的唯一來源。scripts/lib/books.js 會把「第一個 :root 區塊」原樣抽進首頁：
+       請保持單一區塊、區塊內不得出現 `}`；首頁領域色依賴 --accent / --ok / --warn。 */
+    :root {
+      --bg: #ffffff;
+      --bg-soft: #fafaf9;
+      --text: #262a2f;
+      --text-2: #6b7078;
+      --text-3: #9aa0a8;
+      --border: #ecebe8;
+      --border-strong: #dedcd8;
+      --code-bg: #f6f5f3;
+      --accent: #3f6188;
+      --accent-soft: #eef2f7;
+      --accent-line: #cdd9e6;
+      --ok: #4d7d68;
+      --ok-soft: #eef4f1;
+      --warn: #a3743e;
+      --warn-soft: #f6f0e7;
+      --bad: #a8554f;
+      --bad-soft: #f6ecea;
+      --radius: 10px;
+      --radius-sm: 7px;
+      --maxw: 760px;
+      --sans: "Noto Sans TC", system-ui, -apple-system, "Segoe UI", sans-serif;
+      --mono: "JetBrains Mono", "SFMono-Regular", Menlo, Consolas, monospace;
+    }
+
+    /* ---------- base reset ----------
+       等價於 Tailwind preflight 的最小重置（頁面不載入 Tailwind，utility class 不會生效）。
+       文章頁與各篇 demo CSS 都以這組基準值撰寫，改動會讓所有產物的間距、清單、按鈕外觀一起變動。
+       新增規則請一律寫在這個區塊之後，並使用 :root 的 token。 */
+    *, *::before, *::after {
+      box-sizing: border-box;
+      border: 0 solid var(--border);
+    }
+
+    html {
+      line-height: 1.5;
+      -webkit-text-size-adjust: 100%;
+      tab-size: 4;
+    }
+
+    h1, h2, h3, h4, h5, h6 {
+      margin: 0;
+      font-size: inherit;
+      font-weight: inherit;
+    }
+
+    p, blockquote, dl, dd, figure, pre, hr {
+      margin: 0;
+    }
+
+    hr {
+      height: 0;
+      color: inherit;
+      border-top-width: 1px;
+    }
+
+    a {
+      color: inherit;
+      text-decoration: inherit;
+    }
+
+    b, strong {
+      font-weight: bolder;
+    }
+
+    code, kbd, samp, pre {
+      font-family: var(--mono);
+      font-size: 1em;
+    }
+
+    small {
+      font-size: 80%;
+    }
+
+    sub, sup {
+      position: relative;
+      font-size: 75%;
+      line-height: 0;
+      vertical-align: baseline;
+    }
+    sub { bottom: -0.25em; }
+    sup { top: -0.5em; }
+
+    table {
+      border-collapse: collapse;
+      border-color: inherit;
+      text-indent: 0;
+    }
+
+    ol, ul, menu {
+      list-style: none;
+      margin: 0;
+      padding: 0;
+    }
+
+    img, svg, video, canvas, audio, iframe, embed, object {
+      display: block;
+      vertical-align: middle;
+    }
+
+    img, video {
+      max-width: 100%;
+      height: auto;
+    }
+
+    button, input, optgroup, select, textarea {
+      margin: 0;
+      padding: 0;
+      font: inherit;
+      line-height: inherit;
+      color: inherit;
+    }
+
+    button, select {
+      text-transform: none;
+    }
+
+    button, [type="button"], [type="reset"], [type="submit"] {
+      -webkit-appearance: button;
+      background-color: transparent;
+      background-image: none;
+    }
+
+    button, [role="button"] {
+      cursor: pointer;
+    }
+
+    :disabled {
+      cursor: default;
+    }
+
+    input::placeholder, textarea::placeholder {
+      opacity: 1;
+      color: var(--text-3);
+    }
+
+    textarea {
+      resize: vertical;
+    }
+
+    fieldset {
+      margin: 0;
+      padding: 0;
+    }
+
+    legend {
+      padding: 0;
+    }
+
+    summary {
+      display: list-item;
+    }
+
+    [hidden] {
+      display: none;
+    }
+
+    html {
+      scroll-behavior: smooth;
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      html {
+        scroll-behavior: auto;
+      }
+      * {
+        animation-duration: .001ms !important;
+        transition-duration: .001ms !important;
+      }
+    }
+
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font-family: var(--sans);
+      font-weight: 400;
+      font-size: 16px;
+      line-height: 1.78;
+      -webkit-font-smoothing: antialiased;
+      letter-spacing: .005em;
+    }
+
+    ::selection {
+      background: var(--accent-soft);
+    }
+
+    /* ---------- layout ---------- */
+    .wrap {
+      display: flex;
+      max-width: 1180px;
+      margin: 0 auto;
+      gap: 0;
+    }
+
+    .toc {
+      width: 248px;
+      flex: 0 0 248px;
+      position: sticky;
+      top: 0;
+      height: 100vh;
+      padding: 54px 22px 40px 28px;
+      overflow-y: auto;
+      border-right: 1px solid var(--border);
+      transition: width .2s ease, flex-basis .2s ease, padding .2s ease, opacity .15s ease, border-color .15s ease;
+    }
+
+    .toc-kicker {
+      font-family: var(--mono);
+      font-size: 11px;
+      letter-spacing: .14em;
+      text-transform: uppercase;
+      color: var(--text-3);
+      margin-bottom: 20px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+    }
+
+    /* desktop：側欄內收合鈕；≤920px 隱藏，改由 .toc-toggle accordion 控制 */
+    .toc-collapse {
+      display: none;
+      flex: 0 0 auto;
+      align-items: center;
+      justify-content: center;
+      width: 28px;
+      height: 28px;
+      padding: 0;
+      border: none;
+      background: none;
+      border-radius: 6px;
+      color: var(--text-2);
+      line-height: 1;
+      cursor: pointer;
+    }
+
+    .toc-collapse:hover {
+      color: var(--text);
+      background: var(--bg-soft);
+    }
+
+    .toc-collapse:focus-visible {
+      outline: 2px solid var(--accent);
+      outline-offset: 2px;
+    }
+
+    .toc-collapse svg {
+      display: block;
+    }
+
+    /* desktop：側欄收合後的展開鈕（預設隱藏） */
+    .toc-reopen {
+      display: none;
+      position: fixed;
+      top: 18px;
+      left: 18px;
+      z-index: 900;
+      align-items: center;
+      gap: 7px;
+      font-size: 12.5px;
+      line-height: 1;
+      color: var(--text-2);
+      background: var(--bg);
+      border: 1px solid var(--border-strong);
+      border-radius: 999px;
+      padding: 7px 13px 7px 11px;
+      box-shadow: 0 1px 3px rgba(0, 0, 0, .06), 0 4px 12px rgba(0, 0, 0, .04);
+      cursor: pointer;
+      transition: background .15s, border-color .15s, color .15s;
+    }
+
+    .toc-reopen:hover {
+      background: var(--bg-soft);
+      color: var(--text);
+      border-color: var(--text-3);
+    }
+
+    .toc-reopen svg {
+      flex: 0 0 auto;
+      display: block;
+    }
+
+    @media (min-width: 921px) {
+      .toc-collapse {
+        display: inline-flex;
+      }
+
+      body.toc-collapsed .toc {
+        width: 0;
+        flex-basis: 0;
+        padding: 0;
+        opacity: 0;
+        overflow: hidden;
+        border-right-color: transparent;
+        pointer-events: none;
+      }
+
+      body.toc-collapsed .toc-reopen {
+        display: inline-flex;
+      }
+    }
+
+    .toc-kicker a {
+      color: var(--text-3);
+      text-decoration: none;
+      border-bottom: none;
+      transition: color .15s;
+    }
+
+    .toc-kicker a:hover {
+      color: var(--text);
+    }
+
+    .toc-title {
+      font-size: 15px;
+      font-weight: 700;
+      line-height: 1.4;
+      margin: 0 0 12px;
+    }
+
+    .toc-actions {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 8px;
+      margin: 0 0 18px;
+    }
+
+    .read-toggle {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      font-family: var(--sans);
+      font-size: 12.5px;
+      line-height: 1.3;
+      color: var(--text-2);
+      background: var(--bg);
+      border: 1px solid var(--border-strong);
+      border-radius: 999px;
+      padding: 5px 12px 5px 10px;
+      cursor: pointer;
+      transition: background .15s, border-color .15s, color .15s;
+    }
+
+    .read-toggle:hover {
+      background: var(--bg-soft);
+      color: var(--text);
+      border-color: var(--text-3);
+    }
+
+    .read-toggle:focus-visible {
+      outline: 2px solid var(--accent);
+      outline-offset: 2px;
+    }
+
+    .read-toggle[aria-pressed="true"] {
+      background: var(--ok-soft);
+      border-color: var(--ok);
+      color: var(--ok);
+      font-weight: 600;
+    }
+
+    .read-toggle .read-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      border: 1.5px solid currentColor;
+      flex: 0 0 auto;
+    }
+
+    .read-toggle[aria-pressed="true"] .read-dot {
+      background: var(--ok);
+      border-color: var(--ok);
+    }
+
+    .article-foot {
+      margin-top: 56px;
+      padding-top: 24px;
+      border-top: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      flex-wrap: wrap;
+    }
+
+    .article-foot-left {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      flex-wrap: wrap;
+    }
+
+    .article-foot-hint {
+      font-size: 13.5px;
+      color: var(--text-2);
+    }
+
+    .read-toggle.read-toggle-lg {
+      font-size: 13.5px;
+      padding: 7px 16px 7px 13px;
+    }
+
+    .article-foot-back {
+      font-size: 13.5px;
+      color: var(--text-2);
+      border-bottom: 1px solid var(--border-strong);
+    }
+
+    .article-foot-back:hover {
+      color: var(--text);
+      border-color: var(--text);
+    }
+
+    .toc a {
+      display: flex;
+      gap: 10px;
+      align-items: baseline;
+      text-decoration: none;
+      color: var(--text-2);
+      font-size: 13.5px;
+      padding: 6px 10px;
+      border-radius: 6px;
+      line-height: 1.45;
+      transition: background .15s, color .15s;
+      border-bottom: none;
+    }
+
+    .toc a:hover {
+      background: var(--bg-soft);
+      color: var(--text);
+      border-bottom: none;
+    }
+
+    .toc a.active {
+      color: var(--accent);
+      background: var(--accent-soft);
+      font-weight: 500;
+      border-bottom: none;
+    }
+
+    .toc a .n {
+      font-family: var(--mono);
+      font-size: 11px;
+      color: var(--text-3);
+      flex: 0 0 18px;
+    }
+
+    .toc a.active .n {
+      color: var(--accent);
+    }
+
+    main {
+      flex: 1 1 auto;
+      min-width: 0;
+      padding: 0 40px;
+    }
+
+    .inner {
+      max-width: var(--maxw);
+      margin: 0 auto;
+      padding: 72px 0 140px;
+    }
+
+    /* ---------- hero ---------- */
+    .hero {
+      margin-bottom: 64px;
+    }
+
+    .hero .eyebrow {
+      font-family: var(--mono);
+      font-size: 12px;
+      letter-spacing: .16em;
+      text-transform: uppercase;
+      color: var(--accent);
+      margin-bottom: 18px;
+    }
+
+    .hero h1 {
+      font-size: 40px;
+      line-height: 1.18;
+      font-weight: 700;
+      margin: 0 0 18px;
+      letter-spacing: -.01em;
+    }
+
+    .hero .lede {
+      font-size: 18px;
+      line-height: 1.7;
+      color: var(--text-2);
+      font-weight: 300;
+      margin: 0;
+      max-width: 620px;
+    }
+
+    .hero .meta {
+      margin-top: 28px;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+
+    .tag {
+      font-family: var(--mono);
+      font-size: 12px;
+      color: var(--text-2);
+      border: 1px solid var(--border-strong);
+      padding: 4px 11px;
+      border-radius: 999px;
+      background: var(--bg-soft);
+    }
+
+    /* ---------- sections ---------- */
+    section {
+      padding-top: 30px;
+      scroll-margin-top: 24px;
+    }
+
+    .sec-head {
+      display: flex;
+      align-items: baseline;
+      gap: 14px;
+      margin: 0 0 8px;
+    }
+
+    .sec-num {
+      font-family: var(--mono);
+      font-size: 13px;
+      color: var(--text-3);
+      font-weight: 500;
+      padding-top: 6px;
+      flex: 0 0 auto;
+    }
+
+    h2 {
+      font-size: 27px;
+      font-weight: 700;
+      line-height: 1.3;
+      margin: 0;
+      letter-spacing: -.01em;
+    }
+
+    .sec-sub {
+      color: var(--text-2);
+      font-size: 15px;
+      margin: 2px 0 28px 0;
+      font-weight: 300;
+    }
+
+    h3 {
+      font-size: 18.5px;
+      font-weight: 700;
+      margin: 38px 0 12px;
+      line-height: 1.45;
+    }
+
+    h4 {
+      font-size: 15.5px;
+      font-weight: 700;
+      margin: 26px 0 8px;
+      color: var(--text);
+    }
+
+    p {
+      margin: 0 0 16px;
+    }
+
+    a {
+      color: var(--accent);
+      text-decoration: none;
+      border-bottom: 1px solid var(--accent-line);
+      transition: border-color .15s;
+    }
+
+    a:hover {
+      border-color: var(--accent);
+    }
+
+    strong {
+      font-weight: 700;
+    }
+
+    em {
+      font-style: normal;
+      background: var(--accent-soft);
+      padding: 0 4px;
+      border-radius: 4px;
+      font-weight: 500;
+      color: #2f4d6e;
+    }
+
+    hr.div {
+      border: none;
+      border-top: 1px solid var(--border);
+      margin: 46px 0;
+    }
+
+    ul, ol {
+      margin: 0 0 18px;
+      padding-left: 22px;
+    }
+
+    li {
+      margin: 7px 0;
+      padding-left: 4px;
+    }
+
+    code {
+      font-family: var(--mono);
+      font-size: .86em;
+      background: var(--code-bg);
+      padding: 2px 6px;
+      border-radius: 5px;
+      color: #43494f;
+    }
+
+    pre {
+      background: var(--code-bg);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 16px 18px;
+      overflow-x: auto;
+      margin: 0 0 20px;
+      line-height: 1.6;
+    }
+
+    pre code {
+      background: none;
+      padding: 0;
+      font-size: 13px;
+    }
+
+    /* ---------- math notation ---------- */
+    /* 行內數學變數，如 W、R、N。本站不載入 MathJax/KaTeX，請勿使用 $...$ 或 \[...\] LaTeX 分隔符。 */
+    var {
+      font-family: var(--mono);
+      font-style: normal;
+      font-weight: 500;
+      color: var(--accent);
+    }
+
+    /* 區塊數學公式，置中等寬呈現，記得將 > < & 轉義為 &gt; &lt; &amp;。 */
+    .formula {
+      font-family: var(--mono);
+      font-size: 15px;
+      text-align: center;
+      background: var(--bg-soft);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      padding: 14px 18px;
+      margin: 0 0 20px;
+      color: var(--text);
+      letter-spacing: .03em;
+      overflow-x: auto;
+    }
+
+    /* ---------- callouts ---------- */
+    .callout {
+      border: 1px solid var(--border);
+      border-left: 3px solid var(--border-strong);
+      background: var(--bg-soft);
+      border-radius: var(--radius-sm);
+      padding: 15px 18px;
+      margin: 0 0 22px;
+      font-size: 14.5px;
+    }
+
+    .callout .c-title {
+      font-weight: 700;
+      font-size: 13px;
+      letter-spacing: .02em;
+      margin-bottom: 5px;
+      display: flex;
+      gap: 7px;
+      align-items: center;
+    }
+
+    .callout p:last-child {
+      margin-bottom: 0;
+    }
+
+    .callout.accent {
+      border-left-color: var(--accent);
+      background: var(--accent-soft);
+    }
+
+    .callout.accent .c-title {
+      color: #2f4d6e;
+    }
+
+    .callout.warn {
+      border-left-color: var(--warn);
+      background: var(--warn-soft);
+    }
+
+    .callout.warn .c-title {
+      color: var(--warn);
+    }
+
+    .callout .ic {
+      font-family: var(--mono);
+      font-size: 11px;
+      border: 1px solid currentColor;
+      border-radius: 4px;
+      padding: 0 4px;
+      line-height: 1.5;
+      opacity: .8;
+    }
+
+    .oneliner {
+      border: 1px dashed var(--accent-line);
+      border-radius: var(--radius-sm);
+      padding: 13px 16px;
+      margin: 0 0 22px;
+      font-size: 14.5px;
+      background: #fbfcfd;
+    }
+
+    .oneliner b {
+      font-family: var(--mono);
+      font-size: 11px;
+      letter-spacing: .08em;
+      color: var(--accent);
+      display: block;
+      margin-bottom: 4px;
+      text-transform: uppercase;
+    }
+
+    /* ---------- tables ---------- */
+    .tbl-wrap {
+      overflow-x: auto;
+      margin: 0 0 24px;
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+    }
+
+    table {
+      border-collapse: collapse;
+      width: 100%;
+      font-size: 14px;
+      min-width: 520px;
+    }
+
+    th, td {
+      text-align: left;
+      padding: 11px 14px;
+      border-bottom: 1px solid var(--border);
+      vertical-align: top;
+    }
+
+    th {
+      font-weight: 700;
+      background: var(--bg-soft);
+      font-size: 12.5px;
+      letter-spacing: .02em;
+      color: var(--text-2);
+      position: sticky;
+      top: 0;
+    }
+
+    tr:last-child td {
+      border-bottom: none;
+    }
+
+    td.hl {
+      background: var(--accent-soft);
+    }
+
+    .cap {
+      font-size: 12.5px;
+      color: var(--text-3);
+      margin: -12px 0 26px;
+      font-family: var(--mono);
+    }
+
+    /* ---------- interactive shell ---------- */
+    .demo {
+      border: 1px solid var(--border-strong);
+      border-radius: var(--radius);
+      background: var(--bg);
+      margin: 24px 0 26px;
+      overflow: hidden;
+    }
+
+    .demo-bar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      flex-wrap: wrap;
+      padding: 13px 16px;
+      border-bottom: 1px solid var(--border);
+      background: var(--bg-soft);
+    }
+
+    .demo-bar .label {
+      font-family: var(--mono);
+      font-size: 11px;
+      letter-spacing: .1em;
+      text-transform: uppercase;
+      color: var(--text-3);
+    }
+
+    .demo-body {
+      padding: 20px 18px;
+    }
+
+    .seg {
+      display: inline-flex;
+      border: 1px solid var(--border-strong);
+      border-radius: 999px;
+      overflow: hidden;
+      background: var(--bg);
+    }
+
+    .seg button {
+      border: none;
+      background: none;
+      font-family: var(--sans);
+      font-size: 12.5px;
+      color: var(--text-2);
+      padding: 6px 14px;
+      cursor: pointer;
+      transition: background .15s, color .15s;
+    }
+
+    .seg button:hover {
+      color: var(--text);
+    }
+
+    .seg button[aria-pressed="true"] {
+      background: var(--accent);
+      color: #fff;
+    }
+
+    .btn {
+      font-family: var(--sans);
+      font-size: 13px;
+      border: 1px solid var(--border-strong);
+      background: var(--bg);
+      color: var(--text);
+      padding: 7px 16px;
+      border-radius: 7px;
+      cursor: pointer;
+      transition: background .15s, border-color .15s;
+    }
+
+    .btn:hover {
+      background: var(--bg-soft);
+      border-color: var(--text-3);
+    }
+
+    .btn.primary {
+      background: var(--accent);
+      color: #fff;
+      border-color: var(--accent);
+    }
+
+    .btn.primary:hover {
+      background: #365578;
+    }
+
+    .btn:disabled {
+      opacity: .4;
+      cursor: not-allowed;
+    }
+
+    .btn:focus-visible, .seg button:focus-visible, .toc a:focus-visible, a:focus-visible,
+    summary:focus-visible {
+      outline: 2px solid var(--accent);
+      outline-offset: 2px;
+      border-radius: 4px;
+    }
+
+    .status-line {
+      font-size: 13.5px;
+      color: var(--text-2);
+      min-height: 42px;
+      margin-top: 14px;
+      background: var(--bg-soft);
+      border-radius: var(--radius-sm);
+      padding: 10px 13px;
+      border: 1px solid var(--border);
+    }
+
+    .status-line b {
+      color: var(--text);
+    }
+
+    .legend {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 14px;
+      font-size: 11.5px;
+      color: var(--text-2);
+      margin-top: 14px;
+      font-family: var(--mono);
+    }
+
+    .legend span {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .dot {
+      width: 9px;
+      height: 9px;
+      border-radius: 3px;
+      display: inline-block;
+      border: 1px solid rgba(0, 0, 0, .08);
+    }
+
+    /* node states used across diagrams */
+    .ns-idle {
+      background: #fff;
+      border-color: var(--border-strong);
+    }
+
+    .ns-lock {
+      background: var(--warn-soft);
+      border-color: var(--warn);
+    }
+
+    .ns-ok {
+      background: var(--ok-soft);
+      border-color: var(--ok);
+    }
+
+    .ns-bad {
+      background: var(--bad-soft);
+      border-color: var(--bad);
+    }
+
+    .ns-wait {
+      background: var(--accent-soft);
+      border-color: var(--accent);
+    }
+
+    /* FAQ */
+    details.faq {
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      margin-bottom: 10px;
+      background: #fff;
+      overflow: hidden;
+    }
+
+    details.faq summary {
+      cursor: pointer;
+      padding: 14px 16px;
+      font-weight: 600;
+      font-size: 14.5px;
+      list-style: none;
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      align-items: center;
+    }
+
+    details.faq summary::-webkit-details-marker {
+      display: none;
+    }
+
+    details.faq summary .q {
+      font-family: var(--mono);
+      font-size: 11px;
+      color: var(--accent);
+      flex: 0 0 auto;
+    }
+
+    details.faq summary .chev {
+      transition: transform .2s;
+      color: var(--text-3);
+      flex: 0 0 auto;
+      font-size: 13px;
+    }
+
+    details.faq[open] summary .chev {
+      transform: rotate(90deg);
+    }
+
+    details.faq .ans {
+      padding: 0 16px 16px;
+      font-size: 14px;
+      color: var(--text-2);
+    }
+
+    details.faq .ans p {
+      margin: 0 0 10px;
+    }
+
+    details.faq .ans p:last-child {
+      margin: 0;
+    }
+
+    .trap {
+      display: flex;
+      gap: 10px;
+      font-size: 14px;
+      margin: 9px 0;
+    }
+
+    .trap .tn {
+      font-family: var(--mono);
+      font-size: 11px;
+      color: var(--bad);
+      flex: 0 0 auto;
+      border: 1px solid var(--bad-soft);
+      background: var(--bad-soft);
+      border-radius: 4px;
+      padding: 1px 6px;
+      height: fit-content;
+      margin-top: 2px;
+    }
+
+    /* mobile responsive */
+    .toc-toggle {
+      display: none;
+    }
+
+    @media (max-width: 920px) {
+      .wrap {
+        flex-direction: column;
+      }
+      .toc {
+        position: static;
+        width: auto;
+        height: auto;
+        border-right: none;
+        border-bottom: 1px solid var(--border);
+        padding: 18px 22px;
+        transition: none;
+      }
+      .toc-title {
+        margin-bottom: 0;
+      }
+      .toc-actions {
+        margin: 10px 0 0;
+      }
+      .toc-kicker {
+        margin-bottom: 10px;
+      }
+      .toc-nav {
+        display: none;
+        margin-top: 16px;
+      }
+      .toc-nav.open {
+        display: block;
+      }
+      .toc-toggle {
+        display: inline-block;
+        margin-top: 0;
+      }
+      .toc-collapse,
+      .toc-reopen {
+        display: none !important;
+      }
+      main {
+        padding: 0 22px;
+      }
+      .inner {
+        padding: 40px 0 100px;
+      }
+      .hero h1 {
+        font-size: 31px;
+      }
+    }
+
+    @media print {
+      .toc-reopen { display: none !important; }
+    }
+
+    @media (max-width: 480px) {
+      body {
+        font-size: 15px;
+      }
+      .hero h1 {
+        font-size: 27px;
+      }
+      h2 {
+        font-size: 23px;
+      }
+      .demo-body {
+        padding: 16px 13px;
+      }
+    }
+  </style>
+</head>
+<body data-topic-id="compute-models-spectrum">
+  <div class="wrap">
+    <!-- ===================== TOC SIDEBAR ===================== -->
+    <nav class="toc" id="toc-panel" aria-label="目錄">
+      <div class="toc-kicker">
+        <a href="../index.html">← 返回目錄</a>
+        <button class="toc-collapse" type="button" aria-expanded="true" aria-controls="toc-panel"
+                aria-label="收合目錄" title="收合目錄">
+          <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor"
+               stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M15 18l-6-6 6-6"/>
+          </svg>
+        </button>
+      </div>
+      <div class="toc-title">運算模型光譜 (EC2 / ECS / Fargate / Lambda)</div>
+      <div class="toc-actions">
+        <button class="read-toggle" type="button" data-read-toggle aria-pressed="false" title="切換本文已讀狀態">
+          <span class="read-dot" aria-hidden="true"></span>
+          <span class="read-label">標記為已讀</span>
+        </button>
+        <button class="btn toc-toggle" type="button" aria-expanded="false" aria-controls="toc-nav">目錄 ▾</button>
+      </div>
+      <div class="toc-nav" id="toc-nav">
+        <a href="#s1"><span class="n">01</span>四個刻度，一條光譜</a>
+        <a href="#s2"><span class="n">02</span>三道會直接出局的限制</a>
+        <a href="#s3"><span class="n">03</span>裸月費，與那台還沒填滿的機器</a>
+        <a href="#s4"><span class="n">04</span>四題決定落在哪一格</a>
+        <a href="#s5"><span class="n">05</span>面試時按這個順序說</a>
+      </div>
+    </nav>
+    <button class="btn toc-reopen" type="button" aria-expanded="true" aria-controls="toc-panel"
+            aria-label="展開目錄" title="展開目錄">
+      <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor"
+           stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M9 18l6-6-6-6"/>
+      </svg>
+      <span>目錄</span>
+    </button>
+
+    <!-- ===================== MAIN CONTENT ===================== -->
+    <main>
+      <div class="inner">
+        <!-- demo-archetype: E｜決策器 — 讀者用流量形狀、工作形狀、是否要 GPU、維運胃口四題，得到四層裸月費、硬性出局與建議層。選這個形式是因為本篇要回答一份工作負載該落在光譜的哪一層；交叉點由同一條月費式子算出來。最近三篇已占用時序推進、並排對照與參數掃描。 -->
+<style>
+  .cms-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    align-items: stretch;
+    justify-content: center;
+    margin: 14px 0 6px;
+  }
+  .cms-node {
+    border: 1px solid var(--border-strong);
+    border-radius: 8px;
+    background: #fff;
+    padding: 10px 12px;
+    min-width: 110px;
+    max-width: 200px;
+    text-align: center;
+  }
+  .cms-node .nn {
+    font-family: var(--mono);
+    font-size: 12px;
+    font-weight: 700;
+    color: var(--text);
+  }
+  .cms-node .ns {
+    font-size: 11px;
+    color: var(--text-2);
+    margin-top: 3px;
+    line-height: 1.4;
+  }
+  .cms-node.accent { border-top: 3px solid var(--accent); }
+  .cms-arrow {
+    display: flex;
+    align-items: center;
+    font-family: var(--mono);
+    font-size: 13px;
+    color: var(--text-3);
+    white-space: nowrap;
+  }
+  .cms-lead {
+    font-size: 13px;
+    color: var(--text-2);
+    line-height: 1.55;
+    margin: 0 0 12px;
+  }
+  .cms-ask {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 12px 16px;
+    margin-bottom: 12px;
+  }
+  .cms-field {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    font-size: 12px;
+    font-weight: 700;
+    color: var(--text-2);
+  }
+  .cms-field select {
+    font-family: var(--sans);
+    font-size: 13px;
+    font-weight: 400;
+    color: var(--text);
+    background: #fff;
+    border: 1px solid var(--border-strong);
+    border-radius: 8px;
+    padding: 6px 8px;
+  }
+  .cms-check {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 13px;
+    font-weight: 400;
+    color: var(--text);
+    min-height: 34px;
+  }
+  .cms-facts {
+    font-family: var(--mono);
+    font-size: 12px;
+    line-height: 1.5;
+    color: var(--text-2);
+    background: var(--bg-soft);
+    border-radius: 8px;
+    padding: 8px 10px;
+    margin: 0 0 12px;
+  }
+  .cms-board {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 8px;
+  }
+  .cms-card {
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: #fff;
+    padding: 10px;
+    min-height: 112px;
+  }
+  .cms-card.is-pick {
+    border-color: var(--ok);
+    background: var(--ok-soft);
+    box-shadow: inset 0 3px 0 var(--ok);
+  }
+  .cms-card.is-shut { opacity: 0.48; }
+  .cms-k {
+    font-size: 12px;
+    font-weight: 700;
+    color: var(--text);
+    line-height: 1.35;
+  }
+  .cms-k span {
+    display: block;
+    font-weight: 400;
+    color: var(--text-3);
+    font-size: 11px;
+  }
+  .cms-price {
+    font-family: var(--mono);
+    font-size: 18px;
+    color: var(--text);
+    margin: 8px 0 4px;
+  }
+  .cms-sub {
+    font-size: 11px;
+    line-height: 1.45;
+    color: var(--text-2);
+    margin: 0;
+  }
+  @media (max-width: 720px) {
+    .cms-ask, .cms-board { grid-template-columns: 1fr 1fr; }
+  }
+</style>
+
+<section id="s1">
+  <div class="sec-head">
+    <span class="sec-num">01</span>
+    <h2>四個刻度，一條光譜</h2>
+  </div>
+  <p class="sec-sub">行程要活在哪一層抽象上：誰開機、誰打補丁、誰把下一份副本拉起來。</p>
+  <p>負載平衡決定一個請求落進哪一個行程。這篇問的是那個行程本身怎麼存在。VM、容器編排、Serverless 容器、FaaS 不是四個互不相關的產品名，而是同一條光譜上的四個刻度：愈往右，你交出的責任愈多，計費單位也從「機器開著的鐘點」收成「這次呼叫真正佔用的時間」。</p>
+  <div class="cms-row">
+    <div class="cms-node">
+      <div class="nn">VM</div>
+      <div class="ns">EC2 / Compute Engine<br>OS 與擴縮都是你的</div>
+    </div>
+    <span class="cms-arrow">──少管一層──▸</span>
+    <div class="cms-node">
+      <div class="nn">編排容器</div>
+      <div class="ns">ECS on EC2 / EKS / GKE<br>期望狀態交給控制迴圈</div>
+    </div>
+    <span class="cms-arrow">──少管一層──▸</span>
+    <div class="cms-node accent">
+      <div class="nn">Serverless 容器</div>
+      <div class="ns">Fargate / Cloud Run<br>不養機器，任務還在</div>
+    </div>
+    <span class="cms-arrow">──少管一層──▸</span>
+    <div class="cms-node">
+      <div class="nn">FaaS</div>
+      <div class="ns">Lambda / Cloud Run functions<br>呼叫結束，環境可收掉</div>
+    </div>
+  </div>
+  <p class="cap">由左往右讀：你交出的是開機、打補丁與擴縮，不是把業務邏輯交出去。四格都還是在跑你的程式。</p>
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>刻度</th>
+          <th>AWS</th>
+          <th>GCP</th>
+          <th>你仍要負責</th>
+          <th>計費單位</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>VM</td>
+          <td>EC2</td>
+          <td>Compute Engine</td>
+          <td>OS、runtime、擴縮、行程</td>
+          <td>實例開著的時間</td>
+        </tr>
+        <tr>
+          <td>編排容器</td>
+          <td>ECS on EC2、EKS</td>
+          <td>GKE</td>
+          <td>映像、探測、期望副本數</td>
+          <td>仍是節點的實例時間；EKS / GKE 另有控制平面</td>
+        </tr>
+        <tr>
+          <td>Serverless 容器</td>
+          <td>Fargate</td>
+          <td>Cloud Run</td>
+          <td>映像與並行度</td>
+          <td>任務配置的 vCPU 與記憶體，乘上任務活著的時間</td>
+        </tr>
+        <tr>
+          <td>FaaS</td>
+          <td>Lambda</td>
+          <td>Cloud Run functions</td>
+          <td>函式與設定</td>
+          <td>請求，加上執行時間（怎麼量時間，見第 3 節）</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="cap">GCP 的 Cloud Run 用計費開關就能站在兩個刻度上：request-based 只在處理請求時算 CPU，instance-based 則在實例活著的整段時間算 CPU。AWS 要換刻度，通常是換服務。</p>
+  <p>擴縮的時間尺度也沿著這條光譜變短。FaaS 的新並發是秒級，但頂在帳號配額上。Fargate 要先拉映像，計費還有 1 分鐘的最低額。EC2 自動擴縮群組要經過開機與行程暖機，是分鐘級。那個有延遲的回授迴圈——指標、冷卻、暖機缺口——是自動擴縮那篇的主題。這裡只把時間尺度當成選型限制：撐不住一分鐘冷啟動的路徑，就不要把「縮到零」當成免費的選項。</p>
+  <div class="callout warn">
+    <div class="c-title"><span class="ic">陷阱</span>Lambda 這個詞有兩套意思</div>
+    <p>AWS Lambda 是這條光譜右端的 FaaS。串流處理裡的 Lambda Architecture 是「批次層加快取層」的資料架構，兩者沒有繼承關係。面試時把高流量 API 答成 Lambda Architecture，等於換了一題。</p>
+  </div>
+  <div class="oneliner">
+    <b>一句話答法</b>運算模型是一條責任光譜：愈往 FaaS，你愈不用管機器，計費也愈接近「這次呼叫本身」；編排並沒有離開 VM 的計費單位。
+  </div>
+</section>
+
+<section id="s2">
+  <div class="sec-head">
+    <span class="sec-num">02</span>
+    <h2>三道會直接出局的限制</h2>
+  </div>
+  <p class="sec-sub">先問這一層跑不跑得了。跑不了的月費是 0 不是便宜，是沒有這一格。</p>
+  <p>第 4 節的決策器先做這三道淘汰，再比較錢。三道都對著 FaaS，其中 GPU 同時淘汰 Fargate。編排與 VM 在這三道裡都還有格位，因為加速器與長時間行程最終都是放在機器上。</p>
+  <h3>單次執行時間</h3>
+  <p>Lambda Event Functions 的單次執行上限是 15 分鐘。第 4 節裡的長作業設成 20 分鐘、3,008 MB：記憶體還在 128 MB–10,240 MB 的範圍內，長度已經出局。Durable Functions 讓等待可以暫停、等待期間的 on-demand 執行不再累 duration，一段連續運算仍要切在單次上限裡面。怎麼切、cold start 與並發配額怎麼算，是 Serverless FaaS 深入那篇的範圍。</p>
+  <h3>長連線</h3>
+  <p>Event Functions 按 wall-clock 收 GB·s。連線若握在同一次呼叫裡，等候的每一秒都在計費，而且 30 分鐘的連線直接超過 15 分鐘。Web Functions 是另一個計價點：請求、程式真正佔用的 vCPU、以及執行環境活著期間的記憶體。定價頁上的串流例子是一條連線開 3 秒、其中 200 ms 在用 CPU，同一個環境可以同時服務多條，所以等候不再按 wall-clock 的 CPU 計價。幾萬條幾乎閒置的連線仍然需要一個一直活著的環境來握著 socket。那個環境是 VM 或編排節點上的行程，不是「一條連線換一次 Event Function 呼叫」。</p>
+  <h3>GPU</h3>
+  <p>Lambda 的 Event Functions、Web Functions、MicroVMs，公開計價的維度是請求、vCPU、記憶體與快照，沒有 GPU。Fargate 的文件寫明 GPU 與 Inferentia 目前都不可用。推論要加速器，就回到掛得上 GPU 的機器：EC2、ECS on EC2、EKS 節點，或 ECS Managed Instances。這篇的模型用 <var>g5.xlarge</var>（1×A10G、4 vCPU、16 GiB），us-east-1 on-demand 每小時 $1.006，開滿一個月 $734.38。</p>
+  <p>這一句不能推到整個「Serverless 容器」刻度。Cloud Run 可以掛 L4 或 RTX PRO 6000，必須改成 instance-based 計費，實例仍可縮到零，文件寫的啟動時間大約 5 秒。Fargate 沒有 GPU，不代表這一格的每一家都沒有。</p>
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>限制</th>
+          <th>FaaS（Event Functions）</th>
+          <th>Fargate</th>
+          <th>VM / 編排節點</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>單次長度</td>
+          <td class="hl">15 分鐘上限</td>
+          <td>任務可跑到你停掉它</td>
+          <td>實例可一直開著</td>
+        </tr>
+        <tr>
+          <td>長連線</td>
+          <td>wall-clock 全計；Web Functions 改收 active CPU，環境仍要活著</td>
+          <td>任務活著就付配置</td>
+          <td>一個行程握很多條連線</td>
+        </tr>
+        <tr>
+          <td>GPU</td>
+          <td class="hl">沒有這一格</td>
+          <td class="hl">沒有這一格</td>
+          <td>EC2 / 節點可掛；Cloud Run 另有 GPU 實例</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="cap">出局看的是「這一格的計價與配額裡有沒有你要的資源」，不是這個品牌聽起來像不像 Serverless。</p>
+  <div class="callout warn">
+    <div class="c-title"><span class="ic">陷阱</span>「Lambda 不能做長連線」已經說得太滿</div>
+    <p>Event Functions 把等候算進 GB·s，長連線又撞上 15 分鐘，這句在那個計價點上仍然成立。Web Functions 的帳單按 active CPU 與環境記憶體拆開，短串流是它自己的定價例子。該淘汰的是「一條閒置連線占用一次 wall-clock 呼叫」，不是 Lambda 這個產品名下的每一種計費。</p>
+  </div>
+  <div class="oneliner">
+    <b>一句話答法</b>超過 15 分鐘的連續運算、以及要 GPU 的推論，在 Lambda Event Functions 與 Fargate 上沒有格位；長連線則要先問你買的是 wall-clock 還是 active CPU。
+  </div>
+</section>
+
+<section id="s3">
+  <div class="sec-head">
+    <span class="sec-num">03</span>
+    <h2>裸月費，與那台還沒填滿的機器</h2>
+  </div>
+  <p class="sec-sub">交叉點不是某個 rps 之後 FaaS 單價突然改寫，是水平的實例月費被填滿之後，wall-clock 仍比較貴。</p>
+  <p>下面的數字鎖在撰稿當下的公開牌價：us-east-1、Linux、on-demand。不含 Savings Plans、資料傳輸、EBS、負載平衡器。FaaS 用 Lambda Event Functions 的 x86 第一級——每百萬次請求 $0.20、每 GB·s $0.0000166667——每月先扣 100 萬次與 40 萬 GB·s。單一架構、單一區域的 duration 超過約 60 億 GB·s 會進下一級，這條模型沒有算到那裡。Fargate 用 Linux/x86：每 vCPU·時 $0.04048、每 GB·時 $0.004445，計費粒度到秒，最低 1 分鐘。VM 的計價單位是 <var>m6i.large</var>：每小時 $0.096、2 vCPU、8 GiB，開滿 730 小時是 $70.08。</p>
+  <p>短請求的形狀固定成：wall-clock 80 ms，其中 25% 是 CPU（每請求 20 ms 的 vCPU），記憶體 256 MB。容量以利用率 0.6 為目標，超過就進下一台。Fargate 對 256 MB 會落到最小的合法任務：0.25 vCPU 配 0.5 GB，時價 $0.0123425，一個任務的 CPU 容量是每秒 7.5 個請求。</p>
+  <div class="formula">vCPU 需求 = 尖峰 rps × 0.020 ÷ 0.6</div>
+  <div class="formula">VM 台數 = ceil(vCPU 需求 ÷ 2)，月費再乘上尖峰編成覆蓋的時間比例</div>
+  <p>同一組短請求，三個流量假設算出來是：</p>
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>流量</th>
+          <th>Event Functions</th>
+          <th>Fargate</th>
+          <th>VM，編排同價</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>稀疏，一個月 8,000 次</td>
+          <td class="hl">$0.00</td>
+          <td>$1.65</td>
+          <td>$12.80</td>
+        </tr>
+        <tr>
+          <td>日週期，平均 20 / 尖峰 80 rps，尖峰占 25%</td>
+          <td class="hl">$21.17</td>
+          <td>$24.78</td>
+          <td>$35.04</td>
+        </tr>
+        <tr>
+          <td>平穩，平均 150 / 尖峰 165 rps，整月開著</td>
+          <td>$203.37</td>
+          <td class="hl">$198.22</td>
+          <td>$210.24</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="cap">編排欄在第 4 節會單獨畫出來，數字與 VM 相同：ECS on EC2 買的是同一批機器。EKS 的控制平面小時費、以及 bin packing 的碎片，這張表故意沒有加。</p>
+  <p>稀疏那一列，8,000 次還在免費額度裡，所以 FaaS 是 $0。Fargate 若為每次請求拉起任務，要付滿 60 秒：8,000 × 60/3,600 × $0.0123425，四捨五入是 $1.65。VM 同樣被 60 秒最低額卡住：8,000 × 60/3,600 × $0.096 = $12.80。一台一直開著則是 $70.08，模型取較低的那個。</p>
+  <p>日週期的尖峰是 80 × 0.020 / 0.6 = 2.67 vCPU，VM 進到 2 台，而且只有 25% 的時間需要這個編成，其餘縮到 0：2 × 0.25 × $70.08 = $35.04。Fargate 是 ceil(80 / 7.5) = 11 個任務，同樣只覆蓋 25%：11 × 0.25 × $9.01 = $24.78。Lambda 的 20 rps 整月是 5,256 萬次請求、約 105 萬 GB·s，扣掉免費額度後是 $21.17。它比 Fargate 低約 17%。</p>
+  <p>平穩的尖峰是 165 rps，約 5.5 vCPU。Fargate 用 22 個 0.25 vCPU 任務剛好貼上，月費 $198.22。VM 要 3 台才有 6 vCPU，月費 3 × $70.08 = $210.24。Lambda 是 3.942 億次請求、788 萬 GB·s，扣掉免費額度後 $203.37，夾在兩者中間。</p>
+  <p>把短請求放上「整月開滿、尖峰等於平均」的軸，Event Functions 大約從 <var>55 rps</var> 起會貴過一台 <var>m6i.large</var>。在那之前，VM 的月費是一條水平線：你為一台沒填滿的機器付 $70.08。rps 不會讓 Lambda 的單價在某個門檻改寫。單價從一開始就不同——以 1,769 MB 約等於 1 vCPU 的配置比例估算，Event Functions 的 wall-clock 大約是每 vCPU·時 $0.104；m6i.large 攤開是每 vCPU·時 $0.048，而且這 0.048 還帶著記憶體。短請求有四分之三的時間在等 I/O，Lambda 仍按 80 ms 收費，VM 只按 20 ms 的 CPU 準備容量。</p>
+  <div class="callout accent">
+    <div class="c-title"><span class="ic">關鍵</span>交叉之後，Lambda 還有一條回到 VM 計費的路</div>
+    <p>Lambda Managed Instances 維持函式的呼叫方式，帳單改成三筆：EC2 牌價、該牌價 15% 的管理費、每百萬次 $0.20。執行期間不再另收 duration，同一個執行環境可以同時處理多個請求。穩定高流量若已經站在交叉點右邊，不一定得把程式改寫成自己管的行程。它在光譜上是 FaaS 的程式模型，計費點滑回 VM 那一端。</p>
+  </div>
+  <div class="callout warn">
+    <div class="c-title"><span class="ic">陷阱</span>這張表只有運算</div>
+    <p>NAT Gateway、公網 IPv4、跨 AZ 流量與日誌，常常比運算本身更大。$198 與 $210 的差距經不起一筆固定的網路費。交叉點會移動；移動的方向要用你自己的流量形狀重算。</p>
+  </div>
+  <div class="oneliner">
+    <b>一句話答法</b>FaaS 在低流量較便宜，是因為 VM 有一台起跳的月費；流量把那台填滿之後，wall-clock 的 GB·s 通常比同一顆 vCPU 的時價貴。
+  </div>
+</section>
+
+<section id="s4">
+  <div class="sec-head">
+    <span class="sec-num">04</span>
+    <h2>四題決定落在哪一格</h2>
+  </div>
+  <p class="sec-sub">沒有情境對照表。硬限制先淘汰，裸月費再排名，維運胃口只在 15% 以內改寫建議。</p>
+  <p>第 3 節的表是短請求的三個點。工作負載還會變成 20 分鐘的作業、握滿 30 分鐘的連線，或一塊 GPU。決策器用同一組常數把四種刻度都算出來，再套三步：</p>
+  <pre class="mermaid">
+flowchart TD
+    L[硬限制] --> Q{跑得了?}
+    Q -->|否| X[這層出局]
+    Q -->|是| M[算裸月費]
+    M --> B{15% 帶內?}
+    B -->|否| C[取最便宜]
+    B -->|是| P[胃口決勝]
+  </pre>
+  <p class="cap">決策帶是「裸月費 ≤ 最便宜者 × 1.15」。帶外的層不會因為你想養機器就被選上。這條 15% 是帶寬，與 Managed Instances 的 15% 管理費是兩件事。編排與 VM 同價，平手時才由胃口決定誰管那一批機器。</p>
+  <div class="demo" id="demo-cms">
+    <div class="demo-bar">
+      <span class="label">互動 · 運算層決策器</span>
+      <span class="label" style="text-transform:none;font-family:var(--sans);font-size:12px;color:var(--text-2)">改一題，四層月費與建議一起重算</span>
+    </div>
+    <div class="demo-body">
+      <p class="cms-lead">FaaS 欄是 Event Functions 的請求 + GB·s，不是 Web Functions 的 active CPU。編排欄用 ECS on EC2 的讀法，所以與 VM 同價。維運胃口不是一筆 AWS 帳單。</p>
+      <div class="cms-ask">
+        <div class="cms-field">流量形狀
+          <div class="seg" role="group" aria-label="流量形狀">
+            <button type="button" id="cms-pat-sparse" aria-pressed="false">稀疏</button>
+            <button type="button" id="cms-pat-diurnal" aria-pressed="false">日週期</button>
+            <button type="button" id="cms-pat-flat" aria-pressed="true">平穩</button>
+          </div>
+        </div>
+        <div class="cms-field">工作形狀
+          <div class="seg" role="group" aria-label="工作形狀">
+            <button type="button" id="cms-sh-rpc" aria-pressed="true">短請求</button>
+            <button type="button" id="cms-sh-job" aria-pressed="false">20 分鐘作業</button>
+            <button type="button" id="cms-sh-socket" aria-pressed="false">30 分鐘連線</button>
+          </div>
+        </div>
+        <div class="cms-field">維運胃口
+          <select id="cms-ops">
+            <option value="runtime">只想管程式</option>
+            <option value="cluster" selected>可以養叢集</option>
+            <option value="machine">可以養機器</option>
+          </select>
+        </div>
+        <div class="cms-field">加速器
+          <label class="cms-check"><input type="checkbox" id="cms-gpu"> 需要 GPU</label>
+        </div>
+      </div>
+      <div class="cms-facts" id="cms-facts"></div>
+      <div class="cms-board">
+        <div class="cms-card" id="cms-card-0">
+          <div class="cms-k">VM<span>EC2</span></div>
+          <div class="cms-price" id="cms-usd-0">—</div>
+          <p class="cms-sub" id="cms-sub-0"></p>
+        </div>
+        <div class="cms-card" id="cms-card-1">
+          <div class="cms-k">編排容器<span>ECS on EC2</span></div>
+          <div class="cms-price" id="cms-usd-1">—</div>
+          <p class="cms-sub" id="cms-sub-1"></p>
+        </div>
+        <div class="cms-card" id="cms-card-2">
+          <div class="cms-k">Serverless 容器<span>Fargate</span></div>
+          <div class="cms-price" id="cms-usd-2">—</div>
+          <p class="cms-sub" id="cms-sub-2"></p>
+        </div>
+        <div class="cms-card" id="cms-card-3">
+          <div class="cms-k">FaaS<span>Lambda Event</span></div>
+          <div class="cms-price" id="cms-usd-3">—</div>
+          <p class="cms-sub" id="cms-sub-3"></p>
+        </div>
+      </div>
+      <div class="legend">
+        <span><i class="dot ns-ok"></i>建議層</span>
+        <span><i class="dot ns-idle"></i>硬限制出局</span>
+      </div>
+      <div class="status-line" id="cms-say"></div>
+      <button type="button" class="btn" id="cms-reset">重置</button>
+    </div>
+  </div>
+  <p class="cap">綠框是這四題的建議。灰掉的格子是第 2 節的硬限制，不是計費失敗。連線容量的教學假設：每 vCPU 2,500 條，所以 0.25 vCPU 的 Fargate 任務是 625 條，m6i.large 是 5,000 條。</p>
+  <p>預設停在平穩短請求、可以養叢集、沒有 GPU。Fargate $198.22 最便宜，Lambda $203.37，VM 與編排都是 $210.24。15% 帶的上限約 $227.95，三個都在帶內。胃口把建議放在編排，比 Fargate 多 $12.02。改成「只想管程式」，建議改到 Lambda，多付 $5.15。改成「可以養機器」，建議改到 VM，多付的仍是 $12.02——編排與 VM 是同一張帳單，胃口只決定誰來管那 3 台 <var>m6i.large</var>。</p>
+  <p>再改兩題，規則的另外兩面會出現。日週期短請求的 Lambda 是 $21.17，Fargate $24.78 已經高出約 17%，落在帶外，三種胃口都停在 FaaS。稀疏的 8,000 次把 FaaS 收到 $0，帶寬跟著變成 0，胃口無法把你推向 $1.65 或 $12.80。</p>
+  <p>20 分鐘的作業一個月若只有 40 次，FaaS 因長度出局。Fargate 約 $0.72（任務按 1 vCPU 與 3 GB，跑完即停）。VM 若每次開機再加 45 秒緩衝，約 $1.33，相對 $0.72 已經超過 15%，建議停在 Fargate；一直開著的那台仍是 $70.08。平穩的 8,000 條長連線則是 Fargate $117.13、兩台 VM $140.16，VM 約貴 20%，同樣出帶。4 條與 500 條都還塞得進同一個任務與同一台機器，月費不會跟著連線數斜線上升——那是計價粒度，不是模型壞掉。</p>
+  <div class="oneliner">
+    <b>一句話答法</b>先淘汰跑不了的層，再取裸月費；維運胃口只在最便宜者的 15% 以內打破平手，而編排與 VM 的平手是因為它們買的是同一批機器。
+  </div>
+</section>
+
+<section id="s5">
+  <div class="sec-head">
+    <span class="sec-num">05</span>
+    <h2>面試時按這個順序說</h2>
+  </div>
+  <p class="sec-sub">硬限制、閒置與單價、誰還願意管機器。然後補一句：Lambda 這個名字底下已經有不只一種計費點。</p>
+  <p>開口不要從產品目錄開始。先說哪一層根本跑不了：連續運算超過 15 分鐘、要 GPU、或是必須握著大量閒置連線。再說交叉點從哪裡來——一台起跳的實例月費是水平線，Event Functions 的 wall-clock 是過原點的斜線，兩線相交的那個 rps 取決於單次的 CPU 占比與記憶體，不是一個可以背的常數。最後才說維運胃口：當 Fargate、Lambda、VM 的裸月費擠在 15% 以內，選編排還是自己養機器，是團隊想不想管節點，不是運算單價。</p>
+  <p>2026 年的 Lambda 定價頁已經把計費點拆開。穩定高流量有 Managed Instances（EC2 牌價加 15% 管理費，另加請求費）。I/O 與短串流有 Web Functions（active CPU，環境記憶體按存活時間）。可暫停的隔離環境有 MicroVMs（按實例秒，外加快照）。四層光譜還在；「用了 Lambda」不再自動等於「按 GB·s 的 Event Functions」。</p>
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>你觀察到的負載</th>
+          <th>先落在哪一格</th>
+          <th>不要在這篇展開的部分</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>一個月幾千次、每次幾十毫秒</td>
+          <td class="hl">FaaS，多半還在免費額度裡</td>
+          <td>cold start 與並發配額：Serverless FaaS 深入</td>
+        </tr>
+        <tr>
+          <td>平穩、單次 CPU 很短</td>
+          <td>把 Fargate、Event Functions、填滿的 VM 三個數擺在一起</td>
+          <td>請求怎麼分進行程：負載平衡</td>
+        </tr>
+        <tr>
+          <td>單次超過 15 分鐘，但一個月次數少</td>
+          <td>Fargate 跑完即停</td>
+          <td>次數多到填滿一台時，改看一直開著的 VM</td>
+        </tr>
+        <tr>
+          <td>大量閒置連線</td>
+          <td>握連線的行程放在 VM 或編排節點</td>
+          <td>不要為每條連線留一次 Event Function 呼叫</td>
+        </tr>
+        <tr>
+          <td>GPU 推論</td>
+          <td>掛得上 GPU 的 VM、編排節點，或 Cloud Run GPU</td>
+          <td>節點怎麼排、碎片怎麼來：容器編排</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="cap">「尖峰只占 25% 的時間」假設擴縮跟得上。指標、冷卻與暖機造成的缺口，是自動擴縮那篇的模型，不是這張月費表的輸入。</p>
+  <div class="callout accent">
+    <div class="c-title"><span class="ic">關鍵</span>沒有一個 rps 可以背</div>
+    <p>這組假設裡，日週期的 20 rps 是 Lambda 較低，平穩的 150 rps 是 Fargate 較低，而一台 m6i.large 對 80 ms 短請求的交叉約在 55 rps。換記憶體、換 CPU 占比、或把 FaaS 換成 Web Functions，三個數都會動。</p>
+  </div>
+  <div class="oneliner">
+    <b>一句話答法</b>先淘汰跑不了的層，再用「閒置機器的水平月費」解釋 FaaS 的交叉點；產品名只是這個刻度在 AWS 與 GCP 上的標籤。
+  </div>
+</section>
+
+        <footer class="article-foot" aria-label="閱讀進度與導覽">
+          <div class="article-foot-left">
+            <button class="read-toggle read-toggle-lg" type="button" data-read-toggle aria-pressed="false">
+              <span class="read-dot" aria-hidden="true"></span>
+              <span class="read-label">標記為已讀</span>
+            </button>
+            <span class="article-foot-hint" data-read-hint>讀完本篇後可標記為已讀；進度只存在這個瀏覽器，首頁學習地圖會依此顯示。</span>
+          </div>
+          <a class="article-foot-back" href="../index.html">← 返回系統設計知識地圖</a>
+        </footer>
+      </div>
+    </main>
+  </div>
+
+  <script>
+    "use strict";
+    document.addEventListener("DOMContentLoaded", function () {
+      /* ===== TOC scrollspy, mobile accordion & desktop collapse ===== */
+      (function () {
+        var links = Array.prototype.slice.call(document.querySelectorAll(".toc-nav a"));
+        var map = {};
+        links.forEach(function (a) {
+          var href = a.getAttribute("href");
+          if (href && href.startsWith("#")) {
+            map[href.slice(1)] = a;
+          }
+        });
+        var secs = links.map(function (a) {
+          var href = a.getAttribute("href");
+          return href && href.startsWith("#") ? document.getElementById(href.slice(1)) : null;
+        }).filter(Boolean);
+
+        if (secs.length > 0 && typeof IntersectionObserver !== "undefined") {
+          var obs = new IntersectionObserver(function (entries) {
+            entries.forEach(function (e) {
+              if (e.isIntersecting) {
+                links.forEach(function (l) { l.classList.remove("active"); });
+                var act = map[e.target.id];
+                if (act) act.classList.add("active");
+              }
+            });
+          }, { rootMargin: "-20% 0px -70% 0px", threshold: 0 });
+          secs.forEach(function (s) { obs.observe(s); });
+        }
+
+        /* mobile：目錄 accordion（≤920px） */
+        var toggle = document.querySelector(".toc-toggle");
+        var nav = document.querySelector(".toc-nav");
+        if (toggle && nav) {
+          toggle.addEventListener("click", function () {
+            var open = nav.classList.toggle("open");
+            toggle.setAttribute("aria-expanded", open ? "true" : "false");
+          });
+          nav.addEventListener("click", function (e) {
+            if (e.target.closest("a") && window.innerWidth <= 920) {
+              nav.classList.remove("open");
+              toggle.setAttribute("aria-expanded", "false");
+            }
+          });
+        }
+
+        /* desktop：收合側欄（預設展開；不持久化） */
+        var collapseBtn = document.querySelector(".toc-collapse");
+        var reopenBtn = document.querySelector(".toc-reopen");
+        function setTocCollapsed(collapsed) {
+          document.body.classList.toggle("toc-collapsed", collapsed);
+          if (collapseBtn) collapseBtn.setAttribute("aria-expanded", collapsed ? "false" : "true");
+          if (reopenBtn) reopenBtn.setAttribute("aria-expanded", collapsed ? "false" : "true");
+          if (collapsed && reopenBtn) reopenBtn.focus();
+          else if (!collapsed && collapseBtn) collapseBtn.focus();
+        }
+        if (collapseBtn) {
+          collapseBtn.addEventListener("click", function () { setTocCollapsed(true); });
+        }
+        if (reopenBtn) {
+          reopenBtn.addEventListener("click", function () { setTocCollapsed(false); });
+        }
+
+        /* ===== 已讀狀態追蹤（localStorage + file:// fallback） =====
+           儲存格式（key、envelope、window.name 前綴）與 templates/home-learning-map.js 的同名函式共用，改動須兩邊同步。 */
+        var STORAGE_KEY = "sded.read.v1";
+        var WIN_PREFIX = "sded.read.v1:";
+        var topicId = document.body.getAttribute("data-topic-id") || "";
+        var readBtns = Array.prototype.slice.call(document.querySelectorAll("[data-read-toggle]"));
+        var readHint = document.querySelector("[data-read-hint]");
+
+        function parseEnvelope(raw) {
+          if (!raw || typeof raw !== "string") return null;
+          try {
+            var parsed = JSON.parse(raw);
+            if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+            if (parsed.v === 1 && parsed.items && typeof parsed.items === "object" && !Array.isArray(parsed.items)) {
+              return { updatedAt: Number(parsed.updatedAt) || 0, items: parsed.items };
+            }
+            return { updatedAt: 1, items: parsed };
+          } catch (e) {
+            return null;
+          }
+        }
+
+        function loadReadMap() {
+          var fromLs = null;
+          var fromWin = null;
+          try { fromLs = parseEnvelope(window.localStorage.getItem(STORAGE_KEY)); } catch (e) {}
+          if (window.location.protocol === "file:") {
+            try {
+              if (typeof window.name === "string" && window.name.indexOf(WIN_PREFIX) === 0) {
+                fromWin = parseEnvelope(window.name.slice(WIN_PREFIX.length));
+              }
+            } catch (e) {}
+          }
+          var chosen = fromLs;
+          if (fromWin && (!chosen || fromWin.updatedAt > chosen.updatedAt)) {
+            chosen = fromWin;
+            try {
+              window.localStorage.setItem(STORAGE_KEY, JSON.stringify({ v: 1, updatedAt: chosen.updatedAt, items: chosen.items }));
+            } catch (e) {}
+          } else if (chosen && window.location.protocol === "file:") {
+            try {
+              window.name = WIN_PREFIX + JSON.stringify({ v: 1, updatedAt: chosen.updatedAt, items: chosen.items });
+            } catch (e) {}
+          }
+          return chosen && chosen.items ? Object.assign({}, chosen.items) : {};
+        }
+
+        function saveReadMap(items) {
+          var env = JSON.stringify({ v: 1, updatedAt: Date.now(), items: items });
+          try { window.localStorage.setItem(STORAGE_KEY, env); } catch (e) {}
+          if (window.location.protocol === "file:") {
+            try { window.name = WIN_PREFIX + env; } catch (e) {}
+          }
+        }
+
+        function todayLocal() {
+          var d = new Date();
+          return d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0") + "-" + String(d.getDate()).padStart(2, "0");
+        }
+
+        function syncReadUi() {
+          if (!topicId || !readBtns.length) return;
+          var map = loadReadMap();
+          var val = map[topicId];
+          var isRead = Boolean(val);
+          var dateStr = typeof val === "string" && /^\d{4}-\d{2}-\d{2}$/.test(val) ? val : "";
+          readBtns.forEach(function (btn) {
+            btn.setAttribute("aria-pressed", isRead ? "true" : "false");
+            var label = btn.querySelector(".read-label");
+            if (label) {
+              label.textContent = isRead ? "✓ 已讀" : "標記為已讀";
+            }
+          });
+          if (readHint) {
+            readHint.textContent = isRead
+              ? ("已標記為已讀" + (dateStr ? "（" + dateStr + "）" : "") + "。進度只存在這個瀏覽器，首頁學習地圖會依此顯示。")
+              : "讀完本篇後可標記為已讀；進度只存在這個瀏覽器，首頁學習地圖會依此顯示。";
+          }
+        }
+
+        function toggleRead() {
+          if (!topicId) return;
+          var map = loadReadMap();
+          if (map[topicId]) {
+            delete map[topicId];
+          } else {
+            map[topicId] = todayLocal();
+          }
+          saveReadMap(map);
+          syncReadUi();
+        }
+
+        readBtns.forEach(function (btn) {
+          btn.addEventListener("click", toggleRead);
+        });
+        window.addEventListener("pageshow", syncReadUi);
+        window.addEventListener("storage", function (e) {
+          if (!e.key || e.key === STORAGE_KEY) syncReadUi();
+        });
+        syncReadUi();
+      })();
+    });
+  </script>
+
+  
+<script>
+(function () {
+  "use strict";
+
+  /* (1) 常數與參數表。牌價：us-east-1、Linux on-demand。 */
+  var MONTH_H = 730;
+  var MONTH_S = 730 * 3600;
+  var LAMBDA_REQ = 0.20 / 1e6;
+  var LAMBDA_GBS = 0.0000166667;
+  var LAMBDA_MAX_MS = 900000;
+  var FREE_REQ = 1000000;
+  var FREE_GBS = 400000;
+  var FG_VCPU_H = 0.04048;
+  var FG_GB_H = 0.004445;
+  var FG_MIN_S = 60;
+  var EC2_H = 0.096;
+  var EC2_VCPU = 2;
+  var GPU_H = 1.006;
+  var GPU_VCPU = 4;
+  var UTIL = 0.6;
+  var CONNS_PER_VCPU = 2500;
+  var BOOT_S = 45;
+  var BAND = 1.15;
+
+  var SHAPE = {
+    rpc: { busyMs: 80, cpuShare: 0.25, memMb: 256, holdSec: 0 },
+    job: { busyMs: 1200000, cpuShare: 0.85, memMb: 3008, holdSec: 0 },
+    socket: { busyMs: 30, cpuShare: 0.05, memMb: 128, holdSec: 1800 }
+  };
+
+  var LOAD = {
+    sparse: {
+      rpc: { reqMonth: 8000, peakRps: 1, isolated: 1 },
+      job: { reqMonth: 40, peakRps: 0.0004, isolated: 1 },
+      socket: { avgConns: 4, peakConns: 4, isolated: 1 }
+    },
+    diurnal: {
+      rpc: { avgRps: 20, peakRps: 80, duty: 0.25 },
+      job: { reqMonth: 900, peakRps: 0.004, duty: 0.35 },
+      socket: { avgConns: 120, peakConns: 500 }
+    },
+    flat: {
+      rpc: { avgRps: 150, peakRps: 165, duty: 1 },
+      job: { reqMonth: 1460, peakRps: 0.0008, duty: 1 },
+      socket: { avgConns: 8000, peakConns: 8000 }
+    }
+  };
+
+  /* 陣列愈前面愈想要。0 VM、1 編排、2 Fargate、3 FaaS。 */
+  var PREFER = {
+    runtime: [3, 2, 1, 0],
+    cluster: [1, 2, 0, 3],
+    machine: [0, 1, 2, 3]
+  };
+
+  function shapeOf(name) {
+    return SHAPE[name] || SHAPE.rpc;
+  }
+
+  function loadOf(pattern, shapeName) {
+    var row = LOAD[pattern] || LOAD.diurnal;
+    var cell = row[shapeName] || row.rpc;
+    var out = {
+      isolated: cell.isolated ? 1 : 0,
+      peakRps: cell.peakRps || 0,
+      avgRps: cell.avgRps,
+      duty: cell.duty,
+      reqMonth: cell.reqMonth,
+      avgConns: cell.avgConns || 0,
+      peakConns: cell.peakConns || 0
+    };
+    if (out.reqMonth == null && out.avgRps != null) out.reqMonth = out.avgRps * MONTH_S;
+    return out;
+  }
+
+  function billedMs(shape) {
+    return shape.holdSec > 0 ? shape.holdSec * 1000 : shape.busyMs;
+  }
+
+  function faasBlock(shape, gpu) {
+    if (gpu) return 2;
+    if (billedMs(shape) > LAMBDA_MAX_MS) return 1;
+    if (shape.memMb > 10240) return 3;
+    return 0;
+  }
+
+  function faasOpen(shape, gpu) {
+    return faasBlock(shape, gpu) === 0 ? 1 : 0;
+  }
+
+  function ec2Unit(gpu) {
+    if (gpu) return { hourly: GPU_H, vcpu: GPU_VCPU, conns: 8000 };
+    return { hourly: EC2_H, vcpu: EC2_VCPU, conns: 5000 };
+  }
+
+  function unitsForRps(rps, shape, gpu) {
+    if (!(rps > 0)) return 0;
+    var unit = ec2Unit(gpu);
+    var cpuSec = (shape.busyMs / 1000) * shape.cpuShare;
+    var byCpu = Math.ceil((rps * cpuSec / UTIL) / unit.vcpu);
+    var byConn = shape.holdSec > 0 ? Math.ceil((rps * shape.holdSec) / unit.conns) : 0;
+    var byGpu = 0;
+    if (gpu && shape.holdSec === 0) {
+      var per = UTIL / (shape.busyMs / 1000);
+      byGpu = Math.ceil(rps / per);
+    }
+    return Math.max(1, byCpu, byConn, byGpu);
+  }
+
+  function faasRawCost(reqMonth, shape) {
+    var sec = billedMs(shape) / 1000;
+    var memGb = shape.memMb / 1024;
+    var gb = reqMonth * sec * memGb;
+    var billReq = Math.max(0, reqMonth - FREE_REQ);
+    var billGb = Math.max(0, gb - FREE_GBS);
+    return billReq * LAMBDA_REQ + billGb * LAMBDA_GBS;
+  }
+
+  function taskSize(shape) {
+    var gbNeed = shape.memMb / 1024;
+    var vcpuNeed = Math.max(0.25, shape.cpuShare);
+    var vcpu = 0.25;
+    if (vcpuNeed > 0.25 || gbNeed > 2) vcpu = 0.5;
+    if (vcpuNeed > 0.5 || gbNeed > 4) vcpu = 1;
+    if (vcpuNeed > 1 || gbNeed > 8) vcpu = 2;
+    if (vcpuNeed > 2 || gbNeed > 16) vcpu = 4;
+    var gbMax = { 0.25: 2, 0.5: 4, 1: 8, 2: 16, 4: 30 };
+    var gbMin = { 0.25: 0.5, 0.5: 1, 1: 2, 2: 4, 4: 8 };
+    var gb = Math.min(gbMax[vcpu], Math.max(gbMin[vcpu], Math.ceil(gbNeed * 2) / 2));
+    return { vcpu: vcpu, gb: gb };
+  }
+
+  function vmQuote(load, shape, gpu) {
+    var unit = ec2Unit(gpu);
+    if (shape.holdSec > 0) {
+      var peakU = Math.max(1, Math.ceil(load.peakConns / unit.conns));
+      if (load.isolated) return { usd: peakU * unit.hourly * MONTH_H, units: peakU, cycling: 0 };
+      var avgU = Math.max(1, Math.ceil(load.avgConns / unit.conns));
+      var duty = load.peakConns > 0 ? load.avgConns / load.peakConns : 1;
+      var usd = (peakU * duty + avgU * (1 - duty)) * unit.hourly * MONTH_H;
+      return { usd: usd, units: peakU, cycling: 0 };
+    }
+    var units = unitsForRps(Math.max(load.peakRps, 1e-9), shape, gpu);
+    if (load.isolated) {
+      var sec = Math.max(shape.busyMs / 1000 + BOOT_S, 60);
+      var startStop = load.reqMonth * (sec / 3600) * unit.hourly * units;
+      var keep = units * unit.hourly * MONTH_H;
+      if (startStop < keep) return { usd: startStop, units: units, cycling: 1 };
+      return { usd: keep, units: units, cycling: 0 };
+    }
+    var dutyH = load.duty == null ? 1 : load.duty;
+    if (dutyH >= 0.999) return { usd: units * unit.hourly * MONTH_H, units: units, cycling: 0 };
+    var avgRps = load.avgRps != null ? load.avgRps : load.reqMonth / MONTH_S;
+    var valleyRps = (avgRps - dutyH * load.peakRps) / (1 - dutyH);
+    if (valleyRps < 0) valleyRps = 0;
+    var valleyU = valleyRps <= 0.001 ? 0 : unitsForRps(valleyRps, shape, gpu);
+    var blended = (units * dutyH + valleyU * (1 - dutyH)) * unit.hourly * MONTH_H;
+    return { usd: blended, units: units, cycling: 0 };
+  }
+
+  function fgQuote(load, shape) {
+    var task = taskSize(shape);
+    var hourly = task.vcpu * FG_VCPU_H + task.gb * FG_GB_H;
+    if (shape.holdSec > 0) {
+      var cap = Math.max(1, Math.floor(task.vcpu * CONNS_PER_VCPU));
+      var peakT = Math.max(1, Math.ceil(load.peakConns / cap));
+      if (load.isolated) return { usd: hourly * peakT * MONTH_H, tasks: peakT, cycling: 0 };
+      var avgT = Math.max(1, Math.ceil(load.avgConns / cap));
+      var duty = load.peakConns > 0 ? load.avgConns / load.peakConns : 1;
+      var usdHold = (peakT * duty + avgT * (1 - duty)) * hourly * MONTH_H;
+      return { usd: usdHold, tasks: peakT, cycling: 0 };
+    }
+    var cpuSec = (shape.busyMs / 1000) * shape.cpuShare;
+    var rpsPer = (task.vcpu * UTIL) / Math.max(cpuSec, 1e-6);
+    var burstTasks = Math.max(1, Math.ceil(Math.max(load.peakRps, 1e-9) / rpsPer));
+    if (load.isolated) {
+      var sec = Math.max(shape.busyMs / 1000, FG_MIN_S);
+      var cold = load.reqMonth * (sec / 3600) * hourly * burstTasks;
+      var warm = hourly * burstTasks * MONTH_H;
+      if (cold < warm) return { usd: cold, tasks: burstTasks, cycling: 1 };
+      return { usd: warm, tasks: burstTasks, cycling: 0 };
+    }
+    var dutyH = load.duty == null ? 1 : load.duty;
+    var peakT = Math.max(1, Math.ceil(load.peakRps / rpsPer));
+    if (dutyH >= 0.999) return { usd: hourly * peakT * MONTH_H, tasks: peakT, cycling: 0 };
+    var avgRps = load.avgRps != null ? load.avgRps : load.reqMonth / MONTH_S;
+    var valleyRps = (avgRps - dutyH * load.peakRps) / (1 - dutyH);
+    if (valleyRps < 0) valleyRps = 0;
+    var valleyT = valleyRps <= 0.001 ? 0 : Math.max(1, Math.ceil(valleyRps / rpsPer));
+    var blended = (peakT * dutyH + valleyT * (1 - dutyH)) * hourly * MONTH_H;
+    return { usd: blended, tasks: peakT, cycling: 0 };
+  }
+
+  function crossRps(shape, gpu) {
+    if (gpu || !faasOpen(shape, 0)) return -1;
+    var rps;
+    for (rps = 1; rps <= 2000; rps += 1) {
+      var load = {
+        isolated: 0, peakRps: rps, avgRps: rps, duty: 1,
+        reqMonth: rps * MONTH_S, avgConns: 0, peakConns: 0
+      };
+      var fa = faasRawCost(load.reqMonth, shape);
+      var vm = vmQuote(load, shape, 0).usd;
+      if (vm + 0.01 < fa) return rps;
+    }
+    return -1;
+  }
+
+  function round2(n) {
+    return Math.round(n * 100) / 100;
+  }
+
+  function choose(sticker, open, ops) {
+    var prefer = PREFER[ops];
+    var cheapest = -1;
+    var i;
+    for (i = 0; i < 4; i += 1) {
+      if (!open[i]) continue;
+      if (cheapest < 0 || sticker[i] < sticker[cheapest]) cheapest = i;
+    }
+    var band = sticker[cheapest] * BAND;
+    var best = cheapest;
+    for (i = 0; i < 4; i += 1) {
+      if (!open[i]) continue;
+      if (sticker[i] <= band + 1e-9 && prefer.indexOf(i) < prefer.indexOf(best)) best = i;
+    }
+    return {
+      winner: best,
+      cheapest: cheapest,
+      premiumUsd: round2(sticker[best] - sticker[cheapest])
+    };
+  }
+
+  /* (2) compute* 純函式 */
+  // @probe fn       computeSpectrum
+  // @probe baseline {"pattern":"flat","shape":"rpc","gpu":0,"ops":"cluster"}
+  // @probe sweep    {"pattern":["sparse","diurnal"],"shape":["job","socket"],"gpu":[1],"ops":["runtime","machine"]}
+  function computeSpectrum(p) {
+    var shapeName = SHAPE[p.shape] ? p.shape : "rpc";
+    var pattern = LOAD[p.pattern] ? p.pattern : "diurnal";
+    var ops = PREFER[p.ops] ? p.ops : "cluster";
+    var gpu = p.gpu ? 1 : 0;
+    var shape = shapeOf(shapeName);
+    var load = loadOf(pattern, shapeName);
+    var openF = faasOpen(shape, gpu);
+    var openG = gpu ? 0 : 1;
+    var vm = vmQuote(load, shape, gpu);
+    var fg = openG ? fgQuote(load, shape) : { usd: 0, tasks: 0, cycling: 0 };
+    var vmUsd = round2(vm.usd);
+    var fgUsd = openG ? round2(fg.usd) : 0;
+    var faasUsd = openF ? round2(faasRawCost(load.reqMonth, shape)) : 0;
+    var sticker = [vmUsd, vmUsd, fgUsd, faasUsd];
+    var open = [1, 1, openG, openF];
+    var pick = choose(sticker, open, ops);
+    var inflight = shape.holdSec > 0 ? load.peakConns : load.peakRps * (shape.busyMs / 1000);
+    var dutyPct = 0;
+    if (!load.isolated && shape.holdSec === 0 && load.duty != null) dutyPct = Math.round(load.duty * 100);
+    var avgShow = shape.holdSec > 0 ? load.avgConns : (load.avgRps != null ? load.avgRps : 0);
+    var peakShow = shape.holdSec > 0 ? load.peakConns : load.peakRps;
+    return {
+      vmUsd: vmUsd,
+      orchUsd: vmUsd,
+      fgUsd: fgUsd,
+      faasUsd: faasUsd,
+      fgOpen: openG,
+      faasOpen: openF,
+      faasBlock: faasBlock(shape, gpu),
+      vmUnits: vm.units,
+      fgTasks: fg.tasks,
+      vmCycling: vm.cycling,
+      fgCycling: fg.cycling,
+      unitHourly: gpu ? GPU_H : EC2_H,
+      winner: pick.winner,
+      cheapest: pick.cheapest,
+      premiumUsd: pick.premiumUsd,
+      crossRps: crossRps(shape, gpu),
+      reqMonth: Math.round(load.reqMonth || 0),
+      avgShow: Math.round(avgShow * 1000) / 1000,
+      peakShow: Math.round(peakShow * 1000) / 1000,
+      inflight: Math.round(inflight * 10) / 10,
+      holdSec: shape.holdSec,
+      busyMs: shape.busyMs,
+      isolated: load.isolated,
+      dutyPct: dutyPct
+    };
+  }
+
+  /* (3) DOM 參照 */
+  function el(id) { return document.getElementById(id); }
+
+  var patIds = ["cms-pat-sparse", "cms-pat-diurnal", "cms-pat-flat"];
+  var shapeIds = ["cms-sh-rpc", "cms-sh-job", "cms-sh-socket"];
+  var cards = [el("cms-card-0"), el("cms-card-1"), el("cms-card-2"), el("cms-card-3")];
+  var prices = [el("cms-usd-0"), el("cms-usd-1"), el("cms-usd-2"), el("cms-usd-3")];
+  var subs = [el("cms-sub-0"), el("cms-sub-1"), el("cms-sub-2"), el("cms-sub-3")];
+  var factsEl = el("cms-facts");
+  var sayEl = el("cms-say");
+  var gpuEl = el("cms-gpu");
+  var opsEl = el("cms-ops");
+  var resetEl = el("cms-reset");
+
+  var TIER = ["VM", "編排容器", "Fargate", "FaaS"];
+  var state = { pattern: "flat", shape: "rpc", gpu: 0, ops: "cluster" };
+
+  /* (4) render —— 只讀 compute 的結果 */
+  function money(n) {
+    var v = Math.abs(n);
+    var parts = v.toFixed(2).split(".");
+    parts[0] = parts[0].replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+    return (n < 0 ? "-$" : "$") + parts.join(".");
+  }
+
+  function fmtInt(n) {
+    return String(Math.round(n)).replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+  }
+
+  function trimNum(n) {
+    if (Math.abs(n - Math.round(n)) < 0.05) return fmtInt(n);
+    return String(Math.round(n * 10) / 10);
+  }
+
+  function subLine(i, r) {
+    if (i === 3 && !r.faasOpen) {
+      if (r.faasBlock === 2) return "出局：這一格沒有 GPU";
+      if (r.faasBlock === 1) return "出局：單次超過 15 分鐘";
+      return "出局";
+    }
+    if (i === 2 && !r.fgOpen) return "出局：Fargate 沒有 GPU";
+    if (i === 0) {
+      var sku = r.unitHourly > 0.5 ? "g5.xlarge" : "m6i.large";
+      return (r.vmCycling ? "用完即停 · " : "尖峰 ") + r.vmUnits + " 台 " + sku;
+    }
+    if (i === 1) return "與 VM 同一張運算帳單";
+    if (i === 2) {
+      return (r.fgCycling ? "用完即停 · 每次 " : "尖峰 ") + r.fgTasks + " 個任務";
+    }
+    return "請求 + GB·s，已扣免費額度";
+  }
+
+  function factLine(r) {
+    var line;
+    if (r.holdSec > 0) {
+      line = "長連線：尖峰 " + fmtInt(r.peakShow) + " 條、平均 " + fmtInt(r.avgShow) + " 條，握滿 " + fmtInt(r.holdSec / 60) + " 分鐘。";
+    } else if (r.isolated) {
+      line = "這個月 " + fmtInt(r.reqMonth) + " 次，彼此隔開；尖峰同時約 " + trimNum(r.inflight) + " 支在跑。";
+    } else if (r.busyMs >= 600000) {
+      line = "這個月 " + fmtInt(r.reqMonth) + " 次長作業，尖峰同時約 " + trimNum(r.inflight) + " 支。";
+      if (r.dutyPct > 0 && r.dutyPct < 100) line += "尖峰編成約覆蓋 " + r.dutyPct + "% 的時間。";
+    } else {
+      line = "平均 " + trimNum(r.avgShow) + " rps，尖峰 " + trimNum(r.peakShow) + " rps，尖峰同時約 " + trimNum(r.inflight) + " 個請求在飛。";
+      if (r.dutyPct > 0 && r.dutyPct < 100) line += "尖峰編成約覆蓋 " + r.dutyPct + "% 的時間。";
+    }
+    if (r.unitHourly > 0.5) line += " GPU 以 g5.xlarge 計價。";
+    return line;
+  }
+
+  function sayLine(r) {
+    var sticker = [r.vmUsd, r.orchUsd, r.fgUsd, r.faasUsd];
+    var msg = "建議落在" + TIER[r.winner] + "，裸月費 " + money(sticker[r.winner]) + "。";
+    if (r.premiumUsd > 0.009) {
+      msg += "最便宜是 " + TIER[r.cheapest] + " " + money(sticker[r.cheapest]) + "，多付 " + money(r.premiumUsd) + "。這一層在最便宜者的 15% 以內，維運胃口改寫了建議。";
+    } else if (r.winner !== r.cheapest) {
+      msg += "與 " + TIER[r.cheapest] + " 同價，維運胃口在平手時選了這一層。";
+    } else {
+      msg += "它就是裸月費最低的一層。";
+    }
+    if (r.crossRps > 0) {
+      msg += "以這個工作形狀走平穩流量時，Event Functions 大約從 " + r.crossRps + " rps 起會貴過一台起跳的 VM。";
+    }
+    return msg;
+  }
+
+  function render(r) {
+    var sticker = [r.vmUsd, r.orchUsd, r.fgUsd, r.faasUsd];
+    var open = [1, 1, r.fgOpen, r.faasOpen];
+    var i;
+    for (i = 0; i < 4; i += 1) {
+      cards[i].classList.toggle("is-pick", r.winner === i);
+      cards[i].classList.toggle("is-shut", !open[i]);
+      prices[i].textContent = open[i] ? money(sticker[i]) : "—";
+      subs[i].textContent = subLine(i, r);
+    }
+    factsEl.textContent = factLine(r);
+    sayEl.textContent = sayLine(r);
+  }
+
+  function draw() {
+    render(computeSpectrum(state));
+  }
+
+  /* (5) 事件綁定 */
+  function pressOnly(ids, current) {
+    ids.forEach(function (id) {
+      el(id).setAttribute("aria-pressed", id === current ? "true" : "false");
+    });
+  }
+
+  patIds.forEach(function (id) {
+    el(id).addEventListener("click", function () {
+      state.pattern = id.replace("cms-pat-", "");
+      pressOnly(patIds, id);
+      draw();
+    });
+  });
+
+  shapeIds.forEach(function (id) {
+    el(id).addEventListener("click", function () {
+      state.shape = id.replace("cms-sh-", "");
+      pressOnly(shapeIds, id);
+      draw();
+    });
+  });
+
+  gpuEl.addEventListener("change", function () {
+    state.gpu = gpuEl.checked ? 1 : 0;
+    draw();
+  });
+
+  opsEl.addEventListener("change", function () {
+    state.ops = opsEl.value;
+    draw();
+  });
+
+  resetEl.addEventListener("click", function () {
+    state.pattern = "flat";
+    state.shape = "rpc";
+    state.gpu = 0;
+    state.ops = "cluster";
+    pressOnly(patIds, "cms-pat-flat");
+    pressOnly(shapeIds, "cms-sh-rpc");
+    gpuEl.checked = false;
+    opsEl.value = "cluster";
+    draw();
+  });
+
+  draw();
+})();
+</script>
+
+
+<!-- 全螢幕檢視：切換按鈕、樣式與 F 鍵快捷鍵 -->
+<style>
+  .fs-toggle {
+    position: fixed;
+    top: 18px;
+    right: 18px;
+    z-index: 1000;
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    font-family: var(--sans);
+    font-size: 12.5px;
+    line-height: 1;
+    color: var(--text-2);
+    background: var(--bg);
+    border: 1px solid var(--border-strong);
+    border-radius: 999px;
+    padding: 7px 13px 7px 11px;
+    cursor: pointer;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, .06), 0 4px 12px rgba(0, 0, 0, .04);
+    transition: background .15s, border-color .15s, color .15s;
+  }
+
+  .fs-toggle:hover {
+    background: var(--bg-soft);
+    color: var(--text);
+    border-color: var(--text-3);
+  }
+
+  .fs-toggle:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+
+  .fs-toggle[aria-pressed="true"] {
+    background: var(--accent);
+    color: #fff;
+    border-color: var(--accent);
+  }
+
+  .fs-toggle .fs-ic {
+    flex: 0 0 auto;
+    display: block;
+  }
+
+  @media print {
+    .fs-toggle { display: none !important; }
+  }
+
+  @media (max-width: 480px) {
+    .fs-toggle { padding: 8px; }
+    .fs-toggle .fs-label { display: none; }
+  }
+</style>
+<button id="fs-toggle-btn" class="fs-toggle" type="button" aria-pressed="false"
+        aria-label="切換全螢幕檢視 (快捷鍵 F)" title="全螢幕檢視 (F)">
+  <svg class="fs-ic fs-ic-expand" viewBox="0 0 24 24" width="15" height="15" fill="none"
+       stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+    <path d="M8 3H5a2 2 0 0 0-2 2v3m18 0V5a2 2 0 0 0-2-2h-3m0 18h3a2 2 0 0 0 2-2v-3M3 16v3a2 2 0 0 0 2 2h3"/>
+  </svg>
+  <svg class="fs-ic fs-ic-compress" viewBox="0 0 24 24" width="15" height="15" fill="none"
+       stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="display:none">
+    <path d="M8 3v3a2 2 0 0 1-2 2H3m18 0h-3a2 2 0 0 1-2-2V3m0 18v-3a2 2 0 0 1 2-2h3M3 16h3a2 2 0 0 1 2 2v3"/>
+  </svg>
+  <span class="fs-label">全螢幕</span>
+</button>
+<script>
+  "use strict";
+  (function () {
+    var btn = document.getElementById("fs-toggle-btn");
+    if (!btn) return;
+    var docEl = document.documentElement;
+    var canFs = !!(docEl.requestFullscreen || docEl.webkitRequestFullscreen);
+    // 不支援 Fullscreen API (如 iPhone Safari) → 隱藏按鈕，避免壞掉的 UI
+    if (!canFs) { btn.style.display = "none"; return; }
+
+    var expandIc = btn.querySelector(".fs-ic-expand");
+    var compressIc = btn.querySelector(".fs-ic-compress");
+    var label = btn.querySelector(".fs-label");
+
+    function isFs() {
+      return !!(document.fullscreenElement || document.webkitFullscreenElement);
+    }
+    function enter() {
+      if (docEl.requestFullscreen) docEl.requestFullscreen();
+      else if (docEl.webkitRequestFullscreen) docEl.webkitRequestFullscreen();
+    }
+    function exit() {
+      if (document.exitFullscreen) document.exitFullscreen();
+      else if (document.webkitExitFullscreen) document.webkitExitFullscreen();
+    }
+    function toggle() { isFs() ? exit() : enter(); }
+    function sync() {
+      var on = isFs();
+      btn.setAttribute("aria-pressed", on ? "true" : "false");
+      if (label) label.textContent = on ? "離開全螢幕" : "全螢幕";
+      if (expandIc) expandIc.style.display = on ? "none" : "block";
+      if (compressIc) compressIc.style.display = on ? "block" : "none";
+    }
+
+    btn.addEventListener("click", toggle);
+    document.addEventListener("fullscreenchange", sync);
+    document.addEventListener("webkitfullscreenchange", sync);
+    document.addEventListener("keydown", function (e) {
+      if (e.key !== "f" && e.key !== "F") return;
+      if (e.metaKey || e.ctrlKey || e.altKey) return;
+      var t = e.target;
+      var tag = t && t.tagName ? t.tagName.toUpperCase() : "";
+      if (tag === "INPUT" || tag === "TEXTAREA" || (t && t.isContentEditable)) return;
+      e.preventDefault();
+      toggle();
+    });
+    sync();
+  })();
+</script>
+</body>
+</html>
