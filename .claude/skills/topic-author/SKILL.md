@@ -192,7 +192,8 @@ node scripts/generate.js --topic <id> --title "標題"
   ```bash
   git push origin main
   ```
-  全專案的設計目標是全自動運行（Cursor Automation 每次都從最新的 `main` 啟動），直推 main 可避免「PR 未合併 → 狀態追蹤檔漂移」；CI 會在每次 push 跑 `validate.js` 把關。
+  全專案的設計目標是全自動運行（Cursor Automation 每次都從最新的 `main` 啟動），直推 main 可避免「PR 未合併 → 狀態追蹤檔漂移」；CI 會在每次 push 跑 `validate.js` 與 demo 品質閘門把關（新增的 draft 另跑 `archetype-window.js --topic`）。
+  Bot 推送的可寫集合為 `drafts/**`、`books/**`、`docs/completed.json`、`docs/todo.json`，動到其他路徑 CI 會擋下部署，見 `AGENTS.md`「Remote Sync Strategy」。
   **僅當 `git push origin main` 失敗時**（權限不足、非 fast-forward 被拒等），才退而改以 PR 方式提交本次改動，留待人工處理。
   （非 Cursor 自動化的本地人工協作不在此限：是否 push 由使用者決定，預設僅 commit。）
 
@@ -245,6 +246,7 @@ node scripts/remove-completed.js --topic <id> --dry-run       # 先預覽將發�
 
 若撰稿時發現缺少先備主題、或想擴充某領域的後續主題，請交棒 `topic-explorer` skill
 新增節點/邊到 `mindmap.json` 與 `todo.json`，再回來撰稿。
+**Cursor 自動化環境例外**：不得改圖譜（Bot 推送動到 `mindmap.json` 會被 CI 擋下），改為在回報中說明缺口，留給人處理；見 `AGENTS.md`「Remote Sync Strategy」。
 
 ## 補充資源
 
