@@ -29,6 +29,10 @@
  *   node scripts/quality/compute-probe.js --all
  *   任一篇未過即 exit 1。
  *
+ * `--all` 模式會讀 scripts/quality/legacy-baseline.json 的 "compute-probe" 名單（語意見 lib/baseline.js）：
+ *   名單內的舊文仍會跑檢查，失敗印成 SKIP(baseline) 不擋全站；已全過的名單項視為 stale → exit 1。
+ *   單篇模式不看名單。
+ *
  * 回歸 fixture（改本工具後跑一次；good-sim 應 PASS、fake-player 應 FAIL、two-demos 驗多組 @probe）：
  *   SDED_ROOT=scripts/quality/fixtures node scripts/quality/compute-probe.js --all
  */
@@ -38,6 +42,7 @@ const fs = require('fs');
 const path = require('path');
 const vm = require('vm');
 const { extractScriptJs } = require('./lib/draft');
+const { loadBaseline } = require('./lib/baseline');
 
 const ROOT = process.env.SDED_ROOT || path.resolve(__dirname, '..', '..');
 const DRAFTS = path.join(ROOT, 'drafts');
@@ -234,22 +239,45 @@ function probe(id) {
 function main() {
   const args = process.argv.slice(2);
   let ids = args.filter(function (a) { return a.indexOf('--') !== 0; });
-  if (args.indexOf('--all') !== -1 || !ids.length) {
+  const allMode = args.indexOf('--all') !== -1 || !ids.length;
+  if (allMode) {
     ids = fs.readdirSync(DRAFTS).filter(function (d) {
       return fs.existsSync(path.join(DRAFTS, d, 'script.html'));
     }).sort();
+  }
+
+  // 封存名單只在 --all 生效；名單本身有問題就直接失敗，不跑任何篇
+  const baseline = allMode ? loadBaseline(ROOT, 'compute-probe') : { ids: new Set(), errors: [] };
+  if (baseline.errors.length) {
+    baseline.errors.forEach(function (e) { console.log('x legacy-baseline: ' + e); });
+    process.exitCode = 1;
+    return;
+  }
+
+  // 名單內的篇：失敗 → SKIP 不計；通過 → STALE 計失敗
+  function settle(id, ok, note) {
+    if (!baseline.ids.has(id)) return { id: id, ok: ok, tag: ok ? 'PASS ' : 'FAIL ', note: note };
+    if (ok) return { id: id, ok: false, tag: 'STALE', note: '已全過，請從 legacy-baseline.json 移除｜' + note };
+    return { id: id, ok: true, tag: 'SKIP ', note: 'baseline，原本會敗：' + note };
   }
 
   const summary = [];
   for (const id of ids) {
     const r = probe(id);
     if (r.fatal) {
-      console.log('\n### ' + id + '\n  x SKIP/FAIL — ' + r.fatal);
-      summary.push({ id: id, ok: false, note: r.fatal.slice(0, 60) });
+      const s = settle(id, false, r.fatal.slice(0, 60));
+      console.log('\n### ' + id + '\n  ' + (s.ok ? '~ SKIP(baseline)' : 'x SKIP/FAIL') + ' — ' + r.fatal);
+      summary.push(s);
       continue;
     }
     const allOk = r.groups.every(function (g) { return g.ok; });
-    console.log('\n### ' + id + '   ' + (allOk ? 'OK 通過' : 'x 未過') +
+    const s = settle(id, allOk, r.groups.map(function (g) {
+      return (g.entry || '?') + (g.fatal ? ' FATAL' : ' ' + g.responsive.length + ' 輸出' + (g.deadParams.length ? '/死參數 ' + g.deadParams.join('+') : ''));
+    }).join('｜'));
+    const head = s.tag === 'STALE' ? 'OK 通過   x STALE：已全過，請從 legacy-baseline.json 移除'
+      : s.tag === 'SKIP ' ? '~ SKIP(baseline)，原本會敗'
+      : (allOk ? 'OK 通過' : 'x 未過');
+    console.log('\n### ' + id + '   ' + head +
       '（' + r.groups.length + ' 組 @probe；檔內 compute 函式：' + r.names.join(', ') + '）');
     r.groups.forEach(function (g, i) {
       if (g.fatal) { console.log('  [' + (i + 1) + '] ' + (g.entry || '?') + '  x ' + g.fatal); return; }
@@ -262,17 +290,18 @@ function main() {
         g.responsive.slice(0, 10).join(', ') + (g.responsive.length > 10 ? ' …' : ''));
       if (g.deadParams.length) console.log('      x 死參數（改了什麼都不變）：' + g.deadParams.join(', '));
     });
-    summary.push({
-      id: id, ok: allOk,
-      note: r.groups.map(function (g) {
-        return (g.entry || '?') + (g.fatal ? ' FATAL' : ' ' + g.responsive.length + ' 輸出' + (g.deadParams.length ? '/死參數 ' + g.deadParams.join('+') : ''));
-      }).join('｜'),
-    });
+    summary.push(s);
   }
 
   console.log('\n' + '='.repeat(96));
   for (const s of summary) {
-    console.log((s.ok ? 'PASS  ' : 'FAIL  ') + s.id + '  —  ' + s.note);
+    console.log(s.tag + ' ' + s.id + '  —  ' + s.note);
+  }
+  if (allMode) {
+    const skipped = summary.filter(function (s) { return s.tag === 'SKIP '; }).length;
+    const stale = summary.filter(function (s) { return s.tag === 'STALE'; }).map(function (s) { return s.id; });
+    console.log('\nlegacy-baseline：SKIP ' + skipped + ' 篇' +
+      (stale.length ? '；STALE ' + stale.length + ' 篇（' + stale.join(', ') + '）' : ''));
   }
   process.exitCode = summary.every(function (s) { return s.ok; }) ? 0 : 1;
 }

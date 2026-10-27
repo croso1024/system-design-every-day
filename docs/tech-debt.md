@@ -12,8 +12,8 @@
 | # | 篇 | 問題 | 影響 | 預估 | 狀態 |
 | :-: | :--- | :--- | :--- | :--- | :--- |
 | 6 | 全站 | 兩組接受的主 archetype B 撞形 | 多樣性 | 重 | 接受 |
-| 8 | 11 篇舊 demo | 早於 compute／render 約定，L1 第 11 項或 L2 失敗 | demo 閘門無法進 CI | 重（逐篇） | 待處理 |
-| 9 | `scripts/quality/demo-audit.js` | L1 第 6、9 項為啟發式，有已知誤報 | 閘門可信度 | 中 | 待處理 |
+| 8 | 11 篇舊 demo | 早於 compute／render 約定，L1 第 11 項或 L2 失敗；已封存於 `legacy-baseline.json` | 這 11 篇被改到時 L1／L2 全站模式不會擋 | 重（逐篇） | 接受 |
+| 9 | `scripts/quality/demo-audit.js` | L1 第 9 項為啟發式，有已知誤報 | 閘門可信度 | 輕 | 待處理 |
 | 10 | 首頁學習地圖 | 同欄順序由 barycenter 決定，資料一變既有分類的位置可能跟著變 | 地圖長期穩定性 | 輕 | 待處理 |
 | 11 | `scripts/generate.js` | `--title` 與 mindmap 節點的 title 不一致時不會被擋 | 首頁與文章頁標題可能不同 | 輕 | 待處理 |
 | 12 | `scripts/mindmap.js` | `mindmap.json` 解析失敗時靜默當成空圖 | 首頁可能被重繪成空地圖 | 輕 | 待處理 |
@@ -53,18 +53,19 @@
 | `vector-database-fundamentals` | L1 #11、L2 |
 | `wide-column-store` | L2（有 compute，缺 `@probe`） |
 
-**影響**：`demo-audit.js --all` 與 `compute-probe.js --all` 目前不可能全綠，所以 demo 閘門還沒放進 CI。
-**做法**：逐篇把計算抽成 `compute*` 純函式、補 `@probe` 三行，不改互動模型與畫面；某篇的 demo 因其他原因重做時一併處理。
-`wide-column-store` 只缺 `@probe`，最輕。清單清空後，或改為「CI 只對本次 push 改到的 draft 跑閘門」，即可把閘門放進 `.github/workflows/deploy.yml`。
+**現況（2026-10-27 起接受）**：這 11 篇封存在 `scripts/quality/legacy-baseline.json`（`demo-audit` 10 篇、`compute-probe` 11 篇），
+兩支腳本的 `--all` 模式對名單內的篇照跑檢查但印成 SKIP(baseline)、不擋全站；單篇模式不看名單。
+名單只能縮小：名單內的篇一旦全過即 STALE → exit 1；名單只收 `completed_at` 不晚於 `lib/baseline.js` 的 `LEGACY_CUTOFF`（2026-07-31）的已發佈篇，新篇塞進去會被擋。
+**代價**：這 11 篇日後若被修改，L1 的語法、骨架、標籤等檢查在全站模式一併被跳過（使用者接受）；修訂時請跑單篇模式看完整結果。
+**若要歸零**：逐篇把計算抽成 `compute*` 純函式、補 `@probe` 三行，不改互動模型與畫面，然後從名單移除該篇（否則 STALE）。`wide-column-store` 只缺 `@probe`，最輕。
 
 ### 9　demo-audit.js 的啟發式誤報
 
-- **第 6 項（id 綁定）**：script 先組出 id 字串再 `getElementById` 時，工具看不到字面 id，會把控制項誤報為死控制項。
-  目前 `cdn-edge-caching` 的 `swin-*`、`cku-*` 共 12 個控制項即為此誤報。
 - **第 9 項（cap）**：判斷方式是「圖表容器後 4000 字內有無 `.cap`」，容器之間的距離一變，計數就變。
+- **第 6 項（id 綁定）的殘餘盲點**：只認字面 id 與「字面前綴 + 變數」兩種寫法；純變數 `getElementById(v)` 或包了一層的 `setText(id)` 看不到，
+  該 id 若又不以字串形式出現在 script 裡，會被判成死控制項。
 
-**做法**：第 6 項可以改成辨識 `getElementById(prefix + name)` 這類模式並回報「無法靜態判定」，不要直接判死；
-第 9 項可以改成找容器閉合標籤後的下一個兄弟元素。改完對全站跑 `demo-audit.js --all`，確認除上述誤報外結果不變。
+**做法**：第 9 項改成找容器閉合標籤後的下一個兄弟元素；改完對全站跑 `demo-audit.js --all`，確認結果不變。第 6 項的盲點目前以人眼判讀為準。
 
 ### 10　首頁學習地圖的同欄順序尚未固定
 
