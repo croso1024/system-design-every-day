@@ -18,6 +18,7 @@ description: >-
 
 **前置條件**：主題已存在於 `docs/todo.json` / `docs/mindmap.json`。若還沒選題或要新增主題到圖譜，
 那是前段工作，請改用 `topic-explorer` skill。
+**Cursor 自動化環境例外**：不得交棒 `topic-explorer`、不得改圖譜，只從 `mindmap.js --action next` 的候選中挑；見文末「與前段流程的銜接」。
 
 開始撰稿前**必讀** `guidelines/style-guide.md`（視覺與互動元件的唯一規範來源）。
 
@@ -147,7 +148,7 @@ node scripts/quality/archetype-window.js --topic <id>   # 本篇尚未發佈，�
 node scripts/generate.js --topic <id> --title "標題"
 ```
 
-分類由 `docs/mindmap.json` 的節點帶出（主題不在 mindmap 時 exit 1，請先交棒 `topic-explorer`）；
+分類由 `docs/mindmap.json` 的節點帶出（主題不在 mindmap 時 exit 1，請先交棒 `topic-explorer`；Cursor 自動化環境改為停止並在回報中說明）；
 `--category` 選填，有給就必須與節點一致，否則在寫任何檔案之前 exit 1。
 `--title` **逐字使用 mindmap 節點的標題**（主題仍在 todo 時，`completed-ledger.js --action get-todo --topic <id>` 回傳的 title 即為節點標題，兩者由 `add-topic.js` 同時寫入）：
 首頁地圖讀 mindmap 節點的標題、文章頁讀 `--title`，兩者不一致時目前沒有閘門會擋（見 `docs/tech-debt.md` #11）。
@@ -194,6 +195,7 @@ node scripts/generate.js --topic <id> --title "標題"
   ```
   全專案的設計目標是全自動運行（Cursor Automation 每次都從最新的 `main` 啟動），直推 main 可避免「PR 未合併 → 狀態追蹤檔漂移」；CI 會在每次 push 跑 `validate.js` 與 demo 品質閘門把關（新增的 draft 另跑 `archetype-window.js --topic`）。
   Bot 推送的可寫集合為 `drafts/**`、`books/**`、`docs/completed.json`、`docs/todo.json`，動到其他路徑 CI 會擋下部署，見 `AGENTS.md`「Remote Sync Strategy」。
+  撰稿途中發現全站問題（例如 `docs/tech-debt.md` 登錄的項目、`guidelines/`、`scripts/`、`templates/` 的缺陷），**不要順手修改**，在回報中說明，留給人處理。
   **僅當 `git push origin main` 失敗時**（權限不足、非 fast-forward 被拒等），才退而改以 PR 方式提交本次改動，留待人工處理。
   （非 Cursor 自動化的本地人工協作不在此限：是否 push 由使用者決定，預設僅 commit。）
 
