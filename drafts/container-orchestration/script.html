@@ -1,0 +1,426 @@
+<script>
+(function () {
+  "use strict";
+
+  /* (1) 常數與參數表 */
+  var PODS = [
+    { key: "web", cpu: 2, mem: 2 },
+    { key: "worker", cpu: 4, mem: 4 },
+    { key: "cache", cpu: 1, mem: 8 },
+    { key: "batch", cpu: 8, mem: 2 }
+  ];
+
+  var BASE = {
+    nodes: 3,
+    cpu: 12,
+    mem: 8,
+    policy: 0,
+    web: 2,
+    worker: 1,
+    cache: 2,
+    batch: 1,
+    cordon: 0
+  };
+
+  function clampInt(v, lo, hi) {
+    var n = Math.round(Number(v));
+    if (!Number.isFinite(n)) n = lo;
+    if (n < lo) return lo;
+    if (n > hi) return hi;
+    return n;
+  }
+
+  /* (2) compute* 純函式 */
+  // @probe fn       computeSchedule
+  // @probe baseline {"nodes":3,"cpu":12,"mem":8,"policy":0,"web":2,"worker":1,"cache":2,"batch":1,"cordon":0}
+  // @probe sweep    {"nodes":[2,4],"cpu":[8,16],"mem":[8,16],"policy":[0,1],"web":[0,4],"worker":[0,3],"cache":[0,3],"batch":[0,2],"cordon":[1,2]}
+  function computeSchedule(p) {
+    var nNodes = clampInt(p.nodes, 1, 4);
+    var capCpu = clampInt(p.cpu, 4, 16);
+    var capMem = clampInt(p.mem, 4, 16);
+    var policy = clampInt(p.policy, 0, 1);
+    var cordon = clampInt(p.cordon, 0, 15) >>> 0;
+    var counts = {};
+    var pods = [];
+    var i;
+    var k;
+    for (i = 0; i < PODS.length; i++) {
+      counts[PODS[i].key] = clampInt(p[PODS[i].key], 0, 6);
+      for (k = 0; k < counts[PODS[i].key]; k++) {
+        pods.push({
+          key: PODS[i].key,
+          cpu: PODS[i].cpu,
+          mem: PODS[i].mem,
+          seq: pods.length
+        });
+      }
+    }
+
+    var nodes = [];
+    for (i = 0; i < nNodes; i++) {
+      var bit = (1 << i) >>> 0;
+      nodes.push({
+        id: i,
+        capCpu: capCpu,
+        capMem: capMem,
+        freeCpu: capCpu,
+        freeMem: capMem,
+        cordoned: (cordon & bit) !== 0,
+        pods: []
+      });
+    }
+
+    var order = pods.slice();
+    if (policy === 0) {
+      order.sort(function (a, b) {
+        var d = (b.cpu + b.mem) - (a.cpu + a.mem);
+        if (d !== 0) return d;
+        d = b.cpu - a.cpu;
+        if (d !== 0) return d;
+        return a.seq - b.seq;
+      });
+    }
+
+    var waiting = [];
+    for (i = 0; i < order.length; i++) {
+      var pod = order[i];
+      var best = -1;
+      var bestSlack = 0;
+      var ni;
+      for (ni = 0; ni < nodes.length; ni++) {
+        var node = nodes[ni];
+        if (node.cordoned) continue;
+        if (node.freeCpu < pod.cpu || node.freeMem < pod.mem) continue;
+        var slack = node.freeCpu + node.freeMem;
+        if (best === -1) {
+          best = ni;
+          bestSlack = slack;
+          continue;
+        }
+        var tighter = policy === 0 ? slack < bestSlack : slack > bestSlack;
+        if (tighter || (slack === bestSlack && ni < best)) {
+          best = ni;
+          bestSlack = slack;
+        }
+      }
+      if (best === -1) {
+        waiting.push(pod);
+        continue;
+      }
+      nodes[best].freeCpu -= pod.cpu;
+      nodes[best].freeMem -= pod.mem;
+      nodes[best].pods.push({ key: pod.key, cpu: pod.cpu, mem: pod.mem });
+    }
+
+    var placed = 0;
+    var freeCpu = 0;
+    var freeMem = 0;
+    var nodesUsed = 0;
+    var heldCpu = 0;
+    var heldMem = 0;
+    var fullest = 0;
+    var haveMin = false;
+    var minCpu = 0;
+    var minMem = 0;
+    for (i = 0; i < PODS.length; i++) {
+      if (!counts[PODS[i].key]) continue;
+      if (!haveMin || (PODS[i].cpu + PODS[i].mem) < (minCpu + minMem)) {
+        haveMin = true;
+        minCpu = PODS[i].cpu;
+        minMem = PODS[i].mem;
+      }
+    }
+
+    var drawn = [];
+    for (i = 0; i < nodes.length; i++) {
+      var cur = nodes[i];
+      placed += cur.pods.length;
+      if (cur.cordoned) {
+        heldCpu += cur.capCpu;
+        heldMem += cur.capMem;
+      } else {
+        freeCpu += cur.freeCpu;
+        freeMem += cur.freeMem;
+        if (cur.pods.length) nodesUsed += 1;
+        var usedCpu = cur.capCpu - cur.freeCpu;
+        if (usedCpu > fullest) fullest = usedCpu;
+      }
+      drawn.push({
+        id: cur.id,
+        capCpu: cur.capCpu,
+        capMem: cur.capMem,
+        freeCpu: cur.freeCpu,
+        freeMem: cur.freeMem,
+        cordoned: cur.cordoned,
+        pods: cur.pods
+      });
+    }
+
+    var aloneFit = 0;
+    var holeCpu = 0;
+    var holeMem = 0;
+    if (waiting.length === 0 && haveMin) {
+      for (i = 0; i < nodes.length; i++) {
+        if (nodes[i].cordoned) continue;
+        var fitsMin = nodes[i].freeCpu >= minCpu && nodes[i].freeMem >= minMem;
+        if (!fitsMin) {
+          holeCpu += nodes[i].freeCpu;
+          holeMem += nodes[i].freeMem;
+        }
+      }
+    }
+    for (i = 0; i < waiting.length; i++) {
+      if (freeCpu >= waiting[i].cpu && freeMem >= waiting[i].mem) aloneFit += 1;
+    }
+
+    var pendingBy = { web: 0, worker: 0, cache: 0, batch: 0 };
+    for (i = 0; i < waiting.length; i++) pendingBy[waiting[i].key] += 1;
+
+    return {
+      placed: placed,
+      pending: waiting.length,
+      pendingBy: pendingBy,
+      freeCpu: freeCpu,
+      freeMem: freeMem,
+      nodesUsed: nodesUsed,
+      heldCpu: heldCpu,
+      heldMem: heldMem,
+      fullest: fullest,
+      aloneFit: aloneFit,
+      holeCpu: holeCpu,
+      holeMem: holeMem,
+      nodes: drawn
+    };
+  }
+
+  /* (3) DOM 參照與畫面常數 */
+  var FILL = {
+    web: "#3f6188",
+    worker: "#4d7d68",
+    cache: "#a3743e",
+    batch: "#6b7078"
+  };
+
+  var state = {
+    nodes: BASE.nodes,
+    cpu: BASE.cpu,
+    mem: BASE.mem,
+    policy: BASE.policy,
+    web: BASE.web,
+    worker: BASE.worker,
+    cache: BASE.cache,
+    batch: BASE.batch,
+    cordon: BASE.cordon
+  };
+
+  /* (4) render — 只把 compute 的結果畫出來 */
+  function fmtCpu(units) {
+    var v = units / 4;
+    return (Math.round(v * 100) / 100) + " vCPU";
+  }
+
+  function fmtMem(units) {
+    var v = units / 2;
+    return (Math.round(v * 100) / 100) + " GiB";
+  }
+
+  function setText(id, text) {
+    var el = document.getElementById(id);
+    if (el) el.textContent = text;
+  }
+
+  function pendingPhrase(by) {
+    var keys = ["web", "worker", "cache", "batch"];
+    var parts = [];
+    var i;
+    for (i = 0; i < keys.length; i++) {
+      if (by[keys[i]]) parts.push(keys[i] + " ×" + by[keys[i]]);
+    }
+    return parts.join("、");
+  }
+
+  function describe(r) {
+    if (r.placed + r.pending === 0) {
+      return "沒有 Pod 要排。加上任一形狀後，Binpack 與 Spread 會把同一批 request 放進不同節點。";
+    }
+    var msg = "已放置 " + r.placed + " 個";
+    if (r.pending > 0) {
+      msg += "，Pending " + r.pending + " 個（" + pendingPhrase(r.pendingBy) + "）";
+    } else {
+      msg += "，沒有 Pending";
+    }
+    msg += "。可排程節點剩餘 " + fmtCpu(r.freeCpu) + " 與 " + fmtMem(r.freeMem) + "。";
+    if (r.aloneFit > 0) {
+      msg += r.aloneFit + " 個 Pending 單看自己的 request 沒有超過這份剩餘，但沒有節點同時容得下 CPU 與記憶體。";
+    } else if (r.pending > 0) {
+      msg += "這些 Pending 的 request 已經大於叢集剩餘，不是只差形狀。";
+    } else if (r.holeCpu > 0 || r.holeMem > 0) {
+      msg += "全部放完後，還有 " + fmtCpu(r.holeCpu) + "／" + fmtMem(r.holeMem) + " 組不成這批裡最小 Pod 的空洞。";
+    } else if (r.freeCpu > 0 || r.freeMem > 0) {
+      msg += "剩餘空間還放得下另一個這批裡最小的 Pod。";
+    }
+    if (r.heldCpu > 0) {
+      msg += " 不可排程的節點凍結 " + fmtCpu(r.heldCpu) + "／" + fmtMem(r.heldMem) + "。";
+    }
+    return msg;
+  }
+
+  function barRects(x, y, w, h, cap, pods, dim, cordoned) {
+    var html = '<rect x="' + x + '" y="' + y + '" width="' + w + '" height="' + h + '" rx="4" fill="#fafaf9" stroke="#dedcd8"></rect>';
+    if (cordoned) {
+      html += '<rect x="' + x + '" y="' + y + '" width="' + w + '" height="' + h + '" rx="4" fill="#f6f0e7"></rect>';
+      return html;
+    }
+    var cursor = x;
+    var i;
+    for (i = 0; i < pods.length; i++) {
+      var pw = (pods[i][dim] / cap) * w;
+      html += '<rect x="' + cursor + '" y="' + y + '" width="' + pw + '" height="' + h + '" fill="' + FILL[pods[i].key] + '"></rect>';
+      if (pw >= 44) {
+        html += '<text x="' + (cursor + 6) + '" y="' + (y + 15) + '" fill="#ffffff" font-size="11">' + pods[i].key + "</text>";
+      }
+      cursor += pw;
+    }
+    return html;
+  }
+
+  function paintYard(r) {
+    var svg = document.getElementById("orch-yard");
+    var rowH = 100;
+    var height = 12 + r.nodes.length * rowH;
+    svg.setAttribute("viewBox", "0 0 720 " + height);
+    var parts = ['<title>節點上的 CPU 與記憶體佔用</title>'];
+    parts.push('<rect x="0" y="0" width="720" height="' + height + '" fill="#ffffff"></rect>');
+    var i;
+    for (i = 0; i < r.nodes.length; i++) {
+      var node = r.nodes[i];
+      var y = 8 + i * rowH;
+      var remainCpu = node.cordoned ? "不排程" : ("剩 " + fmtCpu(node.freeCpu));
+      var remainMem = node.cordoned ? "容量仍在" : ("剩 " + fmtMem(node.freeMem));
+      parts.push('<g data-node="' + node.id + '">');
+      parts.push('<rect x="0" y="' + y + '" width="720" height="92" rx="8" fill="#ffffff" stroke="#ecebe8"></rect>');
+      parts.push('<text x="12" y="' + (y + 28) + '" fill="#262a2f" font-size="13">n' + (node.id + 1) + "</text>");
+      parts.push('<text x="12" y="' + (y + 48) + '" fill="#6b7078" font-size="11">CPU</text>');
+      parts.push('<text x="12" y="' + (y + 74) + '" fill="#6b7078" font-size="11">MEM</text>');
+      parts.push(barRects(78, y + 16, 500, 20, node.capCpu, node.pods, "cpu", node.cordoned));
+      parts.push(barRects(78, y + 58, 500, 20, node.capMem, node.pods, "mem", node.cordoned));
+      parts.push('<text x="588" y="' + (y + 30) + '" fill="#6b7078" font-size="11">' + remainCpu + "</text>");
+      parts.push('<text x="588" y="' + (y + 72) + '" fill="#6b7078" font-size="11">' + remainMem + "</text>");
+      parts.push("</g>");
+    }
+    svg.innerHTML = parts.join("");
+  }
+
+  function paintLabels() {
+    setText("orch-nodes-out", state.nodes + " 台");
+    setText("orch-cpu-out", fmtCpu(state.cpu));
+    setText("orch-mem-out", fmtMem(state.mem));
+    setText("orch-web-out", "×" + state.web);
+    setText("orch-worker-out", "×" + state.worker);
+    setText("orch-cache-out", "×" + state.cache);
+    setText("orch-batch-out", "×" + state.batch);
+  }
+
+  function render() {
+    var result = computeSchedule(state);
+    paintLabels();
+    paintYard(result);
+    setText("orch-placed", String(result.placed));
+    setText("orch-pending", String(result.pending));
+    setText("orch-alone", String(result.aloneFit));
+    setText("orch-used", String(result.nodesUsed));
+    setText("orch-note", describe(result));
+  }
+
+  /* (5) 事件綁定 */
+  function pullSliders() {
+    state.nodes = Number(document.getElementById("orch-nodes").value);
+    state.cpu = Number(document.getElementById("orch-cpu").value);
+    state.mem = Number(document.getElementById("orch-mem").value);
+    state.web = Number(document.getElementById("orch-web").value);
+    state.worker = Number(document.getElementById("orch-worker").value);
+    state.cache = Number(document.getElementById("orch-cache").value);
+    state.batch = Number(document.getElementById("orch-batch").value);
+    var bits = ((1 << state.nodes) - 1) >>> 0;
+    state.cordon = (state.cordon & bits) >>> 0;
+  }
+
+  function pushSliders() {
+    document.getElementById("orch-nodes").value = String(state.nodes);
+    document.getElementById("orch-cpu").value = String(state.cpu);
+    document.getElementById("orch-mem").value = String(state.mem);
+    document.getElementById("orch-web").value = String(state.web);
+    document.getElementById("orch-worker").value = String(state.worker);
+    document.getElementById("orch-cache").value = String(state.cache);
+    document.getElementById("orch-batch").value = String(state.batch);
+  }
+
+  function setPolicyPressed() {
+    var buttons = document.querySelectorAll("#demo-orch-pack .seg button");
+    var i;
+    for (i = 0; i < buttons.length; i++) {
+      var on = Number(buttons[i].getAttribute("data-policy")) === state.policy;
+      buttons[i].setAttribute("aria-pressed", on ? "true" : "false");
+    }
+  }
+
+  function bindRange(id) {
+    document.getElementById(id).addEventListener("input", function () {
+      pullSliders();
+      render();
+    });
+  }
+
+  bindRange("orch-nodes");
+  bindRange("orch-cpu");
+  bindRange("orch-mem");
+  bindRange("orch-web");
+  bindRange("orch-worker");
+  bindRange("orch-cache");
+  bindRange("orch-batch");
+
+  var policyButtons = document.querySelectorAll("#demo-orch-pack .seg button");
+  var pi;
+  for (pi = 0; pi < policyButtons.length; pi++) {
+    policyButtons[pi].addEventListener("click", function (ev) {
+      state.policy = Number(ev.currentTarget.getAttribute("data-policy"));
+      setPolicyPressed();
+      render();
+    });
+  }
+
+  document.getElementById("orch-yard").addEventListener("click", function (ev) {
+    var t = ev.target;
+    while (t && t !== this) {
+      if (t.getAttribute && t.getAttribute("data-node") !== null) {
+        var id = Number(t.getAttribute("data-node"));
+        var bit = (1 << id) >>> 0;
+        state.cordon = (state.cordon ^ bit) >>> 0;
+        render();
+        return;
+      }
+      t = t.parentNode;
+    }
+  });
+
+  document.getElementById("orch-reset").addEventListener("click", function () {
+    state = {
+      nodes: BASE.nodes,
+      cpu: BASE.cpu,
+      mem: BASE.mem,
+      policy: BASE.policy,
+      web: BASE.web,
+      worker: BASE.worker,
+      cache: BASE.cache,
+      batch: BASE.batch,
+      cordon: BASE.cordon
+    };
+    pushSliders();
+    setPolicyPressed();
+    render();
+  });
+
+  setPolicyPressed();
+  render();
+})();
+</script>

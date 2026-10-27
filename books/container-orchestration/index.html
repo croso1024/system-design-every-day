@@ -1,0 +1,2343 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>容器編排 (ECS / EKS / Kubernetes) | System Design Every Day</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@300;400;500;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+  <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+  <script>
+    mermaid.initialize({
+      startOnLoad: true,
+      theme: 'default',
+      securityLevel: 'loose'
+    });
+  </script>
+  <style>
+    /* 全站設計 token 的唯一來源。scripts/lib/books.js 會把「第一個 :root 區塊」原樣抽進首頁：
+       請保持單一區塊、區塊內不得出現 `}`；首頁領域色依賴 --accent / --ok / --warn。 */
+    :root {
+      --bg: #ffffff;
+      --bg-soft: #fafaf9;
+      --text: #262a2f;
+      --text-2: #6b7078;
+      --text-3: #9aa0a8;
+      --border: #ecebe8;
+      --border-strong: #dedcd8;
+      --code-bg: #f6f5f3;
+      --accent: #3f6188;
+      --accent-soft: #eef2f7;
+      --accent-line: #cdd9e6;
+      --ok: #4d7d68;
+      --ok-soft: #eef4f1;
+      --warn: #a3743e;
+      --warn-soft: #f6f0e7;
+      --bad: #a8554f;
+      --bad-soft: #f6ecea;
+      --radius: 10px;
+      --radius-sm: 7px;
+      --maxw: 760px;
+      --sans: "Noto Sans TC", system-ui, -apple-system, "Segoe UI", sans-serif;
+      --mono: "JetBrains Mono", "SFMono-Regular", Menlo, Consolas, monospace;
+    }
+
+    /* ---------- base reset ----------
+       等價於 Tailwind preflight 的最小重置（頁面不載入 Tailwind，utility class 不會生效）。
+       文章頁與各篇 demo CSS 都以這組基準值撰寫，改動會讓所有產物的間距、清單、按鈕外觀一起變動。
+       新增規則請一律寫在這個區塊之後，並使用 :root 的 token。 */
+    *, *::before, *::after {
+      box-sizing: border-box;
+      border: 0 solid var(--border);
+    }
+
+    html {
+      line-height: 1.5;
+      -webkit-text-size-adjust: 100%;
+      tab-size: 4;
+    }
+
+    h1, h2, h3, h4, h5, h6 {
+      margin: 0;
+      font-size: inherit;
+      font-weight: inherit;
+    }
+
+    p, blockquote, dl, dd, figure, pre, hr {
+      margin: 0;
+    }
+
+    hr {
+      height: 0;
+      color: inherit;
+      border-top-width: 1px;
+    }
+
+    a {
+      color: inherit;
+      text-decoration: inherit;
+    }
+
+    b, strong {
+      font-weight: bolder;
+    }
+
+    code, kbd, samp, pre {
+      font-family: var(--mono);
+      font-size: 1em;
+    }
+
+    small {
+      font-size: 80%;
+    }
+
+    sub, sup {
+      position: relative;
+      font-size: 75%;
+      line-height: 0;
+      vertical-align: baseline;
+    }
+    sub { bottom: -0.25em; }
+    sup { top: -0.5em; }
+
+    table {
+      border-collapse: collapse;
+      border-color: inherit;
+      text-indent: 0;
+    }
+
+    ol, ul, menu {
+      list-style: none;
+      margin: 0;
+      padding: 0;
+    }
+
+    img, svg, video, canvas, audio, iframe, embed, object {
+      display: block;
+      vertical-align: middle;
+    }
+
+    img, video {
+      max-width: 100%;
+      height: auto;
+    }
+
+    button, input, optgroup, select, textarea {
+      margin: 0;
+      padding: 0;
+      font: inherit;
+      line-height: inherit;
+      color: inherit;
+    }
+
+    button, select {
+      text-transform: none;
+    }
+
+    button, [type="button"], [type="reset"], [type="submit"] {
+      -webkit-appearance: button;
+      background-color: transparent;
+      background-image: none;
+    }
+
+    button, [role="button"] {
+      cursor: pointer;
+    }
+
+    :disabled {
+      cursor: default;
+    }
+
+    input::placeholder, textarea::placeholder {
+      opacity: 1;
+      color: var(--text-3);
+    }
+
+    textarea {
+      resize: vertical;
+    }
+
+    fieldset {
+      margin: 0;
+      padding: 0;
+    }
+
+    legend {
+      padding: 0;
+    }
+
+    summary {
+      display: list-item;
+    }
+
+    [hidden] {
+      display: none;
+    }
+
+    html {
+      scroll-behavior: smooth;
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      html {
+        scroll-behavior: auto;
+      }
+      * {
+        animation-duration: .001ms !important;
+        transition-duration: .001ms !important;
+      }
+    }
+
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font-family: var(--sans);
+      font-weight: 400;
+      font-size: 16px;
+      line-height: 1.78;
+      -webkit-font-smoothing: antialiased;
+      letter-spacing: .005em;
+    }
+
+    ::selection {
+      background: var(--accent-soft);
+    }
+
+    /* ---------- layout ---------- */
+    .wrap {
+      display: flex;
+      max-width: 1180px;
+      margin: 0 auto;
+      gap: 0;
+    }
+
+    .toc {
+      width: 248px;
+      flex: 0 0 248px;
+      position: sticky;
+      top: 0;
+      height: 100vh;
+      padding: 54px 22px 40px 28px;
+      overflow-y: auto;
+      border-right: 1px solid var(--border);
+      transition: width .2s ease, flex-basis .2s ease, padding .2s ease, opacity .15s ease, border-color .15s ease;
+    }
+
+    .toc-kicker {
+      font-family: var(--mono);
+      font-size: 11px;
+      letter-spacing: .14em;
+      text-transform: uppercase;
+      color: var(--text-3);
+      margin-bottom: 20px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+    }
+
+    /* desktop：側欄內收合鈕；≤920px 隱藏，改由 .toc-toggle accordion 控制 */
+    .toc-collapse {
+      display: none;
+      flex: 0 0 auto;
+      align-items: center;
+      justify-content: center;
+      width: 28px;
+      height: 28px;
+      padding: 0;
+      border: none;
+      background: none;
+      border-radius: 6px;
+      color: var(--text-2);
+      line-height: 1;
+      cursor: pointer;
+    }
+
+    .toc-collapse:hover {
+      color: var(--text);
+      background: var(--bg-soft);
+    }
+
+    .toc-collapse:focus-visible {
+      outline: 2px solid var(--accent);
+      outline-offset: 2px;
+    }
+
+    .toc-collapse svg {
+      display: block;
+    }
+
+    /* desktop：側欄收合後的展開鈕（預設隱藏） */
+    .toc-reopen {
+      display: none;
+      position: fixed;
+      top: 18px;
+      left: 18px;
+      z-index: 900;
+      align-items: center;
+      gap: 7px;
+      font-size: 12.5px;
+      line-height: 1;
+      color: var(--text-2);
+      background: var(--bg);
+      border: 1px solid var(--border-strong);
+      border-radius: 999px;
+      padding: 7px 13px 7px 11px;
+      box-shadow: 0 1px 3px rgba(0, 0, 0, .06), 0 4px 12px rgba(0, 0, 0, .04);
+      cursor: pointer;
+      transition: background .15s, border-color .15s, color .15s;
+    }
+
+    .toc-reopen:hover {
+      background: var(--bg-soft);
+      color: var(--text);
+      border-color: var(--text-3);
+    }
+
+    .toc-reopen svg {
+      flex: 0 0 auto;
+      display: block;
+    }
+
+    @media (min-width: 921px) {
+      .toc-collapse {
+        display: inline-flex;
+      }
+
+      body.toc-collapsed .toc {
+        width: 0;
+        flex-basis: 0;
+        padding: 0;
+        opacity: 0;
+        overflow: hidden;
+        border-right-color: transparent;
+        pointer-events: none;
+      }
+
+      body.toc-collapsed .toc-reopen {
+        display: inline-flex;
+      }
+    }
+
+    .toc-kicker a {
+      color: var(--text-3);
+      text-decoration: none;
+      border-bottom: none;
+      transition: color .15s;
+    }
+
+    .toc-kicker a:hover {
+      color: var(--text);
+    }
+
+    .toc-title {
+      font-size: 15px;
+      font-weight: 700;
+      line-height: 1.4;
+      margin: 0 0 12px;
+    }
+
+    .toc-actions {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 8px;
+      margin: 0 0 18px;
+    }
+
+    .read-toggle {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      font-family: var(--sans);
+      font-size: 12.5px;
+      line-height: 1.3;
+      color: var(--text-2);
+      background: var(--bg);
+      border: 1px solid var(--border-strong);
+      border-radius: 999px;
+      padding: 5px 12px 5px 10px;
+      cursor: pointer;
+      transition: background .15s, border-color .15s, color .15s;
+    }
+
+    .read-toggle:hover {
+      background: var(--bg-soft);
+      color: var(--text);
+      border-color: var(--text-3);
+    }
+
+    .read-toggle:focus-visible {
+      outline: 2px solid var(--accent);
+      outline-offset: 2px;
+    }
+
+    .read-toggle[aria-pressed="true"] {
+      background: var(--ok-soft);
+      border-color: var(--ok);
+      color: var(--ok);
+      font-weight: 600;
+    }
+
+    .read-toggle .read-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      border: 1.5px solid currentColor;
+      flex: 0 0 auto;
+    }
+
+    .read-toggle[aria-pressed="true"] .read-dot {
+      background: var(--ok);
+      border-color: var(--ok);
+    }
+
+    .article-foot {
+      margin-top: 56px;
+      padding-top: 24px;
+      border-top: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      flex-wrap: wrap;
+    }
+
+    .article-foot-left {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      flex-wrap: wrap;
+    }
+
+    .article-foot-hint {
+      font-size: 13.5px;
+      color: var(--text-2);
+    }
+
+    .read-toggle.read-toggle-lg {
+      font-size: 13.5px;
+      padding: 7px 16px 7px 13px;
+    }
+
+    .article-foot-back {
+      font-size: 13.5px;
+      color: var(--text-2);
+      border-bottom: 1px solid var(--border-strong);
+    }
+
+    .article-foot-back:hover {
+      color: var(--text);
+      border-color: var(--text);
+    }
+
+    .toc a {
+      display: flex;
+      gap: 10px;
+      align-items: baseline;
+      text-decoration: none;
+      color: var(--text-2);
+      font-size: 13.5px;
+      padding: 6px 10px;
+      border-radius: 6px;
+      line-height: 1.45;
+      transition: background .15s, color .15s;
+      border-bottom: none;
+    }
+
+    .toc a:hover {
+      background: var(--bg-soft);
+      color: var(--text);
+      border-bottom: none;
+    }
+
+    .toc a.active {
+      color: var(--accent);
+      background: var(--accent-soft);
+      font-weight: 500;
+      border-bottom: none;
+    }
+
+    .toc a .n {
+      font-family: var(--mono);
+      font-size: 11px;
+      color: var(--text-3);
+      flex: 0 0 18px;
+    }
+
+    .toc a.active .n {
+      color: var(--accent);
+    }
+
+    main {
+      flex: 1 1 auto;
+      min-width: 0;
+      padding: 0 40px;
+    }
+
+    .inner {
+      max-width: var(--maxw);
+      margin: 0 auto;
+      padding: 72px 0 140px;
+    }
+
+    /* ---------- hero ---------- */
+    .hero {
+      margin-bottom: 64px;
+    }
+
+    .hero .eyebrow {
+      font-family: var(--mono);
+      font-size: 12px;
+      letter-spacing: .16em;
+      text-transform: uppercase;
+      color: var(--accent);
+      margin-bottom: 18px;
+    }
+
+    .hero h1 {
+      font-size: 40px;
+      line-height: 1.18;
+      font-weight: 700;
+      margin: 0 0 18px;
+      letter-spacing: -.01em;
+    }
+
+    .hero .lede {
+      font-size: 18px;
+      line-height: 1.7;
+      color: var(--text-2);
+      font-weight: 300;
+      margin: 0;
+      max-width: 620px;
+    }
+
+    .hero .meta {
+      margin-top: 28px;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+
+    .tag {
+      font-family: var(--mono);
+      font-size: 12px;
+      color: var(--text-2);
+      border: 1px solid var(--border-strong);
+      padding: 4px 11px;
+      border-radius: 999px;
+      background: var(--bg-soft);
+    }
+
+    /* ---------- sections ---------- */
+    section {
+      padding-top: 30px;
+      scroll-margin-top: 24px;
+    }
+
+    .sec-head {
+      display: flex;
+      align-items: baseline;
+      gap: 14px;
+      margin: 0 0 8px;
+    }
+
+    .sec-num {
+      font-family: var(--mono);
+      font-size: 13px;
+      color: var(--text-3);
+      font-weight: 500;
+      padding-top: 6px;
+      flex: 0 0 auto;
+    }
+
+    h2 {
+      font-size: 27px;
+      font-weight: 700;
+      line-height: 1.3;
+      margin: 0;
+      letter-spacing: -.01em;
+    }
+
+    .sec-sub {
+      color: var(--text-2);
+      font-size: 15px;
+      margin: 2px 0 28px 0;
+      font-weight: 300;
+    }
+
+    h3 {
+      font-size: 18.5px;
+      font-weight: 700;
+      margin: 38px 0 12px;
+      line-height: 1.45;
+    }
+
+    h4 {
+      font-size: 15.5px;
+      font-weight: 700;
+      margin: 26px 0 8px;
+      color: var(--text);
+    }
+
+    p {
+      margin: 0 0 16px;
+    }
+
+    a {
+      color: var(--accent);
+      text-decoration: none;
+      border-bottom: 1px solid var(--accent-line);
+      transition: border-color .15s;
+    }
+
+    a:hover {
+      border-color: var(--accent);
+    }
+
+    strong {
+      font-weight: 700;
+    }
+
+    em {
+      font-style: normal;
+      background: var(--accent-soft);
+      padding: 0 4px;
+      border-radius: 4px;
+      font-weight: 500;
+      color: #2f4d6e;
+    }
+
+    hr.div {
+      border: none;
+      border-top: 1px solid var(--border);
+      margin: 46px 0;
+    }
+
+    ul, ol {
+      margin: 0 0 18px;
+      padding-left: 22px;
+    }
+
+    li {
+      margin: 7px 0;
+      padding-left: 4px;
+    }
+
+    code {
+      font-family: var(--mono);
+      font-size: .86em;
+      background: var(--code-bg);
+      padding: 2px 6px;
+      border-radius: 5px;
+      color: #43494f;
+    }
+
+    pre {
+      background: var(--code-bg);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 16px 18px;
+      overflow-x: auto;
+      margin: 0 0 20px;
+      line-height: 1.6;
+    }
+
+    pre code {
+      background: none;
+      padding: 0;
+      font-size: 13px;
+    }
+
+    /* ---------- math notation ---------- */
+    /* 行內數學變數，如 W、R、N。本站不載入 MathJax/KaTeX，請勿使用 $...$ 或 \[...\] LaTeX 分隔符。 */
+    var {
+      font-family: var(--mono);
+      font-style: normal;
+      font-weight: 500;
+      color: var(--accent);
+    }
+
+    /* 區塊數學公式，置中等寬呈現，記得將 > < & 轉義為 &gt; &lt; &amp;。 */
+    .formula {
+      font-family: var(--mono);
+      font-size: 15px;
+      text-align: center;
+      background: var(--bg-soft);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      padding: 14px 18px;
+      margin: 0 0 20px;
+      color: var(--text);
+      letter-spacing: .03em;
+      overflow-x: auto;
+    }
+
+    /* ---------- callouts ---------- */
+    .callout {
+      border: 1px solid var(--border);
+      border-left: 3px solid var(--border-strong);
+      background: var(--bg-soft);
+      border-radius: var(--radius-sm);
+      padding: 15px 18px;
+      margin: 0 0 22px;
+      font-size: 14.5px;
+    }
+
+    .callout .c-title {
+      font-weight: 700;
+      font-size: 13px;
+      letter-spacing: .02em;
+      margin-bottom: 5px;
+      display: flex;
+      gap: 7px;
+      align-items: center;
+    }
+
+    .callout p:last-child {
+      margin-bottom: 0;
+    }
+
+    .callout.accent {
+      border-left-color: var(--accent);
+      background: var(--accent-soft);
+    }
+
+    .callout.accent .c-title {
+      color: #2f4d6e;
+    }
+
+    .callout.warn {
+      border-left-color: var(--warn);
+      background: var(--warn-soft);
+    }
+
+    .callout.warn .c-title {
+      color: var(--warn);
+    }
+
+    .callout .ic {
+      font-family: var(--mono);
+      font-size: 11px;
+      border: 1px solid currentColor;
+      border-radius: 4px;
+      padding: 0 4px;
+      line-height: 1.5;
+      opacity: .8;
+    }
+
+    .oneliner {
+      border: 1px dashed var(--accent-line);
+      border-radius: var(--radius-sm);
+      padding: 13px 16px;
+      margin: 0 0 22px;
+      font-size: 14.5px;
+      background: #fbfcfd;
+    }
+
+    .oneliner b {
+      font-family: var(--mono);
+      font-size: 11px;
+      letter-spacing: .08em;
+      color: var(--accent);
+      display: block;
+      margin-bottom: 4px;
+      text-transform: uppercase;
+    }
+
+    /* ---------- tables ---------- */
+    .tbl-wrap {
+      overflow-x: auto;
+      margin: 0 0 24px;
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+    }
+
+    table {
+      border-collapse: collapse;
+      width: 100%;
+      font-size: 14px;
+      min-width: 520px;
+    }
+
+    th, td {
+      text-align: left;
+      padding: 11px 14px;
+      border-bottom: 1px solid var(--border);
+      vertical-align: top;
+    }
+
+    th {
+      font-weight: 700;
+      background: var(--bg-soft);
+      font-size: 12.5px;
+      letter-spacing: .02em;
+      color: var(--text-2);
+      position: sticky;
+      top: 0;
+    }
+
+    tr:last-child td {
+      border-bottom: none;
+    }
+
+    td.hl {
+      background: var(--accent-soft);
+    }
+
+    .cap {
+      font-size: 12.5px;
+      color: var(--text-3);
+      margin: -12px 0 26px;
+      font-family: var(--mono);
+    }
+
+    /* ---------- interactive shell ---------- */
+    .demo {
+      border: 1px solid var(--border-strong);
+      border-radius: var(--radius);
+      background: var(--bg);
+      margin: 24px 0 26px;
+      overflow: hidden;
+    }
+
+    .demo-bar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      flex-wrap: wrap;
+      padding: 13px 16px;
+      border-bottom: 1px solid var(--border);
+      background: var(--bg-soft);
+    }
+
+    .demo-bar .label {
+      font-family: var(--mono);
+      font-size: 11px;
+      letter-spacing: .1em;
+      text-transform: uppercase;
+      color: var(--text-3);
+    }
+
+    .demo-body {
+      padding: 20px 18px;
+    }
+
+    .seg {
+      display: inline-flex;
+      border: 1px solid var(--border-strong);
+      border-radius: 999px;
+      overflow: hidden;
+      background: var(--bg);
+    }
+
+    .seg button {
+      border: none;
+      background: none;
+      font-family: var(--sans);
+      font-size: 12.5px;
+      color: var(--text-2);
+      padding: 6px 14px;
+      cursor: pointer;
+      transition: background .15s, color .15s;
+    }
+
+    .seg button:hover {
+      color: var(--text);
+    }
+
+    .seg button[aria-pressed="true"] {
+      background: var(--accent);
+      color: #fff;
+    }
+
+    .btn {
+      font-family: var(--sans);
+      font-size: 13px;
+      border: 1px solid var(--border-strong);
+      background: var(--bg);
+      color: var(--text);
+      padding: 7px 16px;
+      border-radius: 7px;
+      cursor: pointer;
+      transition: background .15s, border-color .15s;
+    }
+
+    .btn:hover {
+      background: var(--bg-soft);
+      border-color: var(--text-3);
+    }
+
+    .btn.primary {
+      background: var(--accent);
+      color: #fff;
+      border-color: var(--accent);
+    }
+
+    .btn.primary:hover {
+      background: #365578;
+    }
+
+    .btn:disabled {
+      opacity: .4;
+      cursor: not-allowed;
+    }
+
+    .btn:focus-visible, .seg button:focus-visible, .toc a:focus-visible, a:focus-visible,
+    summary:focus-visible {
+      outline: 2px solid var(--accent);
+      outline-offset: 2px;
+      border-radius: 4px;
+    }
+
+    .status-line {
+      font-size: 13.5px;
+      color: var(--text-2);
+      min-height: 42px;
+      margin-top: 14px;
+      background: var(--bg-soft);
+      border-radius: var(--radius-sm);
+      padding: 10px 13px;
+      border: 1px solid var(--border);
+    }
+
+    .status-line b {
+      color: var(--text);
+    }
+
+    .legend {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 14px;
+      font-size: 11.5px;
+      color: var(--text-2);
+      margin-top: 14px;
+      font-family: var(--mono);
+    }
+
+    .legend span {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .dot {
+      width: 9px;
+      height: 9px;
+      border-radius: 3px;
+      display: inline-block;
+      border: 1px solid rgba(0, 0, 0, .08);
+    }
+
+    /* node states used across diagrams */
+    .ns-idle {
+      background: #fff;
+      border-color: var(--border-strong);
+    }
+
+    .ns-lock {
+      background: var(--warn-soft);
+      border-color: var(--warn);
+    }
+
+    .ns-ok {
+      background: var(--ok-soft);
+      border-color: var(--ok);
+    }
+
+    .ns-bad {
+      background: var(--bad-soft);
+      border-color: var(--bad);
+    }
+
+    .ns-wait {
+      background: var(--accent-soft);
+      border-color: var(--accent);
+    }
+
+    /* FAQ */
+    details.faq {
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      margin-bottom: 10px;
+      background: #fff;
+      overflow: hidden;
+    }
+
+    details.faq summary {
+      cursor: pointer;
+      padding: 14px 16px;
+      font-weight: 600;
+      font-size: 14.5px;
+      list-style: none;
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      align-items: center;
+    }
+
+    details.faq summary::-webkit-details-marker {
+      display: none;
+    }
+
+    details.faq summary .q {
+      font-family: var(--mono);
+      font-size: 11px;
+      color: var(--accent);
+      flex: 0 0 auto;
+    }
+
+    details.faq summary .chev {
+      transition: transform .2s;
+      color: var(--text-3);
+      flex: 0 0 auto;
+      font-size: 13px;
+    }
+
+    details.faq[open] summary .chev {
+      transform: rotate(90deg);
+    }
+
+    details.faq .ans {
+      padding: 0 16px 16px;
+      font-size: 14px;
+      color: var(--text-2);
+    }
+
+    details.faq .ans p {
+      margin: 0 0 10px;
+    }
+
+    details.faq .ans p:last-child {
+      margin: 0;
+    }
+
+    .trap {
+      display: flex;
+      gap: 10px;
+      font-size: 14px;
+      margin: 9px 0;
+    }
+
+    .trap .tn {
+      font-family: var(--mono);
+      font-size: 11px;
+      color: var(--bad);
+      flex: 0 0 auto;
+      border: 1px solid var(--bad-soft);
+      background: var(--bad-soft);
+      border-radius: 4px;
+      padding: 1px 6px;
+      height: fit-content;
+      margin-top: 2px;
+    }
+
+    /* mobile responsive */
+    .toc-toggle {
+      display: none;
+    }
+
+    @media (max-width: 920px) {
+      .wrap {
+        flex-direction: column;
+      }
+      .toc {
+        position: static;
+        width: auto;
+        height: auto;
+        border-right: none;
+        border-bottom: 1px solid var(--border);
+        padding: 18px 22px;
+        transition: none;
+      }
+      .toc-title {
+        margin-bottom: 0;
+      }
+      .toc-actions {
+        margin: 10px 0 0;
+      }
+      .toc-kicker {
+        margin-bottom: 10px;
+      }
+      .toc-nav {
+        display: none;
+        margin-top: 16px;
+      }
+      .toc-nav.open {
+        display: block;
+      }
+      .toc-toggle {
+        display: inline-block;
+        margin-top: 0;
+      }
+      .toc-collapse,
+      .toc-reopen {
+        display: none !important;
+      }
+      main {
+        padding: 0 22px;
+      }
+      .inner {
+        padding: 40px 0 100px;
+      }
+      .hero h1 {
+        font-size: 31px;
+      }
+    }
+
+    @media print {
+      .toc-reopen { display: none !important; }
+    }
+
+    @media (max-width: 480px) {
+      body {
+        font-size: 15px;
+      }
+      .hero h1 {
+        font-size: 27px;
+      }
+      h2 {
+        font-size: 23px;
+      }
+      .demo-body {
+        padding: 16px 13px;
+      }
+    }
+  </style>
+</head>
+<body data-topic-id="container-orchestration">
+  <div class="wrap">
+    <!-- ===================== TOC SIDEBAR ===================== -->
+    <nav class="toc" id="toc-panel" aria-label="目錄">
+      <div class="toc-kicker">
+        <a href="../index.html">← 返回目錄</a>
+        <button class="toc-collapse" type="button" aria-expanded="true" aria-controls="toc-panel"
+                aria-label="收合目錄" title="收合目錄">
+          <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor"
+               stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M15 18l-6-6 6-6"/>
+          </svg>
+        </button>
+      </div>
+      <div class="toc-title">容器編排 (ECS / EKS / Kubernetes)</div>
+      <div class="toc-actions">
+        <button class="read-toggle" type="button" data-read-toggle aria-pressed="false" title="切換本文已讀狀態">
+          <span class="read-dot" aria-hidden="true"></span>
+          <span class="read-label">標記為已讀</span>
+        </button>
+        <button class="btn toc-toggle" type="button" aria-expanded="false" aria-controls="toc-nav">目錄 ▾</button>
+      </div>
+      <div class="toc-nav" id="toc-nav">
+        <a href="#s1"><span class="n">01</span>編排器替你做哪些決定</a>
+        <a href="#s2"><span class="n">02</span>排程只加總 request</a>
+        <a href="#s3"><span class="n">03</span>對帳是一輪一輪補差</a>
+        <a href="#s4"><span class="n">04</span>誰該重啟，誰只該停止接流量</a>
+        <a href="#s5"><span class="n">05</span>要哪一種 API，以及要不要自己養節點</a>
+      </div>
+    </nav>
+    <button class="btn toc-reopen" type="button" aria-expanded="true" aria-controls="toc-panel"
+            aria-label="展開目錄" title="展開目錄">
+      <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor"
+           stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M9 18l6-6-6-6"/>
+      </svg>
+      <span>目錄</span>
+    </button>
+
+    <!-- ===================== MAIN CONTENT ===================== -->
+    <main>
+      <div class="inner">
+        <!-- demo-archetype: D｜空間視覺化 — 讀者調整四種 Pod 的數量與節點容量，並點選節點讓它退出這一輪排程，長條上的 CPU／記憶體佔位、Pending 與「總量夠但塞不進」的個數會重算。
+     選 D 是因為這篇的核心是 request 在節點容量裡怎麼佔位。最近三篇的主形式是參數掃描、並排對照與決策器。 -->
+<style>
+  .orch-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    align-items: stretch;
+    justify-content: center;
+    margin: 14px 0 6px;
+  }
+  .orch-node {
+    border: 1px solid var(--border-strong);
+    border-radius: 8px;
+    background: #fff;
+    padding: 10px 12px;
+    min-width: 110px;
+    max-width: 200px;
+    text-align: center;
+  }
+  .orch-node .nn {
+    font-family: var(--mono);
+    font-size: 12px;
+    font-weight: 700;
+    color: var(--text);
+  }
+  .orch-node .ns {
+    font-size: 11px;
+    color: var(--text-2);
+    margin-top: 3px;
+    line-height: 1.4;
+  }
+  .orch-node.accent { border-top: 3px solid var(--accent); }
+  .orch-arrow {
+    display: flex;
+    align-items: center;
+    font-family: var(--mono);
+    font-size: 13px;
+    color: var(--text-3);
+    white-space: nowrap;
+  }
+  .orch-lane {
+    display: grid;
+    grid-template-columns: 118px repeat(3, minmax(0, 1fr));
+    gap: 1px;
+    background: var(--border);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    overflow: hidden;
+    margin: 14px 0 6px;
+  }
+  .orch-lane > div {
+    background: #fff;
+    padding: 8px 10px;
+    font-size: 12px;
+    line-height: 1.5;
+  }
+  .orch-lane .lh {
+    background: var(--bg-soft);
+    font-family: var(--mono);
+    font-size: 11px;
+    font-weight: 700;
+    color: var(--text-2);
+  }
+  .orch-lane .lt {
+    background: var(--bg-soft);
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--text-3);
+  }
+  .orch-lane .lc.act { background: var(--accent-soft); }
+  .orch-lane .lc.ok { background: var(--ok-soft); }
+  .orch-lane .lc.bad { background: var(--bad-soft); }
+  .orch-ctrl {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 12px 16px;
+  }
+  .orch-field {
+    display: grid;
+    grid-template-columns: 1fr auto;
+    gap: 2px 8px;
+    align-items: baseline;
+    font-size: 12px;
+    color: var(--text-2);
+  }
+  .orch-field input[type="range"] {
+    grid-column: 1 / -1;
+    width: 100%;
+    accent-color: var(--accent);
+  }
+  .orch-field b {
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--text);
+    font-weight: 650;
+  }
+  .orch-tools {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    align-items: center;
+    justify-content: space-between;
+    margin: 14px 0 12px;
+  }
+  .orch-yard {
+    width: 100%;
+    height: auto;
+    display: block;
+    background: #ffffff;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+  }
+  .orch-yard text { font-family: var(--mono); }
+  .orch-yard g { cursor: pointer; }
+  .orch-read {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 8px;
+    margin-top: 12px;
+  }
+  .orch-read div {
+    background: var(--bg-soft);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 8px 10px;
+  }
+  .orch-read strong {
+    display: block;
+    font-family: var(--mono);
+    font-size: 16px;
+    color: var(--text);
+  }
+  .orch-read span {
+    font-size: 11px;
+    color: var(--text-2);
+    line-height: 1.4;
+  }
+  .dot.orch-web { background: var(--accent); border-color: var(--accent); }
+  .dot.orch-worker { background: var(--ok); border-color: var(--ok); }
+  .dot.orch-cache { background: var(--warn); border-color: var(--warn); }
+  .dot.orch-batch { background: var(--text-2); border-color: var(--text-2); }
+  @media (max-width: 720px) {
+    .orch-lane { grid-template-columns: 88px repeat(3, minmax(0, 1fr)); }
+    .orch-ctrl { grid-template-columns: 1fr; }
+    .orch-read { grid-template-columns: 1fr 1fr; }
+  }
+</style>
+
+<section id="s1">
+  <div class="sec-head">
+    <span class="sec-num">01</span>
+    <h2>編排器替你做哪些決定</h2>
+  </div>
+  <p class="sec-sub">容器 runtime 負責把行程跑起來。編排器負責的是：這一刻該有幾份、放在哪一台、壞了要不要重啟、新版本怎麼換上去。</p>
+  <p>你交給它的不是一次 <code>docker run</code>，而是一份期望狀態：這個 Deployment 要 3 個這樣的 Pod，這個 Service 要接到帶某個標籤的 Pod。實際狀態隨時會偏離——節點死了、映像拉不下來、探活失敗。控制器下一輪再看期望與實際的差，把差補上。這件事做完不會結束，叢集活著它就一直做。</p>
+  <div class="orch-row">
+    <div class="orch-node">
+      <div class="nn">期望狀態</div>
+      <div class="ns">Deployment、Task 定義</div>
+    </div>
+    <span class="orch-arrow">▸</span>
+    <div class="orch-node accent">
+      <div class="nn">API Server</div>
+      <div class="ns">唯一的讀寫入口</div>
+    </div>
+    <span class="orch-arrow">▸</span>
+    <div class="orch-node">
+      <div class="nn">Scheduler</div>
+      <div class="ns">挑節點、寫上 nodeName</div>
+    </div>
+    <span class="orch-arrow">▸</span>
+    <div class="orch-node">
+      <div class="nn">kubelet</div>
+      <div class="ns">在那台機器上起容器</div>
+    </div>
+  </div>
+  <p class="cap">Scheduler 與 kubelet 都不直接開 etcd。期望狀態先進 API Server，由它寫進 etcd；其他人只對 API Server 做 watch 與更新。</p>
+  <p>面試時 Kubernetes 的物件停在這一層就夠。Pod 是排程與重啟的最小單位，裡面的容器共享 network namespace 與 volume。ReplicaSet 把同一個 Pod 模板維持在 <var>N</var> 份。Deployment 擁有 ReplicaSet，換模板時換的是 ReplicaSet，不是去改正在跑的容器。Service 的 ClusterIP 給一組 Pod 一個穩定的虛擬位址，後端名單來自標籤選出的 EndpointSlice。節點上的 kubelet 只實現「綁到我身上的 Pod」。</p>
+  <p>ECS 的詞彙可以對照看，但不是同一個物件。Task Definition 像 Pod 模板，Task 像一個跑起來的 Pod，Service 同時承擔「維持份數」和「掛上負載平衡」這兩件在 Kubernetes 裡分開的事。Cluster 是這批容量的邊界。控制平面是 AWS 託管的，你看不到 etcd，決策的形狀仍是：期望份數在一邊，實際 Task 在另一邊，差多少就補多少。</p>
+  <div class="callout accent">
+    <div class="c-title"><span class="ic">邊界</span>這篇不往下拆的東西</div>
+    <p>Operator、CRD、CNI 與叢集升級留在 Kubernetes 專篇。副本數與節點數怎麼跟著指標變，是自動擴縮策略的題；這裡把節點集合當成已經給定。藍綠與金絲雀怎麼切流量，是發佈策略要比較的題；這裡只講 Rolling Update 怎麼替換副本。</p>
+  </div>
+  <div class="oneliner">
+    <b>一句話答法</b>編排器持續對帳期望狀態與實際狀態：幾份、放哪、健不健康、新舊怎麼換。它不是替你執行一次 docker run。
+  </div>
+</section>
+
+<section id="s2">
+  <div class="sec-head">
+    <span class="sec-num">02</span>
+    <h2>排程只加總 request</h2>
+  </div>
+  <p class="sec-sub">節點選得對不對，看的是 request 的向量裝箱，不是 limit，也不是程式實際用了多少。</p>
+  <p>kube-scheduler 分兩段。Filter 淘汰放不下的節點：資源不夠、節點被標成不可排程、taint 沒有對應的 toleration、nodeSelector 或 node affinity 不合、拓樸分散沒滿足。Score 再給剩下的節點打分，取得分最高的，把 <code>nodeName</code> 寫回去。資源這一個分數的預設策略是 LeastAllocated，CPU 與記憶體權重相同：剩餘比例越高分越高，所以傾向把 Pod 鋪開。要改成往少數節點擠，得把 NodeResourcesFit 的計分改成 MostAllocated 或 RequestedToCapacityRatio。那是另外開的 bin packing，不是預設。</p>
+  <p>ECS 的 EC2 launch type 把策略寫在 Service 上，可以串多個，前面的先做。類型有三種：<code>binpack</code> 把 Task 放到「該維度剩餘最少、但還放得下」的實例，維度是 CPU 或 memory，目的是少用幾台；<code>spread</code> 依可用區或 <code>instanceId</code> 鋪開；<code>random</code> 不挑。Service 沒寫策略時，預設是依 <code>attribute:ecs.availability-zone</code> 做 spread，不是 binpack。Fargate 沒有實例可挑，這些策略用不上，服務會盡力在可用區之間鋪開。</p>
+  <p>兩邊共同的約束是兩個維度要同一台同時滿足。Pod（或 Task）能放上節點 <var>i</var>，當且僅當：</p>
+  <div class="formula">request_cpu ≤ free_cpu(i) 且 request_mem ≤ free_mem(i)</div>
+  <p>叢集加總還夠、沒有任何一台同時夠，就是碎片。CPU 剩在記憶體已經用完的節點上，對下一個又要 CPU 又要記憶體的 Pod 沒有用。排程器加總的是 request，不是 limit，也不是現在的用量。limit 是執行期的 cgroup：CPU 超了會被 throttle，不會被殺；記憶體超了，那個容器會被 OOM kill。把 limit 設得很大，不會讓這個 Pod 更容易排進去。</p>
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>QoS</th>
+          <th>怎麼判定</th>
+          <th>節點記憶體不夠時</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>Guaranteed</td>
+          <td>每個容器的 CPU、記憶體都有 request，且 request 等於 limit</td>
+          <td>最後才被考慮趕走</td>
+        </tr>
+        <tr>
+          <td>Burstable</td>
+          <td>至少有一個 request，但不是 Guaranteed</td>
+          <td>用量超過自己 request 的先被考慮</td>
+        </tr>
+        <tr>
+          <td>BestEffort</td>
+          <td>完全沒有 request 與 limit</td>
+          <td>最先被考慮</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="cap">排程與「這份容量有沒有被預訂」看 request。BestEffort 在排程上像免費的，記憶體壓力來時卻最先讓位。</p>
+  <div class="callout warn">
+    <div class="c-title"><span class="ic">陷阱</span>sidecar 的 request 也算進這顆 Pod</div>
+    <p>服務網格或日誌 sidecar 的 request 與應用容器加在一起，才是排程器看到的數字。應用自己寫 0.5 vCPU，sidecar 再寫 0.5，這顆 Pod 就是 1。忘了設 request 的 BestEffort 容器不佔排程，卻佔真實記憶體，節點上的其他 Pod 會替它付帳。</p>
+  </div>
+  <p>下面的畫布把兩種目標收成看得到的規則，方便對碎片，不是 kube-scheduler 的逐插件複製品。Binpack 先放 request 總和較大的 Pod，再塞進剩餘 CPU 與記憶體之和最小、但仍放得下的節點。Spread 依 web、worker、cache、batch 的順序，放進剩餘之和最大的節點。LeastAllocated 比的是剩餘比例，還會加上親和性與拓樸分數；ECS 的 binpack 只盯一個維度，而且常常先依可用區 spread。方向與這兩顆按鈕相同，格子不會逐格相同。滑桿上的節點容量請當成 allocatable——機器規格扣掉 kubelet、作業系統與驅逐水位之後剩給 Pod 的那一截——不是雲端實例的標稱 vCPU。</p>
+  <div class="demo" id="demo-orch-pack">
+    <div class="demo-bar">
+      <span class="label">互動 · 節點裝箱</span>
+      <span class="label" style="text-transform:none;font-family:var(--sans);font-size:12px;letter-spacing:0;color:var(--text-2)">點節點可讓它退出這一輪。每次都從空叢集重算。</span>
+    </div>
+    <div class="demo-body">
+      <div class="orch-ctrl">
+        <label class="orch-field">
+          <span>節點數</span>
+          <b id="orch-nodes-out">3 台</b>
+          <input id="orch-nodes" type="range" min="2" max="4" step="1" value="3" aria-label="節點數">
+        </label>
+        <label class="orch-field">
+          <span>每台 CPU allocatable</span>
+          <b id="orch-cpu-out">3 vCPU</b>
+          <input id="orch-cpu" type="range" min="8" max="16" step="4" value="12" aria-label="每台 CPU">
+        </label>
+        <label class="orch-field">
+          <span>每台記憶體 allocatable</span>
+          <b id="orch-mem-out">4 GiB</b>
+          <input id="orch-mem" type="range" min="8" max="16" step="4" value="8" aria-label="每台記憶體">
+        </label>
+        <label class="orch-field">
+          <span>web · 0.5 vCPU / 1 GiB</span>
+          <b id="orch-web-out">×2</b>
+          <input id="orch-web" type="range" min="0" max="4" step="1" value="2" aria-label="web 數量">
+        </label>
+        <label class="orch-field">
+          <span>worker · 1 vCPU / 2 GiB</span>
+          <b id="orch-worker-out">×1</b>
+          <input id="orch-worker" type="range" min="0" max="3" step="1" value="1" aria-label="worker 數量">
+        </label>
+        <label class="orch-field">
+          <span>cache · 0.25 vCPU / 4 GiB</span>
+          <b id="orch-cache-out">×2</b>
+          <input id="orch-cache" type="range" min="0" max="3" step="1" value="2" aria-label="cache 數量">
+        </label>
+        <label class="orch-field">
+          <span>batch · 2 vCPU / 1 GiB</span>
+          <b id="orch-batch-out">×1</b>
+          <input id="orch-batch" type="range" min="0" max="2" step="1" value="1" aria-label="batch 數量">
+        </label>
+      </div>
+      <div class="orch-tools">
+        <div class="seg" role="group" aria-label="放置策略">
+          <button type="button" data-policy="0" aria-pressed="true">Binpack</button>
+          <button type="button" data-policy="1" aria-pressed="false">Spread</button>
+        </div>
+        <button type="button" class="btn" id="orch-reset">重置</button>
+      </div>
+      <svg class="orch-yard" id="orch-yard" viewBox="0 0 720 312" role="img">
+        <title>節點上的 CPU 與記憶體佔用</title>
+      </svg>
+      <div class="legend">
+        <span><i class="dot orch-web"></i>web</span>
+        <span><i class="dot orch-worker"></i>worker</span>
+        <span><i class="dot orch-cache"></i>cache</span>
+        <span><i class="dot orch-batch"></i>batch</span>
+        <span><i class="dot ns-idle"></i>剩餘</span>
+        <span><i class="dot ns-lock"></i>不排程</span>
+      </div>
+      <div class="orch-read">
+        <div><strong id="orch-placed">0</strong><span>已放置</span></div>
+        <div><strong id="orch-pending">0</strong><span>Pending</span></div>
+        <div><strong id="orch-alone">0</strong><span>總量夠，但沒有節點同時容得下</span></div>
+        <div><strong id="orch-used">0</strong><span>有放上 Pod 的節點</span></div>
+      </div>
+      <div class="status-line" id="orch-note">調整數量或點一台節點，放置會重算。</div>
+    </div>
+  </div>
+  <p class="cap">預設三台各 3 vCPU / 4 GiB。Binpack 會讓兩個 cache 各佔滿一台的記憶體，batch 與 worker 擠在第三台，兩個 web Pending——剩餘的 CPU 與那 1 GiB 不在同一台。改成 Spread 後，Pending 會換成兩個 cache：記憶體被拆開，沒有一台還剩 4 GiB。點節點是讓它在 filter 就被淘汰；真實的 cordon 不會趕走已經在上面的 Pod，要趕走得 drain。畫面每次從空叢集重算，所以看不到「舊 Pod 留在不可排程的節點上」。</p>
+  <div class="oneliner">
+    <b>一句話答法</b>排程用 request 做向量裝箱，limit 只負責 throttle 或 OOM。Kubernetes 預設把負載鋪開；要少佔節點得另外開 bin packing。碎片是總量夠、沒有一台同時夠。
+  </div>
+</section>
+
+<section id="s3">
+  <div class="sec-head">
+    <span class="sec-num">03</span>
+    <h2>對帳是一輪一輪補差</h2>
+  </div>
+  <p class="sec-sub">控制器不把「收到一個事件」當成只做一次的指令。它反覆讀期望與現況，差多少做多少。</p>
+  <p>這種迴圈是 level-triggered。ReplicaSet 想要 3 個 Pod、現在只有 1 個，它就再建立 2 個，不管少掉的那兩個是剛被刪掉、還是建立請求根本沒送成功。如果控制器只在「刪除事件」那一刻反應，而那則 watch 剛好在它重啟時漏了，缺口會永遠留著。下一輪 list 會再看到 1 不等於 3。Watch 負責快，定期重新列出負責補漏。動作必須冪等：多做一輪不能把 3 份做成 6 份。</p>
+  <p>協調服務與分散式鎖那篇的結論直接用在這裡。etcd 是小而強一致的鍵值儲存，寫入要付 Raft 多數派的往返，Watch 沿著 revision 追，不適合當業務資料平面。Kubernetes 的物件就是這種元資料：誰該跑、跑幾份、綁在哪一台、探活結果。訂單與訊息本體不進 etcd。API Server 是唯一寫入者；Scheduler、控制器與 kubelet 都走 API，不自己打開 etcd。</p>
+  <pre class="mermaid">
+sequenceDiagram
+    participant Dev as 開發者
+    participant API as API Server
+    participant ET as etcd
+    participant RS as ReplicaSet
+    participant SC as Scheduler
+    participant KL as kubelet
+    Dev->>API: apply Deployment
+    API->>ET: 寫入期望
+    RS->>API: 補齊 Pod 數
+    SC->>API: 綁定節點
+    KL->>API: 回報 Ready
+  </pre>
+  <p class="cap">Deployment 控制器先讓 ReplicaSet 的模板與份數符合期望；圖上的 ReplicaSet 再補 Pod。綁定節點、拉映像、變成 Ready 是後面的寫入。任何一步失敗，下一輪對帳再補，不是同一筆交易一起提交或一起回滾。</p>
+  <p>所以「apply 成功」只表示期望狀態寫進去了。Pod 還可能 Pending，理由在事件裡：排不進、映像拉失敗、還沒通過探活。排不進是第 2 節的裝箱結果，排程器沒有壞；它會留在 Pending，直到有節點放得下，或你把 request 改小。節點不夠時要不要加機器，是自動擴縮策略的回授迴圈，不是這一輪對帳會變出來的。</p>
+  <div class="oneliner">
+    <b>一句話答法</b>控制器反覆把期望減掉觀察到的現況，漏掉的事件靠下一輪 list 補上。apply 成功只代表期望寫入，不代表 Pod 已經 Ready。
+  </div>
+</section>
+
+<section id="s4">
+  <div class="sec-head">
+    <span class="sec-num">04</span>
+    <h2>誰該重啟，誰只該停止接流量</h2>
+  </div>
+  <p class="sec-sub">liveness 回答行程是不是死掉了。readiness 回答現在該不該把請求送過來。兩件事混在同一支探活裡，就會在該摘流量的時候把行程殺掉。</p>
+  <p>kubelet 對每個容器跑探活。startup 成功之前，liveness 與 readiness 都先不跑，用來放過小啟動：慢的行程不會在起來之前被 liveness 殺掉。startup 超過失敗門檻，kubelet 仍會重啟容器。過了 startup 之後，liveness 失敗超過門檻就殺進程並依重啟策略拉起來；readiness 失敗只把這顆 Pod 從 Service 的端點拿掉，行程繼續跑，恢復後再加回去。沒有寫 readiness 的 Pod，一旦容器跑起來就會被放進端點。</p>
+  <div class="orch-lane">
+    <div class="lh">時刻</div>
+    <div class="lh">kubelet</div>
+    <div class="lh">容器</div>
+    <div class="lh">Endpoints</div>
+    <div class="lt">穩態</div>
+    <div class="lc">探活通過</div>
+    <div class="lc">運行中</div>
+    <div class="lc ok">在列、接流量</div>
+    <div class="lt">readiness 失敗</div>
+    <div class="lc ok">不重啟</div>
+    <div class="lc">繼續跑，等依賴恢復</div>
+    <div class="lc ok">摘除，停止接流量</div>
+    <div class="lt">liveness 失敗</div>
+    <div class="lc bad">殺掉並重啟</div>
+    <div class="lc bad">行程中斷</div>
+    <div class="lc">重啟完成前不在列</div>
+  </div>
+  <p class="cap">同一種「下游變慢」，readiness 失敗是把流量移走，行程還在；liveness 失敗是把行程殺掉。該摘流量的時候用 readiness。</p>
+  <div class="callout warn">
+    <div class="c-title"><span class="ic">陷阱</span>liveness 不要去打依賴</div>
+    <p>資料庫或下游一慢，liveness 跟著失敗，kubelet 就重啟容器。重啟後的行程再打同一個下游，雪崩被放大。依賴不健康時讓 readiness 失敗，把這顆 Pod 移出端點，行程留著等下游回來。liveness 只留給死鎖、卡住的事件迴圈這種「重啟才有機會好」的故障。</p>
+  </div>
+  <p>Deployment 預設用 RollingUpdate，不是 Recreate。Recreate 會先刪光舊 Pod 再起新的，中間沒有可用副本。RollingUpdate 用兩個數控制替換：<code>maxUnavailable</code> 預設 25%，百分比無條件捨去，表示可以暫時少於期望份數多少；<code>maxSurge</code> 預設 25%，百分比無條件進位，表示可以暫時多於期望份數多少。兩者不能同時為 0。期望 2 份時，25% 的 unavailable 是 0、surge 是 1：先多起一個新 Pod，新的 Ready 之後再拆舊的。期望 1 份時也是先湧出第二個，而不是先殺光。</p>
+  <p>新 Pod 要 Ready 才算 available。<code>minReadySeconds</code> 預設 0，一 Ready 就算數。新版本一直不 Ready，舊 ReplicaSet 會留著；超過 <code>progressDeadlineSeconds</code>（預設 600 秒）Deployment 標上 ProgressDeadlineExceeded，控制器仍不會把舊的一次拆掉。這是停住，不是整組下線。</p>
+  <p>surge 出去的那顆 Pod 還是要過第 2 節的裝箱。節點的 request 已經塞滿時，新 Pod Pending，更新就停在那裡。把叢集 bin pack 到沒有空洞，滾動更新會缺一台臨時的位置。鋪開的排程比較容易留下這點空間，代價是多佔節點。流量要不要先送 5% 到新版，是發佈策略的題；這裡只決定副本怎麼替換。</p>
+  <div class="oneliner">
+    <b>一句話答法</b>readiness 決定接不接流量，liveness 決定要不要重啟。Rolling Update 靠「新 Pod Ready 才算數」把壞版本留在少數副本裡；叢集塞滿時，maxSurge 那一顆會先 Pending。
+  </div>
+</section>
+
+<section id="s5">
+  <div class="sec-head">
+    <span class="sec-num">05</span>
+    <h2>要哪一種 API，以及要不要自己養節點</h2>
+  </div>
+  <p class="sec-sub">ECS、EKS、GKE 選的是你要維護的控制平面 API。節點與 Fargate 選的是碎片落在叢集上，還是落在單一任務的形狀裡。</p>
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th></th>
+          <th>ECS</th>
+          <th>EKS</th>
+          <th>GKE</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>你寫的 API</td>
+          <td>Task、Service、Cluster</td>
+          <td>Kubernetes API</td>
+          <td>Kubernetes API</td>
+        </tr>
+        <tr>
+          <td>控制平面</td>
+          <td>AWS 全管，沒有 etcd 給你碰</td>
+          <td>AWS 管控制平面，按叢集另外計費；工作者要自己準備</td>
+          <td>Google 管控制平面。Standard 仍有節點；Autopilot 連節點一起抽象掉</td>
+        </tr>
+        <tr>
+          <td>排程</td>
+          <td>EC2 上用 binpack／spread／random。Service 預設依可用區 spread</td>
+          <td>kube-scheduler 的 filter 與 score。預設資源分是 LeastAllocated</td>
+          <td>同一套 kube-scheduler。Autopilot 你碰不到節點層的裝箱</td>
+        </tr>
+        <tr>
+          <td>帶走的東西</td>
+          <td>AWS 整合直接，換雲就是換模型</td>
+          <td>Helm、標準控制器、別的 Kubernetes 叢集</td>
+          <td>與 EKS 相同的工作負載 API。Autopilot 少了節點層的自由</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="cap">選 ECS 是接受 AWS 自己的任務模型。選 EKS 或 GKE 是接受 Kubernetes API，再決定節點要不要出現在你的帳上。EKS 的工作者可以是 managed node group，也可以是 Fargate profile。</p>
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th></th>
+          <th>自己的節點</th>
+          <th>Fargate</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>帳單上的單位</td>
+          <td>整台機器的時間。第 2 節那些塞不滿的洞，機器還在計費</td>
+          <td>任務或 Pod 的 vCPU 與記憶體時間。沒有跨任務的節點碎片</td>
+        </tr>
+        <tr>
+          <td>形狀</td>
+          <td>request 可以依容器加總，只要節點的 allocatable 放得下</td>
+          <td>合法的 vCPU／記憶體是離散配對。為了記憶體把 vCPU 一起抬高，浪費在任務內部</td>
+        </tr>
+        <tr>
+          <td>節點代理</td>
+          <td>DaemonSet、ECS 的 daemon scheduling 都可以，一台一份</td>
+          <td>Fargate 不支援 daemon scheduling，也不跑 DaemonSet</td>
+        </tr>
+        <tr>
+          <td>GPU 與隔離</td>
+          <td>加速器裝在節點上。同節點的容器靠 cgroup 分開</td>
+          <td>運算模型光譜篇對過文件：Fargate 沒有 GPU 與 Inferentia。任務跑在各自的 microVM 裡</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="cap">節點模型用第 2 節的畫布看碎片：剩餘 CPU 若跟記憶體不在同一台，那台機器的錢已經花了。Fargate 把這個洞消掉，改成每個任務為自己的形狀付費。運算模型光譜比較的是時間與單價，沒有把這個洞算進編排那一欄。</p>
+  <p>GKE Autopilot 站在 Fargate 這一側的「不養節點」：計費落在 Pod 的 request 上，bin pack 由平台做，你排不了節點。DaemonSet、主機網路這類節點能力有限制，以雲端文件上的允許清單為準。它仍是 Kubernetes API，不是 ECS 的 Task。</p>
+  <p>可以這樣收束，不必先算完帳單。工作負載都在 AWS、團隊不想經營 Kubernetes API，用 ECS。要 Helm、標準控制器、或同一套 YAML 換叢集，用 EKS 或 GKE。穩定高占用、需要 DaemonSet 或 GPU，用自己的節點，並用第 2 節把碎片算出來；滾動更新還要留得下 maxSurge 那一顆。流量起伏、形狀落在 Fargate 的合法配對裡、不需要節點代理，用 Fargate，把「塞滿機器」這個問題交回去。節點不夠時加機器，以及副本數怎麼跟指標走，仍是自動擴縮策略的事。</p>
+  <div class="oneliner">
+    <b>一句話答法</b>ECS 對上 Kubernetes，是在選控制平面的 API。節點對上 Fargate，是在選碎片出現在叢集的空洞裡，還是出現在單一任務被抬高的 vCPU／記憶體配對裡。
+  </div>
+</section>
+
+        <footer class="article-foot" aria-label="閱讀進度與導覽">
+          <div class="article-foot-left">
+            <button class="read-toggle read-toggle-lg" type="button" data-read-toggle aria-pressed="false">
+              <span class="read-dot" aria-hidden="true"></span>
+              <span class="read-label">標記為已讀</span>
+            </button>
+            <span class="article-foot-hint" data-read-hint>讀完本篇後可標記為已讀；進度只存在這個瀏覽器，首頁學習地圖會依此顯示。</span>
+          </div>
+          <a class="article-foot-back" href="../index.html">← 返回系統設計知識地圖</a>
+        </footer>
+      </div>
+    </main>
+  </div>
+
+  <script>
+    "use strict";
+    document.addEventListener("DOMContentLoaded", function () {
+      /* ===== TOC scrollspy, mobile accordion & desktop collapse ===== */
+      (function () {
+        var links = Array.prototype.slice.call(document.querySelectorAll(".toc-nav a"));
+        var map = {};
+        links.forEach(function (a) {
+          var href = a.getAttribute("href");
+          if (href && href.startsWith("#")) {
+            map[href.slice(1)] = a;
+          }
+        });
+        var secs = links.map(function (a) {
+          var href = a.getAttribute("href");
+          return href && href.startsWith("#") ? document.getElementById(href.slice(1)) : null;
+        }).filter(Boolean);
+
+        if (secs.length > 0 && typeof IntersectionObserver !== "undefined") {
+          var obs = new IntersectionObserver(function (entries) {
+            entries.forEach(function (e) {
+              if (e.isIntersecting) {
+                links.forEach(function (l) { l.classList.remove("active"); });
+                var act = map[e.target.id];
+                if (act) act.classList.add("active");
+              }
+            });
+          }, { rootMargin: "-20% 0px -70% 0px", threshold: 0 });
+          secs.forEach(function (s) { obs.observe(s); });
+        }
+
+        /* mobile：目錄 accordion（≤920px） */
+        var toggle = document.querySelector(".toc-toggle");
+        var nav = document.querySelector(".toc-nav");
+        if (toggle && nav) {
+          toggle.addEventListener("click", function () {
+            var open = nav.classList.toggle("open");
+            toggle.setAttribute("aria-expanded", open ? "true" : "false");
+          });
+          nav.addEventListener("click", function (e) {
+            if (e.target.closest("a") && window.innerWidth <= 920) {
+              nav.classList.remove("open");
+              toggle.setAttribute("aria-expanded", "false");
+            }
+          });
+        }
+
+        /* desktop：收合側欄（預設展開；不持久化） */
+        var collapseBtn = document.querySelector(".toc-collapse");
+        var reopenBtn = document.querySelector(".toc-reopen");
+        function setTocCollapsed(collapsed) {
+          document.body.classList.toggle("toc-collapsed", collapsed);
+          if (collapseBtn) collapseBtn.setAttribute("aria-expanded", collapsed ? "false" : "true");
+          if (reopenBtn) reopenBtn.setAttribute("aria-expanded", collapsed ? "false" : "true");
+          if (collapsed && reopenBtn) reopenBtn.focus();
+          else if (!collapsed && collapseBtn) collapseBtn.focus();
+        }
+        if (collapseBtn) {
+          collapseBtn.addEventListener("click", function () { setTocCollapsed(true); });
+        }
+        if (reopenBtn) {
+          reopenBtn.addEventListener("click", function () { setTocCollapsed(false); });
+        }
+
+        /* ===== 已讀狀態追蹤（localStorage + file:// fallback） =====
+           儲存格式（key、envelope、window.name 前綴）與 templates/home-learning-map.js 的同名函式共用，改動須兩邊同步。 */
+        var STORAGE_KEY = "sded.read.v1";
+        var WIN_PREFIX = "sded.read.v1:";
+        var topicId = document.body.getAttribute("data-topic-id") || "";
+        var readBtns = Array.prototype.slice.call(document.querySelectorAll("[data-read-toggle]"));
+        var readHint = document.querySelector("[data-read-hint]");
+
+        function parseEnvelope(raw) {
+          if (!raw || typeof raw !== "string") return null;
+          try {
+            var parsed = JSON.parse(raw);
+            if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+            if (parsed.v === 1 && parsed.items && typeof parsed.items === "object" && !Array.isArray(parsed.items)) {
+              return { updatedAt: Number(parsed.updatedAt) || 0, items: parsed.items };
+            }
+            return { updatedAt: 1, items: parsed };
+          } catch (e) {
+            return null;
+          }
+        }
+
+        function loadReadMap() {
+          var fromLs = null;
+          var fromWin = null;
+          try { fromLs = parseEnvelope(window.localStorage.getItem(STORAGE_KEY)); } catch (e) {}
+          if (window.location.protocol === "file:") {
+            try {
+              if (typeof window.name === "string" && window.name.indexOf(WIN_PREFIX) === 0) {
+                fromWin = parseEnvelope(window.name.slice(WIN_PREFIX.length));
+              }
+            } catch (e) {}
+          }
+          var chosen = fromLs;
+          if (fromWin && (!chosen || fromWin.updatedAt > chosen.updatedAt)) {
+            chosen = fromWin;
+            try {
+              window.localStorage.setItem(STORAGE_KEY, JSON.stringify({ v: 1, updatedAt: chosen.updatedAt, items: chosen.items }));
+            } catch (e) {}
+          } else if (chosen && window.location.protocol === "file:") {
+            try {
+              window.name = WIN_PREFIX + JSON.stringify({ v: 1, updatedAt: chosen.updatedAt, items: chosen.items });
+            } catch (e) {}
+          }
+          return chosen && chosen.items ? Object.assign({}, chosen.items) : {};
+        }
+
+        function saveReadMap(items) {
+          var env = JSON.stringify({ v: 1, updatedAt: Date.now(), items: items });
+          try { window.localStorage.setItem(STORAGE_KEY, env); } catch (e) {}
+          if (window.location.protocol === "file:") {
+            try { window.name = WIN_PREFIX + env; } catch (e) {}
+          }
+        }
+
+        function todayLocal() {
+          var d = new Date();
+          return d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0") + "-" + String(d.getDate()).padStart(2, "0");
+        }
+
+        function syncReadUi() {
+          if (!topicId || !readBtns.length) return;
+          var map = loadReadMap();
+          var val = map[topicId];
+          var isRead = Boolean(val);
+          var dateStr = typeof val === "string" && /^\d{4}-\d{2}-\d{2}$/.test(val) ? val : "";
+          readBtns.forEach(function (btn) {
+            btn.setAttribute("aria-pressed", isRead ? "true" : "false");
+            var label = btn.querySelector(".read-label");
+            if (label) {
+              label.textContent = isRead ? "✓ 已讀" : "標記為已讀";
+            }
+          });
+          if (readHint) {
+            readHint.textContent = isRead
+              ? ("已標記為已讀" + (dateStr ? "（" + dateStr + "）" : "") + "。進度只存在這個瀏覽器，首頁學習地圖會依此顯示。")
+              : "讀完本篇後可標記為已讀；進度只存在這個瀏覽器，首頁學習地圖會依此顯示。";
+          }
+        }
+
+        function toggleRead() {
+          if (!topicId) return;
+          var map = loadReadMap();
+          if (map[topicId]) {
+            delete map[topicId];
+          } else {
+            map[topicId] = todayLocal();
+          }
+          saveReadMap(map);
+          syncReadUi();
+        }
+
+        readBtns.forEach(function (btn) {
+          btn.addEventListener("click", toggleRead);
+        });
+        window.addEventListener("pageshow", syncReadUi);
+        window.addEventListener("storage", function (e) {
+          if (!e.key || e.key === STORAGE_KEY) syncReadUi();
+        });
+        syncReadUi();
+      })();
+    });
+  </script>
+
+  
+<script>
+(function () {
+  "use strict";
+
+  /* (1) 常數與參數表 */
+  var PODS = [
+    { key: "web", cpu: 2, mem: 2 },
+    { key: "worker", cpu: 4, mem: 4 },
+    { key: "cache", cpu: 1, mem: 8 },
+    { key: "batch", cpu: 8, mem: 2 }
+  ];
+
+  var BASE = {
+    nodes: 3,
+    cpu: 12,
+    mem: 8,
+    policy: 0,
+    web: 2,
+    worker: 1,
+    cache: 2,
+    batch: 1,
+    cordon: 0
+  };
+
+  function clampInt(v, lo, hi) {
+    var n = Math.round(Number(v));
+    if (!Number.isFinite(n)) n = lo;
+    if (n < lo) return lo;
+    if (n > hi) return hi;
+    return n;
+  }
+
+  /* (2) compute* 純函式 */
+  // @probe fn       computeSchedule
+  // @probe baseline {"nodes":3,"cpu":12,"mem":8,"policy":0,"web":2,"worker":1,"cache":2,"batch":1,"cordon":0}
+  // @probe sweep    {"nodes":[2,4],"cpu":[8,16],"mem":[8,16],"policy":[0,1],"web":[0,4],"worker":[0,3],"cache":[0,3],"batch":[0,2],"cordon":[1,2]}
+  function computeSchedule(p) {
+    var nNodes = clampInt(p.nodes, 1, 4);
+    var capCpu = clampInt(p.cpu, 4, 16);
+    var capMem = clampInt(p.mem, 4, 16);
+    var policy = clampInt(p.policy, 0, 1);
+    var cordon = clampInt(p.cordon, 0, 15) >>> 0;
+    var counts = {};
+    var pods = [];
+    var i;
+    var k;
+    for (i = 0; i < PODS.length; i++) {
+      counts[PODS[i].key] = clampInt(p[PODS[i].key], 0, 6);
+      for (k = 0; k < counts[PODS[i].key]; k++) {
+        pods.push({
+          key: PODS[i].key,
+          cpu: PODS[i].cpu,
+          mem: PODS[i].mem,
+          seq: pods.length
+        });
+      }
+    }
+
+    var nodes = [];
+    for (i = 0; i < nNodes; i++) {
+      var bit = (1 << i) >>> 0;
+      nodes.push({
+        id: i,
+        capCpu: capCpu,
+        capMem: capMem,
+        freeCpu: capCpu,
+        freeMem: capMem,
+        cordoned: (cordon & bit) !== 0,
+        pods: []
+      });
+    }
+
+    var order = pods.slice();
+    if (policy === 0) {
+      order.sort(function (a, b) {
+        var d = (b.cpu + b.mem) - (a.cpu + a.mem);
+        if (d !== 0) return d;
+        d = b.cpu - a.cpu;
+        if (d !== 0) return d;
+        return a.seq - b.seq;
+      });
+    }
+
+    var waiting = [];
+    for (i = 0; i < order.length; i++) {
+      var pod = order[i];
+      var best = -1;
+      var bestSlack = 0;
+      var ni;
+      for (ni = 0; ni < nodes.length; ni++) {
+        var node = nodes[ni];
+        if (node.cordoned) continue;
+        if (node.freeCpu < pod.cpu || node.freeMem < pod.mem) continue;
+        var slack = node.freeCpu + node.freeMem;
+        if (best === -1) {
+          best = ni;
+          bestSlack = slack;
+          continue;
+        }
+        var tighter = policy === 0 ? slack < bestSlack : slack > bestSlack;
+        if (tighter || (slack === bestSlack && ni < best)) {
+          best = ni;
+          bestSlack = slack;
+        }
+      }
+      if (best === -1) {
+        waiting.push(pod);
+        continue;
+      }
+      nodes[best].freeCpu -= pod.cpu;
+      nodes[best].freeMem -= pod.mem;
+      nodes[best].pods.push({ key: pod.key, cpu: pod.cpu, mem: pod.mem });
+    }
+
+    var placed = 0;
+    var freeCpu = 0;
+    var freeMem = 0;
+    var nodesUsed = 0;
+    var heldCpu = 0;
+    var heldMem = 0;
+    var fullest = 0;
+    var haveMin = false;
+    var minCpu = 0;
+    var minMem = 0;
+    for (i = 0; i < PODS.length; i++) {
+      if (!counts[PODS[i].key]) continue;
+      if (!haveMin || (PODS[i].cpu + PODS[i].mem) < (minCpu + minMem)) {
+        haveMin = true;
+        minCpu = PODS[i].cpu;
+        minMem = PODS[i].mem;
+      }
+    }
+
+    var drawn = [];
+    for (i = 0; i < nodes.length; i++) {
+      var cur = nodes[i];
+      placed += cur.pods.length;
+      if (cur.cordoned) {
+        heldCpu += cur.capCpu;
+        heldMem += cur.capMem;
+      } else {
+        freeCpu += cur.freeCpu;
+        freeMem += cur.freeMem;
+        if (cur.pods.length) nodesUsed += 1;
+        var usedCpu = cur.capCpu - cur.freeCpu;
+        if (usedCpu > fullest) fullest = usedCpu;
+      }
+      drawn.push({
+        id: cur.id,
+        capCpu: cur.capCpu,
+        capMem: cur.capMem,
+        freeCpu: cur.freeCpu,
+        freeMem: cur.freeMem,
+        cordoned: cur.cordoned,
+        pods: cur.pods
+      });
+    }
+
+    var aloneFit = 0;
+    var holeCpu = 0;
+    var holeMem = 0;
+    if (waiting.length === 0 && haveMin) {
+      for (i = 0; i < nodes.length; i++) {
+        if (nodes[i].cordoned) continue;
+        var fitsMin = nodes[i].freeCpu >= minCpu && nodes[i].freeMem >= minMem;
+        if (!fitsMin) {
+          holeCpu += nodes[i].freeCpu;
+          holeMem += nodes[i].freeMem;
+        }
+      }
+    }
+    for (i = 0; i < waiting.length; i++) {
+      if (freeCpu >= waiting[i].cpu && freeMem >= waiting[i].mem) aloneFit += 1;
+    }
+
+    var pendingBy = { web: 0, worker: 0, cache: 0, batch: 0 };
+    for (i = 0; i < waiting.length; i++) pendingBy[waiting[i].key] += 1;
+
+    return {
+      placed: placed,
+      pending: waiting.length,
+      pendingBy: pendingBy,
+      freeCpu: freeCpu,
+      freeMem: freeMem,
+      nodesUsed: nodesUsed,
+      heldCpu: heldCpu,
+      heldMem: heldMem,
+      fullest: fullest,
+      aloneFit: aloneFit,
+      holeCpu: holeCpu,
+      holeMem: holeMem,
+      nodes: drawn
+    };
+  }
+
+  /* (3) DOM 參照與畫面常數 */
+  var FILL = {
+    web: "#3f6188",
+    worker: "#4d7d68",
+    cache: "#a3743e",
+    batch: "#6b7078"
+  };
+
+  var state = {
+    nodes: BASE.nodes,
+    cpu: BASE.cpu,
+    mem: BASE.mem,
+    policy: BASE.policy,
+    web: BASE.web,
+    worker: BASE.worker,
+    cache: BASE.cache,
+    batch: BASE.batch,
+    cordon: BASE.cordon
+  };
+
+  /* (4) render — 只把 compute 的結果畫出來 */
+  function fmtCpu(units) {
+    var v = units / 4;
+    return (Math.round(v * 100) / 100) + " vCPU";
+  }
+
+  function fmtMem(units) {
+    var v = units / 2;
+    return (Math.round(v * 100) / 100) + " GiB";
+  }
+
+  function setText(id, text) {
+    var el = document.getElementById(id);
+    if (el) el.textContent = text;
+  }
+
+  function pendingPhrase(by) {
+    var keys = ["web", "worker", "cache", "batch"];
+    var parts = [];
+    var i;
+    for (i = 0; i < keys.length; i++) {
+      if (by[keys[i]]) parts.push(keys[i] + " ×" + by[keys[i]]);
+    }
+    return parts.join("、");
+  }
+
+  function describe(r) {
+    if (r.placed + r.pending === 0) {
+      return "沒有 Pod 要排。加上任一形狀後，Binpack 與 Spread 會把同一批 request 放進不同節點。";
+    }
+    var msg = "已放置 " + r.placed + " 個";
+    if (r.pending > 0) {
+      msg += "，Pending " + r.pending + " 個（" + pendingPhrase(r.pendingBy) + "）";
+    } else {
+      msg += "，沒有 Pending";
+    }
+    msg += "。可排程節點剩餘 " + fmtCpu(r.freeCpu) + " 與 " + fmtMem(r.freeMem) + "。";
+    if (r.aloneFit > 0) {
+      msg += r.aloneFit + " 個 Pending 單看自己的 request 沒有超過這份剩餘，但沒有節點同時容得下 CPU 與記憶體。";
+    } else if (r.pending > 0) {
+      msg += "這些 Pending 的 request 已經大於叢集剩餘，不是只差形狀。";
+    } else if (r.holeCpu > 0 || r.holeMem > 0) {
+      msg += "全部放完後，還有 " + fmtCpu(r.holeCpu) + "／" + fmtMem(r.holeMem) + " 組不成這批裡最小 Pod 的空洞。";
+    } else if (r.freeCpu > 0 || r.freeMem > 0) {
+      msg += "剩餘空間還放得下另一個這批裡最小的 Pod。";
+    }
+    if (r.heldCpu > 0) {
+      msg += " 不可排程的節點凍結 " + fmtCpu(r.heldCpu) + "／" + fmtMem(r.heldMem) + "。";
+    }
+    return msg;
+  }
+
+  function barRects(x, y, w, h, cap, pods, dim, cordoned) {
+    var html = '<rect x="' + x + '" y="' + y + '" width="' + w + '" height="' + h + '" rx="4" fill="#fafaf9" stroke="#dedcd8"></rect>';
+    if (cordoned) {
+      html += '<rect x="' + x + '" y="' + y + '" width="' + w + '" height="' + h + '" rx="4" fill="#f6f0e7"></rect>';
+      return html;
+    }
+    var cursor = x;
+    var i;
+    for (i = 0; i < pods.length; i++) {
+      var pw = (pods[i][dim] / cap) * w;
+      html += '<rect x="' + cursor + '" y="' + y + '" width="' + pw + '" height="' + h + '" fill="' + FILL[pods[i].key] + '"></rect>';
+      if (pw >= 44) {
+        html += '<text x="' + (cursor + 6) + '" y="' + (y + 15) + '" fill="#ffffff" font-size="11">' + pods[i].key + "</text>";
+      }
+      cursor += pw;
+    }
+    return html;
+  }
+
+  function paintYard(r) {
+    var svg = document.getElementById("orch-yard");
+    var rowH = 100;
+    var height = 12 + r.nodes.length * rowH;
+    svg.setAttribute("viewBox", "0 0 720 " + height);
+    var parts = ['<title>節點上的 CPU 與記憶體佔用</title>'];
+    parts.push('<rect x="0" y="0" width="720" height="' + height + '" fill="#ffffff"></rect>');
+    var i;
+    for (i = 0; i < r.nodes.length; i++) {
+      var node = r.nodes[i];
+      var y = 8 + i * rowH;
+      var remainCpu = node.cordoned ? "不排程" : ("剩 " + fmtCpu(node.freeCpu));
+      var remainMem = node.cordoned ? "容量仍在" : ("剩 " + fmtMem(node.freeMem));
+      parts.push('<g data-node="' + node.id + '">');
+      parts.push('<rect x="0" y="' + y + '" width="720" height="92" rx="8" fill="#ffffff" stroke="#ecebe8"></rect>');
+      parts.push('<text x="12" y="' + (y + 28) + '" fill="#262a2f" font-size="13">n' + (node.id + 1) + "</text>");
+      parts.push('<text x="12" y="' + (y + 48) + '" fill="#6b7078" font-size="11">CPU</text>');
+      parts.push('<text x="12" y="' + (y + 74) + '" fill="#6b7078" font-size="11">MEM</text>');
+      parts.push(barRects(78, y + 16, 500, 20, node.capCpu, node.pods, "cpu", node.cordoned));
+      parts.push(barRects(78, y + 58, 500, 20, node.capMem, node.pods, "mem", node.cordoned));
+      parts.push('<text x="588" y="' + (y + 30) + '" fill="#6b7078" font-size="11">' + remainCpu + "</text>");
+      parts.push('<text x="588" y="' + (y + 72) + '" fill="#6b7078" font-size="11">' + remainMem + "</text>");
+      parts.push("</g>");
+    }
+    svg.innerHTML = parts.join("");
+  }
+
+  function paintLabels() {
+    setText("orch-nodes-out", state.nodes + " 台");
+    setText("orch-cpu-out", fmtCpu(state.cpu));
+    setText("orch-mem-out", fmtMem(state.mem));
+    setText("orch-web-out", "×" + state.web);
+    setText("orch-worker-out", "×" + state.worker);
+    setText("orch-cache-out", "×" + state.cache);
+    setText("orch-batch-out", "×" + state.batch);
+  }
+
+  function render() {
+    var result = computeSchedule(state);
+    paintLabels();
+    paintYard(result);
+    setText("orch-placed", String(result.placed));
+    setText("orch-pending", String(result.pending));
+    setText("orch-alone", String(result.aloneFit));
+    setText("orch-used", String(result.nodesUsed));
+    setText("orch-note", describe(result));
+  }
+
+  /* (5) 事件綁定 */
+  function pullSliders() {
+    state.nodes = Number(document.getElementById("orch-nodes").value);
+    state.cpu = Number(document.getElementById("orch-cpu").value);
+    state.mem = Number(document.getElementById("orch-mem").value);
+    state.web = Number(document.getElementById("orch-web").value);
+    state.worker = Number(document.getElementById("orch-worker").value);
+    state.cache = Number(document.getElementById("orch-cache").value);
+    state.batch = Number(document.getElementById("orch-batch").value);
+    var bits = ((1 << state.nodes) - 1) >>> 0;
+    state.cordon = (state.cordon & bits) >>> 0;
+  }
+
+  function pushSliders() {
+    document.getElementById("orch-nodes").value = String(state.nodes);
+    document.getElementById("orch-cpu").value = String(state.cpu);
+    document.getElementById("orch-mem").value = String(state.mem);
+    document.getElementById("orch-web").value = String(state.web);
+    document.getElementById("orch-worker").value = String(state.worker);
+    document.getElementById("orch-cache").value = String(state.cache);
+    document.getElementById("orch-batch").value = String(state.batch);
+  }
+
+  function setPolicyPressed() {
+    var buttons = document.querySelectorAll("#demo-orch-pack .seg button");
+    var i;
+    for (i = 0; i < buttons.length; i++) {
+      var on = Number(buttons[i].getAttribute("data-policy")) === state.policy;
+      buttons[i].setAttribute("aria-pressed", on ? "true" : "false");
+    }
+  }
+
+  function bindRange(id) {
+    document.getElementById(id).addEventListener("input", function () {
+      pullSliders();
+      render();
+    });
+  }
+
+  bindRange("orch-nodes");
+  bindRange("orch-cpu");
+  bindRange("orch-mem");
+  bindRange("orch-web");
+  bindRange("orch-worker");
+  bindRange("orch-cache");
+  bindRange("orch-batch");
+
+  var policyButtons = document.querySelectorAll("#demo-orch-pack .seg button");
+  var pi;
+  for (pi = 0; pi < policyButtons.length; pi++) {
+    policyButtons[pi].addEventListener("click", function (ev) {
+      state.policy = Number(ev.currentTarget.getAttribute("data-policy"));
+      setPolicyPressed();
+      render();
+    });
+  }
+
+  document.getElementById("orch-yard").addEventListener("click", function (ev) {
+    var t = ev.target;
+    while (t && t !== this) {
+      if (t.getAttribute && t.getAttribute("data-node") !== null) {
+        var id = Number(t.getAttribute("data-node"));
+        var bit = (1 << id) >>> 0;
+        state.cordon = (state.cordon ^ bit) >>> 0;
+        render();
+        return;
+      }
+      t = t.parentNode;
+    }
+  });
+
+  document.getElementById("orch-reset").addEventListener("click", function () {
+    state = {
+      nodes: BASE.nodes,
+      cpu: BASE.cpu,
+      mem: BASE.mem,
+      policy: BASE.policy,
+      web: BASE.web,
+      worker: BASE.worker,
+      cache: BASE.cache,
+      batch: BASE.batch,
+      cordon: BASE.cordon
+    };
+    pushSliders();
+    setPolicyPressed();
+    render();
+  });
+
+  setPolicyPressed();
+  render();
+})();
+</script>
+
+
+<!-- 全螢幕檢視：切換按鈕、樣式與 F 鍵快捷鍵 -->
+<style>
+  .fs-toggle {
+    position: fixed;
+    top: 18px;
+    right: 18px;
+    z-index: 1000;
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    font-family: var(--sans);
+    font-size: 12.5px;
+    line-height: 1;
+    color: var(--text-2);
+    background: var(--bg);
+    border: 1px solid var(--border-strong);
+    border-radius: 999px;
+    padding: 7px 13px 7px 11px;
+    cursor: pointer;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, .06), 0 4px 12px rgba(0, 0, 0, .04);
+    transition: background .15s, border-color .15s, color .15s;
+  }
+
+  .fs-toggle:hover {
+    background: var(--bg-soft);
+    color: var(--text);
+    border-color: var(--text-3);
+  }
+
+  .fs-toggle:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+
+  .fs-toggle[aria-pressed="true"] {
+    background: var(--accent);
+    color: #fff;
+    border-color: var(--accent);
+  }
+
+  .fs-toggle .fs-ic {
+    flex: 0 0 auto;
+    display: block;
+  }
+
+  @media print {
+    .fs-toggle { display: none !important; }
+  }
+
+  @media (max-width: 480px) {
+    .fs-toggle { padding: 8px; }
+    .fs-toggle .fs-label { display: none; }
+  }
+</style>
+<button id="fs-toggle-btn" class="fs-toggle" type="button" aria-pressed="false"
+        aria-label="切換全螢幕檢視 (快捷鍵 F)" title="全螢幕檢視 (F)">
+  <svg class="fs-ic fs-ic-expand" viewBox="0 0 24 24" width="15" height="15" fill="none"
+       stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+    <path d="M8 3H5a2 2 0 0 0-2 2v3m18 0V5a2 2 0 0 0-2-2h-3m0 18h3a2 2 0 0 0 2-2v-3M3 16v3a2 2 0 0 0 2 2h3"/>
+  </svg>
+  <svg class="fs-ic fs-ic-compress" viewBox="0 0 24 24" width="15" height="15" fill="none"
+       stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="display:none">
+    <path d="M8 3v3a2 2 0 0 1-2 2H3m18 0h-3a2 2 0 0 1-2-2V3m0 18v-3a2 2 0 0 1 2-2h3M3 16h3a2 2 0 0 1 2 2v3"/>
+  </svg>
+  <span class="fs-label">全螢幕</span>
+</button>
+<script>
+  "use strict";
+  (function () {
+    var btn = document.getElementById("fs-toggle-btn");
+    if (!btn) return;
+    var docEl = document.documentElement;
+    var canFs = !!(docEl.requestFullscreen || docEl.webkitRequestFullscreen);
+    // 不支援 Fullscreen API (如 iPhone Safari) → 隱藏按鈕，避免壞掉的 UI
+    if (!canFs) { btn.style.display = "none"; return; }
+
+    var expandIc = btn.querySelector(".fs-ic-expand");
+    var compressIc = btn.querySelector(".fs-ic-compress");
+    var label = btn.querySelector(".fs-label");
+
+    function isFs() {
+      return !!(document.fullscreenElement || document.webkitFullscreenElement);
+    }
+    function enter() {
+      if (docEl.requestFullscreen) docEl.requestFullscreen();
+      else if (docEl.webkitRequestFullscreen) docEl.webkitRequestFullscreen();
+    }
+    function exit() {
+      if (document.exitFullscreen) document.exitFullscreen();
+      else if (document.webkitExitFullscreen) document.webkitExitFullscreen();
+    }
+    function toggle() { isFs() ? exit() : enter(); }
+    function sync() {
+      var on = isFs();
+      btn.setAttribute("aria-pressed", on ? "true" : "false");
+      if (label) label.textContent = on ? "離開全螢幕" : "全螢幕";
+      if (expandIc) expandIc.style.display = on ? "none" : "block";
+      if (compressIc) compressIc.style.display = on ? "block" : "none";
+    }
+
+    btn.addEventListener("click", toggle);
+    document.addEventListener("fullscreenchange", sync);
+    document.addEventListener("webkitfullscreenchange", sync);
+    document.addEventListener("keydown", function (e) {
+      if (e.key !== "f" && e.key !== "F") return;
+      if (e.metaKey || e.ctrlKey || e.altKey) return;
+      var t = e.target;
+      var tag = t && t.tagName ? t.tagName.toUpperCase() : "";
+      if (tag === "INPUT" || tag === "TEXTAREA" || (t && t.isContentEditable)) return;
+      e.preventDefault();
+      toggle();
+    });
+    sync();
+  })();
+</script>
+</body>
+</html>
