@@ -12,7 +12,7 @@
 2. **Cursor Automation** 每日定時觸發 Cloud Agent。
 3. **Agent 智能決策**：Agent 透過 CLI 工具，僅載入過濾後的極小上下文，自發性決定「最符合連貫教學脈絡」的選題。
 4. **組裝編譯**：利用組裝腳本將草稿注入 Notion 風格的 HTML 範本，並重繪**首頁可點擊、可互動的學習地圖**（產頁時在伺服器端完成排版，前端零依賴、不載入任何第三方函式庫）。
-5. **自動部署**：由 GitHub Actions 驗證狀態檔後，將 `books/` 靜態網頁發佈至 GitHub Pages。
+5. **自動部署**：由 GitHub Actions 確認 Bot 推送只動到可寫範圍、驗證狀態檔並通過 demo 品質閘門後，將 `books/` 靜態網頁發佈至 GitHub Pages。
 
 ---
 
@@ -84,7 +84,7 @@ system-design-every-day/
 ├── drafts/            # 各主題的內容原始碼（content.html / script.html），隨產物一起提交
 ├── books/             # 發佈產物（GitHub Pages 的網站根目錄），由腳本自動生成
 ├── scripts/           # CLI 工具鏈；lib/ 為共用模組，quality/ 為 demo 品質閘門
-└── .github/workflows/ # deploy.yml：validate → 注入建置戳記 → 部署 GitHub Pages
+└── .github/workflows/ # deploy.yml：Bot 推送路徑 guard → validate → demo 品質閘門 → 注入建置戳記 → 部署 GitHub Pages
 ```
 
 ---

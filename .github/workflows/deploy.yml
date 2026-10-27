@@ -7,6 +7,7 @@ on:
   workflow_dispatch:
 
 # Sets permissions of the GITHUB_TOKEN to allow deployment to GitHub Pages
+# (contents: read also covers the repository activity API used by the bot push guard)
 permissions:
   contents: read
   pages: write
@@ -18,6 +19,14 @@ concurrency:
   group: "pages"
   cancel-in-progress: false
 
+env:
+  # Bot 推送 guard 的強制開關：'false' = print-only（只印判定、不擋部署）；其他任何值都視為強制，不符即 exit 1。
+  BOT_GUARD_ENFORCE: 'false'
+  # 唯一的人類推送者；其餘 actor（目前只有 cursor[bot]）推送 main 時一律過 guard。
+  # 判定以 HUMAN_ACTOR_ID 為準；HUMAN_LOGIN 只是 activity API 的查詢 filter，改名後查不到會 fail closed。
+  HUMAN_ACTOR_ID: '97429426'
+  HUMAN_LOGIN: croso1024
+
 jobs:
   validate-and-deploy:
     environment:
@@ -25,6 +34,7 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
     runs-on: ubuntu-latest
     steps:
+      # fetch-depth 維持預設 1：guard 只比對兩個 tree，需要的基準 commit 在 guard 步驟內以 SHA 顯式 fetch。
       - name: Checkout Repository
         uses: actions/checkout@v6
 
@@ -33,8 +43,133 @@ jobs:
         with:
           node-version: 24
 
+      # Bot 推送 guard：比對「main 上最近一次人推的 after」到 HEAD 的 tree diff，
+      # 每個路徑都必須落在 Bot 可寫集合：drafts/**、books/**、docs/completed.json、docs/todo.json。
+      # 基準取人推而非 github.event.before，所以 guard 是黏的：Bot 一旦動過集合外的檔案，
+      # 之後每次部署都被擋，直到人推一次 commit 重新定錨；concurrency 跳過的排隊 run 也因此不會漏檢。
+      # 基準來自 repository activity API，官方未載明保留期限。
+      # 查不到人推紀錄時 fail closed；解法是人推一次空 commit：
+      #   git commit --allow-empty -m "[chore] re-anchor bot push guard" && git push origin main
+      # 只認 activity_type=push：人的 force push 與在 GitHub UI merge PR（pr_merge）都不算定錨。
+      # 已知假失敗：Bot 的 run 查詢基準前人剛好推了新 commit（或事後 re-run 舊的 Bot run），
+      # 基準會比 HEAD 新，diff 變成反向、把人的改動列成 DENY；人推那次自己的 run 會正常部署。
+      - name: Guard bot push paths
+        id: guard
+        if: github.event_name == 'push' && github.actor_id != env.HUMAN_ACTOR_ID
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ACTOR: ${{ github.actor }}
+          ACTOR_ID: ${{ github.actor_id }}
+          EVENT_BEFORE: ${{ github.event.before }}
+        run: |
+          set -uo pipefail
+
+          # 判定失敗：強制模式 exit 1；print-only 只發 warning 並結束本步驟（不輸出 base_ok）。
+          # 只有字面 'false' 是 print-only，開關打錯字一律當成強制。
+          stop() {
+            if [ "$BOT_GUARD_ENFORCE" != false ]; then
+              echo "::error::$1"
+              exit 1
+            fi
+            echo "::warning::[print-only] $1"
+            exit 0
+          }
+
+          echo "actor=$ACTOR actor_id=$ACTOR_ID enforce=$BOT_GUARD_ENFORCE"
+          echo "event.before=$EVENT_BEFORE head=$(git rev-parse HEAD)"
+
+          if [ -z "$EVENT_BEFORE" ] || [[ "$EVENT_BEFORE" =~ ^0+$ ]]; then
+            stop "github.event.before 為空或全零，無法確認推送範圍"
+          fi
+
+          anchor=$(gh api -X GET "repos/$GITHUB_REPOSITORY/activity" \
+            -f ref=refs/heads/main -f activity_type=push -f actor="$HUMAN_LOGIN" -f per_page=1 \
+            --jq '.[0] | "\(.actor.id) \(.after)"') || stop "activity API 查詢失敗"
+          read -r anchor_id base <<< "$anchor"
+          echo "anchor: actor_id=$anchor_id after=$base"
+
+          if [ "$anchor_id" != "$HUMAN_ACTOR_ID" ]; then
+            stop "找不到 $HUMAN_LOGIN（$HUMAN_ACTOR_ID）在 main 上的推送紀錄；請人推一次空 commit 重新定錨"
+          fi
+          if ! [[ "$base" =~ ^[0-9a-f]{40}$ ]] || [[ "$base" =~ ^0+$ ]]; then
+            stop "人推紀錄的 after 不是有效的 commit SHA：$base"
+          fi
+          git fetch --no-tags --depth=1 origin "$base" || stop "fetch 不到基準 commit $base"
+          git cat-file -e "$base^{commit}" || stop "基準 $base 不是 commit"
+          echo "trusted_base=$base"
+
+          # --no-renames：避免「scripts/x → drafts/x」這類改名只列出新路徑、藏住集合外的刪除
+          changed=$(git -c core.quotePath=false diff --no-renames --name-only "$base" HEAD --) \
+            || stop "git diff $base..HEAD 失敗"
+          added=$(git -c core.quotePath=false diff --no-renames --name-only --diff-filter=A "$base" HEAD -- drafts/) \
+            || stop "git diff --diff-filter=A $base..HEAD 失敗"
+
+          # 新增的 drafts/<id>/：以新增的 content.html 判定，給 archetype 閘門用
+          new_topics=""
+          while IFS= read -r p; do
+            [[ "$p" =~ ^drafts/([^/]+)/content\.html$ ]] || continue
+            id="${BASH_REMATCH[1]}"
+            [[ "$id" =~ ^[a-z0-9][a-z0-9-]*$ ]] || stop "新增 draft 的 id 不合法：$id"
+            new_topics="$new_topics $id"
+          done <<< "$added"
+          new_topics="${new_topics# }"
+          echo "new_topics=${new_topics:-（無）}"
+
+          {
+            echo "base=$base"
+            echo "base_ok=true"
+            echo "new_topics=$new_topics"
+          } >> "$GITHUB_OUTPUT"
+
+          denied=0
+          echo "變動路徑（$base..HEAD）："
+          while IFS= read -r p; do
+            [ -z "$p" ] && continue
+            case "$p" in
+              drafts/*|books/*|docs/completed.json|docs/todo.json) echo "  allow  $p" ;;
+              *) echo "  DENY   $p"; denied=$((denied + 1)) ;;
+            esac
+          done <<< "$changed"
+
+          if [ "$denied" -gt 0 ]; then
+            stop "$denied 個路徑不在 Bot 可寫集合內（drafts/**、books/**、docs/completed.json、docs/todo.json）"
+          fi
+          echo "判定：通過"
+
       - name: Validate state files and homepage payload
         run: node scripts/validate.js
+
+      # Demo 品質閘門（scripts/quality/，見 guidelines/style-guide.md §0.6）。
+      # --all 對 legacy-baseline.json 名單內的舊文印 SKIP(baseline) 不擋全站；名單項已全過則 STALE → exit 1。
+      - name: Demo gate L1 (demo-audit)
+        run: node scripts/quality/demo-audit.js --all
+
+      - name: Demo gate L2 (compute-probe)
+        run: node scripts/quality/compute-probe.js --all
+
+      # 只檢查 Bot 自人推基準以來新增的 drafts/<id>/；全站模式會因 tech-debt #6 已接受的撞形 exit 1，CI 不用。
+      # 人推與 workflow_dispatch 不跑：人推的文章由作者依 topic-author 流程在本機過閘。
+      - name: Demo gate archetype window (new drafts)
+        if: github.event_name == 'push' && github.actor_id != env.HUMAN_ACTOR_ID
+        env:
+          BASE_OK: ${{ steps.guard.outputs.base_ok }}
+          NEW_TOPICS: ${{ steps.guard.outputs.new_topics }}
+        run: |
+          if [ "$BASE_OK" != true ]; then
+            echo "::warning::guard 未取得基準，無法判定新增的 draft，跳過 archetype 閘門"
+            exit 0
+          fi
+          if [ -z "$NEW_TOPICS" ]; then
+            echo "沒有新增的 draft，跳過"
+            exit 0
+          fi
+          rc=0
+          for id in $NEW_TOPICS; do
+            echo "::group::archetype-window --topic $id"
+            node scripts/quality/archetype-window.js --topic "$id" || rc=1
+            echo "::endgroup::"
+          done
+          exit $rc
 
       # Stamp homepage with the commit actually being deployed (not generate-time HEAD).
       # Requires <!-- BUILD_META --> placeholder in books/index.html (from books.js template).

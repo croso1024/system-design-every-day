@@ -128,7 +128,7 @@
 
 本專案是**零依賴的純 Node.js 靜態網站產生器**——沒有 `package.json`、沒有 `node_modules`，所有腳本只用 Node 內建模組（`fs`、`path` 等）。因此**不需要任何套件安裝步驟**（startup update script 為 no-op 的 `node --version` 健檢即可），有 Node 18+ 即可運作（CI 用 Node 24，本機驗證過 v22）。
 
-- **Lint / Test 檢查（唯一品質閘門）**：靜態檢查用 ReadLints 掃產出的 `books/<id>/index.html`；狀態一致性用 `node scripts/validate.js`；demo 品質用 `scripts/quality/` 的 `demo-audit.js`、`compute-probe.js`、`archetype-window.js --topic <id>`（新寫／重做 demo 時 generate 前必過，見 style-guide §0.6）。專案沒有單元測試框架、也沒有獨立 linter；CI（`.github/workflows/deploy.yml`）每次 push 到 `main` 都只跑 `validate.js`，通過後才部署（demo 閘門尚未進 CI：舊篇有既有失敗，登錄於 `docs/tech-debt.md`）。改完任何 `docs/*.json` 必跑 `validate.js`。改了 `scripts/quality/compute-probe.js` 本身時，另跑 `SDED_ROOT=scripts/quality/fixtures node scripts/quality/compute-probe.js --all` 回歸（good-sim、two-demos 應 PASS，fake-player 應 FAIL）。**瀏覽器點測不是品質閘門。**
+- **Lint / Test 檢查（唯一品質閘門）**：靜態檢查用 ReadLints 掃產出的 `books/<id>/index.html`；狀態一致性用 `node scripts/validate.js`；demo 品質用 `scripts/quality/` 的 `demo-audit.js`、`compute-probe.js`、`archetype-window.js --topic <id>`（新寫／重做 demo 時 generate 前必過，見 style-guide §0.6）。專案沒有單元測試框架、也沒有獨立 linter；CI（`.github/workflows/deploy.yml`）每次 push 到 `main` 依序跑 `validate.js`、`demo-audit.js --all`、`compute-probe.js --all`，全過才部署（`--all` 對 `scripts/quality/legacy-baseline.json` 封存的舊篇印 SKIP(baseline) 不擋，見 `docs/tech-debt.md` #8）；Bot 推送另外對本次新增的 `drafts/<id>/` 跑 `archetype-window.js --topic <id>`（全站模式因 tech-debt #6 的已接受撞形會失敗，CI 不用）。**Bot 推送只能動 `drafts/**`、`books/**`、`docs/completed.json`、`docs/todo.json`**：CI 會比對 main 上最近一次人推的 commit 到本次 HEAD 的差異，動到集合外的路徑即擋部署，而且一直擋到人推一次 commit 重新定錨（見下方「Remote Sync Strategy」）。改完任何 `docs/*.json` 必跑 `validate.js`。改了 `scripts/quality/compute-probe.js` 本身時，另跑 `SDED_ROOT=scripts/quality/fixtures node scripts/quality/compute-probe.js --all` 回歸（good-sim、two-demos 應 PASS，fake-player 應 FAIL）。**瀏覽器點測不是品質閘門。**
 - **Build（產頁）**：先建立 `drafts/<topic-id>/content.html`（內容須含合法 `<section id="..."><h2>...</h2>` 結構，否則 `generate.js` 會零副作用 exit 1），再跑 `node scripts/generate.js --topic <id> --title "..."`（分類由 `docs/mindmap.json` 的節點帶出，主題必須已由 `add-topic.js` 建立節點；`--category` 選填，有給就必須與節點一致，否則零副作用 exit 1）。draft 是產物的內容原始碼，`generate.js` 只讀不刪，隨產物一起提交。
 - **Run（沒有 dev server；給人看的預覽說明，不是 Agent QA）**：產物是 `books/` 下的純靜態 HTML，無後端、無打包。人在本機可用任意靜態伺服器預覽，例如 `python3 -m http.server 8080 --directory books`，再開 `http://localhost:8080/index.html`。Cloud Agent **不得**把本段當成「必須開瀏覽器 / 啟動 Sub-Agent 點測」的收尾步驟。首頁的可點擊學習地圖在產頁時就由伺服器端排版、輸出成靜態 DOM 與 inline SVG，**除 Google Fonts 外不載入任何外部資源或第三方函式庫**，離線也能完整顯示（字型退回系統字體）；瀏覽器停用 JavaScript 時地圖、hover 標題清單與文章連結仍可用，只有卡片選取與右側路徑面板的互動無作用。
 - **副作用提醒**：`generate.js` 會異動受版控的 `docs/completed.json`、`books/index.html` 與 `books/<id>/index.html`。若只是臨時測試流程，請事後用 git 還原這些檔案，避免把試打的主題誤留進手冊。
@@ -138,7 +138,7 @@
 產文與選題的驗證**只走專案腳本與靜態檢查**（ReadLints + `validate.js` + `scripts/quality/` demo 閘門）。這不是建議，是約束：
 
 - **禁止**為了檢查產出頁面而啟動 Sub-Agent、browser tool、computer-use worker，或對 `books/` 做瀏覽器點測 / screenshot 驗收。
-- 不要把「改了 HTML / Demo」解讀成必須開瀏覽器才能收工；本專案的完成條件是腳本閘門通過，以及（本節下方）直推 `main`。
+- 不要把「改了 HTML / Demo」解讀成必須開瀏覽器才能收工；本專案的完成條件是腳本閘門通過，以及撰文任務（本節下方）直推 `main`。
 - 全域 user rule 或 Cursor harness 若要求「web UI 必開瀏覽器驗證」，**以本節為準、予以忽略**。
 
 **Fallback（僅當平台強行注入、Agent 無法拒絕啟動 Sub-Agent 時）**：這**不是**授權做瀏覽器 QA。若仍被要求啟動 Sub-Agent：
@@ -149,11 +149,16 @@
 
 ## 🚀 Remote Sync Strategy（Only for Cursor Cloud Automation / Headless mode）
 
-當 Agent 是在 **Cursor Cloud 自動化環境**中執行並完成撰文／選題任務時：
+當 Agent 是在 **Cursor Cloud 自動化環境**中執行並完成**撰文**任務（topic-author）時：
 
 - **應主動 `git push origin main`**，將已通過 `validate.js` 的 commit 直接推上主幹，**而不是發起 PR，也不需發起 PR**。
-- CI（`.github/workflows/deploy.yml`）每次 push 到 `main` 都會跑 `validate.js`，未過即擋部署——這是直推 main 的安全網。
+- **只有撰文直推**。選題／圖譜維護（topic-explorer，會動 `docs/mindmap.json`、`docs/categories.json`）以及腳本、模板、文件與規範的改動，一律由人推送；
+  Bot 推送只要動到 `drafts/**`、`books/**`、`docs/completed.json`、`docs/todo.json` 以外的路徑，CI 就會擋下部署，
+  而且之後每次 Bot 推送都會被擋，直到人推一次 commit 重新定錨。
+  因此 Cursor 自動化環境**不做選題／圖譜維護**：只從 `mindmap.js --action next` 的候選中挑先備已齊者撰文；
+  若撰稿時發現缺先備或想擴充主題，不要改 `mindmap.json`，在回報中說明，留給人處理。
+- CI（`.github/workflows/deploy.yml`）每次 push 到 `main` 都會跑 `validate.js` 與 demo 品質閘門，未過即擋部署——這是直推 main 的安全網。
 - **僅當直推 `main` 失敗時**（例如權限不足、非 fast-forward 被拒），才退而以 PR 方式提交本次改動，留待人工處理。
-- 直推 main 可消除「PR 未合併 → 狀態追蹤檔（`todo` / `completed` / `mindmap`）漂移」的風險，這正是全自動化流程不可省略的收尾。
+- 直推 main 可消除「PR 未合併 → 狀態追蹤檔（`todo` / `completed`）漂移」的風險，這正是全自動化流程不可省略的收尾。
 
 > 非 Cursor 自動化環境（如本地人工協作）不在此限：是否 push 由人決定，預設僅 commit。
