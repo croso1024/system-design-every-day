@@ -562,8 +562,10 @@ node scripts/quality/archetype-window.js --topic <id>   # 撞形檢查（§0.2 �
 動態組出 id 再 `getElementById` 會被誤報為死控制項、cap 位置判斷只看容器後 4000 字。
 逐一確認屬誤報後可放行，並在回報中註明。
 
-早於本約定的舊篇會在 L1 第 11 項或 L2 失敗，清單登錄於 `docs/tech-debt.md`；
+早於本約定的舊篇會在 L1 第 11 項或 L2 失敗，清單登錄於 `docs/tech-debt.md` #8，並封存在 `scripts/quality/legacy-baseline.json`
+（CI 的 `--all` 模式對名單內的篇印 SKIP(baseline) 不擋）；
 **只改論述、不動 demo** 的修訂不受這些既有失敗阻擋，動到 demo 就必須讓它通過。
+名單只能縮小：舊篇修到單篇模式 exit 0 後，同一個 commit 必須把它從對應的名單移除，否則 `--all` 判 STALE → exit 1、擋下部署。
 
 ---
 

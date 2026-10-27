@@ -107,6 +107,9 @@ node scripts/quality/archetype-window.js --topic <id>   # 與發佈序上相鄰 
    以 `archetype-window.js --topic <id>` 的結果為準。
 6. **重做 demo 時沿用新約定**：依 style-guide §0.5 改成五段結構並補 `@probe`（一頁多 demo 的完整重做範例見 `drafts/distributed-transactions-handbook`），讓該篇脫離 tech-debt 的舊篇清單；
    處理完一項 tech-debt 就把它從 `docs/tech-debt.md` 直接刪除（總表列與說明段都刪，不留「已處理」紀錄）。
+   **該篇若在 `scripts/quality/legacy-baseline.json` 名單內，同一個 commit 必須把它從已通過的那份名單移除**
+   （`demo-audit` 與 `compute-probe` 各一份，單篇模式 exit 0 的那份才移除），並同步 tech-debt #8 的篇數與表格；
+   名單只能縮小，名單內的篇一旦全過，CI 的 `--all` 會判 STALE → exit 1，連人推的部署也會被擋。
 7. **大批次校訂派 Sub-Agent 時**，把 `guidelines/demo-agent-brief.md` 逐字附在指派之後（含第 6 節修訂附則）。
 
 ### Step 6：Git 提交（單行 `[docs]` 規範）
@@ -117,6 +120,7 @@ git add drafts/<id>/content.html drafts/<id>/script.html books/<id>/index.html  
 git commit -m "[docs] refine <id>: <一句話說明本次修訂重點>"
 ```
 - **只 stage 本次真正改動的檔**，勿 `git add .`（避免夾帶無關檔案）。
+- 讓舊篇脫離 baseline 時（見鐵律 6），一併 stage `scripts/quality/legacy-baseline.json` 與 `docs/tech-debt.md`。
 - 帶 `--keep-date` 時 `completed.json` / `books/index.html` 通常不會有日期 diff；
   若確實無變更，就不需 stage 它們。
 - 本地人工協作預設**僅 commit，不 push**；是否 push 由使用者決定。
