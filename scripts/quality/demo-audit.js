@@ -8,13 +8,17 @@
  *   node scripts/quality/demo-audit.js --all --csv      // 只印摘要表，便於橫向比對
  *   任一篇有未過項目即 exit 1。第 6、9 項是啟發式，誤報時以人眼判讀為準。
  *
+ * `--all` 模式會讀 scripts/quality/legacy-baseline.json 的 "demo-audit" 名單（語意見 lib/baseline.js）：
+ *   名單內的舊文仍會跑檢查，失敗印成 SKIP(baseline) 不擋全站；已全過的名單項視為 stale → exit 1。
+ *   單篇模式不看名單。
+ *
  * 檢查項：
  *   1  archetype 宣告位於 content.html 開頭（前 20 行內）
  *   2  .seg 組數 <= 2
  *   3  三件組 .X-metric / .X-verdict / .X-wire（只看 markup 用量，不看 CSS 定義）
  *   4  舊 demo 骨架指紋（防複製上一篇）
  *   5  script.html 去殼後 node --check 語法檢查
- *   6  ID 綁定雙向 diff（綁到不存在的 id / 宣告了沒人用的互動元件）
+ *   6  ID 綁定雙向 diff（綁到不存在的 id / 宣告了沒人用的互動元件；「字面前綴 + 變數」組 id 的視為無法靜態判定，不判死）
  *   7  委派元件的 data-* 屬性是否真被讀取（抓死控制項）
  *   8  <div> / <section> 標籤平衡
  *   9  圖表容器後缺 <p class="cap">
@@ -28,6 +32,7 @@ const path = require('path');
 const os = require('os');
 const { execFileSync } = require('child_process');
 const { parseArchetypeDeclaration, extractScriptJs } = require('./lib/draft');
+const { loadBaseline } = require('./lib/baseline');
 
 const ROOT = process.env.SDED_ROOT || path.resolve(__dirname, '..', '..');
 const DRAFTS = path.join(ROOT, 'drafts');
@@ -83,6 +88,16 @@ function referencedIds(js) {
     let m;
     while ((m = re.exec(js))) out.add(m[2]);
   }
+  return out;
+}
+
+// script 用「字面前綴 + 變數」組 id 再查找（getElementById("cku-" + k)）時，工具看不到完整 id。
+// 收集這些前綴：符合前綴的控制項視為「無法靜態判定」，不判死。
+function dynamicIdPrefixes(js) {
+  const out = new Set();
+  const re = /(?:getElementById|querySelector(?:All)?|\bel)\(\s*(["'])(#?)([A-Za-z0-9_-]+)\1\s*\+/g;
+  let m;
+  while ((m = re.exec(js))) out.add(m[3]);
   return out;
 }
 
@@ -208,19 +223,23 @@ function checkIdBinding(content, js) {
   const interactiveIds = [];
   let m;
   while ((m = re.exec(stripStyle(content)))) interactiveIds.push(m[2]);
+  const prefixes = Array.from(dynamicIdPrefixes(js));
+  const unresolved = [];
   const deadControls = interactiveIds.filter(function (x) {
-    return !refs.has(x) && js.indexOf('"' + x + '"') === -1 && js.indexOf("'" + x + "'") === -1;
+    if (refs.has(x) || js.indexOf('"' + x + '"') !== -1 || js.indexOf("'" + x + "'") !== -1) return false;
+    if (prefixes.some(function (p) { return x.indexOf(p) === 0; })) { unresolved.push(x); return false; }
+    return true;
   });
 
   const notes = [];
   if (dangling.length) notes.push('綁不存在的 id: ' + dangling.join(', '));
   if (deadControls.length) notes.push('死控制項: ' + deadControls.join(', '));
-  return {
-    ok: dangling.length === 0 && deadControls.length === 0,
-    dangling: dangling,
-    deadControls: deadControls,
-    note: notes.length ? notes.join('；') : 'ok（ref ' + refs.size + ' / 互動元件 ' + interactiveIds.length + '）',
-  };
+  const ok = dangling.length === 0 && deadControls.length === 0;
+  let note = notes.length ? notes.join('；') : 'ok（ref ' + refs.size + ' / 互動元件 ' + interactiveIds.length + '）';
+  if (unresolved.length) {
+    note += '；前綴動態綁定、無法靜態判定 ' + unresolved.length + ' 個（' + prefixes.join('*, ') + '*）';
+  }
+  return { ok: ok, dangling: dangling, deadControls: deadControls, unresolved: unresolved, note: note };
 }
 
 function checkDelegated(content, js) {
@@ -381,29 +400,53 @@ function main() {
   const args = process.argv.slice(2);
   const csv = args.indexOf('--csv') !== -1;
   let ids = args.filter(function (a) { return a.indexOf('--') !== 0; });
-  if (args.indexOf('--all') !== -1 || !ids.length) {
+  const allMode = args.indexOf('--all') !== -1 || !ids.length;
+  if (allMode) {
     ids = fs.readdirSync(DRAFTS).filter(function (d) {
       return fs.existsSync(path.join(DRAFTS, d, 'content.html'));
     }).sort();
   }
 
+  // 封存名單只在 --all 生效；名單本身有問題就直接失敗，不跑任何篇
+  const baseline = allMode ? loadBaseline(ROOT, 'demo-audit') : { ids: new Set(), errors: [] };
+  if (baseline.errors.length) {
+    baseline.errors.forEach(function (e) { console.log('x legacy-baseline: ' + e); });
+    process.exitCode = 1;
+    return;
+  }
+
   const rows = [];
+  const skipped = [];
+  const stale = [];
   let failed = false;
   for (const id of ids) {
     const r = audit(id);
     if (r.fatal) { console.log('\n### ' + id + '\n  x ' + r.fatal); failed = true; continue; }
     const entries = Object.keys(r.checks).map(function (k) { return [k, r.checks[k]]; });
     const fails = entries.filter(function (e) { return !e[1].ok; });
-    if (fails.length) failed = true;
+    const inBaseline = baseline.ids.has(id);
+    let status;
+    if (fails.length === 0) {
+      status = 'OK 全通過';
+      if (inBaseline) { stale.push(id); failed = true; status += '   x STALE：已全過，請從 legacy-baseline.json 移除'; }
+    } else if (inBaseline) {
+      status = 'SKIP(baseline)   原本會敗 ' + fails.length + ' 項：' +
+        fails.map(function (e) { return e[0]; }).join('、');
+      skipped.push(id);
+    } else {
+      status = 'x ' + fails.length + ' 項未過';
+      failed = true;
+    }
     rows.push({
       id: id,
       fails: fails.length,
+      baseline: inBaseline,
       arche: r.checks['1 archetype 宣告'].note,
       seg: r.checks['2 seg 組數'].n,
       chrome: r.checks['3 三件組 chrome'].n,
     });
     if (csv) continue;
-    console.log('\n### ' + id + '   ' + (fails.length === 0 ? 'OK 全通過' : 'x ' + fails.length + ' 項未過'));
+    console.log('\n### ' + id + '   ' + status);
     for (const e of entries) {
       console.log('  ' + (e[1].ok ? 'v' : 'x') + ' ' + pad(e[0], 20) + ' ' + e[1].note);
     }
@@ -414,7 +457,12 @@ function main() {
   console.log('-'.repeat(100));
   rows.sort(function (a, b) { return b.fails - a.fails; });
   for (const r of rows) {
-    console.log(pad(r.id, 44) + padStart(r.fails, 5) + padStart(r.seg, 5) + padStart(r.chrome, 5) + '  ' + r.arche);
+    console.log(pad(r.id, 44) + padStart(r.fails, 5) + padStart(r.seg, 5) + padStart(r.chrome, 5) + '  ' + r.arche +
+      (r.baseline ? (r.fails ? '   [baseline]' : '   [baseline STALE]') : ''));
+  }
+  if (allMode) {
+    console.log('\nlegacy-baseline：SKIP ' + skipped.length + ' 篇' +
+      (stale.length ? '；STALE ' + stale.length + ' 篇（' + stale.join(', ') + '）' : ''));
   }
   process.exitCode = failed ? 1 : 0;
 }
