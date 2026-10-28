@@ -1278,7 +1278,7 @@
 
   <div class="callout accent">
     <div class="c-title"><span class="ic">邊界</span>這篇不重講的東西</div>
-    <p>Protobuf 的欄位怎麼編碼、gRPC 一條 stream 上的四種 RPC、deadline 與狀態碼表，都在 gRPC 與 Protocol Buffers 那篇。瀏覽器要的即時推送（誰該用長連線、誰該用單向下推）在 WebSocket 與 SSE 那兩篇。這裡只用「內部是強型別 RPC、瀏覽器不是 gRPC 的原生客戶端」當作選型論據。</p>
+    <p>Protobuf 的欄位怎麼編碼、gRPC 一條 stream 上的四種 RPC、deadline 與狀態碼表，都在 <a href="../grpc-and-protobuf/">gRPC 與 Protocol Buffers</a> 那篇，建議讀完本篇再接著讀。瀏覽器要的即時推送（誰該用長連線、誰該用單向下推）在 <a href="../websocket-realtime-communication/">WebSocket</a> 與 <a href="../sse-server-sent-events/">SSE</a> 那兩篇。這裡只用「內部是強型別 RPC、瀏覽器不是 gRPC 的原生客戶端」當作選型論據。</p>
   </div>
 
   <p>同一個取捨在別的協定上也看得到。MCP 把模型能碰到的表面收成 tools 與 resources，而不是給模型一門通用查詢語言；A2A 把 agent 之間的契約收成任務的生命週期，而不是共享對方的內部 API。兩者都是「誰在呼叫，表面就長成那樣」。角色、交握與生命週期各有專文，這裡不展開。</p>
@@ -1366,15 +1366,18 @@
 
   <p>面試裡「REST 比較囉嗦、GraphQL 一次拿完、gRPC 比較小」這三句可以同時為真，也可以同時為假，取決於你把商品放在哪、快取暖不暖、客戶端到底有沒有用到那 8 個欄位。下面的模型把這件事拆成能重算的帳，常數是教學用的整數，不是生產環境的封包基準。面試要講的是哪一項會變、為什麼變。</p>
 
+  <p>場景設定：這是你們自家手機 App 的「我的訂單」畫面，背後有一個 BFF（Backend for Frontend，專為這個 App 聚合資料的後端）。選手機 App 是為了讓四種契約都站得住：App 能打 REST 與 GraphQL，也能直接跑原生 gRPC client。瀏覽器不行，它得經過 gRPC-Web 與一層 proxy，見 gRPC 篇第 6 節。</p>
+
   <h3>模型假設</h3>
   <p>訂單摘要 64 bytes，明細 20 bytes，商品每個欄位 48 bytes，完整商品固定 8 欄。每個 HTTP 請求加回應的標頭預算 220 bytes（方法、路徑、授權、內容型別，取整）。不重複商品數 <var>P</var> = round(<var>N</var> × <var>K</var> × 3 / 5)，也就是大約六成的明細指向不同商品，其餘是重複引用。</p>
   <div class="formula">拆開的請求數 = 1 + N + P</div>
   <p>拆開的 REST 打三波：一次 <code>GET /orders</code>、<var>N</var> 次 <code>GET /orders/{id}/items</code>、<var>P</var> 次 <code>GET /products/{id}</code>。同一波裡的請求可以並行，所以瀑布深度是 3，但請求數不會因為 HTTP/2 多路複用而變少。多路複用減少的是排程，不是快取鍵，也不是源站要處理的 GET。商品 GET 若是公開且仍新鮮，共享快取可以不把本體再傳一次；訂單清單是使用者自己的，模型裡不把它算進可快取位元組。命中率滑桿只作用在這 <var>P</var> 個商品 GET 上。</p>
   <p>內嵌的 REST 只打一次，伺服器把完整 8 欄焊進每一筆明細。請求數變成 1，商品卻不再是獨立的快取對象，而且同一個商品被幾筆明細用到就會在文件裡出現幾次。</p>
+  <p>GraphQL 這一列會用到幾個詞，先給最短的定義，第 4 節再完整展開。<strong>選取集</strong>（selection set）是查詢裡列出的欄位，伺服器只回這些欄位。<strong>Resolver</strong> 是伺服器上負責填一個欄位的函式，例如 <code>Item.product</code> 的 resolver 拿明細上的商品 id 去查商品。天真的 resolver 對每一筆父物件各查一次，這就是 <strong>N+1</strong>；<strong>DataLoader</strong> 則把同一次請求裡同型別的查詢收成一批。</p>
   <p>GraphQL 也是一次 POST。選取集只帶畫面用到的欄位，所以沒有「8 欄全下」的浪費；但查詢若把商品嵌在明細底下，用到的欄位仍會按明細筆數重複出現。正規化快取是客戶端收到之後的事，減不了這一次回應的位元組。查詢文件本身約 160 bytes 再加每欄 12 bytes。執行期複雜度 = <var>N</var> × <var>K</var> × 欄位數，預算 200；超過就拒絕，線上只回 220 + 96 bytes 的錯誤文件，resolver 不跑。只看查詢文件的成本是欄位數本身——變數裡的 <var>N</var> 與 <var>K</var> 不會出現在文件上。</p>
   <div class="formula">執行期複雜度 = N × K × 欄位數，預算 200</div>
   <p>沒有 DataLoader 時，伺服器對資料庫的往返是 1 + <var>N</var> + <var>P</var>（訂單一查、每筆訂單的明細各一查、每個商品各一查），和拆開的 REST 在網路上的請求數同一形狀，只是這次藏在機房裡。DataLoader 在同一次請求內把這三類收成 3 次批次查詢（訂單、全部明細、全部商品）。它減的是伺服器內部往返，不是客戶端看到的 bytes。</p>
-  <p>gRPC 在這個模型裡是 BFF 對客戶端的一次 unary RPC。本體用同一份嵌套形狀，再乘上 72%：欄位名不會在每筆重複出現。這是方向性的教學折算，不是 wire format 的逐 byte 解碼；編碼細節在 gRPC 與 Protocol Buffers 那篇。框架另計 32 bytes。中介層不把它當成可快取的 GET，可快取位元組是 0。內部若再扇出成三個服務，那是伺服器拓樸，不計進這張客戶端帳。</p>
+  <p>gRPC 在這個模型裡是 App 對 BFF 的一次 unary RPC。本體用同一份嵌套形狀，再乘上 72%：欄位名不會在每筆重複出現。這是方向性的教學折算，不是 wire format 的逐 byte 解碼；編碼細節在 <a href="../grpc-and-protobuf/">gRPC 與 Protocol Buffers</a> 那篇。框架另計 32 bytes。中介層不把它當成可快取的 GET，可快取位元組是 0。內部若再扇出成三個服務，那是伺服器拓樸，不計進這張客戶端帳。</p>
 
   <pre class="mermaid">
 sequenceDiagram

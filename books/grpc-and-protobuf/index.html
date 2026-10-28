@@ -1131,7 +1131,7 @@
         <button class="btn toc-toggle" type="button" aria-expanded="false" aria-controls="toc-nav">目錄 ▾</button>
       </div>
       <div class="toc-nav" id="toc-nav">
-        <a href="#s1"><span class="n">01</span>服務間契約放在線上</a>
+        <a href="#s1"><span class="n">01</span>為什麼服務之間需要一份編譯期契約</a>
         <a href="#s2"><span class="n">02</span>位元組怎麼排</a>
         <a href="#s3"><span class="n">03</span>欄位編號才是身分</a>
         <a href="#s4"><span class="n">04</span>一條 stream 上的四種 RPC</a>
@@ -1222,11 +1222,36 @@
 <section id="s1">
   <div class="sec-head">
     <span class="sec-num">01</span>
-    <h2>服務間契約放在線上</h2>
+    <h2>為什麼服務之間需要一份編譯期契約</h2>
   </div>
-  <p class="sec-sub">Protobuf 決定位元組怎麼排，gRPC 決定這段位元組怎麼佔用一條 HTTP/2 stream。風格選型不在這裡。</p>
+  <p class="sec-sub">Protobuf 把契約寫成一份 .proto，並決定位元組怎麼排；gRPC 把一次函式呼叫對上一條 HTTP/2 stream。這篇講這筆交易換到什麼、要付什麼。</p>
 
-  <p>內部服務之間若用 JSON over HTTP，契約通常活在文件、慣例與「對方應該會接受這個欄位」的默契裡。Protobuf 把契約收成一份 <code>.proto</code>：欄位編號、型別與 RPC 方法在編譯期就固定，兩邊的 stub 由同一份 IDL 生成。gRPC 則規定這份訊息如何走在網路上——一個 RPC 佔一條 HTTP/2 stream，不是「把 JSON 換成二進位再 POST 到某個 URL」這麼薄。</p>
+  <p class="gpb-sub">內部服務用 JSON 互打，痛在哪</p>
+
+  <p>訂單服務要向目錄服務查商品，兩邊由不同團隊、用不同語言維護。用 JSON over HTTP 時，契約通常活在文件、慣例與「對方應該會接受這個欄位」的默契裡。欄位名拼錯或型別被悄悄改掉，要到執行期才發現；每種語言各手寫一份 client 與序列化；每一則訊息都重複帶著欄位名，解析前還要先把文字 tokenize。服務數一多、呼叫量一大，這三件事會一起變貴。</p>
+
+  <p>RPC（Remote Procedure Call）的想法是讓遠端呼叫看起來像本地函式：你呼叫一個方法，框架負責把參數編碼、送過網路、在對端解碼並呼叫真正的實作。gRPC 是這個想法的一種實作，由兩塊拼成。第一塊是 <strong>Protobuf</strong>：一份 <code>.proto</code> 檔同時描述訊息與方法，是雙方共用的契約，也是線上的編碼格式。</p>
+
+<pre><code>syntax = "proto3";
+
+message Page {
+  int32 limit = 1;    // 等號右邊是欄位編號，不是預設值
+  string cursor = 2;
+  sint32 delta = 3;
+}
+
+service Catalog {
+  rpc Get (Page) returns (Page);
+}</code></pre>
+
+  <p><code>protoc</code> 或 buf 這類工具鏈讀這份檔案，替每種語言生成 <strong>stub</strong>：替你處理編碼與網路的那層程式碼。呼叫端拿到的就是一個普通函式，型別不對在編譯期就會被擋下：</p>
+
+<pre><code>// Go：生成出來的 client，呼叫起來像本地函式
+ctx, cancel := context.WithTimeout(ctx, 200*time.Millisecond)
+defer cancel()
+next, err := catalog.Get(ctx, &amp;pb.Page{Limit: 20, Cursor: "c_81"})</code></pre>
+
+  <p>第二塊是 <strong>gRPC</strong> 本身：它規定這份訊息如何走在網路上。一個 RPC 佔一條 HTTP/2 stream，不是「把 JSON 換成二進位再 POST 到某個 URL」這麼薄。上面那個 200 ms 的 timeout 也不是只在本機計時，它會跟著呼叫送到對端（第 5 節）。</p>
 
   <div class="gpb-row">
     <div class="gpb-node">
@@ -1249,14 +1274,36 @@
       <div class="ns">還原成同型訊息</div>
     </div>
   </div>
-  <p class="cap">看中間那一跳：應用程式不自己組 HTTP 語意，stub 把一次呼叫對上一條 stream。Frame、HPACK、多路復用的原理由 HTTP/1.1 與 HTTP/2 篇負責，本篇只講 gRPC 怎麼使用它們。</p>
+  <p class="cap">看中間那一跳：應用程式不自己組 HTTP 語意，stub 把一次呼叫對上一條 stream。Frame、HPACK、多路復用的原理由 <a href="../http-1-1-and-http-2/">HTTP/1.1 與 HTTP/2</a> 篇負責，本篇只講 gRPC 怎麼使用它們。</p>
 
   <p>體積與速度的來源不是「二進位比較酷」。線上沒有欄位名稱，小整數用 varint 壓進一個 byte，解碼是依 schema 往前掃，不必先做 JSON tokenize。代價是訊息<strong>不能自我描述</strong>：沒有 schema 就讀不出欄位。除錯要靠 <code>protoc --decode</code> 或同等工具，不能對著一截 tcpdump 用眼睛讀。</p>
 
+  <p class="gpb-sub">它在 API 風格裡的位置</p>
+
+  <p>gRPC 擅長的範圍很窄：雙方都由你控制、都能吃同一份 <code>.proto</code> 的呼叫，典型是機房裡的服務對服務，或你自己發佈的手機 App。給合作夥伴的公開 API、需要 CDN 快取 GET 的資源，REST 比較合適；前端一屏要聚合多個資源，GraphQL 比較合適；瀏覽器也不是原生 gRPC 的客戶端（第 6 節）。</p>
+
   <div class="callout warn">
-    <div class="c-title"><span class="ic">邊界</span>本篇不幫你選 REST、GraphQL 還是 gRPC</div>
-    <p>三種風格的資源模型、查詢形狀與版本化策略留給 API 設計風格與演進篇。這裡假設你已經決定走服務間 RPC，要搞清楚的是編碼、相容性、串流生命週期，以及長連線如何搞砸負載均衡。</p>
+    <div class="c-title"><span class="ic">邊界</span>選型論證在前一篇，本篇從「已經決定走 RPC」開始</div>
+    <p>三種風格的資源模型、查詢形狀與版本化策略在 <a href="../api-design-styles/">API 設計風格與演進</a>，建議先讀那篇。這裡要搞清楚的是編碼、相容性、串流生命週期，以及長連線如何搞砸負載均衡。</p>
   </div>
+
+  <p class="gpb-sub">本篇路線：為什麼先講位元組</p>
+
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr><th>節</th><th>回答的問題</th><th>為什麼排在這裡</th></tr>
+      </thead>
+      <tbody>
+        <tr><td class="hl">02 位元組怎麼排</td><td>欄位在線上長什麼樣</td><td>線上沒有欄位名、只有編號，後面所有相容性規則都從這裡推出來</td></tr>
+        <tr><td class="hl">03 欄位編號才是身分</td><td>schema 怎麼改才不會弄壞舊 client</td><td>有了 02，「改名安全、改編號危險」是推得出來的結論，不用硬背</td></tr>
+        <tr><td class="hl">04 四種 RPC</td><td>編好的訊息怎麼走在 HTTP/2 上</td><td>訊息之外的那一層：stream、串流、背壓</td></tr>
+        <tr><td class="hl">05 Deadline 與狀態碼</td><td>呼叫鏈上的逾時與錯誤怎麼傳</td><td>單次呼叫懂了，才談多跳之間的預算與重試</td></tr>
+        <tr><td class="hl">06 長連線與瀏覽器</td><td>上線後最常踩的雷</td><td>負載均衡失效與瀏覽器限制，都是前面機制的副作用</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="cap">第 7 節把這些收成面試時的回答。編碼那一節最細，但它是整篇的地基：第 3 節的相容性規則只在你知道「名稱不在線上」之後才講得通。</p>
 
   <div class="oneliner">
     <b>一句話答法</b>Protobuf 是帶編號的二進位契約，gRPC 把每次呼叫映射到一條 HTTP/2 stream；省下的是欄位名與解析成本，不是 API 風格的選擇題。
@@ -1270,7 +1317,7 @@
   </div>
   <p class="sec-sub">一個欄位是 tag、wire type、然後才是值。負的 int32 會膨脹，zigzag 就是為了這件事。</p>
 
-  <p>每個欄位在線上是 <strong>tag-length-value</strong>，但 length 只在某些 wire type 出現。Tag 本身是一個 varint，它的整數值由欄位編號與 wire type 拼出來：</p>
+  <p>第 1 節 <code>Page</code> 裡等號右邊的 1、2、3 就是欄位編號；<code>limit</code>、<code>cursor</code> 這些名稱只留在生成的程式碼裡，不會上線。每個欄位在線上是 <strong>tag-length-value</strong>，但 length 只在某些 wire type 出現。Tag 本身是一個 varint，它的整數值由欄位編號與 wire type 拼出來：</p>
 
   <div class="formula">tag = (field_number &lt;&lt; 3) | wire_type</div>
 
@@ -1347,21 +1394,7 @@
   </div>
   <p class="sec-sub">改名稱不會改線上格式，改編號等於刪掉舊欄位再新增一個。required 是用相容性換檢查的歷史錯誤。</p>
 
-  <p>IDL 同時服務人類與編譯器。一份能生成 stub 的最小契約長這樣：</p>
-
-<pre><code>syntax = "proto3";
-
-message Page {
-  int32 limit = 1;
-  string cursor = 2;
-  sint32 delta = 3;
-}
-
-service Catalog {
-  rpc Get (Page) returns (Page);
-}</code></pre>
-
-  <p>程式碼生成（<code>protoc</code>、buf 這類工具鏈）吐出的 stub 不要手改。方法改名只影響生成出來的函式；<strong>線上身分是等號右邊的編號</strong>。舊 client 仍送編號 2 的時候，新 server 若把 2 的意義換掉，解出來的是安靜的錯資料，不是編譯錯誤。</p>
+  <p>回到第 1 節那份 <code>Page</code>。生成的 stub 不要手改；欄位或方法改名只影響生成出來的程式碼，<strong>線上身分是等號右邊的編號</strong>。舊 client 仍把 cursor 送在編號 2 的時候，新 server 若把 2 的意義換掉，解出來的是安靜的錯資料，不是編譯錯誤。</p>
 
   <p class="gpb-sub">向前相容與向後相容</p>
 
@@ -1406,7 +1439,7 @@ service Catalog {
   </div>
   <p class="sec-sub">Unary、server streaming、client streaming、bidi 差在誰寫、誰先 half-close。背壓是 stream 視窗，不是再造一個佇列。</p>
 
-  <p>原生 gRPC 要求 HTTP/2。TLS 時 ALPN 要協商到 <code>h2</code>。一個 RPC 的路徑是 <code>/package.Service/Method</code>，<code>POST</code>，<code>content-type: application/grpc</code>，並帶 <code>te: trailers</code>。這些是 gRPC 怎麼<strong>使用</strong> HTTP/2；frame 怎麼切、HPACK 怎麼壓標頭、一條連線如何多路復用，見 HTTP/1.1 與 HTTP/2 篇。</p>
+  <p>原生 gRPC 要求 HTTP/2。TLS 時 ALPN（TLS 握手時順便協商「接下來講哪個應用層協定」的擴充）要協商到 <code>h2</code>。一個 RPC 的路徑是 <code>/package.Service/Method</code>，<code>POST</code>，<code>content-type: application/grpc</code>，並帶 <code>te: trailers</code>，宣告自己收得了 trailer。Trailer 是 HTTP 在回應本體<strong>之後</strong>才送出的一組標頭；gRPC 要等最後一則訊息寫完才知道成敗，所以把結果狀態放在這裡。這些是 gRPC 怎麼<strong>使用</strong> HTTP/2；frame 怎麼切、HPACK 怎麼壓標頭、一條連線如何多路復用，見 <a href="../http-1-1-and-http-2/">HTTP/1.1 與 HTTP/2</a> 篇。</p>
 
   <div class="gpb-stack">
     <div class="gpb-layer">
@@ -1443,6 +1476,8 @@ sequenceDiagram
 </pre>
   <p class="cap">成功與失敗都在 trailer 的 grpc-status，不在 HTTP status line。串流因此可以等最後一則訊息寫完才宣布結果。HTTP/1.1 對 trailer 的支援不夠，所以沒有「gRPC over HTTP/1.1」這條路。</p>
 
+  <p>四種模式的差別幾乎都落在 <strong>half-close</strong>：一端宣告「我不會再寫了」，但仍繼續讀對方的回應。在 HTTP/2 上，就是送出帶 <code>END_STREAM</code> 旗標的最後一個 frame。</p>
+
   <div class="tbl-wrap">
     <table>
       <thead>
@@ -1456,7 +1491,7 @@ sequenceDiagram
       </tbody>
     </table>
   </div>
-  <p class="cap">四種模式不是四種協定。差別只在同一條 stream 上，每一端什麼時候停止寫入。瀏覽器要推播給人看，選型在 WebSocket 即時雙向通訊篇與 Server-Sent Events 篇，不在這裡。</p>
+  <p class="cap">四種模式不是四種協定。差別只在同一條 stream 上，每一端什麼時候停止寫入。瀏覽器要推播給人看，選型在 <a href="../websocket-realtime-communication/">WebSocket 即時雙向通訊</a>篇與 <a href="../sse-server-sent-events/">Server-Sent Events</a> 篇，不在這裡。</p>
 
   <p class="gpb-sub">背壓與取消</p>
 
@@ -1555,6 +1590,8 @@ sequenceDiagram
 
   <p>gRPC 的連線是長生命週期的 HTTP/2。L4 均衡器按連線轉發：客戶端握手套到後端 A 之後，這條連線上後來開的每一條 stream 都在 A。B 與 C 要等新的 TCP 連線。一個行程常常只維持少數幾條連線，流量就黏死了。連線層的 keepalive 只讓中間盒不要砍掉閒置連線，它不會重新分配 RPC。</p>
 
+  <p>下表會用到幾個 client 端的詞。<strong>Channel</strong> 是應用拿到的那個邏輯連線物件；<strong>subchannel</strong> 是 channel 底下對<strong>單一後端</strong>的實際連線。LB policy 決定每個 RPC 走哪條 subchannel：<code>pick_first</code> 挑第一條連得上的就一直用，<code>round_robin</code> 輪流使用每條健康的 subchannel。</p>
+
   <div class="tbl-wrap">
     <table>
       <thead>
@@ -1569,11 +1606,11 @@ sequenceDiagram
   </div>
   <p class="cap">round_robin 這類政策是 per RPC 的；pick_first 在連線健康時行為看起來像 L4。後端要下線時，對端應停止在舊連線上開新 stream（GOAWAY 的使用方式見 HTTP/1.1 與 HTTP/2 篇），進行中的 RPC 可能以 UNAVAILABLE 結束，是否重試回到第 5 節的冪等條件。</p>
 
-  <p>Lookaside 或 xDS 這類控制平面解決的是「客戶端怎麼知道後端名單與權重」，不是另一種編碼。名單若只在啟動時抓一次，自動擴縮就會把新機器閒置。</p>
+  <p>Lookaside LB（另外問一個服務「這次該打哪台」）或 xDS（源自 Envoy 的控制平面 API，gRPC client 也能直接訂閱）這類控制平面解決的是「客戶端怎麼知道後端名單與權重」，不是另一種編碼。名單若只在啟動時抓一次，自動擴縮就會把新機器閒置。</p>
 
   <p class="gpb-sub">瀏覽器講的不是原生 gRPC</p>
 
-  <p>瀏覽器的 fetch / XHR 拿不到原生 gRPC 需要的 HTTP/2 控制能力，trailer 也不是一般網頁 API 能穩定讀到的東西。gRPC-Web 是另一份協定：基本規格支援 unary 與 server streaming，要一層 proxy 把它翻成原生 gRPC。Client streaming 與 bidirectional 不在這份基本規格裡。若產品要的是瀏覽器裡的雙向通道，那是 WebSocket 即時雙向通訊篇的問題，不要在 gRPC-Web proxy 裡順便發明一套推播。</p>
+  <p>瀏覽器的 fetch / XHR 拿不到原生 gRPC 需要的 HTTP/2 控制能力，trailer 也不是一般網頁 API 能穩定讀到的東西。gRPC-Web 是另一份協定：基本規格支援 unary 與 server streaming，要一層 proxy 把它翻成原生 gRPC。Client streaming 與 bidirectional 不在這份基本規格裡。若產品要的是瀏覽器裡的雙向通道，那是 <a href="../websocket-realtime-communication/">WebSocket 即時雙向通訊</a>篇的問題，不要在 gRPC-Web proxy 裡順便發明一套推播。</p>
 
   <div class="callout accent">
     <div class="c-title"><span class="ic">關鍵</span>長連線同時是優點與負載均衡的單位錯誤</div>
@@ -1609,7 +1646,7 @@ sequenceDiagram
   </div>
   <p class="cap">每一列都是「機制 + 它破壞什麼」。只答優點的那一半，聽起來像文件複述。</p>
 
-  <p>若被問到與 REST 或 GraphQL 怎麼選、URL 版本號怎麼編，停在邊界：那是 API 設計風格與演進篇的題。本篇的契約單位是欄位編號與 RPC 方法，不是資源 URL。</p>
+  <p>若被問到與 REST 或 GraphQL 怎麼選、URL 版本號怎麼編，停在邊界：那是 <a href="../api-design-styles/">API 設計風格與演進</a>篇的題。本篇的契約單位是欄位編號與 RPC 方法，不是資源 URL。</p>
 
   <div class="oneliner">
     <b>一句話答法</b>Protobuf 用編號與 wire type 換掉自我描述，gRPC 用一條長連線上的 stream 換掉每請求一條 TCP；相容性、deadline 與 per-RPC 選路是這筆交易真正的維護成本。
