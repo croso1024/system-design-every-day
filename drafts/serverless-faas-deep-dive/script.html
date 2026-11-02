@@ -1,0 +1,264 @@
+<script>
+(function () {
+  "use strict";
+
+  /* (1) 常數與預設參數表 */
+  var DB_MAX_CONNS = 200;
+  var SCALE_STEP_ENVS = 1000;
+  var DEFAULTS = {
+    rps: 600,
+    execMs: 400,
+    initMs: 800,
+    instanceConc: 1,
+    provConc: 100,
+    proxyMultiplex: 16
+  };
+
+  /* (2) compute* 純函式 —— 不碰 DOM */
+  // @probe fn       computeFaasScale
+  // @probe baseline {"rps":600,"execMs":400,"initMs":800,"instanceConc":1,"provConc":100,"proxyMultiplex":16}
+  // @probe sweep    {"rps":[40,2400],"execMs":[50,1500],"initMs":[100,2500],"instanceConc":[1,40],"provConc":[0,500],"proxyMultiplex":[1,16]}
+  function computeFaasScale(p) {
+    var rps = Number.isFinite(p.rps) ? Math.max(1, p.rps) : 600;
+    var execMs = Number.isFinite(p.execMs) ? Math.max(10, p.execMs) : 400;
+    var initMs = Number.isFinite(p.initMs) ? Math.max(10, p.initMs) : 800;
+    var k = Number.isFinite(p.instanceConc) ? Math.max(1, p.instanceConc) : 1;
+    var pc = Number.isFinite(p.provConc) ? Math.max(0, p.provConc) : 0;
+    var mux = Number.isFinite(p.proxyMultiplex) ? Math.max(1, p.proxyMultiplex) : 1;
+
+    // Littles Law: in-flight requests L = lambda * W
+    var inFlightReq = Math.ceil((rps * execMs) / 1000);
+    var steadyEnvs = Math.max(1, Math.ceil(inFlightReq / k));
+
+    // Unmitigated baseline (k = 1, PC = 0, direct DB 1:1)
+    var baselineSteadyEnvs = Math.max(1, inFlightReq);
+    var baselinePeakEnvs = Math.ceil(baselineSteadyEnvs * (1 + initMs / execMs));
+
+    // With configured k and Provisioned Concurrency (PC)
+    var warmCoveredEnvs = Math.min(steadyEnvs, pc);
+    var coldSteadyGap = Math.max(0, steadyEnvs - warmCoveredEnvs);
+
+    // Cold-starting environments stay occupied for (execMs + initMs) during the initial burst wave
+    var coldBurstEnvs = coldSteadyGap === 0
+      ? 0
+      : Math.ceil(coldSteadyGap * (1 + initMs / execMs));
+    var peakEnvs = warmCoveredEnvs + coldBurstEnvs;
+
+    // Cold-start invocation share in the initial wave & burst p99 latency
+    var coldSharePct = Math.round((coldBurstEnvs / Math.max(1, peakEnvs)) * 100);
+    var burstP99Ms = coldBurstEnvs > 0 ? (execMs + initMs) : execMs;
+
+    // Standardized INIT billing overhead on cold-start wave (since Aug 2025 INIT is billed)
+    var initBillExtraPct = coldBurstEnvs > 0
+      ? Math.round(((initMs / execMs) * (coldSteadyGap / Math.max(1, steadyEnvs))) * 100)
+      : 0;
+
+    // AWS Lambda scaling rate: +1,000 new environments per 10 seconds per function
+    var firstWindowSupply = pc + SCALE_STEP_ENVS;
+    var throttledEnvs10s = Math.max(0, peakEnvs - firstWindowSupply);
+    var scaleWindows10s = coldBurstEnvs === 0 ? 0 : Math.ceil(coldBurstEnvs / SCALE_STEP_ENVS);
+    var firstWindowUtilPct = Math.min(100, Math.round((peakEnvs / Math.max(1, firstWindowSupply)) * 100));
+
+    // Database backend connections (each environment opens 1 frontend conn; Proxy multiplexes by mux)
+    var directDbConns = baselinePeakEnvs;
+    var backendDbConns = Math.max(1, Math.ceil(peakEnvs / mux));
+    var dbConnUtilPct = Math.round((backendDbConns / DB_MAX_CONNS) * 100);
+    var dbOverflowConns = Math.max(0, backendDbConns - DB_MAX_CONNS);
+
+    var envTone = throttledEnvs10s > 0 ? "bad" : (coldBurstEnvs > 0 ? "warn" : "ok");
+    var coldTone = coldSharePct >= 50 ? "bad" : (coldSharePct > 0 ? "warn" : "ok");
+    var scaleTone = throttledEnvs10s > 0 ? "bad" : (scaleWindows10s > 0 && coldBurstEnvs > 600 ? "warn" : "ok");
+    var dbTone = dbOverflowConns > 0 ? "bad" : (dbConnUtilPct >= 65 ? "warn" : "ok");
+
+    return {
+      inFlightReq: inFlightReq,
+      steadyEnvs: steadyEnvs,
+      peakEnvs: peakEnvs,
+      warmCoveredEnvs: warmCoveredEnvs,
+      coldBurstEnvs: coldBurstEnvs,
+      coldSharePct: coldSharePct,
+      burstP99Ms: burstP99Ms,
+      initBillExtraPct: initBillExtraPct,
+      firstWindowSupply: firstWindowSupply,
+      throttledEnvs10s: throttledEnvs10s,
+      scaleWindows10s: scaleWindows10s,
+      firstWindowUtilPct: firstWindowUtilPct,
+      directDbConns: directDbConns,
+      backendDbConns: backendDbConns,
+      dbConnUtilPct: dbConnUtilPct,
+      dbOverflowConns: dbOverflowConns,
+      envTone: envTone,
+      coldTone: coldTone,
+      scaleTone: scaleTone,
+      dbTone: dbTone
+    };
+  }
+
+  /* (3) DOM 參照與狀態 */
+  var state = {
+    rps: DEFAULTS.rps,
+    execMs: DEFAULTS.execMs,
+    initMs: DEFAULTS.initMs,
+    instanceConc: DEFAULTS.instanceConc,
+    provConc: DEFAULTS.provConc,
+    proxyMultiplex: DEFAULTS.proxyMultiplex
+  };
+
+  var dom = {
+    conc1: document.getElementById("sfd-conc-1"),
+    conc10: document.getElementById("sfd-conc-10"),
+    conc40: document.getElementById("sfd-conc-40"),
+    db1: document.getElementById("sfd-db-1"),
+    db5: document.getElementById("sfd-db-5"),
+    db16: document.getElementById("sfd-db-16"),
+    rps: document.getElementById("sfd-rps"),
+    exec: document.getElementById("sfd-exec"),
+    init: document.getElementById("sfd-init"),
+    pc: document.getElementById("sfd-pc"),
+    rpsVal: document.getElementById("sfd-rps-val"),
+    execVal: document.getElementById("sfd-exec-val"),
+    initVal: document.getElementById("sfd-init-val"),
+    pcVal: document.getElementById("sfd-pc-val"),
+    cardEnv: document.getElementById("sfd-card-env"),
+    cardCold: document.getElementById("sfd-card-cold"),
+    cardScale: document.getElementById("sfd-card-scale"),
+    cardDb: document.getElementById("sfd-card-db"),
+    outEnvs: document.getElementById("sfd-out-envs"),
+    subEnvs: document.getElementById("sfd-sub-envs"),
+    outCold: document.getElementById("sfd-out-cold"),
+    subCold: document.getElementById("sfd-sub-cold"),
+    outScale: document.getElementById("sfd-out-scale"),
+    subScale: document.getElementById("sfd-sub-scale"),
+    outDb: document.getElementById("sfd-out-db"),
+    subDb: document.getElementById("sfd-sub-db"),
+    barScaleTxt: document.getElementById("sfd-bar-scale-txt"),
+    barScale: document.getElementById("sfd-bar-scale"),
+    barDbTxt: document.getElementById("sfd-bar-db-txt"),
+    barDb: document.getElementById("sfd-bar-db"),
+    reset: document.getElementById("sfd-reset"),
+    status: document.getElementById("sfd-status")
+  };
+
+  /* (4) render(state) —— 只讀計算結果更新畫面 */
+  function applyCardTone(el, tone) {
+    el.className = "sfd-card tone-" + tone;
+  }
+
+  function applyBarTone(el, tone, pct) {
+    el.className = "sfd-fill-" + tone;
+    el.style.width = Math.max(2, Math.min(100, pct)) + "%";
+  }
+
+  function render() {
+    var r = computeFaasScale(state);
+
+    dom.conc1.setAttribute("aria-pressed", state.instanceConc === 1 ? "true" : "false");
+    dom.conc10.setAttribute("aria-pressed", state.instanceConc === 10 ? "true" : "false");
+    dom.conc40.setAttribute("aria-pressed", state.instanceConc === 40 ? "true" : "false");
+
+    dom.db1.setAttribute("aria-pressed", state.proxyMultiplex === 1 ? "true" : "false");
+    dom.db5.setAttribute("aria-pressed", state.proxyMultiplex === 5 ? "true" : "false");
+    dom.db16.setAttribute("aria-pressed", state.proxyMultiplex === 16 ? "true" : "false");
+
+    dom.rpsVal.textContent = state.rps + " rps";
+    dom.execVal.textContent = state.execMs + " ms";
+    dom.initVal.textContent = state.initMs + " ms";
+    dom.pcVal.textContent = state.provConc + " 個";
+
+    applyCardTone(dom.cardEnv, r.envTone);
+    dom.outEnvs.textContent = r.steadyEnvs + " / " + r.peakEnvs;
+    dom.subEnvs.textContent = "在途 L=" + r.inFlightReq + "；預熱吸收 " + r.warmCoveredEnvs + " 個，冷擴縮峰值 " + r.coldBurstEnvs + " 個";
+
+    applyCardTone(dom.cardCold, r.coldTone);
+    dom.outCold.textContent = r.coldSharePct + "% / " + r.burstP99Ms + " ms";
+    dom.subCold.textContent = r.coldBurstEnvs === 0
+      ? "PC 全數覆蓋穩態需求，首波無冷啟動且無 INIT 計費加成"
+      : "首波冷啟動帳單平均多付 +" + r.initBillExtraPct + "% INIT 時間";
+
+    applyCardTone(dom.cardScale, r.scaleTone);
+    dom.outScale.textContent = r.scaleWindows10s === 0
+      ? "0 步（免擴縮）"
+      : r.scaleWindows10s + " 個 10s 視窗";
+    dom.subScale.textContent = r.throttledEnvs10s > 0
+      ? "首個 10s 供給上限 " + r.firstWindowSupply + " 個，缺口 " + r.throttledEnvs10s + " 個觸發 429"
+      : "首個 10s 可供給 " + r.firstWindowSupply + " 個環境，無擴縮速率節流";
+
+    applyCardTone(dom.cardDb, r.dbTone);
+    dom.outDb.textContent = r.backendDbConns + " 條 (" + r.dbConnUtilPct + "%)";
+    dom.subDb.textContent = r.dbOverflowConns > 0
+      ? "超出上限 " + r.dbOverflowConns + " 條！直連基準更達 " + r.directDbConns + " 條"
+      : "安全線內（若採 k=1 無 PC 直連 DB 則會衝到 " + r.directDbConns + " 條）";
+
+    dom.barScaleTxt.textContent = "峰值需求 " + r.peakEnvs + " / 首窗供給 " + r.firstWindowSupply + " (" + r.firstWindowUtilPct + "%)";
+    applyBarTone(dom.barScale, r.scaleTone, r.firstWindowUtilPct);
+
+    var dbBarPct = Math.min(100, r.dbConnUtilPct);
+    dom.barDbTxt.textContent = "後端連線 " + r.backendDbConns + " / " + DB_MAX_CONNS + " 上限（直連基準 " + r.directDbConns + " 條）";
+    applyBarTone(dom.barDb, r.dbTone, dbBarPct);
+
+    if (r.throttledEnvs10s > 0 && r.dbOverflowConns > 0) {
+      dom.status.textContent = "雙重警報：突發峰值需 " + r.peakEnvs + " 個環境，不僅超過首個 10 秒視窗供給上限（缺口 " + r.throttledEnvs10s + " 個遭 429 節流），後端資料庫連線也衝到 " + r.backendDbConns + " 條擊穿 max_connections=200。請啟用 RDS Proxy 交易池、提高每實例並發 k 或調高 PC。";
+    } else if (r.throttledEnvs10s > 0) {
+      dom.status.textContent = "擴縮速率節流：資料庫雖由連線池收斂至 " + r.backendDbConns + " 條，但冷啟動拉長佔用時間使首波峰值環境達 " + r.peakEnvs + " 個，超過首個 10 秒視窗可供給的 " + r.firstWindowSupply + " 個（PC + 1,000），缺口 " + r.throttledEnvs10s + " 個會收到 429 TooManyRequestsException。";
+    } else if (r.dbOverflowConns > 0) {
+      dom.status.textContent = "資料庫連線池擊穿：FaaS 擴縮額度雖夠用（峰值 " + r.peakEnvs + " 個環境），但後端資料庫需承受 " + r.backendDbConns + " 條連線，超過 max_connections=200 達 " + r.dbOverflowConns + " 條。請切換至 RDS Proxy 交易池（16:1）或改用 k > 1 的多並發實例。";
+    } else if (r.coldBurstEnvs > 0) {
+      dom.status.textContent = "受控冷啟動：穩態需 " + r.steadyEnvs + " 個環境，其中 " + r.warmCoveredEnvs + " 個由 PC 預熱吸收，剩餘冷擴縮在突發期膨脹為 " + r.coldBurstEnvs + " 個環境（突發 p99 為 " + r.burstP99Ms + " ms），後端 DB 連線收斂於 " + r.backendDbConns + " 條。";
+    } else {
+      dom.status.textContent = "全預熱零冷啟動：Provisioned Concurrency (" + state.provConc + " 個) 完全覆蓋穩態所需的 " + r.steadyEnvs + " 個環境，首波 p99 維持在 " + r.burstP99Ms + " ms，且後端資料庫僅佔用 " + r.backendDbConns + " 條連線。";
+    }
+  }
+
+  /* (5) 事件綁定 */
+  function setConc(val) {
+    state.instanceConc = val;
+    render();
+  }
+
+  function setProxy(val) {
+    state.proxyMultiplex = val;
+    render();
+  }
+
+  dom.conc1.addEventListener("click", function () { setConc(1); });
+  dom.conc10.addEventListener("click", function () { setConc(10); });
+  dom.conc40.addEventListener("click", function () { setConc(40); });
+
+  dom.db1.addEventListener("click", function () { setProxy(1); });
+  dom.db5.addEventListener("click", function () { setProxy(5); });
+  dom.db16.addEventListener("click", function () { setProxy(16); });
+
+  dom.rps.addEventListener("input", function () {
+    state.rps = parseInt(dom.rps.value, 10);
+    render();
+  });
+  dom.exec.addEventListener("input", function () {
+    state.execMs = parseInt(dom.exec.value, 10);
+    render();
+  });
+  dom.init.addEventListener("input", function () {
+    state.initMs = parseInt(dom.init.value, 10);
+    render();
+  });
+  dom.pc.addEventListener("input", function () {
+    state.provConc = parseInt(dom.pc.value, 10);
+    render();
+  });
+
+  dom.reset.addEventListener("click", function () {
+    state.rps = DEFAULTS.rps;
+    state.execMs = DEFAULTS.execMs;
+    state.initMs = DEFAULTS.initMs;
+    state.instanceConc = DEFAULTS.instanceConc;
+    state.provConc = DEFAULTS.provConc;
+    state.proxyMultiplex = DEFAULTS.proxyMultiplex;
+    dom.rps.value = String(DEFAULTS.rps);
+    dom.exec.value = String(DEFAULTS.execMs);
+    dom.init.value = String(DEFAULTS.initMs);
+    dom.pc.value = String(DEFAULTS.provConc);
+    render();
+  });
+
+  render();
+})();
+</script>
