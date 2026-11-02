@@ -1,0 +1,638 @@
+<!-- demo-archetype: B｜參數掃描 — 讀者拖動到達率、單次執行時間、INIT 冷啟動時間、每實例並發數、預熱環境數與連線池複用倍率，即時重算峰值執行環境數、首波冷啟動比例、擴縮步階與資料庫後端連線數。
+     選 B 是因為本篇核心在於流量與執行時間如何透過 Little's Law 放大成執行環境數與資料庫連線數；並排對照形式已被最近三篇占用。 -->
+<style>
+  .sfd-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    align-items: stretch;
+    justify-content: center;
+    margin: 14px 0 6px;
+  }
+  .sfd-node {
+    border: 1px solid var(--border-strong);
+    border-radius: 8px;
+    background: #fff;
+    padding: 10px 12px;
+    min-width: 115px;
+    max-width: 195px;
+    text-align: center;
+  }
+  .sfd-node .nn {
+    font-family: var(--mono);
+    font-size: 12px;
+    font-weight: 700;
+    color: var(--text);
+  }
+  .sfd-node .ns {
+    font-size: 11px;
+    color: var(--text-2);
+    margin-top: 3px;
+    line-height: 1.4;
+  }
+  .sfd-node.accent { border-top: 3px solid var(--accent); }
+  .sfd-node.ok     { border-top: 3px solid var(--ok); }
+  .sfd-node.warn   { border-top: 3px solid var(--warn); }
+  .sfd-node.bad    { border-top: 3px solid var(--bad); }
+  .sfd-arrow {
+    display: flex;
+    align-items: center;
+    font-family: var(--mono);
+    font-size: 13px;
+    color: var(--text-3);
+    white-space: nowrap;
+  }
+
+  .sfd-lane {
+    display: grid;
+    grid-template-columns: 96px repeat(3, minmax(0, 1fr));
+    gap: 1px;
+    background: var(--border);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    overflow: hidden;
+    margin: 14px 0 6px;
+  }
+  .sfd-lane > div {
+    background: #fff;
+    padding: 8px 10px;
+    font-size: 12px;
+    line-height: 1.5;
+  }
+  .sfd-lane .lh {
+    background: var(--bg-soft);
+    font-family: var(--mono);
+    font-size: 11px;
+    font-weight: 700;
+    color: var(--text-2);
+  }
+  .sfd-lane .lt {
+    background: var(--bg-soft);
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--text-3);
+  }
+  .sfd-lane .lc.act  { background: var(--accent-soft); }
+  .sfd-lane .lc.ok   { background: var(--ok-soft); }
+  .sfd-lane .lc.warn { background: var(--warn-soft); }
+  .sfd-lane .lc.bad  { background: var(--bad-soft); }
+
+  .sfd-split {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 12px;
+    margin: 14px 0 6px;
+  }
+  .sfd-pane {
+    border: 1px solid var(--border-strong);
+    border-radius: 8px;
+    background: #fff;
+    padding: 12px 14px;
+  }
+  .sfd-pane.accent { border-top: 3px solid var(--accent); }
+  .sfd-pane.ok     { border-top: 3px solid var(--ok); }
+  .sfd-pane-title {
+    font-family: var(--mono);
+    font-size: 12px;
+    font-weight: 700;
+    color: var(--text);
+    margin: 0 0 6px;
+  }
+  .sfd-pane-desc {
+    font-size: 12px;
+    color: var(--text-2);
+    line-height: 1.55;
+    margin: 0;
+  }
+
+  /* Demo styles */
+  .sfd-lead {
+    margin: 0 0 12px;
+    font-size: 13px;
+    color: var(--text-2);
+    line-height: 1.55;
+  }
+  .sfd-segs {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 12px;
+    margin-bottom: 12px;
+  }
+  .sfd-seg-group {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .sfd-seg-label {
+    font-size: 12px;
+    font-weight: 700;
+    color: var(--text-2);
+  }
+  .sfd-knobs {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 8px;
+    margin-bottom: 12px;
+  }
+  .sfd-knob {
+    background: var(--bg-soft);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    padding: 8px 10px;
+  }
+  .sfd-knob-top {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    gap: 6px;
+    font-size: 12px;
+    color: var(--text-2);
+  }
+  .sfd-knob-top b {
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--text);
+  }
+  .sfd-knob input[type="range"] {
+    width: 100%;
+    margin: 6px 0 0;
+  }
+  .sfd-cards {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 8px;
+    margin-bottom: 12px;
+  }
+  .sfd-card {
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: #fff;
+    padding: 10px 12px;
+  }
+  .sfd-card.tone-ok   { border-color: var(--ok); background: var(--ok-soft); }
+  .sfd-card.tone-warn { border-color: var(--warn); background: var(--warn-soft); }
+  .sfd-card.tone-bad  { border-color: var(--bad); background: var(--bad-soft); }
+  .sfd-card-k {
+    font-size: 11px;
+    font-weight: 700;
+    color: var(--text-2);
+  }
+  .sfd-card-v {
+    font-family: var(--mono);
+    font-size: 18px;
+    font-weight: 700;
+    color: var(--text);
+    margin: 4px 0 2px;
+  }
+  .sfd-card-sub {
+    font-size: 11px;
+    color: var(--text-2);
+    line-height: 1.4;
+    margin: 0;
+  }
+  .sfd-gauges {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    background: var(--bg-soft);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 10px 12px;
+    margin-bottom: 12px;
+  }
+  .sfd-gauge-row {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+  .sfd-gauge-head {
+    display: flex;
+    justify-content: space-between;
+    font-size: 12px;
+    color: var(--text-2);
+  }
+  .sfd-gauge-head span:last-child {
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--text);
+  }
+  .sfd-track {
+    height: 10px;
+    background: #fff;
+    border: 1px solid var(--border-strong);
+    border-radius: 999px;
+    overflow: hidden;
+    display: flex;
+  }
+  .sfd-fill-ok   { background: var(--ok); height: 100%; }
+  .sfd-fill-warn { background: var(--warn); height: 100%; }
+  .sfd-fill-bad  { background: var(--bad); height: 100%; }
+  .sfd-toolbar {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-top: 8px;
+  }
+  @media (max-width: 720px) {
+    .sfd-segs, .sfd-split { grid-template-columns: 1fr; }
+    .sfd-knobs, .sfd-cards { grid-template-columns: 1fr 1fr; }
+    .sfd-lane { grid-template-columns: 72px repeat(3, minmax(0, 1fr)); font-size: 11px; }
+  }
+</style>
+
+<section id="s1">
+  <div class="sec-head">
+    <span class="sec-num">01</span>
+    <h2>執行環境生命週期與 Cold Start 的解剖</h2>
+  </div>
+  <p class="sec-sub">FaaS 不是「每次呼叫生一個用完即丟的行程」，而是一台經歷 INIT、多次 INVOKE 凍結與解凍、最後 SHUTDOWN 的隔離微虛擬機。</p>
+
+  <p>在運算模型光譜篇，我們看過 VM、編排容器、Serverless 容器與 FaaS 四個刻度的責任邊界與月費交叉點。當決定採用 AWS Lambda 或 Google Cloud Run functions 時，真正決定系統尾延遲（p99）、吞吐上限與下游資料庫生死的，不再是作業系統排程，而是<strong>執行環境（Execution Environment）的生命週期與並發模型</strong>。</p>
+
+  <p>以 AWS Lambda 為例，每個執行環境跑在獨立的 Firecracker microVM 內，生命週期嚴格分為三個階段：<code>INIT</code>、<code>INVOKE</code> 與 <code>SHUTDOWN</code>。只有當現有已初始化的環境都在忙碌、或環境因閒置與定期輪替被回收時，新請求才會觸發完整的冷啟動（Cold Start）；隨後的請求只要落入已就緒的環境，就會走解凍重用的暖啟動（Warm Start）。</p>
+
+  <pre class="mermaid">
+sequenceDiagram
+    participant R as 呼叫端 / 事件源
+    participant C as Lambda 控制平面
+    participant E as 執行環境 (microVM)
+    R->>C: 第 1 次請求 (無可用暖環境)
+    C->>E: 配置 microVM + INIT (Extension -> Runtime -> Function 靜態碼)
+    C->>E: INVOKE (執行 handler)
+    E-->>R: 回應結果 (計費含 Init Duration + Duration)
+    Note over E: 凍結 (Freeze)：背景計時器與執行緒全部暫停
+    R->>C: 第 2 次請求 (命中暖環境)
+    C->>E: 解凍 (Unfreeze) + INVOKE (跳過 INIT)
+    E-->>R: 回應結果 (僅收本次 Duration)
+    Note over C,E: 閒置逾時後發送 SHUTDOWN (預留最多 2 秒供 Extension 刷出遙測)
+  </pre>
+  <p class="cap">冷啟動慢在 INIT 的三步串列初始化；暖重用跳過 INIT 直接進入 INVOKE，但兩次呼叫之間環境處於凍結狀態，不可依賴背景非同步工作。</p>
+
+  <h3>INIT 階段的三個子步驟與 2025/2026 計費變革</h3>
+  <p>當新環境啟動時，<code>INIT</code> 依序執行三件事：啟動所有外部監控與安全性代理（<strong>Extension init</strong>）、拉起語言執行期（<strong>Runtime init</strong>，如 JVM、Node.js V8 或 Python 解譯器），最後執行 handler 函式以外的全域靜態程式碼（<strong>Function init</strong>，如載入大型 SDK、初始化資料庫連線池或讀取參數）。</p>
+
+  <ul>
+    <li><strong>INIT 階段全面納入計費（2025 年 8 月起標準化）</strong>：早期 AWS Lambda 對使用受管執行期（Managed Runtime）與 ZIP 封裝的 on-demand 函式，不會將 <code>Init Duration</code> 計入帳單；但自 2025 年 8 月起，Lambda 已將計費規則統一——不論是 ZIP、OCI 容器映像、自訂 Runtime 或 Provisioned Concurrency，<strong>冷啟動的 <code>Init Duration</code> 一律加進 <code>Billed Duration</code> 按 GB·s 收費</strong>。把肥大的依賴樹塞在全域載入，現在不只傷 p99 延遲，還會直接拉高冷啟動帳單。</li>
+    <li><strong>10 秒 INIT 超時與雙重計費陷阱</strong>：標準 on-demand 呼叫的 <code>INIT</code> 階段硬上限是 <strong>10 秒</strong>。若靜態初始化在 10 秒內沒跑完，Lambda 會強制中止並緊接著在第一次 <code>INVOKE</code> 內以函式自身的 timeout 重跑一次 <code>INIT</code>——兩次嘗試的時間都會被計入帳單。</li>
+    <li><strong>跨呼叫重用與凍結邊界</strong>：全域變數與 <code>/tmp</code> 暫存目錄（可配置 512 MB 至 10,240 MB）在同一個執行環境的多次 warm invocation 之間會保留。然而，一旦 <code>handler</code> 回傳，環境立即被凍結（如同收到 <code>SIGSTOP</code>）：任何未 <code>await</code> 的背景 Promise、未刷出的非同步 log 或計時器都會停擺，直到下一次呼叫解凍才突然吐出，造成跨請求的日誌與狀態污染。</li>
+  </ul>
+
+  <div class="callout warn">
+    <div class="c-title"><span class="ic">陷阱</span>把環境重用當成「有狀態快取」來寫業務邏輯</div>
+    <p>全域變數只適合放「丟掉也能重建」的資源（例如 SDK client、連線池、唯讀設定快取）。你永遠無法保證下一筆請求會落進同一個執行環境，也無法阻止平台在背景輪替基礎設施時直接銷毀環境。</p>
+  </div>
+
+  <div class="oneliner">
+    <b>一句話答法</b>FaaS 的冷啟動發生在配置環境與三步 INIT（Extension、Runtime、全域靜態碼）；環境雖會被凍結並跨呼叫重用，但業務邏輯必須維持無狀態，且所有在 handler 回傳前未完成的背景非同步工作都會被凍結截斷。
+  </div>
+</section>
+
+<section id="s2">
+  <div class="sec-head">
+    <span class="sec-num">02</span>
+    <h2>消弭冷啟動的兩條路：Provisioned Concurrency 與 SnapStart</h2>
+  </div>
+  <p class="sec-sub">一個是用常駐預算換取預熱好的活環境，一個是在發佈版本時把初始化後的記憶體拍成快照。兩者不能混用，各自有不同的失效邊界。</p>
+
+  <p>當裁剪依賴套件、改用延遲載入（Lazy Initialization）仍壓不下 JVM 或大型框架動輒數秒的冷啟動時，平台提供兩條截然不同的架構路徑：<strong>Provisioned Concurrency（預置並發，對應 Cloud Run 的 <code>min-instances</code>）</strong>與 <strong>Lambda SnapStart</strong>。</p>
+
+  <div class="sfd-lane">
+    <div class="lh">階段</div>
+    <div class="lh">On-Demand 冷啟動</div>
+    <div class="lh">Provisioned Concurrency</div>
+    <div class="lh">Lambda SnapStart</div>
+
+    <div class="lt">發佈版本時</div>
+    <div class="lc">僅上傳程式碼產物</div>
+    <div class="lc act">依設定數量預先建立環境並跑完 INIT（最長 15 分鐘）</div>
+    <div class="lc act">跑一次 INIT + <code>beforeCheckpoint</code>，拍下加密記憶體／磁碟快照</div>
+
+    <div class="lt">閒置待命期</div>
+    <div class="lc ok">縮到 0，不收待命費</div>
+    <div class="lc warn">環境常駐待命，按配置 GB·s 持續計費</div>
+    <div class="lc ok">僅存快照，無常駐環境（Java 免額外費；Python/.NET 收快取費）</div>
+
+    <div class="lt">突發首筆請求</div>
+    <div class="lc bad">當場跑完整 INIT + INVOKE，尾延遲最高</div>
+    <div class="lc ok">配額內直接進 INVOKE；超出配額的溢出流量退回一般冷啟動</div>
+    <div class="lc ok">從快取載入快照（Restore）+ <code>afterRestore</code> + INVOKE</div>
+  </div>
+  <p class="cap">三種路徑把 INIT 的時間成本放在不同時刻：On-Demand 放在使用者請求當下、Provisioned Concurrency 放在常駐待命帳單、SnapStart 放在版本發佈時的快照。</p>
+
+  <h3>Provisioned Concurrency（PC）的成本折衷與溢出行為</h3>
+  <p>Provisioned Concurrency 會在流量進來前就建立指定數量的執行環境並跑完 <code>INIT</code>。它的優勢是<strong>完全不挑語言與框架</strong>，且預熱環境可搭配 Application Auto Scaling 依排程或利用率調整。但設計時有兩個常被忽略的限制：</p>
+  <ol>
+    <li><strong>溢出（Spillover）不是排隊，而是退回冷啟動</strong>：若設定 <code>PC = 100</code>，瞬間湧入 140 個並發請求，前 100 個命中預熱環境、零冷啟動，但多出的 40 個會立即以標準 On-Demand 模式拉起新環境——也就是那 40 個請求依然會吃到完整冷啟動。</li>
+    <li><strong>60% 利用率分水嶺</strong>：因為預置環境全天候收費，AWS 官方實務建議在該預置量能維持 <strong>60% 以上穩定利用率</strong>時才最具成本效益；若流量極度稀疏卻為了消弭偶發冷啟動而長開 PC，就失去了 FaaS 縮到零的計費優勢。</li>
+  </ol>
+
+  <h3>SnapStart 的快照還原原理與三大面試考點</h3>
+  <p>Lambda SnapStart 採用 Firecracker 虛擬機快照技術：在發佈函式版本（Publish Version）時啟動一個環境跑完 <code>INIT</code>，觸發 <code>beforeCheckpoint</code> hook，接著將整個 microVM 的記憶體頁與磁碟狀態凍結成加密快照並放入低延遲快取。之後每當需要擴縮新環境時，直接從快照 <code>Restore</code> 記憶體狀態並執行 <code>afterRestore</code> hook，把數秒的類別載入縮短至數百毫秒內。</p>
+
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>比較維度</th>
+          <th>Provisioned Concurrency (PC)</th>
+          <th>Lambda SnapStart</th>
+          <th>Cloud Run <code>min-instances</code></th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>核心機制</td>
+          <td>預先拉起並維持活著的執行環境</td>
+          <td>發佈時執行 INIT 並拍下 Firecracker 快照，擴縮時還原</td>
+          <td>預先維持常駐容器實例（單實例可接多並發）</td>
+        </tr>
+        <tr>
+          <td>支援 Runtime</td>
+          <td class="hl">全部 Runtime 與容器映像</td>
+          <td>Java、Python、.NET 受管執行期（不支援容器映像）</td>
+          <td class="hl">全部語言與自訂容器</td>
+        </tr>
+        <tr>
+          <td>計費結構</td>
+          <td>預置時間（每 GB·s）+ 請求 + 執行時間</td>
+          <td class="hl">Java 免收快照費；Python / .NET 收快照快取與每次還原費</td>
+          <td>閒置實例收低費率或依 instance-based 計價</td>
+        </tr>
+        <tr>
+          <td>互斥與硬限制</td>
+          <td>不可與 SnapStart 同版本並用</td>
+          <td>不可與 PC、EFS、或大於 512 MB 的 <code>/tmp</code> 並用</td>
+          <td>需自行確保實例內多執行緒／並行請求安全</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="cap">SnapStart 解決了「突發擴縮不想付常駐待命費」的痛點，但把狀態複製的副作用留給了工程師。</p>
+
+  <div class="callout warn">
+    <div class="c-title"><span class="ic">陷阱</span>SnapStart 的「唯一性複製」與「死連線」事故</div>
+    <p>因為所有新環境都是從同一份記憶體快照複製（Clone）出來的，任何在 <code>INIT</code> 階段生成的隨機數種子（PRNG seed）、預先產生的 UUID、或是暫存的短期 IAM 憑證，在數百個還原環境中都會<strong>一模一樣</strong>；同時，在 <code>INIT</code> 建立的長 TCP 連線在數小時後還原時也早已失效。使用 SnapStart 必須遵守兩條鐵律：(1) 唯一 ID 與隨機數一律放進 handler 或 <code>afterRestore</code> 重新播種；(2) 網路連線在 <code>afterRestore</code> 驗證或重建。</p>
+  </div>
+
+  <div class="oneliner">
+    <b>一句話答法</b>Provisioned Concurrency 用常駐預熱環境消弭冷啟動，適合穩定基載；SnapStart 用版本發佈時的記憶體快照省下常駐費，適合冷啟動重的 Java / Python / .NET，但必須透過 <code>afterRestore</code> 處理隨機數種子重複與過期連線。
+  </div>
+</section>
+
+<section id="s3">
+  <div class="sec-head">
+    <span class="sec-num">03</span>
+    <h2>並發模型、擴縮速率與配額數學</h2>
+  </div>
+  <p class="sec-sub">標準 AWS Lambda 一個環境同時只接一個請求；Cloud Run functions 一個實例可接數十至上千個並行請求。兩者差了一個並發除數 k。</p>
+
+  <p>在系統設計面試中估算 FaaS 容量，起點永遠是 <strong>Little's Law</strong>：系統同時在途的請求數 <var>L</var>，等於每秒到達率 <var>&lambda;</var>（rps）乘上單次平均執行時間 <var>W</var>（秒）。如果每個執行環境能同時處理 <var>k</var> 個請求，所需的活躍環境數 <var>E</var> 就是：</p>
+
+  <div class="formula">L = &lambda; &times; W &nbsp;&nbsp;，&nbsp;&nbsp; 所需環境數 E = ceil(L &divide; k)</div>
+
+  <div class="sfd-split">
+    <div class="sfd-pane accent">
+      <div class="sfd-pane-title">標準 AWS Lambda Event Functions（k = 1）</div>
+      <p class="sfd-pane-desc">每個 microVM 在同一時刻<strong>只處理 1 個請求</strong>。當 <var>&lambda; = 600</var> rps、每次呼叫等下游 API 或資料庫 <var>W = 0.4</var> 秒，系統同時需要 <var>600 &times; 0.4 = 240</var> 個獨立執行環境。好處是請求之間具備硬體級隔離、不會因隔壁請求 OOM 而陪葬；代價是<strong>所有 I/O 等待時間都一比一放大成環境數、冷啟動次數與下游連線數</strong>。</p>
+    </div>
+    <div class="sfd-pane ok">
+      <div class="sfd-pane-title">Cloud Run functions / Lambda 多並發模式（k &gt; 1）</div>
+      <p class="sfd-pane-desc">Cloud Run functions（第 2 代起底層即為 Cloud Run service）預設每實例並發為 <var>80 &times; vCPU</var>（最高可設 1,000）；AWS 亦在 Lambda Web Functions 與 Managed Instances 引入單環境多並發。同樣 <var>L = 240</var> 個在途請求，若每實例可並行處理 <var>k = 40</var> 個 I/O 請求，只需 <var>ceil(240 &divide; 40) = 6</var> 個實例，冷啟動與連線數直接縮小 40 倍，但程式必須具備並行安全且共享故障半徑。</p>
+    </div>
+  </div>
+  <p class="cap">k = 1 把並行問題交給平台開更多 microVM；k &gt; 1 把並行交回容器內的事件迴圈或執行緒池，換取極低的冷啟動與連線開銷。</p>
+
+  <h3>「帳號總並發配額」與「每 10 秒擴縮速率」是兩把不同的尺</h3>
+  <p>許多工程師以為把 AWS 帳號的區域並發配額（Account Concurrency Quota，預設 1,000，可申請調高至數萬）拉高，就能無上限吸收瞬間洪峰。事實上，AWS Lambda 對每一個 Event Function 還有一道獨立的<strong>擴縮速率上限（Concurrency Scaling Rate）</strong>：</p>
+
+  <ul>
+    <li><strong>每函式每 10 秒最多新增 1,000 個執行環境</strong>（或相當於每 10 秒增加 10,000 rps 的處理能力）。這條限制是 per-function 的，不會因為別的函式閒置就借給你，也不會因為帳號總配額調高到 10,000 就自動消失。</li>
+    <li><strong>冷啟動期間的「峰值環境膨脹」</strong>：在突發流量的第一波，尚未預熱的環境必須先跑完 <var>T<sub>init</sub></var> 才能進入 <var>W</var>，代表該環境被佔用的總時間變成 <var>T<sub>init</sub> + W</var>。若 <var>W = 400</var> ms 而冷啟動 <var>T<sub>init</sub> = 800</var> ms，冷啟動期間每個新環境的周轉率只有暖環境的三分之一，瞬時並發環境需求會短暫膨脹為穩態的 <var>1 + T<sub>init</sub> / W = 3</var> 倍！一旦超過首個 10 秒視窗可供給的 <code>PC + 1,000</code> 個環境，多出的同步請求就會收到 <code>429 TooManyRequestsException</code>。</li>
+    <li><strong>Reserved Concurrency（預留並發）的雙面刃</strong>：Reserved Concurrency 同時扮演「保底配額」與「硬上限（Hard Cap）」。替關鍵函式預留 200 並發，代表另外 800 個帳號配額留給其他函式，但也代表<strong>這支關鍵函式自己永遠不能超過 200 並發</strong>；且 Reserved Concurrency 只切配額、<strong>完全不會預熱環境</strong>（設為 0 則常作為緊急斷路開關）。</li>
+  </ul>
+
+  <div class="callout accent">
+    <div class="c-title"><span class="ic">關鍵</span>下游變慢時，FaaS 會自動把小故障放大成並發枯竭</div>
+    <p>根據 <var>L = &lambda; &times; W</var>，當請求到達率 <var>&lambda;</var> 完全沒變（例如維持 500 rps），只因下游支付閘道或資料庫延遲從 100 ms 退化到 2,000 ms，Lambda 的並發環境數就會從 50 瞬間暴漲 20 倍到 1,000，直接吃乾整個帳號的並發配額！這就是為什麼 FaaS 呼叫外部依賴時，必須設定嚴格的短 Timeout 與失敗快速退回，絕不能放任函式乾等 15 分鐘。</p>
+  </div>
+
+  <div class="oneliner">
+    <b>一句話答法</b>FaaS 的並發數由 <var>&lambda; &times; W &divide; k</var> 決定：標準 Lambda 因 <var>k = 1</var> 會將 I/O 等待時間一比一放大為環境數，且受限於每函式每 10 秒最多擴增 1,000 個環境的速率上限。
+  </div>
+</section>
+
+<section id="s4">
+  <div class="sec-head">
+    <span class="sec-num">04</span>
+    <h2>資料庫連線風暴與 RDS Proxy 收斂架構</h2>
+  </div>
+  <p class="sec-sub">幾百個瞬間拉起的 microVM 各自握手一條資料庫連線，會在抵達運算配額前先把 PostgreSQL / MySQL 的 max_connections 擊穿。</p>
+
+  <p>在傳統常駐容器架構中，20 個 Pod 各自維護一個 <code>max = 10</code> 的本地連線池，資料庫最多只會看到 200 條連線；當流量暴增時，請求是在應用程式記憶體裡的連線池排隊。但在標準 AWS Lambda（<var>k = 1</var>）中，每個執行環境同一時間只跑 1 個請求，環境之間<strong>完全不共享記憶體與連線池</strong>——600 個並發環境就意味著 600 個獨立行程各自向資料庫發起 TCP + TLS + 認證交握，並把連線握在全域變數裡直到環境銷毀。</p>
+
+  <div class="sfd-row">
+    <div class="sfd-node">
+      <div class="nn">600 個 Lambda 環境</div>
+      <div class="ns">k = 1，各自握 1 條長連線</div>
+    </div>
+    <span class="sfd-arrow">──600 條前端連線──▸</span>
+    <div class="sfd-node accent">
+      <div class="nn">RDS Proxy / PgBouncer</div>
+      <div class="ns">交易級別複用 (Transaction Pooling)</div>
+    </div>
+    <span class="sfd-arrow">──收斂至 ~38 條──▸</span>
+    <div class="sfd-node ok">
+      <div class="nn">RDS PostgreSQL</div>
+      <div class="ns">max_connections = 200 安全線內</div>
+    </div>
+  </div>
+  <p class="cap">RDS Proxy 擋在數百個短命或凍結的執行環境前面：只有正在執行 SQL 交易的那幾十毫秒才借用後端資料庫連線，其餘時間立即歸還池中。</p>
+
+  <h3>三種收斂連線風暴的工程手段與「連線釘住（Pinning）」陷阱</h3>
+  <ol>
+    <li><strong>部署外部交易級連線池（RDS Proxy / PgBouncer）</strong>：Lambda 雖然維持與 Proxy 的連線，但 Proxy 對後端資料庫採交易級複用（Transaction-level Multiplexing）。若一次 400 ms 的函式呼叫只有 25 ms 真正在跑 SQL，理論複用倍率可達 16 倍。但務必小心 <strong>Session Pinning（連線釘住）</strong>：只要程式碼執行了改變工作階段狀態的指令（如 <code>SET</code> 變更時區或參數、使用暫存表、開啟未關閉的 Prepared Statement），RDS Proxy 為了安全就無法把該連線借給別的環境，複用倍率瞬間退化回 1:1。</li>
+    <li><strong>提高每實例並發度（Cloud Run functions 或 Lambda Managed Instances）</strong>：當單一容器實例同時承接 <var>k = 40</var> 個請求，這 40 個請求就能像傳統微服務一樣共用實例內的同一個連線池，從源頭把實例數與連線池總數除以 <var>k</var>。</li>
+    <li><strong>改用無狀態 HTTP 資料層或上游限流</strong>：DynamoDB 走無狀態 HTTPS API，天生沒有 TCP 連線池上限問題；若後端是關聯式資料庫且無法承受高並發，則應以 SQS 佇列削峰加上 <code>Reserved Concurrency</code>（或 Event Source Mapping 的 <code>MaximumConcurrency</code>）把同時寫入資料庫的環境數鎖在安全範圍內。</li>
+  </ol>
+
+  <div class="demo" id="demo-faas-scale">
+    <div class="demo-bar">
+      <span class="label">互動 · FaaS 並發擴縮與資料庫連線風暴模擬器</span>
+      <span class="label" style="text-transform:none;font-family:var(--sans);font-size:12px;color:var(--text-2)">調整流量、執行與冷啟動耗時，即時重算環境峰值與 DB 連線負載</span>
+    </div>
+    <div class="demo-body">
+      <p class="sfd-lead">以下模型以 Little's Law（<var>L = &lambda; &times; W</var>）為核心，並計入冷啟動期間未預熱環境因 <code>INIT</code> 佔用時間拉長為 <var>W + T<sub>init</sub></var> 所造成的瞬時環境膨脹、AWS Lambda 每 10 秒最多擴增 1,000 個環境的速率限制，以及對後端資料庫（設 <code>max_connections = 200</code>）的連線衝擊。</p>
+
+      <div class="sfd-segs">
+        <div class="sfd-seg-group">
+          <span class="sfd-seg-label">單一環境／實例並發數 k</span>
+          <div class="seg" role="group" aria-label="單一環境並發數">
+            <button type="button" id="sfd-conc-1" aria-pressed="true">k = 1（標準 Lambda）</button>
+            <button type="button" id="sfd-conc-10" aria-pressed="false">k = 10（多並發實例）</button>
+            <button type="button" id="sfd-conc-40" aria-pressed="false">k = 40（Cloud Run 級）</button>
+          </div>
+        </div>
+        <div class="sfd-seg-group">
+          <span class="sfd-seg-label">資料庫連線收斂機制（複用倍率 M）</span>
+          <div class="seg" role="group" aria-label="資料庫連線收斂機制">
+            <button type="button" id="sfd-db-1" aria-pressed="false">直連 DB（1:1）</button>
+            <button type="button" id="sfd-db-5" aria-pressed="false">Proxy 含部分釘住（5:1）</button>
+            <button type="button" id="sfd-db-16" aria-pressed="true">RDS Proxy 交易池（16:1）</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="sfd-knobs">
+        <div class="sfd-knob">
+          <div class="sfd-knob-top"><span>到達率 &lambda;</span><b id="sfd-rps-val">600 rps</b></div>
+          <input type="range" id="sfd-rps" min="40" max="2400" step="40" value="600">
+        </div>
+        <div class="sfd-knob">
+          <div class="sfd-knob-top"><span>執行時間 W</span><b id="sfd-exec-val">400 ms</b></div>
+          <input type="range" id="sfd-exec" min="50" max="1500" step="50" value="400">
+        </div>
+        <div class="sfd-knob">
+          <div class="sfd-knob-top"><span>冷啟動 INIT</span><b id="sfd-init-val">800 ms</b></div>
+          <input type="range" id="sfd-init" min="100" max="2500" step="100" value="800">
+        </div>
+        <div class="sfd-knob">
+          <div class="sfd-knob-top"><span>預熱環境數 PC</span><b id="sfd-pc-val">100 個</b></div>
+          <input type="range" id="sfd-pc" min="0" max="500" step="25" value="100">
+        </div>
+      </div>
+
+      <div class="sfd-cards">
+        <div class="sfd-card" id="sfd-card-env">
+          <div class="sfd-card-k">穩態環境 ／ 突發峰值環境</div>
+          <div class="sfd-card-v" id="sfd-out-envs">—</div>
+          <p class="sfd-card-sub" id="sfd-sub-envs"></p>
+        </div>
+        <div class="sfd-card" id="sfd-card-cold">
+          <div class="sfd-card-k">首波冷啟動比例 ／ 突發 p99</div>
+          <div class="sfd-card-v" id="sfd-out-cold">—</div>
+          <p class="sfd-card-sub" id="sfd-sub-cold"></p>
+        </div>
+        <div class="sfd-card" id="sfd-card-scale">
+          <div class="sfd-card-k">10 秒擴縮步階（上限 +1,000/10s）</div>
+          <div class="sfd-card-v" id="sfd-out-scale">—</div>
+          <p class="sfd-card-sub" id="sfd-sub-scale"></p>
+        </div>
+        <div class="sfd-card" id="sfd-card-db">
+          <div class="sfd-card-k">後端 DB 連線數（上限 200）</div>
+          <div class="sfd-card-v" id="sfd-out-db">—</div>
+          <p class="sfd-card-sub" id="sfd-sub-db"></p>
+        </div>
+      </div>
+
+      <div class="sfd-gauges">
+        <div class="sfd-gauge-row">
+          <div class="sfd-gauge-head">
+            <span>首個 10 秒視窗環境供給率（預熱 PC + 首波 1,000 擴縮額度）</span>
+            <span id="sfd-bar-scale-txt">—</span>
+          </div>
+          <div class="sfd-track">
+            <div id="sfd-bar-scale" class="sfd-fill-ok" style="width:0%"></div>
+          </div>
+        </div>
+        <div class="sfd-gauge-row">
+          <div class="sfd-gauge-head">
+            <span>後端資料庫連線水位（對比純 On-Demand 直連 vs 目前設定）</span>
+            <span id="sfd-bar-db-txt">—</span>
+          </div>
+          <div class="sfd-track">
+            <div id="sfd-bar-db" class="sfd-fill-ok" style="width:0%"></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="sfd-toolbar">
+        <div class="legend">
+          <span><i class="dot ns-ok"></i>配額與連線充裕</span>
+          <span><i class="dot ns-lock"></i>有冷啟動或連線過半</span>
+          <span><i class="dot ns-bad"></i>觸發 429 限流或擊穿 DB 連線池</span>
+        </div>
+        <button type="button" class="btn" id="sfd-reset">重置參數</button>
+      </div>
+      <div class="status-line" id="sfd-status"></div>
+    </div>
+  </div>
+  <p class="cap">試著將「資料庫連線收斂機制」切到「直連 DB（1:1）」，或把執行時間 W 從 400 ms 拉到 1,200 ms：即使到達率不變，冷啟動期間膨脹的環境數也會立刻把 200 條資料庫連線衝爆。</p>
+
+  <div class="oneliner">
+    <b>一句話答法</b>標準 Lambda 每環境一請求的模型會讓環境數與資料庫連線數呈 1:1 暴增；連關聯式資料庫時務必透過 RDS Proxy 做交易級別連線複用（並避免 Session Pinning），或改用多並發實例與無狀態資料 API。
+  </div>
+</section>
+
+<section id="s5">
+  <div class="sec-head">
+    <span class="sec-num">05</span>
+    <h2>非同步事件承接、部分批次失敗與冪等鐵律</h2>
+  </div>
+  <p class="sec-sub">FaaS 承接佇列與事件流時，平台內建的重試與批次拉取保證的是 At-Least-Once；沒有開啟部分批次失敗回報與冪等保護，一筆壞資料就會重播整批交易。</p>
+
+  <p>佇列本身的語義（Visibility Timeout、DLQ）與事件驅動的服務拆分（Outbox、Choreography），分別在訊息佇列基礎篇與事件驅動架構篇討論過。本節聚焦於 <strong>FaaS 執行環境在最末端如何承接這些呼叫</strong>——因為呼叫模式不同，重試主體與失敗邊界完全不同。</p>
+
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>呼叫模式</th>
+          <th>典型上游來源</th>
+          <th>誰負責重試與退避？</th>
+          <th>FaaS 端的關鍵防護設計</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>同步呼叫 (Synchronous)</td>
+          <td>API Gateway、ALB、Cloud Run HTTP 觸發</td>
+          <td>平台<strong>不自動重試</strong>，直接回傳錯誤給呼叫端</td>
+          <td>API 層帶 <code>Idempotency-Key</code>，控制 INIT 與下游 Timeout 避免觸發 29 秒／60 秒閘道逾時</td>
+        </tr>
+        <tr>
+          <td>非同步呼叫 (Asynchronous)</td>
+          <td>EventBridge、S3 事件、SNS（推入 Lambda 內部佇列）</td>
+          <td class="hl">Lambda 內建佇列自動重試最多 2 次（共 3 次執行，含退避）</td>
+          <td>設定 <code>MaximumEventAgeInSeconds</code> 與 <code>OnFailure</code> Destination（保留完整錯誤上下文）</td>
+        </tr>
+        <tr>
+          <td>事件源映射 (Event Source Mapping)</td>
+          <td>SQS、Kinesis、Managed Kafka（由 Lambda Poller 批次拉取）</td>
+          <td class="hl">整批拉取，失敗回退至來源佇列／分片重試直到過期或入 DLQ</td>
+          <td>必開 <strong><code>ReportBatchItemFailures</code></strong> + 外部冪等表 + 限制 <code>MaximumConcurrency</code></td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="cap">最容易出事的是第三類 Event Source Mapping：Poller 幫你把 10 筆訊息包成一個 Batch 餵進同一次 INVOKE，預設只要 1 筆拋出例外，整批 10 筆都會被當成失敗重試。</p>
+
+  <h3>Partial Batch Response 與為何「開了部分失敗回報仍必須冪等」</h3>
+  <p>當 Lambda 透過 Event Source Mapping 消費 SQS 或 Kinesis（例如 <code>batchSize = 10</code>）時，若第 7 筆訊息因格式錯誤或下游暫時超時而讓 handler 拋出例外，預設行為是<strong>整批 10 筆訊息都不刪除</strong>，待 Visibility Timeout 到期後，前 6 筆已經成功扣款或發信的訊息會被重新投遞再跑一次。</p>
+
+  <pre class="mermaid">
+flowchart LR
+    B[Poller 拉取 10 筆訊息] --> H[Handler 逐筆處理]
+    H --> C{開啟 ReportBatchItemFailures?}
+    C -->|未開啟: 拋出例外| A[整批 10 筆退回重試]
+    C -->|已開啟: 回傳失敗 ID 清單| P[前 6 筆刪除, 僅失敗項重試]
+    P --> I[下游仍須以 event_id 做冪等檢查]
+  </pre>
+  <p class="cap">開啟 <code>ReportBatchItemFailures</code> 能擋掉「單筆失敗拖累同批成功項」，但擋不掉「第 6 筆剛寫入資料庫、函式卻在回傳前 OOM 或 Timeout」的跨次重試。</p>
+
+  <p>因此，在 FaaS 處理非同步事件時，必須同時落地兩道防線：</p>
+  <ol>
+    <li><strong>啟用 <code>ReportBatchItemFailures</code>（Partial Batch Response）</strong>：捕捉單筆訊息的例外，將失敗的 <code>itemIdentifier</code>（如 SQS <code>messageId</code>）放入 <code>batchItemFailures</code> 陣列回傳，讓成功處理的訊息正常確認刪除。</li>
+    <li><strong>以業務冪等鍵（Idempotency Key）守住寫入端</strong>：就算開啟了部分批次失敗回報，如果函式在寫完資料庫之後、回傳 JSON 給 Lambda Runtime 之前剛好撞上函式 Timeout 或容器崩潰，Lambda 無法收到回傳清單，依然會把整批訊息退回重試。寫入下游時必須攜帶唯一事件 ID（例如在 DynamoDB 使用 <code>ConditionExpression: "attribute_not_exists(event_id)"</code> 搭配狀態與 TTL，或在關聯式資料庫以唯一索引做 <code>INSERT ... ON CONFLICT DO NOTHING</code>）。</li>
+  </ol>
+
+  <div class="callout accent">
+    <div class="c-title"><span class="ic">關鍵</span>SQS 觸發器的「失控擴縮」要用 MaximumConcurrency 鎖住</div>
+    <p>當 SQS 堆積數萬筆訊息時，Lambda Event Source Mapping 預設會以每分鐘擴增數十個並發的速度一路拉高到 1,000 並發，瞬間把下游慢速 API 或資料庫打垮；若你在函式上把 <code>Reserved Concurrency</code> 設小，又會導致 Poller 拉了訊息卻因函式自身被 429 節流而直接把訊息推往 DLQ。正確作法是在 SQS Event Source Mapping 上設定 <strong><code>MaximumConcurrency</code></strong>——它直接限制 Poller 最多只用幾個執行環境拉取，不會產生假性節流與誤入 DLQ。</p>
+  </div>
+
+  <div class="oneliner">
+    <b>一句話答法</b>FaaS 消費佇列與事件流屬 At-Least-Once 投遞：工程上必須同時開啟 <code>ReportBatchItemFailures</code> 避免單筆毒丸重播整批、在 Event Source Mapping 設定 <code>MaximumConcurrency</code> 保護下游，並以持久化冪等鍵處理 Timeout 造成的重試。
+  </div>
+</section>
