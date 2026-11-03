@@ -1,0 +1,2557 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>部署策略 (Rolling / Blue-Green / Canary) | System Design Every Day</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@300;400;500;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+  <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+  <script>
+    mermaid.initialize({
+      startOnLoad: true,
+      theme: 'default',
+      securityLevel: 'loose'
+    });
+  </script>
+  <style>
+    /* 全站設計 token 的唯一來源。scripts/lib/books.js 會把「第一個 :root 區塊」原樣抽進首頁：
+       請保持單一區塊、區塊內不得出現 `}`；首頁領域色依賴 --accent / --ok / --warn。 */
+    :root {
+      --bg: #ffffff;
+      --bg-soft: #fafaf9;
+      --text: #262a2f;
+      --text-2: #6b7078;
+      --text-3: #9aa0a8;
+      --border: #ecebe8;
+      --border-strong: #dedcd8;
+      --code-bg: #f6f5f3;
+      --accent: #3f6188;
+      --accent-soft: #eef2f7;
+      --accent-line: #cdd9e6;
+      --ok: #4d7d68;
+      --ok-soft: #eef4f1;
+      --warn: #a3743e;
+      --warn-soft: #f6f0e7;
+      --bad: #a8554f;
+      --bad-soft: #f6ecea;
+      --radius: 10px;
+      --radius-sm: 7px;
+      --maxw: 760px;
+      --sans: "Noto Sans TC", system-ui, -apple-system, "Segoe UI", sans-serif;
+      --mono: "JetBrains Mono", "SFMono-Regular", Menlo, Consolas, monospace;
+    }
+
+    /* ---------- base reset ----------
+       等價於 Tailwind preflight 的最小重置（頁面不載入 Tailwind，utility class 不會生效）。
+       文章頁與各篇 demo CSS 都以這組基準值撰寫，改動會讓所有產物的間距、清單、按鈕外觀一起變動。
+       新增規則請一律寫在這個區塊之後，並使用 :root 的 token。 */
+    *, *::before, *::after {
+      box-sizing: border-box;
+      border: 0 solid var(--border);
+    }
+
+    html {
+      line-height: 1.5;
+      -webkit-text-size-adjust: 100%;
+      tab-size: 4;
+    }
+
+    h1, h2, h3, h4, h5, h6 {
+      margin: 0;
+      font-size: inherit;
+      font-weight: inherit;
+    }
+
+    p, blockquote, dl, dd, figure, pre, hr {
+      margin: 0;
+    }
+
+    hr {
+      height: 0;
+      color: inherit;
+      border-top-width: 1px;
+    }
+
+    a {
+      color: inherit;
+      text-decoration: inherit;
+    }
+
+    b, strong {
+      font-weight: bolder;
+    }
+
+    code, kbd, samp, pre {
+      font-family: var(--mono);
+      font-size: 1em;
+    }
+
+    small {
+      font-size: 80%;
+    }
+
+    sub, sup {
+      position: relative;
+      font-size: 75%;
+      line-height: 0;
+      vertical-align: baseline;
+    }
+    sub { bottom: -0.25em; }
+    sup { top: -0.5em; }
+
+    table {
+      border-collapse: collapse;
+      border-color: inherit;
+      text-indent: 0;
+    }
+
+    ol, ul, menu {
+      list-style: none;
+      margin: 0;
+      padding: 0;
+    }
+
+    img, svg, video, canvas, audio, iframe, embed, object {
+      display: block;
+      vertical-align: middle;
+    }
+
+    img, video {
+      max-width: 100%;
+      height: auto;
+    }
+
+    button, input, optgroup, select, textarea {
+      margin: 0;
+      padding: 0;
+      font: inherit;
+      line-height: inherit;
+      color: inherit;
+    }
+
+    button, select {
+      text-transform: none;
+    }
+
+    button, [type="button"], [type="reset"], [type="submit"] {
+      -webkit-appearance: button;
+      background-color: transparent;
+      background-image: none;
+    }
+
+    button, [role="button"] {
+      cursor: pointer;
+    }
+
+    :disabled {
+      cursor: default;
+    }
+
+    input::placeholder, textarea::placeholder {
+      opacity: 1;
+      color: var(--text-3);
+    }
+
+    textarea {
+      resize: vertical;
+    }
+
+    fieldset {
+      margin: 0;
+      padding: 0;
+    }
+
+    legend {
+      padding: 0;
+    }
+
+    summary {
+      display: list-item;
+    }
+
+    [hidden] {
+      display: none;
+    }
+
+    html {
+      scroll-behavior: smooth;
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      html {
+        scroll-behavior: auto;
+      }
+      * {
+        animation-duration: .001ms !important;
+        transition-duration: .001ms !important;
+      }
+    }
+
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font-family: var(--sans);
+      font-weight: 400;
+      font-size: 16px;
+      line-height: 1.78;
+      -webkit-font-smoothing: antialiased;
+      letter-spacing: .005em;
+    }
+
+    ::selection {
+      background: var(--accent-soft);
+    }
+
+    /* ---------- layout ---------- */
+    .wrap {
+      display: flex;
+      max-width: 1180px;
+      margin: 0 auto;
+      gap: 0;
+    }
+
+    .toc {
+      width: 248px;
+      flex: 0 0 248px;
+      position: sticky;
+      top: 0;
+      height: 100vh;
+      padding: 54px 22px 40px 28px;
+      overflow-y: auto;
+      border-right: 1px solid var(--border);
+      transition: width .2s ease, flex-basis .2s ease, padding .2s ease, opacity .15s ease, border-color .15s ease;
+    }
+
+    .toc-kicker {
+      font-family: var(--mono);
+      font-size: 11px;
+      letter-spacing: .14em;
+      text-transform: uppercase;
+      color: var(--text-3);
+      margin-bottom: 20px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+    }
+
+    /* desktop：側欄內收合鈕；≤920px 隱藏，改由 .toc-toggle accordion 控制 */
+    .toc-collapse {
+      display: none;
+      flex: 0 0 auto;
+      align-items: center;
+      justify-content: center;
+      width: 28px;
+      height: 28px;
+      padding: 0;
+      border: none;
+      background: none;
+      border-radius: 6px;
+      color: var(--text-2);
+      line-height: 1;
+      cursor: pointer;
+    }
+
+    .toc-collapse:hover {
+      color: var(--text);
+      background: var(--bg-soft);
+    }
+
+    .toc-collapse:focus-visible {
+      outline: 2px solid var(--accent);
+      outline-offset: 2px;
+    }
+
+    .toc-collapse svg {
+      display: block;
+    }
+
+    /* desktop：側欄收合後的展開鈕（預設隱藏） */
+    .toc-reopen {
+      display: none;
+      position: fixed;
+      top: 18px;
+      left: 18px;
+      z-index: 900;
+      align-items: center;
+      gap: 7px;
+      font-size: 12.5px;
+      line-height: 1;
+      color: var(--text-2);
+      background: var(--bg);
+      border: 1px solid var(--border-strong);
+      border-radius: 999px;
+      padding: 7px 13px 7px 11px;
+      box-shadow: 0 1px 3px rgba(0, 0, 0, .06), 0 4px 12px rgba(0, 0, 0, .04);
+      cursor: pointer;
+      transition: background .15s, border-color .15s, color .15s;
+    }
+
+    .toc-reopen:hover {
+      background: var(--bg-soft);
+      color: var(--text);
+      border-color: var(--text-3);
+    }
+
+    .toc-reopen svg {
+      flex: 0 0 auto;
+      display: block;
+    }
+
+    @media (min-width: 921px) {
+      .toc-collapse {
+        display: inline-flex;
+      }
+
+      body.toc-collapsed .toc {
+        width: 0;
+        flex-basis: 0;
+        padding: 0;
+        opacity: 0;
+        overflow: hidden;
+        border-right-color: transparent;
+        pointer-events: none;
+      }
+
+      body.toc-collapsed .toc-reopen {
+        display: inline-flex;
+      }
+    }
+
+    .toc-kicker a {
+      color: var(--text-3);
+      text-decoration: none;
+      border-bottom: none;
+      transition: color .15s;
+    }
+
+    .toc-kicker a:hover {
+      color: var(--text);
+    }
+
+    .toc-title {
+      font-size: 15px;
+      font-weight: 700;
+      line-height: 1.4;
+      margin: 0 0 12px;
+    }
+
+    .toc-actions {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 8px;
+      margin: 0 0 18px;
+    }
+
+    .read-toggle {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      font-family: var(--sans);
+      font-size: 12.5px;
+      line-height: 1.3;
+      color: var(--text-2);
+      background: var(--bg);
+      border: 1px solid var(--border-strong);
+      border-radius: 999px;
+      padding: 5px 12px 5px 10px;
+      cursor: pointer;
+      transition: background .15s, border-color .15s, color .15s;
+    }
+
+    .read-toggle:hover {
+      background: var(--bg-soft);
+      color: var(--text);
+      border-color: var(--text-3);
+    }
+
+    .read-toggle:focus-visible {
+      outline: 2px solid var(--accent);
+      outline-offset: 2px;
+    }
+
+    .read-toggle[aria-pressed="true"] {
+      background: var(--ok-soft);
+      border-color: var(--ok);
+      color: var(--ok);
+      font-weight: 600;
+    }
+
+    .read-toggle .read-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      border: 1.5px solid currentColor;
+      flex: 0 0 auto;
+    }
+
+    .read-toggle[aria-pressed="true"] .read-dot {
+      background: var(--ok);
+      border-color: var(--ok);
+    }
+
+    .article-foot {
+      margin-top: 56px;
+      padding-top: 24px;
+      border-top: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      flex-wrap: wrap;
+    }
+
+    .article-foot-left {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      flex-wrap: wrap;
+    }
+
+    .article-foot-hint {
+      font-size: 13.5px;
+      color: var(--text-2);
+    }
+
+    .read-toggle.read-toggle-lg {
+      font-size: 13.5px;
+      padding: 7px 16px 7px 13px;
+    }
+
+    .article-foot-back {
+      font-size: 13.5px;
+      color: var(--text-2);
+      border-bottom: 1px solid var(--border-strong);
+    }
+
+    .article-foot-back:hover {
+      color: var(--text);
+      border-color: var(--text);
+    }
+
+    .toc a {
+      display: flex;
+      gap: 10px;
+      align-items: baseline;
+      text-decoration: none;
+      color: var(--text-2);
+      font-size: 13.5px;
+      padding: 6px 10px;
+      border-radius: 6px;
+      line-height: 1.45;
+      transition: background .15s, color .15s;
+      border-bottom: none;
+    }
+
+    .toc a:hover {
+      background: var(--bg-soft);
+      color: var(--text);
+      border-bottom: none;
+    }
+
+    .toc a.active {
+      color: var(--accent);
+      background: var(--accent-soft);
+      font-weight: 500;
+      border-bottom: none;
+    }
+
+    .toc a .n {
+      font-family: var(--mono);
+      font-size: 11px;
+      color: var(--text-3);
+      flex: 0 0 18px;
+    }
+
+    .toc a.active .n {
+      color: var(--accent);
+    }
+
+    main {
+      flex: 1 1 auto;
+      min-width: 0;
+      padding: 0 40px;
+    }
+
+    .inner {
+      max-width: var(--maxw);
+      margin: 0 auto;
+      padding: 72px 0 140px;
+    }
+
+    /* ---------- hero ---------- */
+    .hero {
+      margin-bottom: 64px;
+    }
+
+    .hero .eyebrow {
+      font-family: var(--mono);
+      font-size: 12px;
+      letter-spacing: .16em;
+      text-transform: uppercase;
+      color: var(--accent);
+      margin-bottom: 18px;
+    }
+
+    .hero h1 {
+      font-size: 40px;
+      line-height: 1.18;
+      font-weight: 700;
+      margin: 0 0 18px;
+      letter-spacing: -.01em;
+    }
+
+    .hero .lede {
+      font-size: 18px;
+      line-height: 1.7;
+      color: var(--text-2);
+      font-weight: 300;
+      margin: 0;
+      max-width: 620px;
+    }
+
+    .hero .meta {
+      margin-top: 28px;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+
+    .tag {
+      font-family: var(--mono);
+      font-size: 12px;
+      color: var(--text-2);
+      border: 1px solid var(--border-strong);
+      padding: 4px 11px;
+      border-radius: 999px;
+      background: var(--bg-soft);
+    }
+
+    /* ---------- sections ---------- */
+    section {
+      padding-top: 30px;
+      scroll-margin-top: 24px;
+    }
+
+    .sec-head {
+      display: flex;
+      align-items: baseline;
+      gap: 14px;
+      margin: 0 0 8px;
+    }
+
+    .sec-num {
+      font-family: var(--mono);
+      font-size: 13px;
+      color: var(--text-3);
+      font-weight: 500;
+      padding-top: 6px;
+      flex: 0 0 auto;
+    }
+
+    h2 {
+      font-size: 27px;
+      font-weight: 700;
+      line-height: 1.3;
+      margin: 0;
+      letter-spacing: -.01em;
+    }
+
+    .sec-sub {
+      color: var(--text-2);
+      font-size: 15px;
+      margin: 2px 0 28px 0;
+      font-weight: 300;
+    }
+
+    h3 {
+      font-size: 18.5px;
+      font-weight: 700;
+      margin: 38px 0 12px;
+      line-height: 1.45;
+    }
+
+    h4 {
+      font-size: 15.5px;
+      font-weight: 700;
+      margin: 26px 0 8px;
+      color: var(--text);
+    }
+
+    p {
+      margin: 0 0 16px;
+    }
+
+    a {
+      color: var(--accent);
+      text-decoration: none;
+      border-bottom: 1px solid var(--accent-line);
+      transition: border-color .15s;
+    }
+
+    a:hover {
+      border-color: var(--accent);
+    }
+
+    strong {
+      font-weight: 700;
+    }
+
+    em {
+      font-style: normal;
+      background: var(--accent-soft);
+      padding: 0 4px;
+      border-radius: 4px;
+      font-weight: 500;
+      color: #2f4d6e;
+    }
+
+    hr.div {
+      border: none;
+      border-top: 1px solid var(--border);
+      margin: 46px 0;
+    }
+
+    ul, ol {
+      margin: 0 0 18px;
+      padding-left: 22px;
+    }
+
+    li {
+      margin: 7px 0;
+      padding-left: 4px;
+    }
+
+    code {
+      font-family: var(--mono);
+      font-size: .86em;
+      background: var(--code-bg);
+      padding: 2px 6px;
+      border-radius: 5px;
+      color: #43494f;
+    }
+
+    pre {
+      background: var(--code-bg);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 16px 18px;
+      overflow-x: auto;
+      margin: 0 0 20px;
+      line-height: 1.6;
+    }
+
+    pre code {
+      background: none;
+      padding: 0;
+      font-size: 13px;
+    }
+
+    /* ---------- math notation ---------- */
+    /* 行內數學變數，如 W、R、N。本站不載入 MathJax/KaTeX，請勿使用 $...$ 或 \[...\] LaTeX 分隔符。 */
+    var {
+      font-family: var(--mono);
+      font-style: normal;
+      font-weight: 500;
+      color: var(--accent);
+    }
+
+    /* 區塊數學公式，置中等寬呈現，記得將 > < & 轉義為 &gt; &lt; &amp;。 */
+    .formula {
+      font-family: var(--mono);
+      font-size: 15px;
+      text-align: center;
+      background: var(--bg-soft);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      padding: 14px 18px;
+      margin: 0 0 20px;
+      color: var(--text);
+      letter-spacing: .03em;
+      overflow-x: auto;
+    }
+
+    /* ---------- callouts ---------- */
+    .callout {
+      border: 1px solid var(--border);
+      border-left: 3px solid var(--border-strong);
+      background: var(--bg-soft);
+      border-radius: var(--radius-sm);
+      padding: 15px 18px;
+      margin: 0 0 22px;
+      font-size: 14.5px;
+    }
+
+    .callout .c-title {
+      font-weight: 700;
+      font-size: 13px;
+      letter-spacing: .02em;
+      margin-bottom: 5px;
+      display: flex;
+      gap: 7px;
+      align-items: center;
+    }
+
+    .callout p:last-child {
+      margin-bottom: 0;
+    }
+
+    .callout.accent {
+      border-left-color: var(--accent);
+      background: var(--accent-soft);
+    }
+
+    .callout.accent .c-title {
+      color: #2f4d6e;
+    }
+
+    .callout.warn {
+      border-left-color: var(--warn);
+      background: var(--warn-soft);
+    }
+
+    .callout.warn .c-title {
+      color: var(--warn);
+    }
+
+    .callout .ic {
+      font-family: var(--mono);
+      font-size: 11px;
+      border: 1px solid currentColor;
+      border-radius: 4px;
+      padding: 0 4px;
+      line-height: 1.5;
+      opacity: .8;
+    }
+
+    .oneliner {
+      border: 1px dashed var(--accent-line);
+      border-radius: var(--radius-sm);
+      padding: 13px 16px;
+      margin: 0 0 22px;
+      font-size: 14.5px;
+      background: #fbfcfd;
+    }
+
+    .oneliner b {
+      font-family: var(--mono);
+      font-size: 11px;
+      letter-spacing: .08em;
+      color: var(--accent);
+      display: block;
+      margin-bottom: 4px;
+      text-transform: uppercase;
+    }
+
+    /* ---------- tables ---------- */
+    .tbl-wrap {
+      overflow-x: auto;
+      margin: 0 0 24px;
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+    }
+
+    table {
+      border-collapse: collapse;
+      width: 100%;
+      font-size: 14px;
+      min-width: 520px;
+    }
+
+    th, td {
+      text-align: left;
+      padding: 11px 14px;
+      border-bottom: 1px solid var(--border);
+      vertical-align: top;
+    }
+
+    th {
+      font-weight: 700;
+      background: var(--bg-soft);
+      font-size: 12.5px;
+      letter-spacing: .02em;
+      color: var(--text-2);
+      position: sticky;
+      top: 0;
+    }
+
+    tr:last-child td {
+      border-bottom: none;
+    }
+
+    td.hl {
+      background: var(--accent-soft);
+    }
+
+    .cap {
+      font-size: 12.5px;
+      color: var(--text-3);
+      margin: -12px 0 26px;
+      font-family: var(--mono);
+    }
+
+    /* ---------- interactive shell ---------- */
+    .demo {
+      border: 1px solid var(--border-strong);
+      border-radius: var(--radius);
+      background: var(--bg);
+      margin: 24px 0 26px;
+      overflow: hidden;
+    }
+
+    .demo-bar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      flex-wrap: wrap;
+      padding: 13px 16px;
+      border-bottom: 1px solid var(--border);
+      background: var(--bg-soft);
+    }
+
+    .demo-bar .label {
+      font-family: var(--mono);
+      font-size: 11px;
+      letter-spacing: .1em;
+      text-transform: uppercase;
+      color: var(--text-3);
+    }
+
+    .demo-body {
+      padding: 20px 18px;
+    }
+
+    .seg {
+      display: inline-flex;
+      border: 1px solid var(--border-strong);
+      border-radius: 999px;
+      overflow: hidden;
+      background: var(--bg);
+    }
+
+    .seg button {
+      border: none;
+      background: none;
+      font-family: var(--sans);
+      font-size: 12.5px;
+      color: var(--text-2);
+      padding: 6px 14px;
+      cursor: pointer;
+      transition: background .15s, color .15s;
+    }
+
+    .seg button:hover {
+      color: var(--text);
+    }
+
+    .seg button[aria-pressed="true"] {
+      background: var(--accent);
+      color: #fff;
+    }
+
+    .btn {
+      font-family: var(--sans);
+      font-size: 13px;
+      border: 1px solid var(--border-strong);
+      background: var(--bg);
+      color: var(--text);
+      padding: 7px 16px;
+      border-radius: 7px;
+      cursor: pointer;
+      transition: background .15s, border-color .15s;
+    }
+
+    .btn:hover {
+      background: var(--bg-soft);
+      border-color: var(--text-3);
+    }
+
+    .btn.primary {
+      background: var(--accent);
+      color: #fff;
+      border-color: var(--accent);
+    }
+
+    .btn.primary:hover {
+      background: #365578;
+    }
+
+    .btn:disabled {
+      opacity: .4;
+      cursor: not-allowed;
+    }
+
+    .btn:focus-visible, .seg button:focus-visible, .toc a:focus-visible, a:focus-visible,
+    summary:focus-visible {
+      outline: 2px solid var(--accent);
+      outline-offset: 2px;
+      border-radius: 4px;
+    }
+
+    .status-line {
+      font-size: 13.5px;
+      color: var(--text-2);
+      min-height: 42px;
+      margin-top: 14px;
+      background: var(--bg-soft);
+      border-radius: var(--radius-sm);
+      padding: 10px 13px;
+      border: 1px solid var(--border);
+    }
+
+    .status-line b {
+      color: var(--text);
+    }
+
+    .legend {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 14px;
+      font-size: 11.5px;
+      color: var(--text-2);
+      margin-top: 14px;
+      font-family: var(--mono);
+    }
+
+    .legend span {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .dot {
+      width: 9px;
+      height: 9px;
+      border-radius: 3px;
+      display: inline-block;
+      border: 1px solid rgba(0, 0, 0, .08);
+    }
+
+    /* node states used across diagrams */
+    .ns-idle {
+      background: #fff;
+      border-color: var(--border-strong);
+    }
+
+    .ns-lock {
+      background: var(--warn-soft);
+      border-color: var(--warn);
+    }
+
+    .ns-ok {
+      background: var(--ok-soft);
+      border-color: var(--ok);
+    }
+
+    .ns-bad {
+      background: var(--bad-soft);
+      border-color: var(--bad);
+    }
+
+    .ns-wait {
+      background: var(--accent-soft);
+      border-color: var(--accent);
+    }
+
+    /* FAQ */
+    details.faq {
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      margin-bottom: 10px;
+      background: #fff;
+      overflow: hidden;
+    }
+
+    details.faq summary {
+      cursor: pointer;
+      padding: 14px 16px;
+      font-weight: 600;
+      font-size: 14.5px;
+      list-style: none;
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      align-items: center;
+    }
+
+    details.faq summary::-webkit-details-marker {
+      display: none;
+    }
+
+    details.faq summary .q {
+      font-family: var(--mono);
+      font-size: 11px;
+      color: var(--accent);
+      flex: 0 0 auto;
+    }
+
+    details.faq summary .chev {
+      transition: transform .2s;
+      color: var(--text-3);
+      flex: 0 0 auto;
+      font-size: 13px;
+    }
+
+    details.faq[open] summary .chev {
+      transform: rotate(90deg);
+    }
+
+    details.faq .ans {
+      padding: 0 16px 16px;
+      font-size: 14px;
+      color: var(--text-2);
+    }
+
+    details.faq .ans p {
+      margin: 0 0 10px;
+    }
+
+    details.faq .ans p:last-child {
+      margin: 0;
+    }
+
+    .trap {
+      display: flex;
+      gap: 10px;
+      font-size: 14px;
+      margin: 9px 0;
+    }
+
+    .trap .tn {
+      font-family: var(--mono);
+      font-size: 11px;
+      color: var(--bad);
+      flex: 0 0 auto;
+      border: 1px solid var(--bad-soft);
+      background: var(--bad-soft);
+      border-radius: 4px;
+      padding: 1px 6px;
+      height: fit-content;
+      margin-top: 2px;
+    }
+
+    /* mobile responsive */
+    .toc-toggle {
+      display: none;
+    }
+
+    @media (max-width: 920px) {
+      .wrap {
+        flex-direction: column;
+      }
+      .toc {
+        position: static;
+        width: auto;
+        height: auto;
+        border-right: none;
+        border-bottom: 1px solid var(--border);
+        padding: 18px 22px;
+        transition: none;
+      }
+      .toc-title {
+        margin-bottom: 0;
+      }
+      .toc-actions {
+        margin: 10px 0 0;
+      }
+      .toc-kicker {
+        margin-bottom: 10px;
+      }
+      .toc-nav {
+        display: none;
+        margin-top: 16px;
+      }
+      .toc-nav.open {
+        display: block;
+      }
+      .toc-toggle {
+        display: inline-block;
+        margin-top: 0;
+      }
+      .toc-collapse,
+      .toc-reopen {
+        display: none !important;
+      }
+      main {
+        padding: 0 22px;
+      }
+      .inner {
+        padding: 40px 0 100px;
+      }
+      .hero h1 {
+        font-size: 31px;
+      }
+    }
+
+    @media print {
+      .toc-reopen { display: none !important; }
+    }
+
+    @media (max-width: 480px) {
+      body {
+        font-size: 15px;
+      }
+      .hero h1 {
+        font-size: 27px;
+      }
+      h2 {
+        font-size: 23px;
+      }
+      .demo-body {
+        padding: 16px 13px;
+      }
+    }
+  </style>
+</head>
+<body data-topic-id="deployment-strategies">
+  <div class="wrap">
+    <!-- ===================== TOC SIDEBAR ===================== -->
+    <nav class="toc" id="toc-panel" aria-label="目錄">
+      <div class="toc-kicker">
+        <a href="../index.html">← 返回目錄</a>
+        <button class="toc-collapse" type="button" aria-expanded="true" aria-controls="toc-panel"
+                aria-label="收合目錄" title="收合目錄">
+          <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor"
+               stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M15 18l-6-6 6-6"/>
+          </svg>
+        </button>
+      </div>
+      <div class="toc-title">部署策略 (Rolling / Blue-Green / Canary)</div>
+      <div class="toc-actions">
+        <button class="read-toggle" type="button" data-read-toggle aria-pressed="false" title="切換本文已讀狀態">
+          <span class="read-dot" aria-hidden="true"></span>
+          <span class="read-label">標記為已讀</span>
+        </button>
+        <button class="btn toc-toggle" type="button" aria-expanded="false" aria-controls="toc-nav">目錄 ▾</button>
+      </div>
+      <div class="toc-nav" id="toc-nav">
+        <a href="#s1"><span class="n">01</span>總覽：新版本如何安全地接手流量</a>
+        <a href="#s2"><span class="n">02</span>四大部署與發佈模式深度拆解</a>
+        <a href="#s3"><span class="n">03</span>新舊版本並存：API 與 Schema 相容 (Expand / Contract)</a>
+        <a href="#s4"><span class="n">04</span>自動指標判定與漸進式交付 (Automated Canary Analysis)</a>
+        <a href="#s5"><span class="n">05</span>雲端實戰對照：AWS CodeDeploy / ALB / Lambda vs GCP Cloud Deploy / Cloud Run</a>
+        <a href="#s6"><span class="n">06</span>互動決策器：部署策略與爆炸半徑試算室</a>
+      </div>
+    </nav>
+    <button class="btn toc-reopen" type="button" aria-expanded="true" aria-controls="toc-panel"
+            aria-label="展開目錄" title="展開目錄">
+      <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor"
+           stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M9 18l6-6-6-6"/>
+      </svg>
+      <span>目錄</span>
+    </button>
+
+    <!-- ===================== MAIN CONTENT ===================== -->
+    <main>
+      <div class="inner">
+        <!-- demo-archetype: E｜決策器 — 讀者回答回滾時間目標、額外容量上限、Schema 變更類型與自動指標驗證需求四個維度，即時推導最佳部署組合、淘汰原因、預期回滾秒數與首波爆炸半徑。
+     選 E 是因為本篇 brief 明確建議以決策器推導部署策略，且核心命題是在多個衝突約束間做取捨；最近三篇的主形式為空間視覺化、並排對照與參數掃描，未撞形。 -->
+<style>
+  .dps-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    align-items: stretch;
+    justify-content: center;
+    margin: 14px 0 6px;
+  }
+  .dps-node {
+    border: 1px solid var(--border-strong);
+    border-radius: 8px;
+    background: #fff;
+    padding: 10px 12px;
+    min-width: 115px;
+    max-width: 195px;
+    text-align: center;
+  }
+  .dps-node .nn {
+    font-family: var(--mono);
+    font-size: 12px;
+    font-weight: 700;
+    color: var(--text);
+  }
+  .dps-node .ns {
+    font-size: 11px;
+    color: var(--text-2);
+    margin-top: 3px;
+    line-height: 1.4;
+  }
+  .dps-node.accent { border-top: 3px solid var(--accent); }
+  .dps-node.ok     { border-top: 3px solid var(--ok); }
+  .dps-node.warn   { border-top: 3px solid var(--warn); }
+  .dps-node.bad    { border-top: 3px solid var(--bad); }
+  .dps-arrow {
+    display: flex;
+    align-items: center;
+    font-family: var(--mono);
+    font-size: 13px;
+    color: var(--text-3);
+    white-space: nowrap;
+  }
+
+  .dps-lane {
+    display: grid;
+    grid-template-columns: 104px repeat(3, minmax(0, 1fr));
+    gap: 1px;
+    background: var(--border);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    overflow: hidden;
+    margin: 14px 0 6px;
+  }
+  .dps-lane > div {
+    background: #fff;
+    padding: 8px 10px;
+    font-size: 12px;
+    line-height: 1.5;
+  }
+  .dps-lane .lh {
+    background: var(--bg-soft);
+    font-family: var(--mono);
+    font-size: 11px;
+    font-weight: 700;
+    color: var(--text-2);
+  }
+  .dps-lane .lt {
+    background: var(--bg-soft);
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--text-3);
+  }
+  .dps-lane .lc.act  { background: var(--accent-soft); }
+  .dps-lane .lc.ok   { background: var(--ok-soft); }
+  .dps-lane .lc.warn { background: var(--warn-soft); }
+  .dps-lane .lc.bad  { background: var(--bad-soft); }
+
+  .dps-split {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 12px;
+    margin: 14px 0 6px;
+  }
+  .dps-pane {
+    border: 1px solid var(--border-strong);
+    border-radius: 8px;
+    background: #fff;
+    padding: 12px 14px;
+  }
+  .dps-pane.accent { border-top: 3px solid var(--accent); }
+  .dps-pane.ok     { border-top: 3px solid var(--ok); }
+  .dps-pane-title {
+    font-family: var(--mono);
+    font-size: 12px;
+    font-weight: 700;
+    color: var(--text);
+    margin: 0 0 6px;
+  }
+  .dps-pane-desc {
+    font-size: 12px;
+    color: var(--text-2);
+    line-height: 1.55;
+    margin: 0;
+  }
+
+  /* Demo styles */
+  .dps-lead {
+    margin: 0 0 12px;
+    font-size: 13px;
+    color: var(--text-2);
+    line-height: 1.55;
+  }
+  .dps-qgrid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 12px 16px;
+    margin-bottom: 12px;
+  }
+  .dps-qbox {
+    background: var(--bg-soft);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    padding: 10px 12px;
+  }
+  .dps-qlabel {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    font-size: 12px;
+    font-weight: 700;
+    color: var(--text);
+    margin-bottom: 6px;
+  }
+  .dps-qlabel b {
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--accent);
+  }
+  .dps-qbox select {
+    width: 100%;
+    font-family: var(--sans);
+    font-size: 13px;
+    color: var(--text);
+    background: #fff;
+    border: 1px solid var(--border-strong);
+    border-radius: 6px;
+    padding: 6px 8px;
+  }
+  .dps-qbox input[type="range"] {
+    width: 100%;
+    accent-color: var(--accent);
+    margin: 4px 0 2px;
+  }
+  .dps-qhint {
+    font-size: 11px;
+    color: var(--text-3);
+    margin-top: 4px;
+    line-height: 1.4;
+  }
+  .dps-toolbar {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 10px;
+    margin-bottom: 12px;
+  }
+  .dps-reco-banner {
+    border: 1px solid var(--border-strong);
+    border-left: 4px solid var(--accent);
+    border-radius: 8px;
+    background: var(--accent-soft);
+    padding: 10px 14px;
+    margin-bottom: 12px;
+  }
+  .dps-reco-banner.is-warn {
+    border-left-color: var(--warn);
+    background: var(--warn-soft);
+  }
+  .dps-reco-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+  .dps-reco-name {
+    font-family: var(--mono);
+    font-size: 14px;
+    font-weight: 700;
+    color: var(--text);
+  }
+  .dps-reco-badge {
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--text-2);
+    background: #fff;
+    border: 1px solid var(--border-strong);
+    border-radius: 4px;
+    padding: 2px 7px;
+  }
+  .dps-reco-why {
+    font-size: 12px;
+    color: var(--text-2);
+    margin: 6px 0 0;
+    line-height: 1.55;
+  }
+  .dps-cards {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 8px;
+    margin-bottom: 10px;
+  }
+  .dps-card {
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: #fff;
+    padding: 10px;
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+    gap: 8px;
+  }
+  .dps-card.is-winner {
+    border-color: var(--ok);
+    background: var(--ok-soft);
+    box-shadow: inset 0 3px 0 var(--ok);
+  }
+  .dps-card.is-runner {
+    border-color: var(--accent);
+    box-shadow: inset 0 3px 0 var(--accent);
+  }
+  .dps-card.is-out {
+    background: var(--bg-soft);
+    opacity: 0.72;
+  }
+  .dps-cname {
+    font-family: var(--mono);
+    font-size: 12px;
+    font-weight: 700;
+    color: var(--text);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 4px;
+  }
+  .dps-ctag {
+    font-size: 10px;
+    font-weight: 600;
+    padding: 1px 5px;
+    border-radius: 4px;
+    background: var(--bg-soft);
+    color: var(--text-2);
+  }
+  .dps-card.is-winner .dps-ctag {
+    background: #fff;
+    color: var(--ok);
+  }
+  .dps-card.is-out .dps-ctag {
+    background: var(--bad-soft);
+    color: var(--bad);
+  }
+  .dps-cstats {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 4px 6px;
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--text-2);
+    border-top: 1px solid var(--border);
+    border-bottom: 1px solid var(--border);
+    padding: 6px 0;
+  }
+  .dps-cstats span b {
+    display: block;
+    font-size: 12px;
+    color: var(--text);
+  }
+  .dps-cnote {
+    font-size: 11px;
+    color: var(--text-2);
+    line-height: 1.45;
+  }
+
+  @media (max-width: 720px) {
+    .dps-lane { grid-template-columns: 78px repeat(3, minmax(0, 1fr)); font-size: 11px; }
+    .dps-split, .dps-qgrid { grid-template-columns: 1fr; }
+    .dps-cards { grid-template-columns: 1fr 1fr; }
+  }
+</style>
+
+<section id="s1">
+  <div class="sec-head">
+    <span class="sec-num">01</span>
+    <h2>總覽：新版本如何安全地接手流量</h2>
+  </div>
+  <p class="sec-sub">部署不是單純覆蓋二進位檔，而是控制「程式碼置換」與「真實流量放行」的時間差。</p>
+
+  <p>在單機時代，發佈新版本意味著停機、替換執行檔、重啟程序；一旦新版本存在記憶體洩漏或查詢退化，所有線上使用者會在同一秒同時撞上故障。在分散式系統中，部署策略（Deployment Strategies）的核心命題只有一個：<strong>如何讓新版本（<var>v2</var>）在不中斷服務的前提下接手流量，並且在發現缺陷時，把受影響的使用者比例（Blast Radius）與恢復時間（MTTR）壓到最低。</strong></p>
+
+  <div class="dps-row">
+    <div class="dps-node">
+      <div class="nn">Build Artifact</div>
+      <div class="ns">不可變映像檔 v2</div>
+    </div>
+    <span class="dps-arrow">▸</span>
+    <div class="dps-node accent">
+      <div class="nn">Provision &amp; Warm</div>
+      <div class="ns">部署運算節點並預熱</div>
+    </div>
+    <span class="dps-arrow">▸</span>
+    <div class="dps-node ok">
+      <div class="nn">Traffic Shifting</div>
+      <div class="ns">L7 權重或指標漸進切流</div>
+    </div>
+    <span class="dps-arrow">▸</span>
+    <div class="dps-node warn">
+      <div class="nn">Feature Toggle</div>
+      <div class="ns">執行期依條件開關新邏輯</div>
+    </div>
+  </div>
+  <p class="cap">現代持續交付將「部署（把程式放到機器上）」與「發佈（讓使用者看見新功能）」拆成獨立步驟，使回滾不再依賴漫長的重新編譯。</p>
+
+  <p>工程團隊在選擇部署策略時，本質上是在四個無法同時拉滿的維度之間做折衷：</p>
+  <ul>
+    <li><strong>爆炸半徑（Blast Radius）</strong>：若 <var>v2</var> 帶有嚴重臭蟲，第一時間會有多少比例的線上請求受損（<var>1%</var>、<var>25%</var> 還是 <var>100%</var>）？</li>
+    <li><strong>回滾速度（Rollback Speed）</strong>：發現異常後，將流量完全撤回 <var>v1</var> 需要幾秒？是改一條路由規則，還是要等整批容器重新拉取映像檔並通過健康檢查？</li>
+    <li><strong>額外容量成本（Capacity Overhead）</strong>：發佈期間需要多準備多少台機器？是僅多開 <var>10%</var> 的過渡節點，還是必須同時維持兩套 <var>100%</var> 規模的生產環境？</li>
+    <li><strong>多版本並存複雜度（Coexistence Complexity）</strong>：當 <var>v1</var> 與 <var>v2</var> 在線上同時讀寫同一個資料庫與快取時，網路協定與資料表 Schema 是否會發生衝突？</li>
+  </ul>
+
+  <div class="callout accent">
+    <div class="c-title"><span class="ic">關鍵</span>Deployment（部署）≠ Release（發佈）</div>
+    <p>把容器映像檔推上生產環境稱為 <strong>Deployment</strong>（基礎設施層動作）；將真實使用者的請求導向新程式碼路徑稱為 <strong>Release</strong>（業務層動作）。Rolling Update 將兩者綁在一起，機器一啟動就接客；Blue-Green、Canary 與 Feature Flag 則將兩者解耦，這正是高可靠度系統能做到「秒級止血」的根本原因。</p>
+  </div>
+
+  <div class="oneliner">
+    <b>一句話答法</b>部署策略是「爆炸半徑、回滾速度、額外機器成本、新舊並存相容性」的四維折衷；越快回滾、越小爆炸半徑的方案，對雙倍容量或漸進路由控制面的要求就越高。
+  </div>
+</section>
+
+<section id="s2">
+  <div class="sec-head">
+    <span class="sec-num">02</span>
+    <h2>四大部署與發佈模式深度拆解</h2>
+  </div>
+  <p class="sec-sub">從原位分批替換的 Rolling，到雙環境切換的 Blue-Green、按比例試水的 Canary，再到應用層的 Feature Flag。</p>
+
+  <h3>1. Rolling Update（滾動更新）</h3>
+  <p>Rolling Update 是最普及的預設策略。系統將現有叢集分成多個批次（Batch），每次停掉一小批 <var>v1</var> 實例、換上 <var>v2</var> 實例，待新實例通過 Readiness Probe 後再推進下一批。在容器編排篇（<code>container-orchestration</code>）中談過 Kubernetes Deployment 透過 <code>maxSurge</code> 與 <code>maxUnavailable</code> 控制滾動步調；在 AWS EC2 Auto Scaling 或 ECS 中，則對應 Rolling update with additional batch。</p>
+  <ul>
+    <li><strong>優勢</strong>：額外容量成本極低（僅需 <var>10%</var>～<var>25%</var> 的 Surge 緩衝），不需要額外的 L7 權重路由控制面。</li>
+    <li><strong>致命傷</strong>：<strong>回滾也是滾動的</strong>。當部署推進到 <var>60%</var> 才發現異常，回滾必須反向執行另一輪滾動替換，期間必須等待連線排空（Connection Draining）與容器冷啟動，耗時往往長達數分鐘。</li>
+  </ul>
+
+  <h3>2. Blue-Green Deployment（藍綠部署）</h3>
+  <p>藍綠部署直接避開「原位替換」的混亂：線上正在服務 <var>100%</var> 流量的舊環境稱為 <strong>Blue（<var>v1</var>）</strong>；發佈時，平行建立一套規模完全相同（<var>100%</var> 容量）的全新環境 <strong>Green（<var>v2</var>）</strong>。工程師可以在 Green 環境上先跑合成測試（Synthetic Testing）與預熱，確認無誤後，在負載平衡器或 DNS 層將流量一次性從 Blue 切往 Green。</p>
+  <ul>
+    <li><strong>優勢</strong>：<strong>零新舊版本混跑窗口</strong>（若一次性切流），且回滾速度極快——只要原來的 Blue 環境還沒銷毀，切回舊 Target Group 只需毫秒到數秒。</li>
+    <li><strong>致命傷</strong>：發佈與觀察期間需要 <strong><var>200%</var> 的運算容量</strong>；若服務本身帶有龐大的本機狀態或需要維持數百萬條長連線（如 WebSocket 篇談到的有狀態閘道），一次性全量切換會引發連線瞬間重連風暴。</li>
+  </ul>
+
+  <h3>3. Canary Deployment（金絲雀發佈）</h3>
+  <p>礦工下坑時會帶一隻對瓦斯極為敏感的金絲雀來預警危險。Canary 發佈只先部署極少數的 <var>v2</var> 實例（或利用 L7 路由權重切出 <var>1%</var>～<var>5%</var> 的真實流量），讓極小部分真實請求替全體使用者「踩雷」。待觀察一段時間（Baking Period）確認錯誤率與延遲沒有劣化，才按 <var>5% &rarr; 25% &rarr; 50% &rarr; 100%</var> 階梯推進。</p>
+  <ul>
+    <li><strong>優勢</strong>：爆炸半徑被嚴格限制在首波比例（例如 <var>2%</var>），同時只需額外準備極少量的金絲雀實例容量。</li>
+    <li><strong>致命傷</strong>：新舊版本並存時間最長（可能持續數十分鐘至數小時），對資料庫 Schema 與 API 向後相容的要求最嚴苛；且必須搭配細粒度的 L7 流量控制與自動化指標觀測。</li>
+  </ul>
+
+  <h3>4. Feature Flag（功能旗標 / 暗發佈）</h3>
+  <p>前三種策略都在「基礎設施或路由層」切換實例，而 Feature Flag 則把切換點搬進<strong>應用程式碼內部</strong>（<code>if (flags.isEnabled("new-checkout", userContext))</code>）。<var>v2</var> 程式碼可以透過 Rolling 或 Canary 先部署到所有機器上（此時新功能預設關閉，稱為 Dark Launch），之後再透過遠端組態中心（如 AWS AppConfig、LaunchDarkly）針對特定內部員工、特定地區或 <var>1%</var> 付費戶動態打開。</p>
+
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>評估維度</th>
+          <th>Rolling Update</th>
+          <th>Blue-Green</th>
+          <th>Canary</th>
+          <th>Feature Flag (結合部署)</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><strong>額外容量需求</strong></td>
+          <td class="hl">低（+10%～25% 批次緩衝）</td>
+          <td>高（+100% 雙倍平行環境）</td>
+          <td class="hl">極低（+1%～10% 金絲雀節點）</td>
+          <td>無額外機器（記憶體內判斷）</td>
+        </tr>
+        <tr>
+          <td><strong>最小爆炸半徑</strong></td>
+          <td>首個批次比例（約 10%～25%）</td>
+          <td>100%（一次性切流時）</td>
+          <td class="hl">1%～5%（可按權重微調）</td>
+          <td class="hl">單一 User ID / 內部測試員</td>
+        </tr>
+        <tr>
+          <td><strong>回滾速度 (MTTR)</strong></td>
+          <td>慢（2～10 分鐘，需重跑滾動）</td>
+          <td class="hl">極快（數秒，切回舊環境）</td>
+          <td class="hl">極快（數秒，權重歸零）</td>
+          <td class="hl">即時（毫秒～秒，推播組態）</td>
+        </tr>
+        <tr>
+          <td><strong>新舊版本並存期</strong></td>
+          <td>中（滾動進行的數分鐘內）</td>
+          <td class="hl">極短（僅切換瞬間之排空期）</td>
+          <td>長（整個各階觀察期）</td>
+          <td>長（新舊分支長期並存於同程序）</td>
+        </tr>
+        <tr>
+          <td><strong>控制面依賴</strong></td>
+          <td>基本健康檢查 (Readiness)</td>
+          <td>Target Group / 路由切換</td>
+          <td>L7 權重路由 + 指標監控</td>
+          <td>低延遲組態推播 + 旗標生命週期清理</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="cap">四大策略並無絕對優劣：Blue-Green 用雙倍機器買「零並存與秒級回滾」，Canary 用長並存期與控制面複雜度買「極小爆炸半徑與低機器成本」。</p>
+
+  <div class="oneliner">
+    <b>一句話答法</b>Rolling 省機器但回滾慢；Blue-Green 回滾快但花雙倍容量；Canary 兼顧省容量與小爆炸半徑但拉長新舊並存期；Feature Flag 則將業務發布從部署管線中徹底解耦。
+  </div>
+</section>
+
+<section id="s3">
+  <div class="sec-head">
+    <span class="sec-num">03</span>
+    <h2>新舊版本並存：API 與 Schema 相容 (Expand / Contract)</h2>
+  </div>
+  <p class="sec-sub">只要線上同時存在 v1 與 v2 實例，任何破壞性 Schema 變更都會讓「秒級回滾」變成災難。</p>
+
+  <p>在面試中，許多候選人談完「用 Canary 切 <var>5%</var> 流量，出事就秒切回 <var>v1</var>」便以為萬無一失，卻忽略了背後的狀態層：<strong>運算實例是無狀態且可並存的，但底層資料庫通常只有一份。</strong></p>
+  <p>假設你要將使用者資料表的 <code>full_name</code> 欄位拆成 <code>first_name</code> 與 <code>last_name</code>。若在部署 <var>v2</var> 前直接執行 <code>ALTER TABLE DROP COLUMN full_name</code>，線上仍在處理 <var>95%</var> 流量的 <var>v1</var> 實例會立刻因為找不到欄位而全面崩潰；反之，若 <var>v2</var> 寫入了只有 <var>v2</var> 看得懂的格式，當 Canary 失敗回滾到 <var>v1</var> 時，<var>v1</var> 讀到這批新資料也會反序列化失敗。</p>
+
+  <h3>平行演進模式：Expand and Contract（擴張與收縮）</h3>
+  <p>為了讓 Rolling 與 Canary 在任意時刻都能安全推進或無損回滾，資料庫與有狀態 Schema 必須遵循 <strong>Expand &rarr; Migrate (Dual-Write) &rarr; Contract</strong> 三階段演進，將一次破壞性變更拆成多次向後相容（Backward-compatible）與向前相容（Forward-compatible）的小步部署：</p>
+
+  <div class="dps-lane">
+    <div class="lh">演進階段</div>
+    <div class="lh">資料庫 Schema 狀態</div>
+    <div class="lh">線上應用程式行為</div>
+    <div class="lh">回滾安全性</div>
+
+    <div class="lt">1. Expand<br>(擴張期)</div>
+    <div class="lc act">新增可為 NULL 的 <code>first_name</code>、<code>last_name</code>，保留舊欄位 <code>full_name</code>（不加 NOT NULL 約束）。</div>
+    <div class="lc">線上仍為 <var>v1</var>（只讀寫 <code>full_name</code>），正準備透過 Canary 推進 <var>v2</var>。</div>
+    <div class="lc ok">完全安全：新欄位對 <var>v1</var> 透明。</div>
+
+    <div class="lt">2. Dual-Write<br>(雙寫與回填)</div>
+    <div class="lc">新舊欄位並存；背景批次工作（Backfill Job）掃描歷史舊列，補齊空白的新欄位。</div>
+    <div class="lc act"><var>v2</var> 上線：<strong>同時寫入新舊欄位（Dual-Write）</strong>；讀取時優先讀新欄位，若為空則 Fallback 讀舊欄位。</div>
+    <div class="lc ok">可隨時切回 <var>v1</var>：因 <var>v2</var> 仍持續同步寫入 <code>full_name</code>，<var>v1</var> 不會漏讀任何新異動。</div>
+
+    <div class="lt">3. Cutover<br>(讀取切換)</div>
+    <div class="lc">確認歷史回填 100% 完成，所有資料列的新舊欄位皆有值。</div>
+    <div class="lc"><var>v3</var> 上線：完全改讀新欄位，並停止讀取舊欄位（若確定不再回滾至 <var>v1</var>，可停止雙寫舊欄位）。</div>
+    <div class="lc warn">退回 <var>v2</var> 安全；若停止雙寫則不可再退回遠古 <var>v1</var>。</div>
+
+    <div class="lt">4. Contract<br>(收縮清理)</div>
+    <div class="lc ok">確認線上已無任何實例引用 <code>full_name</code> 後，執行 DDL 移除舊欄位並加上約束。</div>
+    <div class="lc">所有實例均穩定運行於 <var>v3</var>。</div>
+    <div class="lc ok">遷移閉環完成，消除技術債。</div>
+  </div>
+  <p class="cap">Expand / Contract 的核心紀律：永遠不在同一次應用程式部署中「同時新增新欄位並刪除舊欄位」；刪除動作必須留到所有舊版實例徹底退場且不再需要回滾之後。</p>
+
+  <div class="callout warn">
+    <div class="c-title"><span class="ic">陷阱</span>訊息佇列與快取的「跨版本汙染」</div>
+    <p>除了關聯式資料庫，<strong>非同步佇列（Kafka / SQS）與共用快取（Redis）</strong>也是常見的回滾殺手。若 <var>v2</var> Producer 發出了刪減欄位的訊息，線上並存的 <var>v1</var> Consumer 就會解析失敗；若 <var>v2</var> 往 Redis 寫入新版序列化物件，切回 <var>v1</var> 後會引發整片快取反序列化崩潰。務必維持合約的加法演進（Additive Changes），或為破壞性快取鍵加上版本前綴（關於 API 契約演進與版本化規則，由 <code>api-design-styles</code> 專門討論）。</p>
+  </div>
+
+  <div class="oneliner">
+    <b>一句話答法</b>有狀態變更必須走 Expand / Migrate / Contract：先加可空新欄並雙寫回填，等舊版實例 100% 下線且過完觀察期，最後才在獨立步驟中刪除舊欄位。
+  </div>
+</section>
+
+<section id="s4">
+  <div class="sec-head">
+    <span class="sec-num">04</span>
+    <h2>自動指標判定與漸進式交付 (Automated Canary Analysis)</h2>
+  </div>
+  <p class="sec-sub">不用人眼盯大盤：用黃金訊號、最小樣本數門檻與雙基線比對，讓部署管線自動推進或熔斷回滾。</p>
+
+  <p>如果 Canary 發佈後需要工程師守在螢幕前肉眼盯著 Grafana 儀表板 30 分鐘，那它既無法規模化，也容易因人為疲勞而漏看尾端延遲（Tail Latency）劣化。現代<strong>漸進式交付（Progressive Delivery）</strong>將流量切換與自動指標分析（Automated Canary Analysis, ACA）綁成閉環控制系統。</p>
+
+  <pre class="mermaid">
+sequenceDiagram
+    participant CD as 部署控制面
+    participant LB as L7 路由器
+    participant Can as Canary (v2)
+    participant Met as 指標分析引擎
+    CD->>LB: 1. 設定權重 v1=95%, v2=5%
+    LB->>Can: 2. 導流 5% 真實請求
+    Can-->>Met: 3. 上報 5xx / p99 延遲 / 飽和度
+    Met->>CD: 4a. 指標異常 (超越閾值)
+    CD->>LB: 4b. 緊急回滾：v2 權重歸 0%
+    Met->>CD: 5a. 觀察期通過且樣本充足
+    CD->>LB: 5b. 推進下一階：v2=25% -> 50% -> 100%
+  </pre>
+  <p class="cap">漸進式交付閉環：每一階權重提升後都必須通過「最小樣本數」與「觀察期（Baking Period）」雙重驗證，任一指標違規即自動將 v2 權重歸零。</p>
+
+  <h3>自動判定時的三個工程細節</h3>
+  <ol>
+    <li><strong>拿什麼比：絕對閾值 vs 對照基線（Baseline vs Canary）</strong>：單純設定「5xx 錯誤率 <var>&lt; 1%</var>」很容易在離峰或外部第三方故障時誤判。標準作法是同時建立一個與 Canary 同規模、同時間啟動的 <var>v1</var> 對照組（Baseline），計算 Canary 與 Baseline 之間的統計差異（如 Mann-Whitney U 檢定或相對退化比例）。這樣既能排除「剛啟動時的快取冷卻效應」，也能濾掉「全站外部依賴抖動」造成的假警報。</li>
+    <li><strong>看哪些指標：四大黃金訊號 + 業務漏斗指標</strong>：除了 HTTP 5xx 錯誤率與 <var>p95</var>/<var>p99</var> 延遲，還必須納入<strong>業務層轉換率</strong>（例如結帳成功率、發文成功數）。因為如果 <var>v2</var> 把原本該正常處理的請求錯誤地直接回傳 <code>200 OK</code> 空陣列，基礎設施指標會看起來「又快又沒錯」，只有業務指標驟降才能抓出這類靜默壞死（Silent Failure）。（關於黃金訊號、SLO 與 Error Budget 的嚴格定義，由 <code>slo-sli-alerting</code> 負責）。</li>
+    <li><strong>何時才算數：最小樣本數（Minimum Sample Size）與觀察期</strong>：在低流量時段，<var>5%</var> 的金絲雀可能在 5 分鐘內只收到 8 個請求，其中 1 個偶發逾時就會讓錯誤率飆到 <var>12.5%</var> 觸發假回滾；反之，記憶體洩漏（Memory Leak）或連線池耗盡往往需要累積數十分鐘才會顯現。因此 ACA 必須同時要求「Baking 時間達標」且「累積請求樣本數 <var>N</var> 足夠」。</li>
+  </ol>
+
+  <div class="formula">AffectedRequests = TotalQPS &times; CanaryWeight &times; (DetectionWindowSec + RollbackSec)</div>
+
+  <p>上式揭示了 Canary 的真實保護力：即便把回滾時間 <code>RollbackSec</code> 壓到 3 秒，如果偵測窗口 <code>DetectionWindowSec</code> 需要 300 秒才湊得齊統計顯著樣本，期間仍會有 <code>TotalQPS &times; CanaryWeight &times; 303</code> 筆請求受損。這也是為什麼高風險變更常先用 <strong>Shadow Traffic（流量鏡像 / Dark Traffic）</strong>將真實請求複製一份非同步打向 <var>v2</var>（丟棄 <var>v2</var> 回應、不影響真實用戶），或者先用 Feature Flag 限縮在內部帳號驗證，確認無誤後才進入 Canary 權重切流。</p>
+
+  <div class="oneliner">
+    <b>一句話答法</b>自動金絲雀分析（ACA）靠「同規模 Baseline 對照」消除冷啟動與時段偏差，並結合「黃金訊號 + 業務指標 + 最小樣本數門檻」決定自動推進或秒級歸零。
+  </div>
+</section>
+
+<section id="s5">
+  <div class="sec-head">
+    <span class="sec-num">05</span>
+    <h2>雲端實戰對照：AWS CodeDeploy / ALB / Lambda vs GCP Cloud Deploy / Cloud Run</h2>
+  </div>
+  <p class="sec-sub">不同運算層的流量切換原語：從 L7 Target Group 權重、Lambda Alias 到 Cloud Run Revision 流量分割。</p>
+
+  <p>在系統設計面試中，考官常追問：「你說用 Canary 切 <var>10%</var> 流量，在雲端架構上到底是哪一個元件在切？」不同運算模型（EC2/ECS、Kubernetes、Serverless）對應的流量控制點截然不同：</p>
+
+  <div class="dps-split">
+    <div class="dps-pane accent">
+      <div class="dps-pane-title">AWS 部署與切流原語 (CodeDeploy / ALB / Lambda)</div>
+      <p class="dps-pane-desc">
+        <strong>1. ALB Weighted Target Groups</strong>：在單一 Listener 規則下掛載 Blue 與 Green 兩個 Target Group，直接調整路由權重（如 <var>90:10</var>），支援啟用 Stickiness 避免同一用戶在單次操作中反覆橫跳於 <var>v1</var>/<var>v2</var>。<br>
+        <strong>2. AWS CodeDeploy</strong>：原生支援 EC2/On-Premises、ECS 與 Lambda 三種運算平台。在 ECS 藍綠/金絲雀部署中，CodeDeploy 會建立 Replacement Task Set，掛上測試埠驗證後，再依 <code>Canary10Percent5Minutes</code> 或 <code>Linear10PercentEvery3Minutes</code> 動態改寫 ALB 權重；期間綁定 CloudWatch Alarms，一旦告警觸發即自動中止並把權重切回 Original Task Set。<br>
+        <strong>3. Lambda Alias Traffic Shifting</strong>：Lambda 每次發布會產生不可變的數字版本（Version 1, 2）；穩定名稱的 <strong>Alias（如 <code>prod</code>）</strong>可在兩個版本間配置權重（例如 95% 指往 v1、5% 指往 v2），由 CodeDeploy 自動推進並執行 PreTraffic / PostTraffic Hook 驗證。
+      </p>
+    </div>
+    <div class="dps-pane ok">
+      <div class="dps-pane-title">GCP 部署與切流原語 (Cloud Deploy / Cloud Run / GKE)</div>
+      <p class="dps-pane-desc">
+        <strong>1. Cloud Run Revision Traffic Splitting</strong>：每次部署自動建立不可變的 Revision（如 <code>svc-00001</code>、<code>svc-00002</code>）。可直接在服務層按百分比分配流量（如 <code>--to-revisions=svc-00002=10,svc-00001=90</code>），或為新版綁定專屬 URL Tag（<code>https://canary---svc.run.app</code>）供內部先行壓測（0% 公開流量，100% 標籤存取）。<br>
+        <strong>2. GCP Cloud Deploy</strong>：託管的持續交付管線，原生支援 GKE、Cloud Run 與 Anthos，內建 Canary 階段定義（如 <code>percentages: [10, 50]</code>）與 Verify Job 自動驗證。<br>
+        <strong>3. GKE / Kubernetes 進階切流</strong>：原生 K8s Service 只能按 Pod 數量比例分流（要切 1% 至少得開 100 個 Pod）；細粒度百分比切流需搭配 Gateway API（<code>HTTPRoute</code> 的 <code>backendRefs.weight</code>）或 Argo Rollouts / Flagger 結合 Cloud Monitoring 自動推進。
+      </p>
+    </div>
+  </div>
+  <p class="cap">容器與無伺服器平台的不可變版本（ECS Task Set、Lambda Version、Cloud Run Revision）讓權重切流與秒級回滾成為內建原語，不再需要手動搬移機器。</p>
+
+  <div class="callout accent">
+    <div class="c-title"><span class="ic">關鍵</span>連線排空 (Connection Draining / Deregistration Delay) 的隱形時間窗</div>
+    <p>無論在 ALB 切換 Target Group 還是用 Rolling 替換實例，「路由權重變成 <var>0%</var>」只代表<strong>不再派發新請求</strong>，正在舊實例上執行中的長請求（In-flight Requests）仍會繼續跑完，直到超過 Deregistration Delay（ALB 預設 300 秒）才強制斷線。這意味著即使切流只需 1 秒，舊程式碼對資料庫的寫入仍可能持續數十秒——這再次印證了第 3 節 Expand / Contract 相容性的必要性。</p>
+  </div>
+
+  <div class="oneliner">
+    <b>一句話答法</b>AWS 靠 ALB Weighted Target Groups、Lambda Alias 搭配 CodeDeploy + CloudWatch Alarms 實現自動漸進切流；GCP 則以 Cloud Run Revision Traffic Splitting、Gateway API 與 Cloud Deploy 對齊相同能力。
+  </div>
+</section>
+
+<section id="s6">
+  <div class="sec-head">
+    <span class="sec-num">06</span>
+    <h2>互動決策器：部署策略與爆炸半徑試算室</h2>
+  </div>
+  <p class="sec-sub">設定回滾時間要求、額外容量預算、Schema 變更性質與觀測成熟度，即時推導最佳部署組合並量化各方案的受影響請求數。</p>
+
+  <div class="demo" id="demo-dps">
+    <div class="demo-bar">
+      <span class="label">互動決策器 · 部署策略選型與受損請求評估</span>
+      <span class="label" style="text-transform:none;font-family:var(--sans);font-size:12px;color:var(--text-2)">調整四個架構約束與線上流量參數，比較四種策略的合規性與故障衝擊</span>
+    </div>
+    <div class="demo-body">
+      <p class="dps-lead">請回答下方 4 個系統約束問題，並透過滑桿設定線上流量（QPS）與預期故障率。決策引擎會先淘汰違反硬約束（容量上限、回滾 SLA、破壞性 Schema 變更）的策略，再從合格候選中選出衝擊最小的組合架構。</p>
+
+      <div class="dps-toolbar">
+        <div class="seg" role="group" aria-label="回滾時間要求">
+          <button type="button" data-rto="instant" aria-pressed="true">回滾要求：秒級 (&le; 15s)</button>
+          <button type="button" data-rto="fast" aria-pressed="false">回滾要求：分鐘級 (&le; 120s)</button>
+          <button type="button" data-rto="relaxed" aria-pressed="false">回滾要求：寬鬆 (&le; 600s)</button>
+        </div>
+        <div class="seg" role="group" aria-label="資料庫 Schema 變更">
+          <button type="button" data-schema="none" aria-pressed="true">無 Schema 變更</button>
+          <button type="button" data-schema="additive" aria-pressed="false">Expand 相容變更</button>
+          <button type="button" data-schema="breaking" aria-pressed="false">破壞性 Schema 變更</button>
+        </div>
+      </div>
+
+      <div class="dps-qgrid">
+        <div class="dps-qbox">
+          <div class="dps-qlabel">
+            <span>Q3. 額外容量預算上限 (Surge Cap)</span>
+            <b id="dps-val-cap">+25%</b>
+          </div>
+          <input type="range" id="dps-in-cap" min="10" max="100" step="5" value="25">
+          <div class="dps-qhint">發佈期間可額外開啟的機器比例（Blue-Green 需 100% 雙倍環境）。</div>
+        </div>
+
+        <div class="dps-qbox">
+          <div class="dps-qlabel">
+            <span>Q4. 權重路由與自動指標成熟度</span>
+            <b id="dps-val-obs">L7 權重 + 自動告警</b>
+          </div>
+          <select id="dps-in-obs">
+            <option value="basic">僅有基本健康檢查 (L4 / Readiness)</option>
+            <option value="weighted" selected>具備 L7 權重路由 + 自動指標告警 (ACA)</option>
+            <option value="flag-sdk">具備 L7 自動告警 + Feature Flag 組態中心</option>
+          </select>
+          <div class="dps-qhint">決定能否支援細粒度 Canary 切流與執行期旗標秒關。</div>
+        </div>
+
+        <div class="dps-qbox">
+          <div class="dps-qlabel">
+            <span>線上總流量 (Total QPS)</span>
+            <b id="dps-val-qps">2,000 req/s</b>
+          </div>
+          <input type="range" id="dps-in-qps" min="200" max="10000" step="200" value="2000">
+          <div class="dps-qhint">用於計算發佈缺陷版本時，從暴露到完成回滾之間的受損請求總數。</div>
+        </div>
+
+        <div class="dps-qbox">
+          <div class="dps-qlabel">
+            <span>新版本缺陷錯誤率 (Defect Rate)</span>
+            <b id="dps-val-err">5%</b>
+          </div>
+          <input type="range" id="dps-in-err" min="1" max="50" step="1" value="5">
+          <div class="dps-qhint">假設 v2 上線後帶有此比例的請求失敗，觀察各策略能擋下多少災情。</div>
+        </div>
+      </div>
+
+      <div class="dps-reco-banner" id="dps-reco-box">
+        <div class="dps-reco-head">
+          <span class="dps-reco-name" id="dps-reco-title">建議策略計算中…</span>
+          <span class="dps-reco-badge" id="dps-reco-meta">--</span>
+        </div>
+        <p class="dps-reco-why" id="dps-reco-why">--</p>
+      </div>
+
+      <div class="dps-cards" id="dps-cards">
+        <div class="dps-card" id="dps-card-rolling">
+          <div class="dps-cname"><span>Rolling Update</span><span class="dps-ctag" id="dps-tag-rolling">--</span></div>
+          <div class="dps-cstats">
+            <span>回滾耗時<b id="dps-rt-rolling">--</b></span>
+            <span>額外容量<b id="dps-cap-rolling">--</b></span>
+            <span>首波暴露<b id="dps-exp-rolling">--</b></span>
+            <span>受損請求<b id="dps-bad-rolling">--</b></span>
+          </div>
+          <div class="dps-cnote" id="dps-note-rolling">--</div>
+        </div>
+
+        <div class="dps-card" id="dps-card-bg">
+          <div class="dps-cname"><span>Blue-Green</span><span class="dps-ctag" id="dps-tag-bg">--</span></div>
+          <div class="dps-cstats">
+            <span>回滾耗時<b id="dps-rt-bg">--</b></span>
+            <span>額外容量<b id="dps-cap-bg">--</b></span>
+            <span>首波暴露<b id="dps-exp-bg">--</b></span>
+            <span>受損請求<b id="dps-bad-bg">--</b></span>
+          </div>
+          <div class="dps-cnote" id="dps-note-bg">--</div>
+        </div>
+
+        <div class="dps-card" id="dps-card-canary">
+          <div class="dps-cname"><span>Canary (漸進)</span><span class="dps-ctag" id="dps-tag-canary">--</span></div>
+          <div class="dps-cstats">
+            <span>回滾耗時<b id="dps-rt-canary">--</b></span>
+            <span>額外容量<b id="dps-cap-canary">--</b></span>
+            <span>首波暴露<b id="dps-exp-canary">--</b></span>
+            <span>受損請求<b id="dps-bad-canary">--</b></span>
+          </div>
+          <div class="dps-cnote" id="dps-note-canary">--</div>
+        </div>
+
+        <div class="dps-card" id="dps-card-flag">
+          <div class="dps-cname"><span>Canary + Flag</span><span class="dps-ctag" id="dps-tag-flag">--</span></div>
+          <div class="dps-cstats">
+            <span>回滾耗時<b id="dps-rt-flag">--</b></span>
+            <span>額外容量<b id="dps-cap-flag">--</b></span>
+            <span>首波暴露<b id="dps-exp-flag">--</b></span>
+            <span>受損請求<b id="dps-bad-flag">--</b></span>
+          </div>
+          <div class="dps-cnote" id="dps-note-flag">--</div>
+        </div>
+      </div>
+
+      <div class="dps-toolbar" style="margin-top:8px;margin-bottom:6px">
+        <div class="legend" style="margin:0">
+          <span><i class="dot ns-ok"></i>首選策略 (合格且衝擊最低)</span>
+          <span><i class="dot ns-wait"></i>次選可行方案</span>
+          <span><i class="dot ns-bad"></i>違反約束出局</span>
+        </div>
+        <button type="button" class="btn" id="dps-btn-reset">重置預設約束</button>
+      </div>
+
+      <div class="status-line" id="dps-status">--</div>
+    </div>
+  </div>
+
+  <div class="oneliner">
+    <b>一句話答法</b>面試收尾公式：基礎設施層用 Canary（或容量充裕時用 Blue-Green）控制運算實例切換風險，資料層強制執行 Expand / Contract 維持雙向相容，高風險業務邏輯再包一層 Feature Flag 做到秒級無損開關。
+  </div>
+</section>
+
+        <footer class="article-foot" aria-label="閱讀進度與導覽">
+          <div class="article-foot-left">
+            <button class="read-toggle read-toggle-lg" type="button" data-read-toggle aria-pressed="false">
+              <span class="read-dot" aria-hidden="true"></span>
+              <span class="read-label">標記為已讀</span>
+            </button>
+            <span class="article-foot-hint" data-read-hint>讀完本篇後可標記為已讀；進度只存在這個瀏覽器，首頁學習地圖會依此顯示。</span>
+          </div>
+          <a class="article-foot-back" href="../index.html">← 返回系統設計知識地圖</a>
+        </footer>
+      </div>
+    </main>
+  </div>
+
+  <script>
+    "use strict";
+    document.addEventListener("DOMContentLoaded", function () {
+      /* ===== TOC scrollspy, mobile accordion & desktop collapse ===== */
+      (function () {
+        var links = Array.prototype.slice.call(document.querySelectorAll(".toc-nav a"));
+        var map = {};
+        links.forEach(function (a) {
+          var href = a.getAttribute("href");
+          if (href && href.startsWith("#")) {
+            map[href.slice(1)] = a;
+          }
+        });
+        var secs = links.map(function (a) {
+          var href = a.getAttribute("href");
+          return href && href.startsWith("#") ? document.getElementById(href.slice(1)) : null;
+        }).filter(Boolean);
+
+        if (secs.length > 0 && typeof IntersectionObserver !== "undefined") {
+          var obs = new IntersectionObserver(function (entries) {
+            entries.forEach(function (e) {
+              if (e.isIntersecting) {
+                links.forEach(function (l) { l.classList.remove("active"); });
+                var act = map[e.target.id];
+                if (act) act.classList.add("active");
+              }
+            });
+          }, { rootMargin: "-20% 0px -70% 0px", threshold: 0 });
+          secs.forEach(function (s) { obs.observe(s); });
+        }
+
+        /* mobile：目錄 accordion（≤920px） */
+        var toggle = document.querySelector(".toc-toggle");
+        var nav = document.querySelector(".toc-nav");
+        if (toggle && nav) {
+          toggle.addEventListener("click", function () {
+            var open = nav.classList.toggle("open");
+            toggle.setAttribute("aria-expanded", open ? "true" : "false");
+          });
+          nav.addEventListener("click", function (e) {
+            if (e.target.closest("a") && window.innerWidth <= 920) {
+              nav.classList.remove("open");
+              toggle.setAttribute("aria-expanded", "false");
+            }
+          });
+        }
+
+        /* desktop：收合側欄（預設展開；不持久化） */
+        var collapseBtn = document.querySelector(".toc-collapse");
+        var reopenBtn = document.querySelector(".toc-reopen");
+        function setTocCollapsed(collapsed) {
+          document.body.classList.toggle("toc-collapsed", collapsed);
+          if (collapseBtn) collapseBtn.setAttribute("aria-expanded", collapsed ? "false" : "true");
+          if (reopenBtn) reopenBtn.setAttribute("aria-expanded", collapsed ? "false" : "true");
+          if (collapsed && reopenBtn) reopenBtn.focus();
+          else if (!collapsed && collapseBtn) collapseBtn.focus();
+        }
+        if (collapseBtn) {
+          collapseBtn.addEventListener("click", function () { setTocCollapsed(true); });
+        }
+        if (reopenBtn) {
+          reopenBtn.addEventListener("click", function () { setTocCollapsed(false); });
+        }
+
+        /* ===== 已讀狀態追蹤（localStorage + file:// fallback） =====
+           儲存格式（key、envelope、window.name 前綴）與 templates/home-learning-map.js 的同名函式共用，改動須兩邊同步。 */
+        var STORAGE_KEY = "sded.read.v1";
+        var WIN_PREFIX = "sded.read.v1:";
+        var topicId = document.body.getAttribute("data-topic-id") || "";
+        var readBtns = Array.prototype.slice.call(document.querySelectorAll("[data-read-toggle]"));
+        var readHint = document.querySelector("[data-read-hint]");
+
+        function parseEnvelope(raw) {
+          if (!raw || typeof raw !== "string") return null;
+          try {
+            var parsed = JSON.parse(raw);
+            if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+            if (parsed.v === 1 && parsed.items && typeof parsed.items === "object" && !Array.isArray(parsed.items)) {
+              return { updatedAt: Number(parsed.updatedAt) || 0, items: parsed.items };
+            }
+            return { updatedAt: 1, items: parsed };
+          } catch (e) {
+            return null;
+          }
+        }
+
+        function loadReadMap() {
+          var fromLs = null;
+          var fromWin = null;
+          try { fromLs = parseEnvelope(window.localStorage.getItem(STORAGE_KEY)); } catch (e) {}
+          if (window.location.protocol === "file:") {
+            try {
+              if (typeof window.name === "string" && window.name.indexOf(WIN_PREFIX) === 0) {
+                fromWin = parseEnvelope(window.name.slice(WIN_PREFIX.length));
+              }
+            } catch (e) {}
+          }
+          var chosen = fromLs;
+          if (fromWin && (!chosen || fromWin.updatedAt > chosen.updatedAt)) {
+            chosen = fromWin;
+            try {
+              window.localStorage.setItem(STORAGE_KEY, JSON.stringify({ v: 1, updatedAt: chosen.updatedAt, items: chosen.items }));
+            } catch (e) {}
+          } else if (chosen && window.location.protocol === "file:") {
+            try {
+              window.name = WIN_PREFIX + JSON.stringify({ v: 1, updatedAt: chosen.updatedAt, items: chosen.items });
+            } catch (e) {}
+          }
+          return chosen && chosen.items ? Object.assign({}, chosen.items) : {};
+        }
+
+        function saveReadMap(items) {
+          var env = JSON.stringify({ v: 1, updatedAt: Date.now(), items: items });
+          try { window.localStorage.setItem(STORAGE_KEY, env); } catch (e) {}
+          if (window.location.protocol === "file:") {
+            try { window.name = WIN_PREFIX + env; } catch (e) {}
+          }
+        }
+
+        function todayLocal() {
+          var d = new Date();
+          return d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0") + "-" + String(d.getDate()).padStart(2, "0");
+        }
+
+        function syncReadUi() {
+          if (!topicId || !readBtns.length) return;
+          var map = loadReadMap();
+          var val = map[topicId];
+          var isRead = Boolean(val);
+          var dateStr = typeof val === "string" && /^\d{4}-\d{2}-\d{2}$/.test(val) ? val : "";
+          readBtns.forEach(function (btn) {
+            btn.setAttribute("aria-pressed", isRead ? "true" : "false");
+            var label = btn.querySelector(".read-label");
+            if (label) {
+              label.textContent = isRead ? "✓ 已讀" : "標記為已讀";
+            }
+          });
+          if (readHint) {
+            readHint.textContent = isRead
+              ? ("已標記為已讀" + (dateStr ? "（" + dateStr + "）" : "") + "。進度只存在這個瀏覽器，首頁學習地圖會依此顯示。")
+              : "讀完本篇後可標記為已讀；進度只存在這個瀏覽器，首頁學習地圖會依此顯示。";
+          }
+        }
+
+        function toggleRead() {
+          if (!topicId) return;
+          var map = loadReadMap();
+          if (map[topicId]) {
+            delete map[topicId];
+          } else {
+            map[topicId] = todayLocal();
+          }
+          saveReadMap(map);
+          syncReadUi();
+        }
+
+        readBtns.forEach(function (btn) {
+          btn.addEventListener("click", toggleRead);
+        });
+        window.addEventListener("pageshow", syncReadUi);
+        window.addEventListener("storage", function (e) {
+          if (!e.key || e.key === STORAGE_KEY) syncReadUi();
+        });
+        syncReadUi();
+      })();
+    });
+  </script>
+
+  
+<script>
+(function () {
+  "use strict";
+
+  /* ================================================================
+   * (1) 常數與參數表
+   * ================================================================ */
+  var RTO_LIMIT_SEC = {
+    instant: 15,
+    fast: 120,
+    relaxed: 600
+  };
+
+  var OBS_LABEL = {
+    basic: "僅基本健康檢查 (L4)",
+    weighted: "L7 權重 + 自動告警",
+    "flag-sdk": "L7 告警 + Feature Flag"
+  };
+
+  var STRATEGY_META = {
+    rolling: { name: "Rolling Update", baseCap: 10 },
+    bg: { name: "Blue-Green", baseCap: 100 },
+    canary: { name: "Canary (漸進)", baseCap: 10 },
+    flag: { name: "Canary + Flag", baseCap: 10 }
+  };
+
+  var MIN_SIGNIFICANT_ERRORS = 30;
+
+  /* ================================================================
+   * (2) compute* 純函式 —— 不得出現任何 DOM / document / window 存取
+   * ================================================================ */
+
+  function clampNum(v, lo, hi) {
+    var n = Number(v);
+    if (!Number.isFinite(n)) return lo;
+    return Math.max(lo, Math.min(hi, n));
+  }
+
+  // @probe fn       computeDeploymentDecision
+  // @probe baseline {"rto":"instant","schema":"none","capBudget":25,"obs":"weighted","qps":2000,"defectPct":5}
+  // @probe sweep    {"rto":["instant","relaxed"],"schema":["none","breaking"],"capBudget":[10,100],"obs":["basic","flag-sdk"],"qps":[200,10000],"defectPct":[1,50]}
+  function computeDeploymentDecision(p) {
+    var rtoKey = RTO_LIMIT_SEC[p.rto] ? p.rto : "instant";
+    var rtoMaxSec = RTO_LIMIT_SEC[rtoKey];
+    var schema = (p.schema === "additive" || p.schema === "breaking") ? p.schema : "none";
+    var capBudget = clampNum(p.capBudget, 10, 100);
+    var obs = OBS_LABEL[p.obs] ? p.obs : "weighted";
+    var qps = clampNum(p.qps, 200, 10000);
+    var defectRate = clampNum(p.defectPct, 1, 50) / 100;
+
+    // 依額外容量預算推導 Rolling 的單批比例與批次數
+    var rollingBatchPct = Math.min(50, Math.max(10, Math.floor(capBudget / 5) * 5));
+    var rollingBatches = Math.ceil(100 / rollingBatchPct);
+    var drainPenaltySec = Math.round(qps / 500) * 3;
+    var rollingRollbackSec = rollingBatches * 28 + drainPenaltySec;
+
+    // 觀測成熟度決定基礎抓取間隔
+    var baseScrapeSec = obs === "basic" ? 150 : (obs === "weighted" ? 20 : 12);
+    // 相容遷移需要額外驗證雙寫一致性
+    var schemaVerifySec = schema === "none" ? 0 : (schema === "additive" ? 12 : 45);
+    var migrationPhases = schema === "none" ? 1 : (schema === "additive" ? 2 : 3);
+
+    var rawConfigs = [
+      {
+        key: "rolling",
+        reqCapPct: rollingBatchPct,
+        exposurePct: rollingBatchPct,
+        rollbackSec: rollingRollbackSec,
+        needsWeighted: false,
+        needsFlag: false,
+        coexists: true
+      },
+      {
+        key: "bg",
+        reqCapPct: 100,
+        exposurePct: 100,
+        rollbackSec: 8 + Math.round(qps / 2500),
+        needsWeighted: false,
+        needsFlag: false,
+        coexists: false
+      },
+      {
+        key: "canary",
+        reqCapPct: 10,
+        exposurePct: 5,
+        rollbackSec: 6,
+        needsWeighted: true,
+        needsFlag: false,
+        coexists: true
+      },
+      {
+        key: "flag",
+        reqCapPct: 10,
+        exposurePct: 1,
+        rollbackSec: 2,
+        needsWeighted: true,
+        needsFlag: true,
+        coexists: true
+      }
+    ];
+
+    var evaluations = {};
+    var eligibleList = [];
+
+    for (var i = 0; i < rawConfigs.length; i += 1) {
+      var cfg = rawConfigs[i];
+      var reasons = [];
+
+      if (cfg.reqCapPct > capBudget) {
+        reasons.push("需 +" + cfg.reqCapPct + "% 容量（超出 +" + capBudget + "% 預算）");
+      }
+      if (cfg.rollbackSec > rtoMaxSec) {
+        reasons.push("回滾需 " + cfg.rollbackSec + "s（超出 " + rtoMaxSec + "s 目標）");
+      }
+      if (cfg.needsWeighted && obs === "basic") {
+        reasons.push("缺 L7 權重路由與自動指標告警");
+      }
+      if (cfg.needsFlag && obs !== "flag-sdk") {
+        reasons.push("缺 Feature Flag 組態中心");
+      }
+      if (schema === "breaking") {
+        if (cfg.coexists) {
+          reasons.push("新舊版本並存期間會因破壞性 Schema 崩潰");
+        } else {
+          reasons.push("切流後若寫入新格式，切回舊環境將無法相容讀取");
+        }
+      }
+
+      var errPerSec = qps * (cfg.exposurePct / 100) * defectRate;
+      var sampleWaitSec = Math.ceil(MIN_SIGNIFICANT_ERRORS / Math.max(0.05, errPerSec));
+      var detectSec = Math.min(360, Math.max(baseScrapeSec, sampleWaitSec) + schemaVerifySec);
+      var totalWindowSec = detectSec + cfg.rollbackSec;
+      var failedReqs = Math.round(errPerSec * totalWindowSec);
+
+      // 綜合評分：越低受損與越快回滾分數越高
+      var penalty = Math.round(failedReqs / 15) + cfg.rollbackSec * 2 + cfg.reqCapPct;
+      var score = Math.max(0, 1000 - penalty);
+      var eligible = reasons.length === 0;
+
+      var item = {
+        key: cfg.key,
+        name: STRATEGY_META[cfg.key].name,
+        eligible: eligible,
+        reqCapPct: cfg.reqCapPct,
+        exposurePct: cfg.exposurePct,
+        detectSec: detectSec,
+        rollbackSec: cfg.rollbackSec,
+        failedReqs: failedReqs,
+        score: score,
+        note: eligible
+          ? ("偵測 " + detectSec + "s + 回滾 " + cfg.rollbackSec + "s，期間受損約 " + failedReqs + " 筆請求。")
+          : ("淘汰：" + reasons.join("；") + "。")
+      };
+
+      evaluations[cfg.key] = item;
+      if (eligible) {
+        eligibleList.push(item);
+      }
+    }
+
+    eligibleList.sort(function (a, b) {
+      if (a.failedReqs !== b.failedReqs) return a.failedReqs - b.failedReqs;
+      return a.rollbackSec - b.rollbackSec;
+    });
+
+    var winner = eligibleList.length > 0 ? eligibleList[0] : null;
+    var runnerUp = eligibleList.length > 1 ? eligibleList[1] : null;
+    var bgFailed = evaluations.bg.failedReqs;
+    var savedReqs = winner ? Math.max(0, bgFailed - winner.failedReqs) : 0;
+
+    var headline = "";
+    var explanation = "";
+    var warnMode = false;
+
+    if (schema === "breaking") {
+      warnMode = true;
+      headline = "硬性阻斷：請先將破壞性變更拆解為 Expand / Contract 三階段";
+      explanation = "目前選擇了「破壞性 Schema 變更」（需 " + migrationPhases + " 階段遷移）。直接部署會導致 v1/v2 並存崩潰或回滾後資料損毀；請先獨立部署第 1 階段 Expand（新增可空欄位 + 雙寫），把變更降級為「Expand 相容變更」後再推進程式碼。";
+    } else if (!winner) {
+      warnMode = true;
+      headline = "無完全符合約束的策略：請放寬容量預算或升級 L7 權重路由控制面";
+      explanation = "在回滾要求 <= " + rtoMaxSec + "s 且額外容量 <= +" + capBudget + "% 下，Rolling 因回滾需 " + evaluations.rolling.rollbackSec + "s 出局，Blue-Green 因需 +100% 容量出局，而 Canary 因缺少 L7 權重與自動告警無法啟用。";
+    } else {
+      headline = "首選推薦：" + winner.name + (schema === "additive" ? " ＋ Expand 雙寫遷移" : "");
+      explanation = "在回滾上限 " + rtoMaxSec + "s 與容量預算 +" + capBudget + "% 下，" + winner.name + " 將首波爆炸半徑鎖在 " + winner.exposurePct + "%，預計 " + winner.detectSec + "s 湊齊統計樣本、" + winner.rollbackSec + "s 完成回滾，受損請求壓低至 " + winner.failedReqs + " 筆（較全量切流少損壞 " + savedReqs + " 筆）。";
+    }
+
+    return {
+      winnerKey: winner ? winner.key : "none",
+      runnerUpKey: runnerUp ? runnerUp.key : "none",
+      eligibleCount: eligibleList.length,
+      migrationPhases: migrationPhases,
+      rollingBatches: rollingBatches,
+      rtoMaxSec: rtoMaxSec,
+      savedReqs: savedReqs,
+      warnMode: warnMode,
+      headline: headline,
+      explanation: explanation,
+      evaluations: evaluations
+    };
+  }
+
+  /* ================================================================
+   * (3) DOM 參照
+   * ================================================================ */
+  function el(id) {
+    return document.getElementById(id);
+  }
+
+  var root = el("demo-dps");
+  if (!root) return;
+
+  var inCap = el("dps-in-cap");
+  var inObs = el("dps-in-obs");
+  var inQps = el("dps-in-qps");
+  var inErr = el("dps-in-err");
+  var btnReset = el("dps-btn-reset");
+
+  var valCap = el("dps-val-cap");
+  var valObs = el("dps-val-obs");
+  var valQps = el("dps-val-qps");
+  var valErr = el("dps-val-err");
+
+  var recoBox = el("dps-reco-box");
+  var recoTitle = el("dps-reco-title");
+  var recoMeta = el("dps-reco-meta");
+  var recoWhy = el("dps-reco-why");
+  var statusLine = el("dps-status");
+
+  var cardDom = {
+    rolling: {
+      card: el("dps-card-rolling"),
+      tag: el("dps-tag-rolling"),
+      rt: el("dps-rt-rolling"),
+      cap: el("dps-cap-rolling"),
+      exp: el("dps-exp-rolling"),
+      bad: el("dps-bad-rolling"),
+      note: el("dps-note-rolling")
+    },
+    bg: {
+      card: el("dps-card-bg"),
+      tag: el("dps-tag-bg"),
+      rt: el("dps-rt-bg"),
+      cap: el("dps-cap-bg"),
+      exp: el("dps-exp-bg"),
+      bad: el("dps-bad-bg"),
+      note: el("dps-note-bg")
+    },
+    canary: {
+      card: el("dps-card-canary"),
+      tag: el("dps-tag-canary"),
+      rt: el("dps-rt-canary"),
+      cap: el("dps-cap-canary"),
+      exp: el("dps-exp-canary"),
+      bad: el("dps-bad-canary"),
+      note: el("dps-note-canary")
+    },
+    flag: {
+      card: el("dps-card-flag"),
+      tag: el("dps-tag-flag"),
+      rt: el("dps-rt-flag"),
+      cap: el("dps-cap-flag"),
+      exp: el("dps-exp-flag"),
+      bad: el("dps-bad-flag"),
+      note: el("dps-note-flag")
+    }
+  };
+
+  var state = {
+    rto: "instant",
+    schema: "none",
+    capBudget: 25,
+    obs: "weighted",
+    qps: 2000,
+    defectPct: 5
+  };
+
+  /* ================================================================
+   * (4) render(state) —— 只讀計算結果更新畫面
+   * ================================================================ */
+  function fmtInt(n) {
+    return Number(n).toLocaleString("en-US");
+  }
+
+  function render() {
+    var out = computeDeploymentDecision(state);
+
+    valCap.textContent = "+" + state.capBudget + "%";
+    valObs.textContent = OBS_LABEL[state.obs] || state.obs;
+    valQps.textContent = fmtInt(state.qps) + " req/s";
+    valErr.textContent = state.defectPct + "%";
+
+    var rtoBtns = root.querySelectorAll("[data-rto]");
+    for (var i = 0; i < rtoBtns.length; i += 1) {
+      var b = rtoBtns[i];
+      b.setAttribute("aria-pressed", b.getAttribute("data-rto") === state.rto ? "true" : "false");
+    }
+
+    var schemaBtns = root.querySelectorAll("[data-schema]");
+    for (var j = 0; j < schemaBtns.length; j += 1) {
+      var sb = schemaBtns[j];
+      sb.setAttribute("aria-pressed", sb.getAttribute("data-schema") === state.schema ? "true" : "false");
+    }
+
+    recoBox.className = "dps-reco-banner" + (out.warnMode ? " is-warn" : "");
+    recoTitle.textContent = out.headline;
+    recoMeta.textContent = "合格策略 " + out.eligibleCount + " / 4 ・ DB 遷移階段 " + out.migrationPhases + " 階";
+    recoWhy.textContent = out.explanation;
+
+    var keys = ["rolling", "bg", "canary", "flag"];
+    for (var k = 0; k < keys.length; k += 1) {
+      var key = keys[k];
+      var ev = out.evaluations[key];
+      var dom = cardDom[key];
+
+      var cls = "dps-card";
+      var tagText = "可行";
+      if (out.winnerKey === key) {
+        cls += " is-winner";
+        tagText = "首選推薦";
+      } else if (out.runnerUpKey === key) {
+        cls += " is-runner";
+        tagText = "次選方案";
+      } else if (!ev.eligible) {
+        cls += " is-out";
+        tagText = "違反約束";
+      }
+
+      dom.card.className = cls;
+      dom.tag.textContent = tagText;
+      dom.rt.textContent = ev.rollbackSec + "s";
+      dom.cap.textContent = "+" + ev.reqCapPct + "%";
+      dom.exp.textContent = ev.exposurePct + "%";
+      dom.bad.textContent = fmtInt(ev.failedReqs) + " 筆";
+      dom.note.textContent = ev.note;
+    }
+
+    statusLine.textContent = "目前設定：RTO <= " + out.rtoMaxSec + "s｜Rolling 分 " + out.rollingBatches + " 批推進｜DB 演進需 " + out.migrationPhases + " 階段｜首選策略可比全量切換少損失 " + fmtInt(out.savedReqs) + " 筆請求。";
+  }
+
+  /* ================================================================
+   * (5) 事件綁定
+   * ================================================================ */
+  root.addEventListener("click", function (ev) {
+    var node = ev.target && ev.target.nodeType === 1 ? ev.target : (ev.target ? ev.target.parentElement : null);
+    if (!node || !node.closest) return;
+
+    var rtoBtn = node.closest("[data-rto]");
+    if (rtoBtn && root.contains(rtoBtn)) {
+      state.rto = rtoBtn.getAttribute("data-rto");
+      render();
+      return;
+    }
+
+    var schemaBtn = node.closest("[data-schema]");
+    if (schemaBtn && root.contains(schemaBtn)) {
+      state.schema = schemaBtn.getAttribute("data-schema");
+      render();
+    }
+  });
+
+  inCap.addEventListener("input", function () {
+    state.capBudget = Number(inCap.value);
+    render();
+  });
+
+  inObs.addEventListener("change", function () {
+    state.obs = inObs.value;
+    render();
+  });
+
+  inQps.addEventListener("input", function () {
+    state.qps = Number(inQps.value);
+    render();
+  });
+
+  inErr.addEventListener("input", function () {
+    state.defectPct = Number(inErr.value);
+    render();
+  });
+
+  btnReset.addEventListener("click", function () {
+    state.rto = "instant";
+    state.schema = "none";
+    state.capBudget = 25;
+    state.obs = "weighted";
+    state.qps = 2000;
+    state.defectPct = 5;
+    inCap.value = "25";
+    inObs.value = "weighted";
+    inQps.value = "2000";
+    inErr.value = "5";
+    render();
+  });
+
+  render();
+})();
+</script>
+
+
+<!-- 全螢幕檢視：切換按鈕、樣式與 F 鍵快捷鍵 -->
+<style>
+  .fs-toggle {
+    position: fixed;
+    top: 18px;
+    right: 18px;
+    z-index: 1000;
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    font-family: var(--sans);
+    font-size: 12.5px;
+    line-height: 1;
+    color: var(--text-2);
+    background: var(--bg);
+    border: 1px solid var(--border-strong);
+    border-radius: 999px;
+    padding: 7px 13px 7px 11px;
+    cursor: pointer;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, .06), 0 4px 12px rgba(0, 0, 0, .04);
+    transition: background .15s, border-color .15s, color .15s;
+  }
+
+  .fs-toggle:hover {
+    background: var(--bg-soft);
+    color: var(--text);
+    border-color: var(--text-3);
+  }
+
+  .fs-toggle:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+
+  .fs-toggle[aria-pressed="true"] {
+    background: var(--accent);
+    color: #fff;
+    border-color: var(--accent);
+  }
+
+  .fs-toggle .fs-ic {
+    flex: 0 0 auto;
+    display: block;
+  }
+
+  @media print {
+    .fs-toggle { display: none !important; }
+  }
+
+  @media (max-width: 480px) {
+    .fs-toggle { padding: 8px; }
+    .fs-toggle .fs-label { display: none; }
+  }
+</style>
+<button id="fs-toggle-btn" class="fs-toggle" type="button" aria-pressed="false"
+        aria-label="切換全螢幕檢視 (快捷鍵 F)" title="全螢幕檢視 (F)">
+  <svg class="fs-ic fs-ic-expand" viewBox="0 0 24 24" width="15" height="15" fill="none"
+       stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+    <path d="M8 3H5a2 2 0 0 0-2 2v3m18 0V5a2 2 0 0 0-2-2h-3m0 18h3a2 2 0 0 0 2-2v-3M3 16v3a2 2 0 0 0 2 2h3"/>
+  </svg>
+  <svg class="fs-ic fs-ic-compress" viewBox="0 0 24 24" width="15" height="15" fill="none"
+       stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="display:none">
+    <path d="M8 3v3a2 2 0 0 1-2 2H3m18 0h-3a2 2 0 0 1-2-2V3m0 18v-3a2 2 0 0 1 2-2h3M3 16h3a2 2 0 0 1 2 2v3"/>
+  </svg>
+  <span class="fs-label">全螢幕</span>
+</button>
+<script>
+  "use strict";
+  (function () {
+    var btn = document.getElementById("fs-toggle-btn");
+    if (!btn) return;
+    var docEl = document.documentElement;
+    var canFs = !!(docEl.requestFullscreen || docEl.webkitRequestFullscreen);
+    // 不支援 Fullscreen API (如 iPhone Safari) → 隱藏按鈕，避免壞掉的 UI
+    if (!canFs) { btn.style.display = "none"; return; }
+
+    var expandIc = btn.querySelector(".fs-ic-expand");
+    var compressIc = btn.querySelector(".fs-ic-compress");
+    var label = btn.querySelector(".fs-label");
+
+    function isFs() {
+      return !!(document.fullscreenElement || document.webkitFullscreenElement);
+    }
+    function enter() {
+      if (docEl.requestFullscreen) docEl.requestFullscreen();
+      else if (docEl.webkitRequestFullscreen) docEl.webkitRequestFullscreen();
+    }
+    function exit() {
+      if (document.exitFullscreen) document.exitFullscreen();
+      else if (document.webkitExitFullscreen) document.webkitExitFullscreen();
+    }
+    function toggle() { isFs() ? exit() : enter(); }
+    function sync() {
+      var on = isFs();
+      btn.setAttribute("aria-pressed", on ? "true" : "false");
+      if (label) label.textContent = on ? "離開全螢幕" : "全螢幕";
+      if (expandIc) expandIc.style.display = on ? "none" : "block";
+      if (compressIc) compressIc.style.display = on ? "block" : "none";
+    }
+
+    btn.addEventListener("click", toggle);
+    document.addEventListener("fullscreenchange", sync);
+    document.addEventListener("webkitfullscreenchange", sync);
+    document.addEventListener("keydown", function (e) {
+      if (e.key !== "f" && e.key !== "F") return;
+      if (e.metaKey || e.ctrlKey || e.altKey) return;
+      var t = e.target;
+      var tag = t && t.tagName ? t.tagName.toUpperCase() : "";
+      if (tag === "INPUT" || tag === "TEXTAREA" || (t && t.isContentEditable)) return;
+      e.preventDefault();
+      toggle();
+    });
+    sync();
+  })();
+</script>
+</body>
+</html>
