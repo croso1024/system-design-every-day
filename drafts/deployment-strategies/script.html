@@ -1,0 +1,398 @@
+<script>
+(function () {
+  "use strict";
+
+  /* ================================================================
+   * (1) 常數與參數表
+   * ================================================================ */
+  var RTO_LIMIT_SEC = {
+    instant: 15,
+    fast: 120,
+    relaxed: 600
+  };
+
+  var OBS_LABEL = {
+    basic: "僅基本健康檢查 (L4)",
+    weighted: "L7 權重 + 自動告警",
+    "flag-sdk": "L7 告警 + Feature Flag"
+  };
+
+  var STRATEGY_META = {
+    rolling: { name: "Rolling Update", baseCap: 10 },
+    bg: { name: "Blue-Green", baseCap: 100 },
+    canary: { name: "Canary (漸進)", baseCap: 10 },
+    flag: { name: "Canary + Flag", baseCap: 10 }
+  };
+
+  var MIN_SIGNIFICANT_ERRORS = 30;
+
+  /* ================================================================
+   * (2) compute* 純函式 —— 不得出現任何 DOM / document / window 存取
+   * ================================================================ */
+
+  function clampNum(v, lo, hi) {
+    var n = Number(v);
+    if (!Number.isFinite(n)) return lo;
+    return Math.max(lo, Math.min(hi, n));
+  }
+
+  // @probe fn       computeDeploymentDecision
+  // @probe baseline {"rto":"instant","schema":"none","capBudget":25,"obs":"weighted","qps":2000,"defectPct":5}
+  // @probe sweep    {"rto":["instant","relaxed"],"schema":["none","breaking"],"capBudget":[10,100],"obs":["basic","flag-sdk"],"qps":[200,10000],"defectPct":[1,50]}
+  function computeDeploymentDecision(p) {
+    var rtoKey = RTO_LIMIT_SEC[p.rto] ? p.rto : "instant";
+    var rtoMaxSec = RTO_LIMIT_SEC[rtoKey];
+    var schema = (p.schema === "additive" || p.schema === "breaking") ? p.schema : "none";
+    var capBudget = clampNum(p.capBudget, 10, 100);
+    var obs = OBS_LABEL[p.obs] ? p.obs : "weighted";
+    var qps = clampNum(p.qps, 200, 10000);
+    var defectRate = clampNum(p.defectPct, 1, 50) / 100;
+
+    // 依額外容量預算推導 Rolling 的單批比例與批次數
+    var rollingBatchPct = Math.min(50, Math.max(10, Math.floor(capBudget / 5) * 5));
+    var rollingBatches = Math.ceil(100 / rollingBatchPct);
+    var drainPenaltySec = Math.round(qps / 500) * 3;
+    var rollingRollbackSec = rollingBatches * 28 + drainPenaltySec;
+
+    // 觀測成熟度決定基礎抓取間隔
+    var baseScrapeSec = obs === "basic" ? 150 : (obs === "weighted" ? 20 : 12);
+    // 相容遷移需要額外驗證雙寫一致性
+    var schemaVerifySec = schema === "none" ? 0 : (schema === "additive" ? 12 : 45);
+    var migrationPhases = schema === "none" ? 1 : (schema === "additive" ? 2 : 3);
+
+    var rawConfigs = [
+      {
+        key: "rolling",
+        reqCapPct: rollingBatchPct,
+        exposurePct: rollingBatchPct,
+        rollbackSec: rollingRollbackSec,
+        needsWeighted: false,
+        needsFlag: false,
+        coexists: true
+      },
+      {
+        key: "bg",
+        reqCapPct: 100,
+        exposurePct: 100,
+        rollbackSec: 8 + Math.round(qps / 2500),
+        needsWeighted: false,
+        needsFlag: false,
+        coexists: false
+      },
+      {
+        key: "canary",
+        reqCapPct: 10,
+        exposurePct: 5,
+        rollbackSec: 6,
+        needsWeighted: true,
+        needsFlag: false,
+        coexists: true
+      },
+      {
+        key: "flag",
+        reqCapPct: 10,
+        exposurePct: 1,
+        rollbackSec: 2,
+        needsWeighted: true,
+        needsFlag: true,
+        coexists: true
+      }
+    ];
+
+    var evaluations = {};
+    var eligibleList = [];
+
+    for (var i = 0; i < rawConfigs.length; i += 1) {
+      var cfg = rawConfigs[i];
+      var reasons = [];
+
+      if (cfg.reqCapPct > capBudget) {
+        reasons.push("需 +" + cfg.reqCapPct + "% 容量（超出 +" + capBudget + "% 預算）");
+      }
+      if (cfg.rollbackSec > rtoMaxSec) {
+        reasons.push("回滾需 " + cfg.rollbackSec + "s（超出 " + rtoMaxSec + "s 目標）");
+      }
+      if (cfg.needsWeighted && obs === "basic") {
+        reasons.push("缺 L7 權重路由與自動指標告警");
+      }
+      if (cfg.needsFlag && obs !== "flag-sdk") {
+        reasons.push("缺 Feature Flag 組態中心");
+      }
+      if (schema === "breaking") {
+        if (cfg.coexists) {
+          reasons.push("新舊版本並存期間會因破壞性 Schema 崩潰");
+        } else {
+          reasons.push("切流後若寫入新格式，切回舊環境將無法相容讀取");
+        }
+      }
+
+      var errPerSec = qps * (cfg.exposurePct / 100) * defectRate;
+      var sampleWaitSec = Math.ceil(MIN_SIGNIFICANT_ERRORS / Math.max(0.05, errPerSec));
+      var detectSec = Math.min(360, Math.max(baseScrapeSec, sampleWaitSec) + schemaVerifySec);
+      var totalWindowSec = detectSec + cfg.rollbackSec;
+      var failedReqs = Math.round(errPerSec * totalWindowSec);
+
+      // 綜合評分：越低受損與越快回滾分數越高
+      var penalty = Math.round(failedReqs / 15) + cfg.rollbackSec * 2 + cfg.reqCapPct;
+      var score = Math.max(0, 1000 - penalty);
+      var eligible = reasons.length === 0;
+
+      var item = {
+        key: cfg.key,
+        name: STRATEGY_META[cfg.key].name,
+        eligible: eligible,
+        reqCapPct: cfg.reqCapPct,
+        exposurePct: cfg.exposurePct,
+        detectSec: detectSec,
+        rollbackSec: cfg.rollbackSec,
+        failedReqs: failedReqs,
+        score: score,
+        note: eligible
+          ? ("偵測 " + detectSec + "s + 回滾 " + cfg.rollbackSec + "s，期間受損約 " + failedReqs + " 筆請求。")
+          : ("淘汰：" + reasons.join("；") + "。")
+      };
+
+      evaluations[cfg.key] = item;
+      if (eligible) {
+        eligibleList.push(item);
+      }
+    }
+
+    eligibleList.sort(function (a, b) {
+      if (a.failedReqs !== b.failedReqs) return a.failedReqs - b.failedReqs;
+      return a.rollbackSec - b.rollbackSec;
+    });
+
+    var winner = eligibleList.length > 0 ? eligibleList[0] : null;
+    var runnerUp = eligibleList.length > 1 ? eligibleList[1] : null;
+    var bgFailed = evaluations.bg.failedReqs;
+    var savedReqs = winner ? Math.max(0, bgFailed - winner.failedReqs) : 0;
+
+    var headline = "";
+    var explanation = "";
+    var warnMode = false;
+
+    if (schema === "breaking") {
+      warnMode = true;
+      headline = "硬性阻斷：請先將破壞性變更拆解為 Expand / Contract 三階段";
+      explanation = "目前選擇了「破壞性 Schema 變更」（需 " + migrationPhases + " 階段遷移）。直接部署會導致 v1/v2 並存崩潰或回滾後資料損毀；請先獨立部署第 1 階段 Expand（新增可空欄位 + 雙寫），把變更降級為「Expand 相容變更」後再推進程式碼。";
+    } else if (!winner) {
+      warnMode = true;
+      headline = "無完全符合約束的策略：請放寬容量預算或升級 L7 權重路由控制面";
+      explanation = "在回滾要求 <= " + rtoMaxSec + "s 且額外容量 <= +" + capBudget + "% 下，Rolling 因回滾需 " + evaluations.rolling.rollbackSec + "s 出局，Blue-Green 因需 +100% 容量出局，而 Canary 因缺少 L7 權重與自動告警無法啟用。";
+    } else {
+      headline = "首選推薦：" + winner.name + (schema === "additive" ? " ＋ Expand 雙寫遷移" : "");
+      explanation = "在回滾上限 " + rtoMaxSec + "s 與容量預算 +" + capBudget + "% 下，" + winner.name + " 將首波爆炸半徑鎖在 " + winner.exposurePct + "%，預計 " + winner.detectSec + "s 湊齊統計樣本、" + winner.rollbackSec + "s 完成回滾，受損請求壓低至 " + winner.failedReqs + " 筆（較全量切流少損壞 " + savedReqs + " 筆）。";
+    }
+
+    return {
+      winnerKey: winner ? winner.key : "none",
+      runnerUpKey: runnerUp ? runnerUp.key : "none",
+      eligibleCount: eligibleList.length,
+      migrationPhases: migrationPhases,
+      rollingBatches: rollingBatches,
+      rtoMaxSec: rtoMaxSec,
+      savedReqs: savedReqs,
+      warnMode: warnMode,
+      headline: headline,
+      explanation: explanation,
+      evaluations: evaluations
+    };
+  }
+
+  /* ================================================================
+   * (3) DOM 參照
+   * ================================================================ */
+  function el(id) {
+    return document.getElementById(id);
+  }
+
+  var root = el("demo-dps");
+  if (!root) return;
+
+  var inCap = el("dps-in-cap");
+  var inObs = el("dps-in-obs");
+  var inQps = el("dps-in-qps");
+  var inErr = el("dps-in-err");
+  var btnReset = el("dps-btn-reset");
+
+  var valCap = el("dps-val-cap");
+  var valObs = el("dps-val-obs");
+  var valQps = el("dps-val-qps");
+  var valErr = el("dps-val-err");
+
+  var recoBox = el("dps-reco-box");
+  var recoTitle = el("dps-reco-title");
+  var recoMeta = el("dps-reco-meta");
+  var recoWhy = el("dps-reco-why");
+  var statusLine = el("dps-status");
+
+  var cardDom = {
+    rolling: {
+      card: el("dps-card-rolling"),
+      tag: el("dps-tag-rolling"),
+      rt: el("dps-rt-rolling"),
+      cap: el("dps-cap-rolling"),
+      exp: el("dps-exp-rolling"),
+      bad: el("dps-bad-rolling"),
+      note: el("dps-note-rolling")
+    },
+    bg: {
+      card: el("dps-card-bg"),
+      tag: el("dps-tag-bg"),
+      rt: el("dps-rt-bg"),
+      cap: el("dps-cap-bg"),
+      exp: el("dps-exp-bg"),
+      bad: el("dps-bad-bg"),
+      note: el("dps-note-bg")
+    },
+    canary: {
+      card: el("dps-card-canary"),
+      tag: el("dps-tag-canary"),
+      rt: el("dps-rt-canary"),
+      cap: el("dps-cap-canary"),
+      exp: el("dps-exp-canary"),
+      bad: el("dps-bad-canary"),
+      note: el("dps-note-canary")
+    },
+    flag: {
+      card: el("dps-card-flag"),
+      tag: el("dps-tag-flag"),
+      rt: el("dps-rt-flag"),
+      cap: el("dps-cap-flag"),
+      exp: el("dps-exp-flag"),
+      bad: el("dps-bad-flag"),
+      note: el("dps-note-flag")
+    }
+  };
+
+  var state = {
+    rto: "instant",
+    schema: "none",
+    capBudget: 25,
+    obs: "weighted",
+    qps: 2000,
+    defectPct: 5
+  };
+
+  /* ================================================================
+   * (4) render(state) —— 只讀計算結果更新畫面
+   * ================================================================ */
+  function fmtInt(n) {
+    return Number(n).toLocaleString("en-US");
+  }
+
+  function render() {
+    var out = computeDeploymentDecision(state);
+
+    valCap.textContent = "+" + state.capBudget + "%";
+    valObs.textContent = OBS_LABEL[state.obs] || state.obs;
+    valQps.textContent = fmtInt(state.qps) + " req/s";
+    valErr.textContent = state.defectPct + "%";
+
+    var rtoBtns = root.querySelectorAll("[data-rto]");
+    for (var i = 0; i < rtoBtns.length; i += 1) {
+      var b = rtoBtns[i];
+      b.setAttribute("aria-pressed", b.getAttribute("data-rto") === state.rto ? "true" : "false");
+    }
+
+    var schemaBtns = root.querySelectorAll("[data-schema]");
+    for (var j = 0; j < schemaBtns.length; j += 1) {
+      var sb = schemaBtns[j];
+      sb.setAttribute("aria-pressed", sb.getAttribute("data-schema") === state.schema ? "true" : "false");
+    }
+
+    recoBox.className = "dps-reco-banner" + (out.warnMode ? " is-warn" : "");
+    recoTitle.textContent = out.headline;
+    recoMeta.textContent = "合格策略 " + out.eligibleCount + " / 4 ・ DB 遷移階段 " + out.migrationPhases + " 階";
+    recoWhy.textContent = out.explanation;
+
+    var keys = ["rolling", "bg", "canary", "flag"];
+    for (var k = 0; k < keys.length; k += 1) {
+      var key = keys[k];
+      var ev = out.evaluations[key];
+      var dom = cardDom[key];
+
+      var cls = "dps-card";
+      var tagText = "可行";
+      if (out.winnerKey === key) {
+        cls += " is-winner";
+        tagText = "首選推薦";
+      } else if (out.runnerUpKey === key) {
+        cls += " is-runner";
+        tagText = "次選方案";
+      } else if (!ev.eligible) {
+        cls += " is-out";
+        tagText = "違反約束";
+      }
+
+      dom.card.className = cls;
+      dom.tag.textContent = tagText;
+      dom.rt.textContent = ev.rollbackSec + "s";
+      dom.cap.textContent = "+" + ev.reqCapPct + "%";
+      dom.exp.textContent = ev.exposurePct + "%";
+      dom.bad.textContent = fmtInt(ev.failedReqs) + " 筆";
+      dom.note.textContent = ev.note;
+    }
+
+    statusLine.textContent = "目前設定：RTO <= " + out.rtoMaxSec + "s｜Rolling 分 " + out.rollingBatches + " 批推進｜DB 演進需 " + out.migrationPhases + " 階段｜首選策略可比全量切換少損失 " + fmtInt(out.savedReqs) + " 筆請求。";
+  }
+
+  /* ================================================================
+   * (5) 事件綁定
+   * ================================================================ */
+  root.addEventListener("click", function (ev) {
+    var node = ev.target && ev.target.nodeType === 1 ? ev.target : (ev.target ? ev.target.parentElement : null);
+    if (!node || !node.closest) return;
+
+    var rtoBtn = node.closest("[data-rto]");
+    if (rtoBtn && root.contains(rtoBtn)) {
+      state.rto = rtoBtn.getAttribute("data-rto");
+      render();
+      return;
+    }
+
+    var schemaBtn = node.closest("[data-schema]");
+    if (schemaBtn && root.contains(schemaBtn)) {
+      state.schema = schemaBtn.getAttribute("data-schema");
+      render();
+    }
+  });
+
+  inCap.addEventListener("input", function () {
+    state.capBudget = Number(inCap.value);
+    render();
+  });
+
+  inObs.addEventListener("change", function () {
+    state.obs = inObs.value;
+    render();
+  });
+
+  inQps.addEventListener("input", function () {
+    state.qps = Number(inQps.value);
+    render();
+  });
+
+  inErr.addEventListener("input", function () {
+    state.defectPct = Number(inErr.value);
+    render();
+  });
+
+  btnReset.addEventListener("click", function () {
+    state.rto = "instant";
+    state.schema = "none";
+    state.capBudget = 25;
+    state.obs = "weighted";
+    state.qps = 2000;
+    state.defectPct = 5;
+    inCap.value = "25";
+    inObs.value = "weighted";
+    inQps.value = "2000";
+    inErr.value = "5";
+    render();
+  });
+
+  render();
+})();
+</script>
