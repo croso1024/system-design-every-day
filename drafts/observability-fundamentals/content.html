@@ -1,0 +1,610 @@
+<!-- demo-archetype: F｜拆解器 — 讀者可編輯一段 Prometheus exposition 格式的文字樣本、選取直方圖桶位結構與實例規模，並點選開關各標籤以即時拆解時間序列基數乘積、直方圖展開序列數、抓取吞吐量與月度成本貢獻。選 F 是因為本篇核心在於拆解一行文字指標背後的資料模型與標籤維度如何導致基數爆炸。 -->
+<style>
+  /* 本篇專屬：obv-* 命名空間 */
+  .obv-row {
+    display: flex; flex-wrap: wrap; gap: 10px;
+    align-items: stretch; justify-content: center;
+    margin: 14px 0 6px;
+  }
+  .obv-node {
+    border: 1px solid var(--border-strong); border-radius: 8px;
+    background: #fff; padding: 10px 12px;
+    min-width: 112px; max-width: 196px; text-align: center;
+  }
+  .obv-node .nn { font-family: var(--mono); font-size: 12px; font-weight: 700; color: var(--text); }
+  .obv-node .ns { font-size: 11px; color: var(--text-2); margin-top: 3px; line-height: 1.4; }
+  .obv-node.accent { border-top: 3px solid var(--accent); }
+  .obv-node.ok     { border-top: 3px solid var(--ok); }
+  .obv-node.warn   { border-top: 3px solid var(--warn); }
+  .obv-node.bad    { border-top: 3px solid var(--bad); }
+  .obv-arrow {
+    display: flex; align-items: center;
+    font-family: var(--mono); font-size: 13px; color: var(--text-3);
+    white-space: nowrap;
+  }
+
+  /* 並排雙欄對照：Push vs Pull 收集模型 */
+  .obv-split {
+    display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px;
+    margin: 14px 0 6px;
+  }
+  .obv-split-card {
+    border: 1px solid var(--border-strong); border-radius: 8px;
+    background: #fff; padding: 14px 16px;
+  }
+  .obv-split-card.accent { border-top: 3px solid var(--accent); }
+  .obv-split-card.ok { border-top: 3px solid var(--ok); }
+  .obv-split-head {
+    font-family: var(--mono); font-size: 13px; font-weight: 700;
+    color: var(--text); margin-bottom: 8px; display: flex; justify-content: space-between; align-items: baseline;
+  }
+  .obv-split-head span { font-size: 11px; font-weight: 500; color: var(--text-3); }
+  .obv-split-list { font-size: 13px; color: var(--text-2); padding-left: 18px; margin: 0; }
+  .obv-split-list li { margin: 5px 0; line-height: 1.5; }
+
+  /* 互動拆解器樣式 */
+  .obv-toolbar {
+    display: flex; flex-wrap: wrap; gap: 10px 14px;
+    align-items: center; justify-content: space-between; margin-bottom: 12px;
+  }
+  .obv-presets {
+    display: flex; flex-wrap: wrap; gap: 6px; align-items: center; font-size: 12.5px; color: var(--text-2);
+  }
+  .obv-input-box {
+    margin-bottom: 14px;
+  }
+  .obv-input-label {
+    display: flex; justify-content: space-between; align-items: baseline;
+    font-size: 12px; color: var(--text-2); margin-bottom: 5px; font-family: var(--mono);
+  }
+  .obv-raw-input {
+    width: 100%; font-family: var(--mono); font-size: 12.5px;
+    padding: 9px 11px; border: 1px solid var(--border-strong);
+    border-radius: var(--radius-sm); background: var(--code-bg); color: var(--text);
+  }
+  .obv-raw-input:focus {
+    outline: 2px solid var(--accent); outline-offset: 1px; background: #fff;
+  }
+
+  /* 語法 Token 拆解帶 */
+  .obv-anatomy {
+    border: 1px solid var(--border); border-radius: var(--radius-sm);
+    background: var(--bg-soft); padding: 12px 14px; margin-bottom: 14px;
+  }
+  .obv-anatomy-title {
+    font-family: var(--mono); font-size: 11px; color: var(--text-3);
+    text-transform: uppercase; letter-spacing: .08em; margin-bottom: 8px;
+  }
+  .obv-tokens {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(145px, 1fr)); gap: 8px;
+  }
+  .obv-tok {
+    border: 1px solid var(--border-strong); border-radius: 6px;
+    background: #fff; padding: 8px 10px;
+  }
+  .obv-tok .tk-role {
+    font-family: var(--mono); font-size: 10.5px; color: var(--text-3);
+    display: flex; justify-content: space-between;
+  }
+  .obv-tok .tk-val {
+    font-family: var(--mono); font-size: 12.5px; font-weight: 700;
+    color: var(--text); margin: 3px 0; word-break: break-all;
+  }
+  .obv-tok .tk-desc {
+    font-size: 11.5px; color: var(--text-2); line-height: 1.4;
+  }
+  .obv-tok.accent { border-left: 3px solid var(--accent); }
+  .obv-tok.ok     { border-left: 3px solid var(--ok); }
+  .obv-tok.warn   { border-left: 3px solid var(--warn); }
+
+  /* 參數控制列 */
+  .obv-knobs {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+    gap: 10px 16px; margin-bottom: 14px; padding: 10px 12px;
+    border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--bg-soft);
+  }
+  .obv-knob { display: flex; flex-direction: column; gap: 4px; font-size: 12.5px; color: var(--text-2); }
+  .obv-knob .kl { display: flex; justify-content: space-between; font-weight: 600; color: var(--text); }
+  .obv-knob .kv { font-family: var(--mono); font-size: 12px; color: var(--accent); }
+  .obv-knob input[type="range"] { width: 100%; margin: 0; accent-color: var(--accent); }
+
+  /* 標籤逐項拆解表 */
+  .obv-lbl-grid {
+    border: 1px solid var(--border); border-radius: var(--radius-sm);
+    overflow: hidden; margin-bottom: 14px; font-size: 12.5px;
+  }
+  .obv-lbl-item {
+    display: grid;
+    grid-template-columns: 92px minmax(120px, 1.3fr) 95px 115px minmax(130px, 1.4fr);
+    gap: 8px; align-items: center; padding: 8px 10px;
+    border-top: 1px solid var(--border); background: #fff;
+  }
+  .obv-lbl-item.head {
+    background: var(--bg-soft); font-family: var(--mono); font-size: 11px;
+    font-weight: 700; color: var(--text-2); border-top: none;
+  }
+  .obv-lbl-item.dropped {
+    background: var(--bg-soft); opacity: .68;
+  }
+  .obv-lbl-toggle {
+    font-family: var(--mono); font-size: 11.5px; padding: 4px 8px;
+    border-radius: 5px; border: 1px solid var(--border-strong); background: #fff;
+  }
+  .obv-lbl-toggle.on {
+    background: var(--accent-soft); border-color: var(--accent); color: var(--accent); font-weight: 700;
+  }
+  .obv-lbl-toggle.off {
+    background: var(--bg-soft); border-color: var(--border-strong); color: var(--text-3);
+  }
+  .obv-lbl-kv { font-family: var(--mono); font-size: 12px; word-break: break-all; }
+  .obv-lbl-kv .k { font-weight: 700; color: var(--text); }
+  .obv-lbl-kv .v { color: var(--text-2); }
+  .obv-badge {
+    display: inline-block; font-family: var(--mono); font-size: 11px;
+    padding: 2px 6px; border-radius: 4px; border: 1px solid transparent;
+  }
+  .obv-badge.ok   { background: var(--ok-soft); border-color: var(--ok); color: var(--ok); }
+  .obv-badge.warn { background: var(--warn-soft); border-color: var(--warn); color: var(--warn); }
+  .obv-badge.bad  { background: var(--bad-soft); border-color: var(--bad); color: var(--bad); }
+  .obv-badge.idle { background: var(--bg-soft); border-color: var(--border-strong); color: var(--text-3); }
+
+  /* 指標結果摘要卡 */
+  .obv-cards {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+    gap: 10px; margin-bottom: 12px;
+  }
+  .obv-card {
+    border: 1px solid var(--border); border-radius: var(--radius-sm);
+    padding: 10px 12px; background: #fff;
+  }
+  .obv-card .ck { font-size: 11.5px; color: var(--text-2); margin-bottom: 3px; }
+  .obv-card .cv { font-family: var(--mono); font-size: 16px; font-weight: 700; color: var(--text); }
+  .obv-card .cs { font-family: var(--mono); font-size: 11px; color: var(--text-3); margin-top: 3px; }
+  .obv-card.ok   { border-top: 3px solid var(--ok); }
+  .obv-card.warn { border-top: 3px solid var(--warn); }
+  .obv-card.bad  { border-top: 3px solid var(--bad); }
+
+  @media (max-width: 720px) {
+    .obv-split { grid-template-columns: 1fr; }
+    .obv-lbl-item {
+      grid-template-columns: 78px 1fr 78px;
+    }
+    .obv-lbl-item .col-prod, .obv-lbl-item .col-note {
+      grid-column: 1 / -1;
+    }
+  }
+</style>
+
+<!-- HERO -->
+<header class="hero">
+  <div class="eyebrow">系統設計 · 田野手冊</div>
+  <h1>可觀測性基礎 (Logs / Metrics / Traces)</h1>
+  <p class="lede">分散式系統在生產環境出事時，你永遠不會剛好掛著 debugger。可觀測性（Observability）處理的核心問題，是如何在不重新部署程式碼的前提下，單靠系統對外輸出的三種訊號——Metrics、Logs 與 Traces——在幾分鐘內完成「發現異常 → 縮小爆炸範圍 → 定位單一請求根因」的閉環，同時不讓觀測基礎設施本身的帳單比業務機器還貴。</p>
+  <div class="meta">
+    <span class="tag">Metrics</span>
+    <span class="tag">Logs</span>
+    <span class="tag">Traces</span>
+    <span class="tag">High Cardinality</span>
+    <span class="tag">OpenTelemetry</span>
+  </div>
+</header>
+
+<!-- ============ 01 三大訊號定位 ============ -->
+<section id="s1">
+  <div class="sec-head">
+    <span class="sec-num">01</span>
+    <h2>三大訊號的定位與問題邊界</h2>
+  </div>
+  <p class="sec-sub">每種訊號回答哪一類問題、為什麼缺一不可，以及在系統設計版圖中的座標。</p>
+
+  <p>在單體應用的年代，排查問題幾乎等於「SSH 進機器看 <code>/var/log/app.log</code> + 跑 <code>top</code>」。但當一個結帳請求會橫跨 API Gateway、訂單服務、風控模型、庫存資料庫與外部金流共十幾個節點時，沒有任何一台機器的本機日誌能單獨回答「為什麼這筆訂單卡了 4 秒」。</p>
+
+  <p>傳統<strong>監控（Monitoring）</strong>處理的是<em>已知的未知（Known Unknowns）</em>：你事先知道 CPU 會滿、硬碟會爆、5xx 錯誤率會升高，所以預先寫好告警規則；而<strong>可觀測性（Observability）</strong>處理的是<em>未知的未知（Unknown Unknowns）</em>：只有當「iOS 18.1 客戶端 + 東京區域 + 特定促銷券組合」才會觸發的死鎖，你不可能事先為這個組合寫一條專屬告警，必須靠訊號的任意維度切片與關聯分析把問題挖出來。</p>
+
+  <h3>三大訊號的資料模型與成本光譜</h3>
+  <p>Logs、Metrics、Traces 常被稱為可觀測性的三大支柱（Three Pillars），但工程師在架構設計上真正該記住的不是名詞，而是它們<strong>用什麼儲存成本，換取回答哪一類問題的能力</strong>：</p>
+
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>訊號類型</th>
+          <th>回答的核心問題</th>
+          <th>底層資料模型</th>
+          <th>成本決定因子</th>
+          <th>AWS / GCP 託管代表與開源對照</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><strong>Metrics（指標）</strong></td>
+          <td class="hl">「系統現在有沒有壞？哪個面相壞了？」（What &amp; When）</td>
+          <td>時間戳 + 數值 + 低基數標籤集（Time Series）</td>
+          <td><strong>活躍時間序列數（Active Series）</strong>，與請求量 QPS 脫鉤</td>
+          <td>AWS CloudWatch Metrics / AMP<br>GCP Cloud Monitoring<br>開源：Prometheus / VictoriaMetrics</td>
+        </tr>
+        <tr>
+          <td><strong>Traces（追蹤）</strong></td>
+          <td class="hl">「時間花在呼叫鏈的哪一跳？誰拖慢了誰？」（Where）</td>
+          <td>以 <code>trace_id</code> 串起的有向無環樹（DAG of Spans）</td>
+          <td><strong>請求數 × Span 數 × 採樣率</strong></td>
+          <td>AWS X-Ray<br>GCP Cloud Trace<br>開源：Jaeger / Grafana Tempo</td>
+        </tr>
+        <tr>
+          <td><strong>Logs（日誌）</strong></td>
+          <td class="hl">「那一刻在該節點內部的確切上下文與錯誤原因是什麼？」（Why）</td>
+          <td>時間戳 + 結構化 JSON 鍵值對（無固定維度上限）</td>
+          <td><strong>資料寫入總位元組（GB Ingested）</strong>與索引欄位數</td>
+          <td>AWS CloudWatch Logs / OpenSearch<br>GCP Cloud Logging<br>開源：ELK / ClickHouse / Grafana Loki</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="cap">三大訊號的工程折衷：Metrics 將單筆請求壓縮成統計數字以換取極低查詢延遲與固定成本；Logs 保留全部細節但成本隨流量線性暴增；Traces 則專門紀錄跨服務的因果關係。</p>
+
+  <div class="callout accent">
+    <div class="c-title"><span class="ic">座標</span>為什麼不能只留其中一種？</div>
+    <p>若只留 Logs：你要算「過去 1 小時全站 P99 延遲」就必須即時掃描數百 GB 的文字，既慢又貴，不適合當秒級告警源。若只留 Metrics：你知道 <code>http_requests_total{status="500"}</code> 飆高了，但因為 Metrics 不能放 <code>user_id</code> 或堆疊追蹤（Stack Trace），你永遠查不出是哪一筆請求、哪一行程式碼拋出例外。三者分工的本質，就是<strong>在「聚合統計速度」與「單筆事件上下文」之間做分層儲存</strong>。</p>
+  </div>
+
+  <div class="oneliner">
+    <b>一句話答法</b>Metrics 負責用常數級成本發現「哪裡正在痛（What）」，Traces 負責在微服務拓樸中定位「痛在哪個節點（Where）」，Logs 負責還原「該節點內部的確切死因（Why）」。
+  </div>
+</section>
+
+<hr class="div">
+
+<!-- ============ 02 Metrics 型別與百分位陷阱 ============ -->
+<section id="s2">
+  <div class="sec-head">
+    <span class="sec-num">02</span>
+    <h2>Metrics 資料模型與百分位數學陷阱</h2>
+  </div>
+  <p class="sec-sub">Counter、Gauge、Histogram 與 Summary 的本質差異，以及為什麼對 P99 取平均會在面試直接出局。</p>
+
+  <p>時序資料庫（TSDB，如 Prometheus、CloudWatch Metrics 底層儲存）中的每一條時間序列（Time Series），都是由<strong>指標名稱（Metric Name）+ 一組排序後的 <code>key="value"</code> 標籤（Labels / Dimensions）</strong>唯一決定的。序列裡面只存放按時間排序的 <code>(timestamp, float64)</code> 樣本點。</p>
+
+  <h3>四種核心指標型別</h3>
+  <ul>
+    <li><strong>Counter（單調遞增計數器）</strong>：只增不減，唯一歸零的時機是行程重啟（Process Restart）。例如 <code>http_requests_total</code>、<code>payment_errors_total</code>。查詢時絕不直接看絕對值，而是透過 <code>rate(metric[5m])</code> 計算每秒增長斜率（QPS），TSDB 會自動偵測並補償重啟造成的數值重置（Counter Reset）。</li>
+    <li><strong>Gauge（瞬時水位計）</strong>：可增可減的當下快照。例如 <code>memory_usage_bytes</code>、<code>goroutines_active</code>、佇列當前堆積深度。適合取跨時間的 <code>avg_over_time</code> 或 <code>max_over_time</code>，但對 Gauge 算 <code>rate()</code> 毫無物理意義。</li>
+    <li><strong>Histogram（直方圖）</strong>：在採集端預先切好固定延遲桶位（Buckets，如 <code>le="0.05"</code>、<code>le="0.1"</code>、<code>le="0.5"</code>、<code>le="+Inf"</code>），每個桶位本質上都是一個獨立的 Counter，統計「落入該上界以下的累積請求數」。此外還會附帶 <code>_sum</code>（總耗時）與 <code>_count</code>（總請求數）兩條序列。</li>
+    <li><strong>Summary（客戶端摘要）</strong>：由應用程式在本地滑動視窗內直接算好 <code>quantile="0.99"</code> 後上報一個浮點數。雖然省去了桶位序列，但<strong>無法跨實例聚合</strong>，在分散式多副本環境中幾乎已被 Histogram 取代。</li>
+  </ul>
+
+  <h3>面試必考陷阱：為什麼百分位數（Percentiles）絕對不能直接平均或相加？</h3>
+  <p>假設訂單服務有兩台實例 Pod A 與 Pod B。在過去 1 分鐘內：</p>
+  <ul>
+    <li><strong>Pod A（正常節點，流量佔 99%）</strong>：處理了 <var>9900</var> 筆請求，每筆都在 <code>10 ms</code> 內完成，其本機算出的 <var>P99_A</var> = <code>10 ms</code>。</li>
+    <li><strong>Pod B（發生資料庫連線池飢餓，流量佔 1%）</strong>：只處理了 <var>100</var> 筆請求，但全部卡死到 <code>2000 ms</code> 才回應，其本機算出的 <var>P99_B</var> = <code>2000 ms</code>。</li>
+  </ul>
+  <p>如果每個 Pod 用 Summary 型別各自上報自己的 P99，而你在儀表板上寫出「把所有 Pod 的 P99 取平均」：</p>
+
+  <div class="formula">錯誤的平均值 = (10 ms + 2000 ms) / 2 = 1005 ms</div>
+
+  <p>但實際上，全站這 <var>10000</var> 筆請求裡面，有 <var>9900</var> 筆（剛好 99%）是 <code>10 ms</code>，剩下 <var>100</var> 筆（剛好 1%）是 <code>2000 ms</code>。全站真正的 P99 其實落在第 9900 筆與第 9901 筆的交界處（即 <code>10 ms</code> 附近，而 P99.1 才會跳到 <code>2000 ms</code>）；反過來，若 Pod B 處理了 <var>200</var> 筆慢請求（佔全站 2%），全站真實 P99 應該是 <code>2000 ms</code>，取平均算出來的 <code>1005 ms</code> 則會嚴重低估災情！</p>
+
+  <div class="callout warn">
+    <div class="c-title"><span class="ic">陷阱</span>跨實例計算百分位數的唯一正確做法：聚合 Histogram 桶位</div>
+    <p>百分位數是<strong>不可加（Non-additive）</strong>的統計量，但「落在 100ms 以下的請求筆數」是<strong>可加（Additive）</strong>的計數！因此必須使用 Histogram（或在 AWS CloudWatch 使用底層同樣儲存桶位結構的 <code>p99</code> 統計、GCP Cloud Monitoring 的 <code>Distribution</code> 型別），先把所有 Pod 在同一個 <code>le</code> 桶位的計數器加總，最後才在完整的全站累積分佈上做線性內插：</p>
+  </div>
+
+  <div class="formula">histogram_quantile(0.99, sum by (le, service) (rate(http_request_duration_seconds_bucket[5m])))</div>
+
+  <div class="oneliner">
+    <b>一句話答法</b>百分位數不可跨機器平均；多副本服務必須上報 Histogram 桶位計數，先按 <code>le</code> 桶位跨實例加總（<code>sum by (le)</code>），再由累積分佈反推全站 P95/P99。
+  </div>
+</section>
+
+<hr class="div">
+
+<!-- ============ 03 高基數爆炸與互動拆解器 ============ -->
+<section id="s3">
+  <div class="sec-head">
+    <span class="sec-num">03</span>
+    <h2>高基數爆炸（High Cardinality Explosion）</h2>
+  </div>
+  <p class="sec-sub">為什麼在 Metric Label 塞進 user_id 或 trace_id，會瞬間拖垮 Prometheus 記憶體並讓 CloudWatch 帳單破表。</p>
+
+  <p>TSDB 之所以能毫秒級回答「過去 6 小時每秒請求率」，是因為它為<strong>每一組唯一的標籤組合</strong>在記憶體中維護一個獨立的 Inverted Index 條目與壓縮 Chunk（例如 Gorilla XOR 壓縮需要同一條時間序列連續寫入許多點，壓縮率才會高）。</p>
+
+  <p>當你在程式碼裡寫下一行看似無害的指標打點：</p>
+  <pre><code>http_request_duration_seconds_bucket{service="checkout", method="POST", status="200", user_id="u_948102"}</code></pre>
+  <p>總活躍時間序列數（Active Time Series Cardinality）並不是各標籤可能取值數的「相加」，而是<strong>笛卡兒積（Cartesian Product）相乘</strong>，再乘上實例數與直方圖桶位數：</p>
+
+  <div class="formula">Total Series = Instances &times; SeriesPerMetric &times; &prod; |Label_i|</div>
+
+  <p>只要其中一個標籤是無界或高基數欄位（例如 <code>user_id</code>、<code>order_id</code>、<code>ip_address</code>、<code>request_id</code>、或是未歸一化的完整 URL Path <code>/orders/849201</code>），乘積就會從幾千條瞬間暴增到數千萬條。更糟的是，每個 <code>user_id</code> 只出現一兩次就不再產生新樣本，形成大量「只有 1 個數據點的短命序列（Churn）」——TSDB 既無法有效壓縮，索引表還會常駐在記憶體中，最終導致 Prometheus OOM 崩潰，或在按 Custom Metric 條數計費的 AWS CloudWatch（每條每月約 $0.30 USD）產出數十萬美元的天價帳單。</p>
+
+  <!-- 互動 DEMO：Archetype F 拆解器 -->
+  <div class="demo" id="demo-cardinality-decomposer">
+    <div class="demo-bar">
+      <span class="label">互動 · Prometheus 指標語法與基數拆解器（Archetype F）</span>
+      <span class="label" style="text-transform:none;font-family:var(--sans);font-size:12px;color:var(--text-2)">編輯指標文字或點選開關各標籤，即時拆解序列乘積與成本貢獻</span>
+    </div>
+    <div class="demo-body">
+      <div class="obv-toolbar">
+        <div class="obv-presets">
+          <span>範例樣本：</span>
+          <div class="seg" role="group" aria-label="指標範例樣本切換">
+            <button type="button" data-preset="safe" aria-pressed="false">標準低基數</button>
+            <button type="button" data-preset="explosion" aria-pressed="true">誤塞高基數標籤</button>
+            <button type="button" data-preset="rawpath" aria-pressed="false">未歸一化 URL</button>
+          </div>
+        </div>
+        <button type="button" class="btn" id="obv-btn-reset">重置預設</button>
+      </div>
+
+      <div class="obv-input-box">
+        <div class="obv-input-label">
+          <span>Prometheus Exposition 單行樣本（可直接修改指標名、<code>key="value"</code> 標籤或數值）</span>
+          <span id="obv-parse-hint">語法解析正常</span>
+        </div>
+        <input type="text" class="obv-raw-input" id="obv-raw-input" aria-label="Prometheus 指標文字輸入"
+               value='http_request_duration_seconds_bucket{service="checkout",method="POST",route="/orders/:id",status="200",region="ap-northeast-1",user_id="u_84920"} 142 1730678400000'>
+      </div>
+
+      <!-- 第 1 層拆解：Exposition 語法結構 -->
+      <div class="obv-anatomy">
+        <div class="obv-anatomy-title">Layer 1 · Exposition 格式語法段拆解</div>
+        <div class="obv-tokens" id="obv-tokens"></div>
+      </div>
+
+      <!-- 環境規模與型別展開參數 -->
+      <div class="obv-knobs">
+        <div class="obv-knob">
+          <span class="kl"><span>指標結構展開（Type）</span></span>
+          <div class="seg" role="group" aria-label="指標型別展開倍率">
+            <button type="button" data-mult="1" aria-pressed="false">Counter/Gauge (×1)</button>
+            <button type="button" data-mult="12" aria-pressed="true">Histogram 10桶 (×12)</button>
+            <button type="button" data-mult="22" aria-pressed="false">細粒度 20桶 (×22)</button>
+          </div>
+        </div>
+        <label class="obv-knob">
+          <span class="kl"><span>部署實例數（Instances / Pods）</span><span class="kv" id="obv-inst-val">15 台</span></span>
+          <input type="range" id="obv-inst-slider" min="1" max="60" step="1" value="15" aria-label="部署實例數">
+        </label>
+        <label class="obv-knob">
+          <span class="kl"><span>抓取間隔（Scrape Interval）</span><span class="kv" id="obv-scrape-val">15 s</span></span>
+          <input type="range" id="obv-scrape-slider" min="5" max="60" step="5" value="15" aria-label="抓取間隔秒數">
+        </label>
+      </div>
+
+      <!-- 第 2 層拆解：逐個標籤對時間序列基數的乘積貢獻 -->
+      <div class="obv-anatomy-title" style="font-family:var(--mono);font-size:11px;color:var(--text-3);text-transform:uppercase;letter-spacing:.08em;margin-bottom:6px;">
+        Layer 2 · 標籤維度拆解與基數乘積鏈（點選左側按鈕模擬從 Metric 移除該標籤、改放 Logs/Traces）
+      </div>
+      <div class="obv-lbl-grid">
+        <div class="obv-lbl-item head">
+          <div>保留於 Metric</div>
+          <div>拆解出的標籤 <code>key="value"</code></div>
+          <div>預估取值基數</div>
+          <div class="col-prod">累積序列乘積</div>
+          <div class="col-note">維度診斷與歸屬建議</div>
+        </div>
+        <div id="obv-lbl-rows"></div>
+      </div>
+
+      <!-- 算出的核心指標 -->
+      <div class="obv-cards">
+        <div class="obv-card" id="obv-card-series">
+          <div class="ck">總活躍時間序列（Active Series）</div>
+          <div class="cv" id="obv-out-series">—</div>
+          <div class="cs" id="obv-out-series-sub">—</div>
+        </div>
+        <div class="obv-card" id="obv-out-rate-card">
+          <div class="ck">每秒寫入樣本數（Samples / sec）</div>
+          <div class="cv" id="obv-out-rate">—</div>
+          <div class="cs" id="obv-out-rate-sub">—</div>
+        </div>
+        <div class="obv-card" id="obv-out-ram-card">
+          <div class="ck">TSDB 索引常駐記憶體（預估）</div>
+          <div class="cv" id="obv-out-ram">—</div>
+          <div class="cs">約 3.5 KB / active series</div>
+        </div>
+        <div class="obv-card" id="obv-out-cost-card">
+          <div class="ck">託管指標月度帳單（CloudWatch 級）</div>
+          <div class="cv" id="obv-out-cost">—</div>
+          <div class="cs" id="obv-out-saved-sub">—</div>
+        </div>
+      </div>
+
+      <div class="status-line" id="obv-status"></div>
+      <div class="legend">
+        <span><i class="dot ns-ok"></i>安全有界維度（適合放 Metrics）</span>
+        <span><i class="dot ns-lock"></i>中度放大維度（需設路由歸一化與上限）</span>
+        <span><i class="dot ns-bad"></i>高基數無界維度（嚴禁放 Metrics，應移至 Logs / Traces）</span>
+      </div>
+    </div>
+  </div>
+  <p class="cap">拆解器說明：一行帶有 <code>_bucket</code> 後綴的 Prometheus 指標，在底層會先乘上直方圖桶位數（10 個桶位加上 <code>_sum</code> 與 <code>_count</code> 共 12 條序列）與 Pod 實例數，再依序乘上每個標籤的基數。試著在上方點擊關閉 <code>user_id</code> 標籤，觀察活躍時間序列數如何從上億條瞬間降回數萬條的安全水位。</p>
+
+  <div class="oneliner">
+    <b>一句話答法</b>Metric 標籤只放有界、可枚舉的分群維度（<code>service</code>、<code>status</code>、<code>region</code>、歸一化後的 <code>route</code>）；凡是跟隨用戶或單筆請求成長的高基數 ID（<code>user_id</code>、<code>trace_id</code>）一律放進 Logs 與 Traces。
+  </div>
+</section>
+
+<hr class="div">
+
+<!-- ============ 04 收集模型與日誌管線 ============ -->
+<section id="s4">
+  <div class="sec-head">
+    <span class="sec-num">04</span>
+    <h2>Push vs Pull 收集模型與日誌管線設計</h2>
+  </div>
+  <p class="sec-sub">Prometheus 與 CloudWatch 的推拉取捨，以及高吞吐日誌管線如何做緩衝、削峰與冷熱分層。</p>
+
+  <h3>Metrics 收集的兩大流派：Pull（拉取）vs Push（推送）</h3>
+  <p>系統設計面試常問：「監控系統應該讓 Server 主動去拉（Pull），還是讓應用程式主動往外推（Push）？」這不是宗教戰爭，而是針對不同執行環境的工程取捨：</p>
+
+  <div class="obv-split">
+    <div class="obv-split-card accent">
+      <div class="obv-split-head">Pull 模型（拉取式）<span>代表：Prometheus</span></div>
+      <ul class="obv-split-list">
+        <li><strong>運作方式</strong>：應用程式只暴露 <code>GET /metrics</code> HTTP 端點；Collector 透過服務發現（如 Kubernetes SD）定期主動抓取。</li>
+        <li><strong>核心優勢 1（內建健康檢查）</strong>：抓不到就代表目標掛了（<code>up == 0</code>），不需額外心跳機制。</li>
+        <li><strong>核心優勢 2（防壓垮保護）</strong>：收集端自己決定抓取頻率與並行度，不會因為上游流量暴增而被萬台機器同時推送打爆。</li>
+        <li><strong>天然短板</strong>：生命週期短於抓取間隔（如 15 秒）的無伺服器函數（AWS Lambda）或批次 CronJob，還沒被抓就已經銷毀了；跨 VPC / NAT 防火牆時也難以反向連入。</li>
+      </ul>
+    </div>
+    <div class="obv-split-card ok">
+      <div class="obv-split-head">Push 模型（推送式）<span>代表：AWS CloudWatch / OTLP</span></div>
+      <ul class="obv-split-list">
+        <li><strong>運作方式</strong>：應用程式內的 SDK 或本機 Sidecar / Daemon Agent（如 CloudWatch Agent、OTel Collector）將指標打包透過網路主動發往後端接收器。</li>
+        <li><strong>核心優勢 1（短命任務友善）</strong>：FaaS（Lambda / Cloud Run functions）與短批次任務可在結束前主動 flush 最後一批指標。</li>
+        <li><strong>核心優勢 2（網路方向單純）</strong>：只需要工作節點具備對外（Egress）連線至收集端 LB 的權限，跨多雲或邊緣節點部署容易。</li>
+        <li><strong>天然短板</strong>：全站故障重啟或流量洪峰時，數千台節點同時重試推送會造成接收端雪崩（需靠接收端限流與客戶端退避保護）；且「沒收到數據」無法直接區分是節點閒置、網路斷線還是進程崩潰。</li>
+      </ul>
+    </div>
+  </div>
+  <p class="cap">現代架構通常採混合模式：Kubernetes 內部常駐服務由 DaemonSet / StatefulSet 的 OTel Collector 就近 Pull，再由 Collector 統一批次透過 OTLP Push 到遠端託管 TSDB（如 Amazon Managed Service for Prometheus 或 GCP Cloud Monitoring）。</p>
+
+  <h3>高吞吐日誌收集管線（Log Ingestion Pipeline）</h3>
+  <p>與每隔 15 秒才產生一個數字的 Metrics 不同，每次請求都可能寫出數行結構化 JSON 日誌。若業務服務在處理請求的關鍵路徑上，直接同步透過網路呼叫 Elasticsearch 或 CloudWatch Logs API，一旦日誌後端發生 GC 停頓或網路抖動，就會直接阻塞甚至拖垮業務執行緒。</p>
+
+  <p>因此，生產級日誌管線必定遵守<strong>「本地非同步落盤 + Agent 採集 + 訊息佇列削峰 + 冷熱分層儲存」</strong>的四段式架構：</p>
+
+  <div class="obv-row">
+    <div class="obv-node accent">
+      <div class="nn">App Process</div>
+      <div class="ns">只寫 stdout / 本地檔<br>零網路阻塞</div>
+    </div>
+    <span class="obv-arrow">▸</span>
+    <div class="obv-node">
+      <div class="nn">Node Agent</div>
+      <div class="ns">Fluent Bit / Vector<br>Tail + 遮罩 PII + 批次</div>
+    </div>
+    <span class="obv-arrow">▸</span>
+    <div class="obv-node warn">
+      <div class="nn">Buffer Queue</div>
+      <div class="ns">Kafka / Kinesis<br>吸收故障期日誌洪峰</div>
+    </div>
+    <span class="obv-arrow">▸</span>
+    <div class="obv-node ok">
+      <div class="nn">Hot Index (3-7d)</div>
+      <div class="ns">OpenSearch / Loki<br>即時排障全文檢索</div>
+    </div>
+    <span class="obv-arrow">▸</span>
+    <div class="obv-node">
+      <div class="nn">Cold Archive (1y+)</div>
+      <div class="ns">S3 / GCS + Parquet<br>Athena / BigQuery 稽核</div>
+    </div>
+  </div>
+  <p class="cap">日誌管線的核心設計原則：業務程式永遠不直接連遠端日誌庫；當系統雪崩導致錯誤日誌暴增 50 倍時，Buffer Queue 負責擋下寫入尖峰，保護後端索引叢集不在此時跟著崩潰（佇列分區與保留機制詳見 Kafka 架構篇，倒排索引與分片寫入成本詳見搜尋與分析引擎篇）。</p>
+
+  <div class="callout accent">
+    <div class="c-title"><span class="ic">關鍵</span>AWS CloudWatch EMF 與 GCP 結構化日誌的「日誌轉指標」模式</div>
+    <p>在 Serverless 或高併發環境中，若不想維護獨立的指標推送通道，AWS CloudWatch 提供 <strong>Embedded Metric Format（EMF）</strong>：應用程式只需往 <code>stdout</code> 印出一行符合 EMF 規範的 JSON 日誌，CloudWatch Logs 接收時會自動從中解析並抽取出高頻聚合的 CloudWatch Metrics（只保留低基數維度），同時整行原始 JSON（含高基數的 <code>request_id</code>、<code>user_id</code>）則留在 Logs 供事後查詢。GCP Cloud Logging 的 <strong>Log-based Metrics</strong> 也扮演完全相同的角色——一次寫入，同時滿足低成本告警與高明細排障。</p>
+  </div>
+
+  <div class="oneliner">
+    <b>一句話答法</b>業務服務只將結構化 JSON 日誌非同步寫入 <code>stdout</code>，由節點上的輕量 Agent（Fluent Bit / OTel Collector）收集並經佇列削峰後，依查詢熱度分流至短期熱索引（OpenSearch）與長期冷物件儲存（S3 / GCS）。
+  </div>
+</section>
+
+<hr class="div">
+
+<!-- ============ 05 三大訊號串聯與 OpenTelemetry ============ -->
+<section id="s5">
+  <div class="sec-head">
+    <span class="sec-num">05</span>
+    <h2>OpenTelemetry 統一採集與三大訊號的關聯串接</h2>
+  </div>
+  <p class="sec-sub">如何用 trace_id 與 Exemplars 把獨立的三座資料孤島串成一條無縫的排障動線。</p>
+
+  <p>早期企業最大的痛點是「三套 Agent、三份帳單、三座孤島」：Prometheus SDK 採 Metrics、Fluentd 採 Logs、各雲端廠商專屬的 X-Ray 或 Zipkin SDK 採 Traces。不僅侵入業務程式碼，更嚴重的是當告警響起時，工程師在 Grafana 看到 P99 飆高，卻無法一鍵跳轉到引發該尖峰的那筆 Trace 與對應的 Error Log。</p>
+
+  <h3>OpenTelemetry（OTel）的解耦設計</h3>
+  <p>CNCF 的 <strong>OpenTelemetry</strong> 透過將「產生訊號的 API/SDK」與「接收儲存的後端 Vendor」徹底解耦，成為現代雲原生系統的事實標準：</p>
+  <ul>
+    <li><strong>統一語意約定（Semantic Conventions）</strong>：強制規定 HTTP 狀態碼一律叫 <code>http.response.status_code</code>、服務名一律透過 Resource Attribute <code>service.name</code> 標記，確保三種訊號擁有完全一致的元資料欄位。</li>
+    <li><strong>OTel Collector（中樞路由器）</strong>：透過 <code>Receivers → Processors → Exporters</code> 管線，應用程式只要以標準 <strong>OTLP（OpenTelemetry Protocol，基於 gRPC/Protobuf 或 HTTP）</strong>將三種訊號發給本機 Collector，Collector 就能在記憶體中完成批次壓縮、敏感欄位脫敏（Redaction）、過濾高基數標籤，最後一分多路同時導出到 AWS CloudWatch / X-Ray、GCP Cloud Operations 或自建的 Prometheus / Tempo / Loki。</li>
+  </ul>
+
+  <h3>靠 Exemplars 與 <code>trace_id</code> 走完黃金排障閉環</h3>
+  <p>既然我們在第 3 節強調「絕對不能把 <code>trace_id</code> 放進 Metric Label」，那要怎麼從一條聚合後的 Histogram 指標跳轉到具體的某筆慢請求 Trace？答案是 <strong>Exemplars（樣本錨點）</strong>。</p>
+  <p>當應用程式記錄一筆耗時 <code>1.8s</code> 的請求進 Histogram 的 <code>le="2.0"</code> 桶位時，OTel SDK 會在該桶位旁順手附帶一個輕量的 Exemplar 抽樣註記：<code># {trace_id="4bf92f3577b34da6"} 1.82 1730678400</code>。它<strong>不會建立新的時間序列</strong>（因此零基數爆炸風險），而是在圖表上留下一顆可點擊的取樣星點：</p>
+
+  <pre class="mermaid">
+sequenceDiagram
+    participant Eng as 值班工程師
+    participant TSDB as Metrics (Prometheus/CW)
+    participant Trace as Traces (Tempo/X-Ray)
+    participant Log as Logs (OpenSearch/Loki)
+    TSDB->>Eng: 告警：checkout P99 > 1.5s
+    Eng->>TSDB: 點擊 le="2.0" 桶位上的 Exemplar
+    TSDB-->>Eng: 取得抽樣 trace_id="4bf92f..."
+    Eng->>Trace: 以 trace_id 查詢完整呼叫樹
+    Trace-->>Eng: 定位 inventory-db span 耗時 1.6s (status=ERROR)
+    Eng->>Log: 以 trace_id + span_id 過濾結構化日誌
+    Log-->>Eng: 取得死鎖 SQL 與完整 Stack Trace
+  </pre>
+  <p class="cap">三大訊號的串聯關鍵：Metrics 透過 Exemplar 夾帶抽樣的 <code>trace_id</code> 跳入 Traces；結構化 Logs 則在每一行 JSON 自動注入當前 Context 的 <code>trace_id</code> 與 <code>span_id</code>，讓最後一步檢索只需精準比對 ID，不必大海撈針（跨進程的 W3C Trace Context 標頭傳播與頭尾採樣策略，由分散式追蹤篇專門深入；而如何用這些指標計算 Error Budget 與多視窗燃燒率告警，則由 SLI/SLO 與告警篇負責）。</p>
+
+  <div class="oneliner">
+    <b>一句話答法</b>三大訊號靠兩座橋樑串成閉環：從 Metrics 跳到 Traces 靠 Histogram 桶位旁附掛的 <strong>Exemplar（抽樣 <code>trace_id</code>）</strong>；從 Traces 跳到 Logs 則靠結構化日誌自動注入的 <strong><code>trace_id</code> + <code>span_id</code></strong>。
+  </div>
+</section>
+
+<hr class="div">
+
+<!-- ============ 06 面試常見問題與架構陷阱 ============ -->
+<section id="s6">
+  <div class="sec-head">
+    <span class="sec-num">06</span>
+    <h2>面試高頻考點與生產環境常見陷阱</h2>
+  </div>
+  <p class="sec-sub">系統設計面試中關於可觀測性成本、可靠性與架構取捨的經典追問。</p>
+
+  <div class="trap">
+    <span class="tn">陷阱 01</span>
+    <div><strong>把動態路徑直接放進 Metric Label：</strong>未經過路由框架歸一化，直接把 <code>req.url</code>（如 <code>/api/v1/users/98172/orders/4412</code>）當作 <code>path</code> 標籤打入 Prometheus，等同於把高基數 ID 塞進指標。必須改用路由樣板（Route Template，如 <code>/api/v1/users/:uid/orders/:oid</code>），並為 404 未知路徑統一收斂為 <code>route="NOT_FOUND"</code>，防止惡意掃描器隨便打亂數 URL 就把監控系統打到 OOM。</div>
+  </div>
+
+  <div class="trap">
+    <span class="tn">陷阱 02</span>
+    <div><strong>用非結構化純文字印日誌，事後靠 Regex 硬切：</strong>在微服務高併發下印出 <code>printf("User %s failed to pay %d", uid, amt)</code>，會迫使收集管線（Fluentd / Logstash）消耗大量 CPU 跑正規表示式（Grok parsing），且一旦開發者改動輸出字串格式，告警與儀表板立刻靜默壞死。生產環境應一律輸出單行 JSON，並統一欄位命名。</div>
+  </div>
+
+  <div class="trap">
+    <span class="tn">陷阱 03</span>
+    <div><strong>觀測系統與業務系統共用故障域（Shared Fate）：</strong>把監控告警與日誌叢集部署在同一個會在業務故障時一起斷網的區域或 Kubernetes 叢集內，或者讓業務執行緒在本地磁碟寫滿、遠端 Collector 掛掉時發生同步阻塞，導致「監控掛掉反而把業務系統害死」。</div>
+  </div>
+
+  <h3 style="margin-top:28px;">面試深度追問 FAQ</h3>
+
+  <details class="faq">
+    <summary>
+      <span><span class="q">Q1</span> 面試官問：「我們的日誌與指標帳單每個月高達 10 萬美金，你會如何系統性地砍掉 70% 成本卻不犧牲排障能力？」</span>
+      <span class="chev">▸</span>
+    </summary>
+    <div class="ans">
+      <p><strong>第一刀砍 Metrics 基數（通常佔帳單大頭）：</strong>盤點 Top 10 序列數最多的指標，移除無界標籤（<code>user_id</code>、<code>pod_ip</code>、未歸一化路徑）與從未被任何 Dashboard 或 Alert 引用的殭屍指標；對不需要細分到 Pod 層級的業務指標，在 OTel Collector 層先做預聚合（Pre-aggregation）再寫入遠端 TSDB。</p>
+      <p><strong>第二刀砍 Logs 寫入量與熱儲存天數：</strong>將高頻成功的 <code>200 OK</code> 存取日誌（Access Logs）改為抽樣寫入或只留 Metrics；嚴格限制生產環境預設為 <code>INFO/WARN</code>，透過動態配置中心在需要排障時才對特定服務或特定用戶開啟 5 分鐘的 <code>DEBUG</code>；並將 OpenSearch / CloudWatch 標準熱索引縮短至 3～7 天，其餘全部轉入 S3 / GCS Parquet 冷儲存。</p>
+    </div>
+  </details>
+
+  <details class="faq">
+    <summary>
+      <span><span class="q">Q2</span> AWS CloudWatch 與自建 Prometheus + Grafana Stack（或 AMP/AMG）在架構選型上怎麼權衡？</span>
+      <span class="chev">▸</span>
+    </summary>
+    <div class="ans">
+      <p><strong>AWS CloudWatch（以及 GCP Cloud Operations）</strong>的優勢是與雲端底座零配置整合（EC2、ALB、RDS、Lambda 原生開箱即用）、完全免運維，且支援 EMF 從日誌直接抽指標；但缺點是按 Custom Metric 條數與 API 呼叫計費，在 Kubernetes 高動態容器環境下若不嚴格控管標籤維度，成本極易失控，且跨雲查詢語法不通用。</p>
+      <p><strong>Prometheus 生態（或託管版 AWS AMP / GCP Managed Service for Prometheus）</strong>天生為容器與微服務設計，具備強大的 PromQL 多維度聚合與豐富的開源 Exporter 生態；當時間序列達數十萬至數百萬規模時，搭配物件儲存後端（Thanos / Mimir / VictoriaMetrics）的單位序列成本遠低於傳統 Custom Metrics。實務上最常見的架構是：雲端託管資源（RDS / ALB）留在 CloudWatch，Kubernetes 內的微服務統一走 OTel + Prometheus 相容儲存，最後由同一座 Grafana 統一查詢。</p>
+    </div>
+  </details>
+
+  <details class="faq">
+    <summary>
+      <span><span class="q">Q3</span> 當系統遭遇瞬間 20 倍流量的災難性故障，Error Logs 暴增時，如何確保可觀測性管線自己不會先崩潰？</span>
+      <span class="chev">▸</span>
+    </summary>
+    <div class="ans">
+      <p>必須在管線的三個層級設計背壓（Backpressure）與優雅降級：</p>
+      <p>1. <strong>應用端絕不阻塞：</strong>寫往本機環形緩衝區或 <code>stdout</code>，若緩衝區滿則寧可丟棄舊日誌並將 <code>dropped_logs_total</code> 計數器 +1，也絕不阻塞業務處理執行緒。<br>
+         2. <strong>採集端動態歸併與限流：</strong>在 Node Agent（Vector / OTel Collector）啟用重複錯誤折疊（Deduplication / Throttling），例如同一秒內完全相同的 DB 連線超時 Stack Trace 只取樣發送前 10 筆並附上重複次數。<br>
+         3. <strong>佇列削峰與優先級分流：</strong>將 <code>ERROR/FATAL</code> 日誌與一般 <code>INFO</code> 日誌分流至不同 Kafka Topic，確保在檢索叢集達到寫入上限時，優先保障錯誤日誌與核心 Metrics 通道暢通。</p>
+    </div>
+  </details>
+</section>

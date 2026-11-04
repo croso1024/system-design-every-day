@@ -1,0 +1,483 @@
+<script>
+(function () {
+  "use strict";
+
+  /* =====================================================================
+     (1) 常數與參數表
+     ===================================================================== */
+  var PRESETS = {
+    safe: 'http_request_duration_seconds_bucket{service="checkout",method="POST",route="/orders/:id",status="200",region="ap-northeast-1"} 142 1730678400000',
+    explosion: 'http_request_duration_seconds_bucket{service="checkout",method="POST",route="/orders/:id",status="200",region="ap-northeast-1",user_id="u_84920"} 142 1730678400000',
+    rawpath: 'http_requests_total{service="catalog",method="GET",path="/products/99281/reviews/4410",status="200",client_ip="203.0.113.42"} 18 1730678405000'
+  };
+
+  var KNOWN_CARDINALITY = {
+    service:    { card: 8,     tier: "ok",   advice: "低基數核心服務維度，必留於 Metric" },
+    method:     { card: 4,     tier: "ok",   advice: "HTTP 動詞枚舉固定（GET/POST/PUT/DELETE），安全" },
+    status:     { card: 5,     tier: "ok",   advice: "HTTP 狀態碼分桶或常見碼有界，安全" },
+    region:     { card: 3,     tier: "ok",   advice: "可用區或區域數量固定，適合保留" },
+    env:        { card: 2,     tier: "ok",   advice: "環境維度（prod/staging），基數極低" },
+    route:      { card: 25,    tier: "warn", advice: "已歸一化路由樣板（:id），須設上限並收斂 404" },
+    endpoint:   { card: 30,    tier: "warn", advice: "端點數量中度放大，確保未夾帶動態參數" },
+    le:         { card: 1,     tier: "ok",   advice: "Histogram 桶位上界標籤（已計入型別展開倍率）" },
+    quantile:   { card: 4,     tier: "warn", advice: "Summary 客戶端分位數，注意不可跨實例直接平均" },
+    path:       { card: 12000, tier: "bad",  advice: "未歸一化動態 URL 路徑！應改為 route 樣板或移至 Logs" },
+    uri:        { card: 10000, tier: "bad",  advice: "含動態 ID 或 Query String，嚴禁直接作為 Metric 標籤" },
+    user_id:    { card: 50000, tier: "bad",  advice: "無界用戶 ID！會引發笛卡兒積爆炸，應移至 Logs / Traces" },
+    uid:        { card: 50000, tier: "bad",  advice: "高基數用戶識別碼，應改放結構化日誌欄位" },
+    trace_id:   { card: 100000,tier: "bad",  advice: "每筆請求唯一！請改用 Histogram Exemplar 附掛" },
+    request_id: { card: 100000,tier: "bad",  advice: "單次請求 ID 每次都換，放進 Metric 等同記憶體洩漏" },
+    order_id:   { card: 80000, tier: "bad",  advice: "業務單號無上限，查詢特定訂單請走 Logs 索引" },
+    client_ip:  { card: 20000, tier: "bad",  advice: "公網 IP 組合極多，防禦分析應走 WAF 日誌或 Loki" },
+    ip:         { card: 20000, tier: "bad",  advice: "高基數 IP 位址，不應進入 TSDB 時間序列索引" },
+    pod_id:     { card: 200,   tier: "warn", advice: "隨滾動部署與擴縮頻繁更替（Churn），建議只保留至 Collector 聚合前" }
+  };
+
+  var BYTES_PER_SERIES = 3584;
+  var COST_PER_SERIES_USD = 0.30;
+
+  /* =====================================================================
+     (2) compute* 純函式 —— 嚴禁碰 DOM / window / console
+     ===================================================================== */
+  function estimateLabelMeta(key, val) {
+    var k = String(key || "").trim().toLowerCase();
+    var v = String(val || "").trim();
+    if (KNOWN_CARDINALITY[k]) {
+      var meta = KNOWN_CARDINALITY[k];
+      if ((k === "route" || k === "path" || k === "uri") && /\/\d{3,}/.test(v)) {
+        return { card: 12000, tier: "bad", advice: "偵測到路徑內嵌純數字 ID（" + v + "），未歸一化將導致序列暴增" };
+      }
+      if ((k === "path" || k === "uri") && v.indexOf(":") !== -1) {
+        return { card: 25, tier: "warn", advice: "路徑已含參數佔位符，基數受控於路由表大小" };
+      }
+      return { card: meta.card, tier: meta.tier, advice: meta.advice };
+    }
+    if (/_id$/.test(k) || /id$/.test(k) || /uuid|token|session|email/.test(k)) {
+      return { card: 40000, tier: "bad", advice: "疑似高基數唯一識別碼，會造成 TSDB 索引膨脹，應移至 Logs/Traces" };
+    }
+    if (/^\d{4,}$/.test(v) || /[0-9a-f]{8,}/i.test(v)) {
+      return { card: 15000, tier: "bad", advice: "標籤值似動態流水號或雜湊值，極易引發高基數爆炸" };
+    }
+    return { card: 6, tier: "ok", advice: "自訂低基數枚舉標籤，可保留於 Metric" };
+  }
+
+  function parseExpositionLine(rawLine) {
+    var line = String(rawLine || "").trim();
+    if (!line) {
+      return {
+        valid: false,
+        metricName: "unknown_metric",
+        familyName: "unknown_metric",
+        suffixType: "Counter / Gauge",
+        labels: [],
+        sampleValue: "0",
+        timestamp: "（由抓取端填入）"
+      };
+    }
+
+    var m = line.match(/^([a-zA-Z_:][a-zA-Z0-9_:]*)(\{[^}]*\})?\s+([-+]?[0-9]*\.?[0-9]+(?:[eE][-+]?[0-9]+)?|[+-]?Inf|NaN)(?:\s+(\d+))?/);
+    var metricName = "http_requests_total";
+    var labelBlock = "";
+    var sampleValue = "1";
+    var timestamp = "（抓取當下賦予）";
+    var valid = true;
+
+    if (m) {
+      metricName = m[1];
+      labelBlock = m[2] || "";
+      sampleValue = m[3];
+      timestamp = m[4] ? m[4] : "（抓取當下賦予）";
+    } else {
+      valid = false;
+      var braceIdx = line.indexOf("{");
+      if (braceIdx > 0) {
+        metricName = line.slice(0, braceIdx).trim();
+        var closeIdx = line.indexOf("}", braceIdx);
+        if (closeIdx > braceIdx) {
+          labelBlock = line.slice(braceIdx, closeIdx + 1);
+          var rest = line.slice(closeIdx + 1).trim().split(/\s+/);
+          if (rest[0]) sampleValue = rest[0];
+          if (rest[1]) timestamp = rest[1];
+        }
+      } else {
+        var parts = line.split(/\s+/);
+        if (parts[0]) metricName = parts[0];
+        if (parts[1]) sampleValue = parts[1];
+      }
+    }
+
+    var familyName = metricName;
+    var suffixType = "Gauge / Untyped";
+    if (/_bucket$/.test(metricName)) {
+      familyName = metricName.replace(/_bucket$/, "");
+      suffixType = "Histogram 累積桶位 (_bucket)";
+    } else if (/_sum$/.test(metricName)) {
+      familyName = metricName.replace(/_sum$/, "");
+      suffixType = "Histogram 總和 (_sum)";
+    } else if (/_count$/.test(metricName)) {
+      familyName = metricName.replace(/_count$/, "");
+      suffixType = "Histogram 總次數 (_count)";
+    } else if (/_total$/.test(metricName)) {
+      familyName = metricName.replace(/_total$/, "");
+      suffixType = "Counter 單調遞增計數 (_total)";
+    }
+
+    var labels = [];
+    if (labelBlock.length > 2) {
+      var inner = labelBlock.slice(1, -1);
+      var kvRe = /([a-zA-Z_][a-zA-Z0-9_]*)\s*=\s*"([^"]*)"/g;
+      var km;
+      while ((km = kvRe.exec(inner))) {
+        var k = km[1];
+        var v = km[2];
+        var est = estimateLabelMeta(k, v);
+        labels.push({
+          key: k,
+          val: v,
+          card: est.card,
+          tier: est.tier,
+          advice: est.advice
+        });
+      }
+    }
+
+    return {
+      valid: valid,
+      metricName: metricName,
+      familyName: familyName,
+      suffixType: suffixType,
+      labels: labels,
+      sampleValue: sampleValue,
+      timestamp: timestamp
+    };
+  }
+
+  // @probe fn       computeMetricAnatomy
+  // @probe baseline {"rawLine":"http_request_duration_seconds_bucket{service=\"checkout\",method=\"POST\",route=\"/orders/:id\",status=\"200\",region=\"ap-northeast-1\",user_id=\"u_84920\"} 142 1730678400000","seriesMultiplier":12,"instances":15,"scrapeSec":15,"disabledKeys":[]}
+  // @probe sweep    {"rawLine":["http_requests_total{service=\"auth\",status=\"200\"} 98 1730678400000","http_request_duration_seconds_bucket{service=\"checkout\",method=\"POST\",path=\"/orders/98271\",user_id=\"u_84920\",trace_id=\"4bf92f\"} 142 1730678400000"],"seriesMultiplier":[1,22],"instances":[1,60],"scrapeSec":[5,60],"disabledKeys":[["user_id"],["user_id","route"]]}
+  function computeMetricAnatomy(p) {
+    var parsed = parseExpositionLine(p && p.rawLine);
+    var mult = Math.max(1, Number(p && p.seriesMultiplier) || 1);
+    var inst = Math.max(1, Number(p && p.instances) || 1);
+    var scrapeSec = Math.max(1, Number(p && p.scrapeSec) || 15);
+    var disabledArr = (p && Array.isArray(p.disabledKeys)) ? p.disabledKeys : [];
+    var disabledSet = {};
+    for (var i = 0; i < disabledArr.length; i += 1) {
+      disabledSet[String(disabledArr[i])] = true;
+    }
+
+    var baseSeries = inst * mult;
+    var activeRunning = baseSeries;
+    var unprunedRunning = baseSeries;
+    var labelBreakdown = [];
+    var highCardKeys = [];
+    var keptCount = 0;
+
+    for (var j = 0; j < parsed.labels.length; j += 1) {
+      var lb = parsed.labels[j];
+      var isDropped = Boolean(disabledSet[lb.key]);
+      unprunedRunning = unprunedRunning * lb.card;
+      if (!isDropped) {
+        activeRunning = activeRunning * lb.card;
+        keptCount += 1;
+        if (lb.tier === "bad") {
+          highCardKeys.push(lb.key);
+        }
+      }
+      labelBreakdown.push({
+        key: lb.key,
+        val: lb.val,
+        card: lb.card,
+        tier: lb.tier,
+        advice: lb.advice,
+        dropped: isDropped,
+        cumulativeSeries: activeRunning
+      });
+    }
+
+    var activeSeries = activeRunning;
+    var savedSeries = Math.max(0, unprunedRunning - activeSeries);
+    var samplesPerSec = Math.round(activeSeries / scrapeSec);
+    var memoryMB = Math.round((activeSeries * BYTES_PER_SERIES) / (1024 * 1024) * 10) / 10;
+    var monthlyCostUSD = Math.round(activeSeries * COST_PER_SERIES_USD);
+    var savedCostUSD = Math.round(savedSeries * COST_PER_SERIES_USD);
+
+    var healthTone = "ok";
+    var summaryVerdict = "";
+    if (activeSeries >= 500000 || highCardKeys.length > 0) {
+      healthTone = "bad";
+      summaryVerdict = "危險（高基數爆炸）：單一指標展開出 " + activeSeries.toLocaleString("en-US") +
+        " 條時間序列" + (highCardKeys.length ? "（元兇標籤：" + highCardKeys.join(", ") + "）" : "") +
+        "，將消耗約 " + memoryMB + " MB TSDB 記憶體並產生極高帳單，請點選左側按鈕將高基數標籤移出 Metric。";
+    } else if (activeSeries >= 30000) {
+      healthTone = "warn";
+      summaryVerdict = "警告（中高基數水位）：目前展開 " + activeSeries.toLocaleString("en-US") +
+        " 條時間序列（每秒寫入 " + samplesPerSec.toLocaleString("en-US") + " 個樣本點），須留意路由樣板數量與直方圖桶位是否過度細分。";
+    } else {
+      healthTone = "ok";
+      summaryVerdict = "健康（低基數受控）：目前展開 " + activeSeries.toLocaleString("en-US") +
+        " 條時間序列，常駐記憶體僅約 " + memoryMB + " MB，可安全用於秒級告警與聚合儀表板。" +
+        (savedSeries > 0 ? "（已透過移除標籤攔截了 " + savedSeries.toLocaleString("en-US") + " 條冗餘序列！）" : "");
+    }
+
+    return {
+      validSyntax: parsed.valid,
+      metricName: parsed.metricName,
+      familyName: parsed.familyName,
+      suffixType: parsed.suffixType,
+      sampleValue: parsed.sampleValue,
+      timestamp: parsed.timestamp,
+      keptLabelCount: keptCount,
+      baseSeries: baseSeries,
+      activeSeries: activeSeries,
+      unprunedSeries: unprunedRunning,
+      savedSeries: savedSeries,
+      samplesPerSec: samplesPerSec,
+      memoryMB: memoryMB,
+      monthlyCostUSD: monthlyCostUSD,
+      savedCostUSD: savedCostUSD,
+      healthTone: healthTone,
+      highCardCount: highCardKeys.length,
+      summaryVerdict: summaryVerdict,
+      labelBreakdown: labelBreakdown
+    };
+  }
+
+  /* =====================================================================
+     (3) DOM 參照與狀態
+     ===================================================================== */
+  var root = document.getElementById("demo-cardinality-decomposer");
+  if (!root) return;
+
+  var rawInputEl      = document.getElementById("obv-raw-input");
+  var parseHintEl     = document.getElementById("obv-parse-hint");
+  var tokensEl        = document.getElementById("obv-tokens");
+  var instSliderEl    = document.getElementById("obv-inst-slider");
+  var instValEl       = document.getElementById("obv-inst-val");
+  var scrapeSliderEl  = document.getElementById("obv-scrape-slider");
+  var scrapeValEl     = document.getElementById("obv-scrape-val");
+  var lblRowsEl       = document.getElementById("obv-lbl-rows");
+  var outSeriesEl     = document.getElementById("obv-out-series");
+  var outSeriesSubEl  = document.getElementById("obv-out-series-sub");
+  var cardSeriesEl    = document.getElementById("obv-card-series");
+  var outRateEl       = document.getElementById("obv-out-rate");
+  var outRateSubEl    = document.getElementById("obv-out-rate-sub");
+  var outRateCardEl   = document.getElementById("obv-out-rate-card");
+  var outRamEl        = document.getElementById("obv-out-ram");
+  var outRamCardEl    = document.getElementById("obv-out-ram-card");
+  var outCostEl       = document.getElementById("obv-out-cost");
+  var outSavedSubEl   = document.getElementById("obv-out-saved-sub");
+  var outCostCardEl   = document.getElementById("obv-out-cost-card");
+  var statusEl        = document.getElementById("obv-status");
+  var resetBtnEl      = document.getElementById("obv-btn-reset");
+
+  var state = {
+    preset: "explosion",
+    rawLine: PRESETS.explosion,
+    seriesMultiplier: 12,
+    instances: 15,
+    scrapeSec: 15,
+    disabledKeys: []
+  };
+
+  function escHtml(str) {
+    return String(str)
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;");
+  }
+
+  function fmtNum(n) {
+    if (n >= 1000000000) return (n / 1000000000).toFixed(2) + " B";
+    if (n >= 1000000) return (n / 1000000).toFixed(2) + " M";
+    return n.toLocaleString("en-US");
+  }
+
+  /* =====================================================================
+     (4) render(state) —— 只讀計算結果繪製畫面
+     ===================================================================== */
+  function render() {
+    var res = computeMetricAnatomy(state);
+
+    instValEl.textContent = state.instances + " 台";
+    scrapeValEl.textContent = state.scrapeSec + " s";
+
+    if (res.validSyntax) {
+      parseHintEl.textContent = "語法解析正常 · 拆出 " + res.labelBreakdown.length + " 個標籤維度";
+      parseHintEl.style.color = "var(--ok)";
+    } else {
+      parseHintEl.textContent = "寬容解析模式（標準格式：metric_name{k=\"v\"} value [timestamp]）";
+      parseHintEl.style.color = "var(--warn)";
+    }
+
+    var multLabel = state.seriesMultiplier === 1
+      ? "單一序列 (×1)"
+      : "Histogram 展開 (×" + state.seriesMultiplier + " 條/組合)";
+
+    tokensEl.innerHTML =
+      '<div class="obv-tok accent">' +
+        '<div class="tk-role"><span>1. METRIC FAMILY</span><span>指標家族</span></div>' +
+        '<div class="tk-val">' + escHtml(res.familyName) + '</div>' +
+        '<div class="tk-desc">原始名稱：<code>' + escHtml(res.metricName) + '</code>（' + escHtml(res.suffixType) + '）</div>' +
+      '</div>' +
+      '<div class="obv-tok warn">' +
+        '<div class="tk-role"><span>2. TYPE &amp; INSTANCES</span><span>基底序列數</span></div>' +
+        '<div class="tk-val">' + fmtNum(res.baseSeries) + ' 條基底</div>' +
+        '<div class="tk-desc">' + state.instances + ' 台實例 &times; ' + multLabel + '</div>' +
+      '</div>' +
+      '<div class="obv-tok ok">' +
+        '<div class="tk-role"><span>3. SAMPLE VALUE</span><span>浮點樣本值</span></div>' +
+        '<div class="tk-val">' + escHtml(res.sampleValue) + '</div>' +
+        '<div class="tk-desc">TSDB 用 Gorilla XOR 壓縮儲存的數值本體</div>' +
+      '</div>' +
+      '<div class="obv-tok">' +
+        '<div class="tk-role"><span>4. TIMESTAMP (MS)</span><span>毫秒時間戳</span></div>' +
+        '<div class="tk-val">' + escHtml(res.timestamp) + '</div>' +
+        '<div class="tk-desc">每 ' + state.scrapeSec + ' 秒附加一個時間點</div>' +
+      '</div>';
+
+    if (res.labelBreakdown.length === 0) {
+      lblRowsEl.innerHTML =
+        '<div class="obv-lbl-item"><div style="grid-column:1/-1;color:var(--text-3);text-align:center;">此指標未帶任何 {key="value"} 標籤，總序列數僅等於「實例數 × 型別展開倍率」。</div></div>';
+    } else {
+      var rowsHtml = "";
+      for (var i = 0; i < res.labelBreakdown.length; i += 1) {
+        var item = res.labelBreakdown[i];
+        var badgeCls = item.dropped ? "idle" : item.tier;
+        var multText = item.dropped
+          ? "已移出 (×1)"
+          : "× " + item.card.toLocaleString("en-US") + " 種值";
+        var cumText = item.dropped
+          ? "不放大（維持 " + fmtNum(item.cumulativeSeries) + "）"
+          : "&rarr; " + fmtNum(item.cumulativeSeries) + " 條";
+
+        rowsHtml +=
+          '<div class="obv-lbl-item' + (item.dropped ? " dropped" : "") + '">' +
+            '<div>' +
+              '<button type="button" class="obv-lbl-toggle ' + (item.dropped ? "off" : "on") + '" ' +
+                      'data-toggle-key="' + escHtml(item.key) + '" ' +
+                      'aria-pressed="' + (item.dropped ? "false" : "true") + '">' +
+                (item.dropped ? "已移出" : "✓ 保留") +
+              '</button>' +
+            '</div>' +
+            '<div class="obv-lbl-kv"><span class="k">' + escHtml(item.key) + '</span>=<span class="v">"' + escHtml(item.val) + '"</span></div>' +
+            '<div><span class="obv-badge ' + badgeCls + '">' + multText + '</span></div>' +
+            '<div class="col-prod" style="font-family:var(--mono);font-size:12px;color:var(--text);">' + cumText + '</div>' +
+            '<div class="col-note" style="font-size:12px;color:var(--text-2);">' + escHtml(item.advice) + '</div>' +
+          '</div>';
+      }
+      lblRowsEl.innerHTML = rowsHtml;
+    }
+
+    outSeriesEl.textContent = fmtNum(res.activeSeries) + " 條";
+    outSeriesSubEl.textContent = "保留 " + res.keptLabelCount + " 個標籤維度之笛卡兒積";
+    cardSeriesEl.className = "obv-card " + res.healthTone;
+
+    outRateEl.textContent = fmtNum(res.samplesPerSec) + " 點/秒";
+    outRateSubEl.textContent = "每 " + state.scrapeSec + " 秒對 " + state.instances + " 台抓取一次";
+    outRateCardEl.className = "obv-card " + res.healthTone;
+
+    outRamEl.textContent = res.memoryMB >= 1024
+      ? (res.memoryMB / 1024).toFixed(2) + " GB"
+      : res.memoryMB.toFixed(1) + " MB";
+    outRamCardEl.className = "obv-card " + res.healthTone;
+
+    outCostEl.textContent = "$" + fmtNum(res.monthlyCostUSD) + " / 月";
+    outSavedSubEl.textContent = res.savedSeries > 0
+      ? "已省下 $" + fmtNum(res.savedCostUSD) + " / 月（攔截 " + fmtNum(res.savedSeries) + " 條）"
+      : "以 $0.30 / custom metric 估算";
+    outCostCardEl.className = "obv-card " + res.healthTone;
+
+    statusEl.innerHTML = "<b>診斷結論：</b>" + escHtml(res.summaryVerdict);
+
+    var presetBtns = root.querySelectorAll("[data-preset]");
+    for (var pIdx = 0; pIdx < presetBtns.length; pIdx += 1) {
+      var pb = presetBtns[pIdx];
+      pb.setAttribute("aria-pressed", pb.getAttribute("data-preset") === state.preset ? "true" : "false");
+    }
+
+    var multBtns = root.querySelectorAll("[data-mult]");
+    for (var mIdx = 0; mIdx < multBtns.length; mIdx += 1) {
+      var mb = multBtns[mIdx];
+      mb.setAttribute("aria-pressed", Number(mb.getAttribute("data-mult")) === state.seriesMultiplier ? "true" : "false");
+    }
+  }
+
+  /* =====================================================================
+     (5) 事件綁定
+     ===================================================================== */
+  rawInputEl.addEventListener("input", function () {
+    state.rawLine = rawInputEl.value;
+    state.preset = "";
+    render();
+  });
+
+  instSliderEl.addEventListener("input", function () {
+    state.instances = Number(instSliderEl.value) || 1;
+    render();
+  });
+
+  scrapeSliderEl.addEventListener("input", function () {
+    state.scrapeSec = Number(scrapeSliderEl.value) || 15;
+    render();
+  });
+
+  root.addEventListener("click", function (e) {
+    var target = e.target && e.target.nodeType === 1 ? e.target : (e.target ? e.target.parentElement : null);
+    if (!target) return;
+
+    var presetBtn = target.closest("[data-preset]");
+    if (presetBtn) {
+      var pk = presetBtn.getAttribute("data-preset");
+      if (PRESETS[pk]) {
+        state.preset = pk;
+        state.rawLine = PRESETS[pk];
+        state.disabledKeys = [];
+        rawInputEl.value = state.rawLine;
+        if (pk === "rawpath") {
+          state.seriesMultiplier = 1;
+        } else {
+          state.seriesMultiplier = 12;
+        }
+        render();
+      }
+      return;
+    }
+
+    var multBtn = target.closest("[data-mult]");
+    if (multBtn) {
+      state.seriesMultiplier = Number(multBtn.getAttribute("data-mult")) || 1;
+      render();
+      return;
+    }
+
+    var toggleBtn = target.closest("[data-toggle-key]");
+    if (toggleBtn) {
+      var key = toggleBtn.getAttribute("data-toggle-key");
+      var idx = state.disabledKeys.indexOf(key);
+      if (idx === -1) {
+        state.disabledKeys.push(key);
+      } else {
+        state.disabledKeys.splice(idx, 1);
+      }
+      render();
+    }
+  });
+
+  resetBtnEl.addEventListener("click", function () {
+    state.preset = "explosion";
+    state.rawLine = PRESETS.explosion;
+    state.seriesMultiplier = 12;
+    state.instances = 15;
+    state.scrapeSec = 15;
+    state.disabledKeys = [];
+    rawInputEl.value = state.rawLine;
+    instSliderEl.value = "15";
+    scrapeSliderEl.value = "15";
+    render();
+  });
+
+  render();
+})();
+</script>
