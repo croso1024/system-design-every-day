@@ -242,6 +242,9 @@
 一句話說明「這張圖在講什麼、讀者該看哪裡、哪個細節是重點」。
 `.cap` 是圖表語意的最後一道保險。**沒有 cap 的圖等同沒畫。**
 
+圖與 `.cap` 的間距由 `templates/base.html` 統一為 12px（緊鄰 `.cap` 的元素 margin-bottom 預設歸零；用更高權重的選擇器替它設下邊距只會讓間距變鬆）。
+圖表容器**不必為圖說設下邊距**，也**不要在頁面內覆寫 `.cap` 的 margin**——負的上邊距會讓圖說壓進圖裡。
+
 ---
 
 ### 2. `.<p>-row` — 線性管線 / 拓樸（節點 ≤ 6）
@@ -273,7 +276,7 @@
 .dns-row {
   display: flex; flex-wrap: wrap; gap: 10px;
   align-items: stretch; justify-content: center;
-  margin: 14px 0 6px;
+  margin: 14px 0 0; /* 下緣交給 .cap，見鐵律 3 */
 }
 .dns-node {
   border: 1px solid var(--border-strong); border-radius: 8px;
@@ -317,7 +320,7 @@
 .cs-lane {
   display: grid; grid-template-columns: 52px repeat(3, 1fr); gap: 1px;
   background: var(--border); border: 1px solid var(--border);
-  border-radius: 8px; overflow: hidden; margin: 14px 0 6px;
+  border-radius: 8px; overflow: hidden; margin: 14px 0 0; /* 下緣交給 .cap */
 }
 .cs-lane > div { background: #fff; padding: 8px 10px; font-size: 12px; line-height: 1.5; }
 .cs-lane .lh { background: var(--bg-soft); font-family: var(--mono); font-size: 11px;
