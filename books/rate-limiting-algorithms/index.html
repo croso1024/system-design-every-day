@@ -1131,14 +1131,14 @@
         <button class="btn toc-toggle" type="button" aria-expanded="false" aria-controls="toc-nav">目錄 ▾</button>
       </div>
       <div class="toc-nav" id="toc-nav">
-        <a href="#s1"><span class="n">01</span>先決定放不放，再讓上游開工</a>
-        <a href="#s2"><span class="n">02</span>對齊視窗：好寫，邊界會放兩倍</a>
-        <a href="#s3"><span class="n">03</span>滑動視窗：精確的日誌，或兩個整數的近似</a>
-        <a href="#s4"><span class="n">04</span>兩種桶：立刻送出，或排開再送</a>
-        <a href="#s5"><span class="n">05</span>同一條到達序列，兩種演算法並排</a>
-        <a href="#s6"><span class="n">06</span>多節點：原子扣額度，或先預取再承擔不公平</a>
-        <a href="#s7"><span class="n">07</span>面試時按這個順序講完</a>
-        <a href="#s8"><span class="n">08</span>Usage Plan 與 WAF 各管一種粒度</a>
+        <a href="#s1"><span class="n">01</span>定位：限流器不只是一行 Redis INCR</a>
+        <a href="#s2"><span class="n">02</span>Fixed Window：最簡單的格子，邊界放進兩倍</a>
+        <a href="#s3"><span class="n">03</span>Sliding Window：用記憶體換精確，或用兩個整數近似</a>
+        <a href="#s4"><span class="n">04</span>Token Bucket vs Leaky Bucket：放行突發，還是排隊整形</a>
+        <a href="#s5"><span class="n">05</span>互動實驗室：同一條請求序列，兩種演算法並排</a>
+        <a href="#s6"><span class="n">06</span>分散式限流：原子性、時鐘與熱鍵預取</a>
+        <a href="#s7"><span class="n">07</span>面試實戰：15 分鐘答題骨架與選型總表</a>
+        <a href="#s8"><span class="n">08</span>雲端實務：多層限流與 AWS 的兩套現成工具</a>
       </div>
     </nav>
     <button class="btn toc-reopen" type="button" aria-expanded="true" aria-controls="toc-panel"
@@ -1153,16 +1153,17 @@
     <!-- ===================== MAIN CONTENT ===================== -->
     <main>
       <div class="inner">
-        <!-- demo-archetype: C｜並排對照（主，同一序列兩種演算法）＋C｜並排對照（次，原子加一與本地預取） — 讀者改同一組到達時間，左右同時重算兩種演算法的放行、超出與送出間隔；容量與每秒補充會改寫 Token／Leaky 的累計曲線。
-     brief 的另一種形式是只拖容量與補充速率（參數掃描）。那個形式被最近三篇的主 archetype 擋住，所以這兩個旋鈕放在並排對照裡，曲線由兩欄一起畫出來。 -->
+        <!-- demo-archetype: C｜並排對照（主，同一序列兩種演算法）＋C｜並排對照（次，原子加一與本地預取） — 讀者載入流量劇本或自改八筆到達時間、窗寬、上限、容量與補充速率，左右兩條時間軌同時重算每筆的放行／延後／拒絕、上游實際收到的時刻，以及任意窗寬內最多收到幾筆；次 demo 調節點數與預取批次，算出中央往返次數、卡在節點上的額度與提早拒絕。
+     選 C 是因為本篇的核心是「同一組流量，不同演算法給出不同形狀」，並排才看得出差異；參數掃描（B）被最近三篇的主 archetype 擋住，所以容量與補充速率的旋鈕放在並排對照裡。 -->
 <style>
+  /* ---------- 靜態圖：管線盒 ---------- */
   .rla-row {
     display: flex;
     flex-wrap: wrap;
     gap: 10px;
     align-items: stretch;
     justify-content: center;
-    margin: 14px 0 6px;
+    margin: 14px 0 22px;
   }
   .rla-node {
     border: 1px solid var(--border-strong);
@@ -1176,6 +1177,8 @@
   .rla-node .nn { font-family: var(--mono); font-size: 12px; font-weight: 700; color: var(--text); }
   .rla-node .ns { font-size: 11px; color: var(--text-2); margin-top: 3px; line-height: 1.4; }
   .rla-node.accent { border-top: 3px solid var(--accent); }
+  .rla-node.ok { border-top: 3px solid var(--ok); }
+  .rla-node.warn { border-top: 3px solid var(--warn); }
   .rla-arrow {
     display: flex;
     align-items: center;
@@ -1184,38 +1187,72 @@
     color: var(--text-3);
     white-space: nowrap;
   }
-  .rla-lane {
-    display: grid;
-    grid-template-columns: 52px repeat(2, minmax(0, 1fr));
-    gap: 1px;
-    background: var(--border);
+
+  /* ---------- 靜態圖與 demo 共用的 SVG 樣式 ---------- */
+  .rla-fig { margin: 14px 0 22px; }
+  .rla-fig svg, #rla-svg {
+    display: block;
+    width: 100%;
+    height: auto;
     border: 1px solid var(--border);
     border-radius: 8px;
-    overflow: hidden;
-    margin: 14px 0 6px;
+    background: #ffffff;
   }
-  .rla-lane > div { background: #fff; padding: 8px 10px; font-size: 12px; line-height: 1.5; }
-  .rla-lane .lh {
-    background: var(--bg-soft);
-    font-family: var(--mono);
-    font-size: 11px;
-    font-weight: 700;
-    color: var(--text-2);
-  }
-  .rla-lane .lt {
-    background: var(--bg-soft);
-    font-family: var(--mono);
-    font-size: 11px;
-    color: var(--text-3);
-  }
-  .rla-lane .lc.act { background: var(--accent-soft); }
-  .rla-lane .lc.ok { background: var(--ok-soft); }
-  .rla-lane .lc.bad { background: var(--bad-soft); }
+  .rla-fig text, #rla-svg text { font-family: var(--mono); }
+  .rla-tn { font-size: 12px; font-weight: 700; fill: #262a2f; }
+  .rla-tl { font-size: 11px; font-weight: 400; fill: #6b7078; }
+  .rla-tx { font-size: 11px; fill: #262a2f; }
+  .rla-tick { font-size: 11px; fill: #9aa0a8; }
+  .rla-txt-ok { font-size: 11px; font-weight: 700; fill: #4d7d68; }
+  .rla-txt-warn { font-size: 11px; font-weight: 700; fill: #a3743e; }
+  .rla-txt-bad { font-size: 11px; font-weight: 700; fill: #a8554f; }
+  .rla-txt-acc { font-size: 11px; font-weight: 700; fill: #3f6188; }
+  .rla-band { fill: #fafaf9; stroke: #ecebe8; }
+  .rla-box { fill: #ffffff; stroke: #dedcd8; }
+  .rla-strip.acc { fill: #3f6188; }
+  .rla-strip.ok { fill: #4d7d68; }
+  .rla-edge { stroke: #9aa0a8; stroke-width: 1.4; fill: none; }
+  .rla-div { stroke: #dedcd8; stroke-width: 1; }
+  .rla-bound { stroke: #3f6188; stroke-width: 1.4; stroke-dasharray: 5 4; }
+  .rla-now { stroke: #3f6188; stroke-width: 1.6; }
+  .rla-win { fill: #fafaf9; stroke: #dedcd8; }
+  .rla-frame { fill: #f6ecea; fill-opacity: .6; stroke: #a8554f; stroke-width: 1.4; stroke-dasharray: 6 4; }
+  .rla-frame.acc { fill: #eef2f7; fill-opacity: .55; stroke: #3f6188; }
+  .rla-dot.pass { fill: #4d7d68; }
+  .rla-dot.deny { fill: #ffffff; stroke: #a3743e; stroke-width: 1.6; }
+  .rla-dot.hit { fill: #a8554f; }
+  .rla-uni { fill: #eef4f1; stroke: #4d7d68; }
+  .rla-ovl { fill: #3f6188; fill-opacity: .16; stroke: #3f6188; stroke-width: 1; }
+  .rla-pail { fill: #fafaf9; stroke: #6b7078; stroke-width: 1.6; }
+  .rla-token { fill: #eef2f7; stroke: #3f6188; stroke-width: 1.4; }
+  .rla-job { fill: #eef4f1; stroke: #4d7d68; stroke-width: 1.4; }
+  .rla-ax { stroke: #9aa0a8; stroke-width: 1; }
+  .rla-grid { stroke: #dedcd8; stroke-width: 1; stroke-dasharray: 3 4; }
+  .rla-base, .rla-sep { stroke: #ecebe8; stroke-width: 1; }
+  .rla-bg { fill: #ffffff; }
+  .rla-up.pass { fill: #4d7d68; }
+  .rla-up.wait { fill: #3f6188; }
+  .rla-dl { stroke: #3f6188; stroke-width: 1.2; stroke-dasharray: 4 3; fill: none; }
+  .rla-pk.over { fill: #f6ecea; stroke: #a8554f; stroke-width: 1.2; stroke-dasharray: 5 3; }
+  .rla-pk.fine { fill: #eef4f1; stroke: #4d7d68; stroke-width: 1; stroke-dasharray: 5 3; }
+  .rla-pkt { font-size: 11px; font-weight: 700; }
+  .rla-pkt.over { fill: #a8554f; }
+  .rla-pkt.fine { fill: #4d7d68; }
+  .rla-mk circle { stroke-width: 1.5; }
+  .rla-mk text { font-size: 11px; font-weight: 700; }
+  .rla-mk.pass circle { fill: #4d7d68; stroke: #4d7d68; }
+  .rla-mk.pass text { fill: #ffffff; }
+  .rla-mk.wait circle { fill: #3f6188; stroke: #3f6188; }
+  .rla-mk.wait text { fill: #ffffff; }
+  .rla-mk.deny circle { fill: #ffffff; stroke: #a3743e; }
+  .rla-mk.deny text { fill: #a3743e; }
+
+  /* ---------- 並排算例 ---------- */
   .rla-split {
     display: grid;
     grid-template-columns: 1fr 1fr;
     gap: 12px;
-    margin: 14px 0 6px;
+    margin: 14px 0 22px;
   }
   .rla-pane {
     border: 1px solid var(--border-strong);
@@ -1223,11 +1260,16 @@
     background: #fff;
     padding: 12px 14px;
   }
-  .rla-pane.token { border-top: 3px solid var(--accent); }
-  .rla-pane.leaky { border-top: 3px solid var(--ok); }
-  .rla-pane b { font-family: var(--mono); font-size: 12px; }
+  .rla-pane.warn { border-top: 3px solid var(--warn); }
+  .rla-pane.bad { border-top: 3px solid var(--bad); }
+  .rla-pane b { font-size: 13px; }
   .rla-pane ol { margin: 8px 0 0; padding-left: 18px; font-family: var(--mono); font-size: 12px; color: var(--text); }
-  .rla-pane li { margin: 3px 0; }
+  .rla-pane li { margin: 4px 0; line-height: 1.55; }
+
+  /* ---------- demo：同一序列兩種演算法 ---------- */
+  .rla-presets { margin-bottom: 14px; }
+  .rla-presets .seg { flex-wrap: wrap; border-radius: 14px; }
+  .rla-hint { font-size: 12.5px; color: var(--text-2); margin: 8px 0 0; line-height: 1.6; }
   .rla-controls, .rla-sliders, .rls-sliders {
     display: grid;
     grid-template-columns: 1fr 1fr;
@@ -1252,20 +1294,15 @@
     width: 100%;
   }
   .rla-sliders input, .rls-sliders input { width: 100%; accent-color: var(--accent); }
-  .rla-sliders b, .rls-sliders b, .rla-controls b {
+  .rla-sliders b, .rls-sliders b {
     font-family: var(--mono);
     font-size: 12px;
     color: var(--text);
     font-weight: 650;
   }
-  #rla-svg {
-    width: 100%;
-    height: auto;
-    display: block;
-    border: 1px solid var(--border);
-    border-radius: 8px;
-    background: #fafaf9;
-  }
+  .rla-bucket.rla-off label { opacity: .45; }
+  .rla-off-note { display: none; grid-column: 1 / -1; font-size: 12px; color: var(--text-3); margin: -4px 0 0; }
+  .rla-bucket.rla-off .rla-off-note { display: block; }
   .rla-score, .rls-cols {
     display: grid;
     grid-template-columns: 1fr 1fr;
@@ -1308,173 +1345,471 @@
     padding: 4px 6px;
   }
   .rla-ledger td { border-top: 1px solid var(--border); padding: 4px 6px; }
+  .rla-ledger td:first-child { font-family: var(--mono); font-size: 11px; color: var(--text-3); width: 28px; }
+  .rla-ledger td:nth-child(2) { width: 96px; }
   .rla-ledger td.ns-ok, .rla-ledger td.ns-wait, .rla-ledger td.ns-lock {
     font-family: var(--mono);
     font-size: 11px;
   }
-  .rls-rack {
+
+  /* ---------- demo：集中計數與本地預取 ---------- */
+  .rls-quota { display: grid; gap: 6px; margin-top: 4px; }
+  .rls-qrow {
     display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(112px, 1fr));
-    gap: 8px;
-    margin-top: 4px;
+    grid-template-columns: 56px 1fr 132px;
+    gap: 10px;
+    align-items: center;
   }
-  .rls-cell {
-    border: 1px solid var(--border-strong);
-    border-radius: 8px;
+  .rls-qname, .rls-qnum { font-family: var(--mono); font-size: 11px; color: var(--text-2); }
+  .rls-qnum { text-align: right; }
+  .rls-qtrack {
+    display: flex;
+    height: 16px;
+    border: 1px solid var(--border);
+    border-radius: 4px;
     background: #fff;
-    padding: 8px;
-    text-align: center;
+    overflow: hidden;
   }
-  .rls-id { font-family: var(--mono); font-size: 11px; color: var(--text-2); }
-  .rls-held { font-family: var(--mono); font-size: 22px; font-weight: 700; color: var(--text); line-height: 1.2; }
-  .rls-sub { font-size: 11px; color: var(--text-2); margin-top: 2px; }
-  .rla-fan { margin: 14px 0 6px; }
+  .rls-q { display: block; flex: none; height: 100%; }
+  .rls-q.served { background: var(--ok-soft); box-shadow: inset 0 0 0 1px var(--ok); }
+  .rls-q.held { background: var(--warn-soft); box-shadow: inset 0 0 0 1px var(--warn); }
+  .rls-q.denied { background: var(--bad-soft); box-shadow: inset 0 0 0 1px var(--bad); }
+
   @media (max-width: 720px) {
-    .rla-lane { grid-template-columns: 44px repeat(2, minmax(0, 1fr)); }
-    .rla-lane > div { font-size: 11px; padding: 6px; }
     .rla-split, .rla-score, .rls-cols, .rla-controls, .rla-sliders, .rls-sliders {
       grid-template-columns: 1fr;
     }
+    .rls-qrow { grid-template-columns: 48px 1fr; }
+    .rls-qnum { grid-column: 2; text-align: left; }
   }
 </style>
 
 <section id="s1">
   <div class="sec-head">
     <span class="sec-num">01</span>
-    <h2>先決定放不放，再讓上游開工</h2>
+    <h2>定位：限流器不只是一行 Redis INCR</h2>
   </div>
-  <p class="sec-sub">限流器賣的是「在昂貴工作發生之前說不」。演算法選擇決定你允許什麼樣的突發，以及多節點時這句話還算不算數。</p>
-  <p>面試題 Design a Rate Limiter 容易被答成「用 Redis <code>INCR</code>」。那只是儲存。題目真正要的是四件事：限流器坐在哪、鍵是誰、一段時間內允許什麼形狀的流量、很多台機器時這個計數怎麼保持一個意思。演算法決定形狀；原子操作決定這個意思在多節點下還在不在。</p>
+  <p class="sec-sub">限流器的工作，是在昂貴的業務邏輯開工之前便宜地說「不」。設計它要先回答四個問題，選演算法只是其中一個。</p>
+  <p>面試題 Design a Rate Limiter 很容易被答成「用 Redis <code>INCR</code> 數一下」。<code>INCR</code> 只是儲存層的一個原子操作，它回答不了這幾件事：限流器放在請求路徑的哪裡？用什麼當計數的鍵？「每秒 10 次」指的是哪一段時間裡的 10 次、允不允許瞬間衝一下？很多台機器時，這個數字怎麼仍然只有一份？</p>
   <div class="rla-row">
     <div class="rla-node">
       <div class="nn">客戶端</div>
-      <div class="ns">帶身份而來</div>
-    </div>
-    <span class="rla-arrow">▸</span>
-    <div class="rla-node accent">
-      <div class="nn">限流器</div>
-      <div class="ns">先決定放不放</div>
+      <div class="ns">帶 token 或 API key</div>
     </div>
     <span class="rla-arrow">▸</span>
     <div class="rla-node">
-      <div class="nn">上游</div>
-      <div class="ns">昂貴的工作</div>
+      <div class="nn">認出身份</div>
+      <div class="ns">算出限流鍵</div>
+    </div>
+    <span class="rla-arrow">▸</span>
+    <div class="rla-node accent">
+      <div class="nn">限流判定</div>
+      <div class="ns">一次原子讀改寫，超額回 429</div>
+    </div>
+    <span class="rla-arrow">▸</span>
+    <div class="rla-node">
+      <div class="nn">業務邏輯</div>
+      <div class="ns">查資料庫、扣款、呼叫模型</div>
     </div>
   </div>
-  <p class="cap">限流器要在上游開工之前做完決定。決定本身必須比被保護的工作便宜，否則它就是另一個需要被保護的熱點。</p>
-  <p>身份通常是使用者、API key 或來源 IP，有時再乘上路由。驗證要做到「認得出這個鍵」就夠，不要等整個業務邏輯跑完才計數——否則超限的請求已經把資料庫打過一輪。不同端點的成本可以不同：上傳可以扣 5，讀取扣 1。Token Bucket 用扣減量表達這件事最自然；對齊視窗的計數器通常還是一筆算 1。</p>
+  <p class="cap">限流判定排在身份辨識之後、業務邏輯之前。被拒絕的請求在第三個盒子就返回，不會碰到資料庫；判定本身也必須比它保護的工作便宜，否則限流器自己就成了新的熱點。</p>
+
+  <p>把題目拆開，設計一個限流器要回答四個維度的問題：</p>
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>維度</th>
+          <th>要回答的問題</th>
+          <th>常見答案</th>
+          <th>本篇位置</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td class="hl">限流鍵</td>
+          <td>數的是誰？每個端點一樣貴嗎？</td>
+          <td>使用者 id、API key、來源 IP，或「鍵 × 路由」；上傳扣 5 點、讀取扣 1 點</td>
+          <td>本節</td>
+        </tr>
+        <tr>
+          <td class="hl">流量形狀</td>
+          <td>契約是「任意一段時間內不超過 N 次」，還是「長期平均速率，外加允許多大的突發」？</td>
+          <td>每分鐘最多 100 次；或每秒 10 次、瞬間最多衝到 20 次</td>
+          <td>第 2–5 節</td>
+        </tr>
+        <tr>
+          <td class="hl">共用狀態</td>
+          <td>N 台無狀態服務怎麼共用同一個計數？計數器掛了怎麼辦？</td>
+          <td>集中式 Redis 加原子腳本、熱鍵本地預取、Fail-open 或 Fail-closed</td>
+          <td>第 6 節</td>
+        </tr>
+        <tr>
+          <td class="hl">部署位置</td>
+          <td>在邊緣、閘道，還是服務內部數？</td>
+          <td>WAF／CDN 擋 IP 洪峰、API Gateway 管 API key、服務內管使用者與成本</td>
+          <td>第 8 節</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="cap">四個維度互相獨立：同一個 Token Bucket 可以放在閘道數 API key，也可以放在服務內數使用者。面試時先把四格填完，再談演算法。</p>
+  <p>鍵只要做到「認得出是誰」就夠了，不要等整個業務邏輯跑完才計數——否則超額的請求已經把資料庫打過一輪。不同端點的成本可以不同：上傳扣 5 點、讀取扣 1 點。Token Bucket 用「這次扣幾個許可」表達加權最自然；視窗計數器通常仍是一筆算 1。</p>
+
+  <p>流量形狀是演算法的戰場。本篇的五種演算法（外加一個常被誤認為第六種的 GCRA）分成兩個家族，各有一條演化主線：</p>
+  <div class="rla-fig">
+    <svg viewBox="0 0 720 262" role="img" aria-labelledby="rla-fam-t">
+      <title id="rla-fam-t">限流演算法的兩大家族：視窗計數家族的演化，與桶家族三種變體的關係</title>
+      <defs>
+        <marker id="rla-fam-mk" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M 0 1 L 8 5 L 0 9 z" fill="#9aa0a8"></path>
+        </marker>
+      </defs>
+      <rect class="rla-band" x="4" y="4" width="712" height="122" rx="10"></rect>
+      <text class="rla-tn" x="20" y="28">視窗計數家族<tspan class="rla-tl" dx="10">問「這段時間放行了幾筆」</tspan></text>
+      <rect class="rla-box" x="20" y="44" width="160" height="64" rx="8"></rect>
+      <rect class="rla-strip acc" x="20" y="44" width="160" height="3"></rect>
+      <text class="rla-tn" x="100" y="72" text-anchor="middle">Fixed Window</text>
+      <text class="rla-tl" x="100" y="92" text-anchor="middle">每格一個計數</text>
+      <rect class="rla-box" x="280" y="44" width="160" height="64" rx="8"></rect>
+      <rect class="rla-strip acc" x="280" y="44" width="160" height="3"></rect>
+      <text class="rla-tn" x="360" y="72" text-anchor="middle">Sliding Log</text>
+      <text class="rla-tl" x="360" y="92" text-anchor="middle">每筆留下時間戳</text>
+      <rect class="rla-box" x="540" y="44" width="160" height="64" rx="8"></rect>
+      <rect class="rla-strip acc" x="540" y="44" width="160" height="3"></rect>
+      <text class="rla-tn" x="620" y="72" text-anchor="middle">Sliding Counter</text>
+      <text class="rla-tl" x="620" y="92" text-anchor="middle">兩個整數加權估計</text>
+      <line class="rla-edge" x1="182" y1="76" x2="276" y2="76" marker-end="url(#rla-fam-mk)"></line>
+      <text class="rla-txt-acc" x="229" y="68" text-anchor="middle">修邊界突刺</text>
+      <text class="rla-tl" x="229" y="94" text-anchor="middle">代價：存 L 筆</text>
+      <line class="rla-edge" x1="442" y1="76" x2="536" y2="76" marker-end="url(#rla-fam-mk)"></line>
+      <text class="rla-txt-acc" x="489" y="68" text-anchor="middle">狀態壓回 O(1)</text>
+      <text class="rla-tl" x="489" y="94" text-anchor="middle">代價：會估錯</text>
+
+      <rect class="rla-band" x="4" y="136" width="712" height="122" rx="10"></rect>
+      <text class="rla-tn" x="20" y="160">桶家族<tspan class="rla-tl" dx="10">問「長期速率多少、瞬間能衝多少」</tspan></text>
+      <rect class="rla-box" x="20" y="176" width="160" height="64" rx="8"></rect>
+      <rect class="rla-strip ok" x="20" y="176" width="160" height="3"></rect>
+      <text class="rla-tn" x="100" y="204" text-anchor="middle">Token Bucket</text>
+      <text class="rla-tl" x="100" y="224" text-anchor="middle">桶裡裝的是許可</text>
+      <rect class="rla-box" x="280" y="176" width="160" height="64" rx="8"></rect>
+      <rect class="rla-strip ok" x="280" y="176" width="160" height="3"></rect>
+      <text class="rla-tn" x="360" y="204" text-anchor="middle">GCRA</text>
+      <text class="rla-tl" x="360" y="224" text-anchor="middle">漏桶當計量器</text>
+      <rect class="rla-box" x="540" y="176" width="160" height="64" rx="8"></rect>
+      <rect class="rla-strip ok" x="540" y="176" width="160" height="3"></rect>
+      <text class="rla-tn" x="620" y="204" text-anchor="middle">Leaky Bucket</text>
+      <text class="rla-tl" x="620" y="224" text-anchor="middle">漏桶當佇列</text>
+      <line class="rla-edge" x1="184" y1="208" x2="274" y2="208" marker-start="url(#rla-fam-mk)" marker-end="url(#rla-fam-mk)"></line>
+      <text class="rla-txt-ok" x="229" y="200" text-anchor="middle">決策完全相同</text>
+      <text class="rla-tl" x="229" y="226" text-anchor="middle">只是記帳方向相反</text>
+      <line class="rla-edge" x1="442" y1="208" x2="536" y2="208" marker-end="url(#rla-fam-mk)"></line>
+      <text class="rla-txt-ok" x="489" y="200" text-anchor="middle">加上佇列</text>
+      <text class="rla-tl" x="489" y="226" text-anchor="middle">突發改成排隊</text>
+    </svg>
+  </div>
+  <p class="cap">上排三種都在數「一段時間放行了幾筆」，每往右一步都在修前一種的缺點，也付出新的代價（第 2、3 節）。下排不數視窗，改用速率與容量描述流量（第 4 節）。中間那條雙箭頭是最常被誤解的一點：漏桶只當計量器時，放行與拒絕跟 Token Bucket 一模一樣；只有加上佇列，才會把突發排成等距。</p>
+
   <div class="callout accent">
     <div class="c-title"><span class="ic">邊界</span>三道門不要答成同一道</div>
-    <p>限流是工作開始前，依「這個鍵最近打了多少」拒絕。熔斷、艙壁隔離與降級是依賴已經失敗或自己已經忙不過來之後的自保。逾時、重試與退避是客戶端在失敗之後怎麼再試——限流器要假設拒絕不是終點，被拒絕的客戶端常常馬上回來。429、Retry-After 與額度標頭的契約在 API 設計風格與演進；Redis 的資料結構在 Redis 架構與運維；以模型 token 計價的預算在 LLM Gateway。這篇只處理「怎麼數、數出來的形狀、多節點如何共用這一個數」。</p>
+    <p>限流是工作開始前，依「這個鍵最近打了多少」拒絕。熔斷、艙壁隔離與降級是依賴已經失敗、或自己已經忙不過來之後的自保。逾時、重試與退避是客戶端在失敗之後怎麼再試——限流器要假設拒絕不是終點，被拒絕的客戶端常常馬上回來。429、Retry-After 與額度標頭的契約在 API 設計風格與演進；Redis 的資料結構在 Redis 架構與運維；以模型 token 計價的預算在 LLM Gateway。這篇只處理「怎麼數、數出來的形狀、多節點如何共用這一個數」。</p>
   </div>
   <div class="oneliner">
-    <b>一句話答法</b>限流器在上游之前、用便宜的原子計數拒絕超額。演算法決定允許的突發形狀；多節點若各數各的，等於把上限乘上台數。
+    <b>一句話答法</b>限流器在上游之前、用便宜的原子計數拒絕超額。先答鍵、形狀、共用狀態、部署位置四件事；演算法分成「數視窗」與「管速率」兩個家族，決定你允許什麼樣的突發。
   </div>
 </section>
 
 <section id="s2">
   <div class="sec-head">
     <span class="sec-num">02</span>
-    <h2>對齊視窗：好寫，邊界會放兩倍</h2>
+    <h2>Fixed Window：最簡單的格子，邊界放進兩倍</h2>
   </div>
-  <p class="sec-sub">Fixed Window 把時間切成等寬的格子，每格一個計數。格子對齊絕對時間時，所有身份在同一條邊界上一起歸零。</p>
-  <p>規則很短：請求時刻 <var>t</var>、窗寬 <var>W</var>、上限 <var>L</var>，視窗編號是 <code>floor(t / W)</code>。該編號的計數未滿 <var>L</var> 就放行並加一，否則拒絕。熱路徑只留兩個數字：現在的編號、這個編號已經放了幾筆。實作用帶視窗編號的 key，到期時間設成一個窗寬，下一格自然換一把新 key。</p>
-  <p>代價出現在邊界。設 <var>L</var> = 2、<var>W</var> = 1000 ms。800 ms 與 900 ms 落在視窗 0，兩筆都放。1000 ms 起算視窗 1，計數從 0 再開，1100 ms 再放一筆。演算法覺得自己守住了「每窗 2 筆」。把尺改成「任意連續 1000 ms」，800 到 1100 這四筆全部還在同一段裡，實際是 <var>2 × L</var>。</p>
-  <div class="rla-lane">
-    <div class="lh">時刻</div><div class="lh">Fixed Window</div><div class="lh">往回 1000 ms</div>
-    <div class="lt">800</div><div class="lc ok">視窗 0，放行 1/2</div><div class="lc">1 筆</div>
-    <div class="lt">900</div><div class="lc ok">視窗 0，放行 2/2</div><div class="lc">2 筆</div>
-    <div class="lt">1000</div><div class="lc act">視窗 1，歸零後放行</div><div class="lc bad">3 筆，已超過 2</div>
-    <div class="lt">1100</div><div class="lc ok">視窗 1，放行 2/2</div><div class="lc bad">4 筆 = 2×limit</div>
+  <p class="sec-sub">把時間切成等寬的格子，每格一個計數器。好寫、好原子化；代價是相鄰兩格的邊界兩側，可以各吃滿一次上限。</p>
+  <p>規則很短。請求時刻 <var>t</var>、窗寬 <var>W</var>、上限 <var>L</var>，視窗編號是 <code>floor(t / W)</code>。該編號的計數加一後不超過 <var>L</var> 就放行，否則拒絕。熱路徑只需要一個帶編號的 key 與它的到期時間：</p>
+  <pre><code>key   = "rl:" + 規則 + ":" + 使用者 + ":" + floor(now / W)
+count = INCR key                    -- 這一格第一次被打會得到 1
+if count == 1 then PEXPIRE key W    -- 讓這一格自己過期，下一格自然換新 key
+放行 ⇔ count ≤ L</code></pre>
+  <p class="cap">每個身份每一格一個整數。這兩行命令拆開送有一個經典的坑，第 6 節會把它們合進同一支腳本。</p>
+  <p>代價出現在格子邊界。設 <var>W</var> = 1000 ms、<var>L</var> = 3。請求在 820、880、940 ms 到達，落在視窗 0，三筆都放；960 ms 那筆因為視窗 0 已滿被拒。1000 ms 起算視窗 1，計數從 0 重來，1000、1060、1120 ms 又放了三筆。從演算法的角度，每個格子都守住了「最多 3 筆」——但只要把尺換成「任意連續 1000 ms」，820 到 1120 這短短 300 ms 裡就進去了 6 筆。</p>
+  <div class="rla-fig">
+    <svg viewBox="0 0 720 214" role="img" aria-labelledby="rla-fw-t">
+      <title id="rla-fw-t">Fixed Window 邊界突刺：兩個格子各放行 3 筆，跨邊界的任意 1000 ms 內卻有 6 筆</title>
+      <text class="rla-txt-acc" x="374" y="16" text-anchor="middle">整點邊界 t = 1000</text>
+      <rect class="rla-win" x="64" y="26" width="310" height="86" rx="4"></rect>
+      <rect class="rla-win" x="374" y="26" width="310" height="86" rx="4"></rect>
+      <text class="rla-tl" x="72" y="44">視窗 0 · [0, 1000)</text>
+      <text class="rla-tl" x="382" y="44">視窗 1 · [1000, 2000)</text>
+      <text class="rla-tl" x="72" y="70">放行</text>
+      <text class="rla-tl" x="72" y="92">拒絕</text>
+      <text class="rla-txt-ok" x="72" y="106">這一格放行 3 筆，沒超過上限</text>
+      <text class="rla-txt-ok" x="430" y="106">這一格放行 3 筆，沒超過上限</text>
+      <circle class="rla-dot pass" cx="318.2" cy="66" r="6"></circle>
+      <circle class="rla-dot pass" cx="336.8" cy="66" r="6"></circle>
+      <circle class="rla-dot pass" cx="355.4" cy="66" r="6"></circle>
+      <circle class="rla-dot pass" cx="374" cy="66" r="6"></circle>
+      <circle class="rla-dot pass" cx="392.6" cy="66" r="6"></circle>
+      <circle class="rla-dot pass" cx="411.2" cy="66" r="6"></circle>
+      <circle class="rla-dot deny" cx="361.6" cy="88" r="6"></circle>
+      <circle class="rla-dot deny" cx="637.5" cy="88" r="6"></circle>
+      <text class="rla-tn" x="8" y="70">固定格</text>
+      <text class="rla-tn" x="8" y="155">滑動尺</text>
+      <rect class="rla-frame" x="281" y="126" width="310" height="50" rx="6"></rect>
+      <text class="rla-tl" x="289" y="140">任意擺放的 1000 ms：[700, 1700)</text>
+      <circle class="rla-dot hit" cx="318.2" cy="157" r="6"></circle>
+      <circle class="rla-dot hit" cx="336.8" cy="157" r="6"></circle>
+      <circle class="rla-dot hit" cx="355.4" cy="157" r="6"></circle>
+      <circle class="rla-dot hit" cx="374" cy="157" r="6"></circle>
+      <circle class="rla-dot hit" cx="392.6" cy="157" r="6"></circle>
+      <circle class="rla-dot hit" cx="411.2" cy="157" r="6"></circle>
+      <text class="rla-txt-bad" x="583" y="162" text-anchor="end">6 筆 = 2 × L</text>
+      <line class="rla-bound" x1="374" y1="22" x2="374" y2="184"></line>
+      <line class="rla-ax" x1="64" y1="190" x2="684" y2="190"></line>
+      <text class="rla-tick" x="64" y="206" text-anchor="middle">0</text>
+      <text class="rla-tick" x="219" y="206" text-anchor="middle">500</text>
+      <text class="rla-tick" x="374" y="206" text-anchor="middle">1000</text>
+      <text class="rla-tick" x="529" y="206" text-anchor="middle">1500</text>
+      <text class="rla-tick" x="684" y="206" text-anchor="end">2000 ms</text>
+    </svg>
   </div>
-  <p class="cap">看 1000 這一列：對齊視窗認為新的一秒開始了，往回看 800 仍落在這一秒裡。突刺不是實作 bug，是格子邊界的定義。</p>
-  <div class="formula">邊界兩側合起來，最短約一個窗寬內可放進 2 × limit</div>
-  <p>還有一種常見寫法不把視窗編號放進 key：第一次 <code>INCR</code> 時把 TTL 設成 <var>W</var>，key 過期就等於重新開窗。邊界從「大家共用的整點」變成「這個鍵自己的第一筆」。單鍵仍然可以在過期前後各吃滿一次 <var>L</var>，所以 2 倍還在，只是每個身份的尖峰不對齊。時鐘若只靠各台應用自己算 <code>floor(t / W)</code>，歪 200 ms 在 60 秒窗裡無所謂，在 1 秒窗裡會讓相鄰兩台把同一筆請求算進不同格。要對齊就用計數器那台機器的時間來算編號。</p>
+  <p class="cap">上排是演算法看到的世界：兩個格子各放行 3 筆，都守住上限；960 與 1850 兩筆因所在格子已滿而被拒。下排把同一批放行換成任意擺放的 1000 ms 尺——820 到 1120 這 300 ms 裡進了 6 筆。這組數字就是第 5 節實驗室的「跨邊界突刺」劇本。</p>
+  <div class="formula">邊界兩側各吃滿一次：任意一個窗寬內，最多可放進 2 × L</div>
+  <p>突刺不是實作 bug，是「格子」這個定義本身。常見的變形是不把視窗編號放進 key，而在第一次 <code>INCR</code> 時把 TTL 設成 <var>W</var>：key 過期就等於重新開窗。邊界從「所有人共用的整點」變成「這個身份自己的第一筆」，不同使用者的歸零時刻因此被打散，整點那一刻全站一起解封的尖峰消失了。但單一身份仍然可以在過期前、過期後各吃滿一次 <var>L</var>，所以對單一攻擊者而言，2 倍還在。</p>
+  <p>另一個細節是時鐘。若各台應用自己算 <code>floor(t / W)</code>，機器之間歪 200 ms，在 60 秒的窗裡無所謂，在 1 秒的窗裡會讓相鄰兩台把同一時刻的請求算進不同格。要對齊，就用計數器那台機器的時間算編號——第 6 節的腳本示範怎麼做。</p>
   <div class="callout warn">
     <div class="c-title"><span class="ic">陷阱</span>「固定視窗很簡單」不算答完</div>
-    <p>面試官下一句通常是：限制每秒 5 次，攻擊者能不能在某個瞬間打進 10 次？能。就在邊界兩側。你若接受這個突刺，要說得出來；你若不接受，就不要停在 Fixed Window。</p>
+    <p>面試官下一句通常是：限制每秒 5 次，攻擊者能不能在某個瞬間打進 10 次？能，就在邊界兩側。你若接受這個突刺，要說得出來，並說明為什麼業務可以接受（例如窗寬是一小時、目的只是防爬蟲）；你若不接受，就不要停在 Fixed Window。</p>
   </div>
   <div class="oneliner">
-    <b>一句話答法</b>Fixed Window 每格一個計數，好寫也好原子化。相鄰兩格各吃滿上限時，任意一個窗寬裡最多約兩倍。
+    <b>一句話答法</b>Fixed Window 每格一個計數，O(1) 好寫也好原子化。相鄰兩格各吃滿上限時，跨邊界的任意一個窗寬裡最多約兩倍；用第一筆觸發 TTL 只能打散不同使用者的尖峰，消不掉單一使用者的兩倍。
   </div>
 </section>
 
 <section id="s3">
   <div class="sec-head">
     <span class="sec-num">03</span>
-    <h2>滑動視窗：精確的日誌，或兩個整數的近似</h2>
+    <h2>Sliding Window：用記憶體換精確，或用兩個整數近似</h2>
   </div>
-  <p class="sec-sub">Sliding Window 要守的是「任意一段 W 內不超過 L」，不是「每個對齊格子不超過 L」。精確與省記憶體在這裡分家。</p>
-  <p>Sliding Log 留下這個鍵在窗內每一次放行的時間戳。新請求進來，先丟掉年齡已經達到 <var>W</var> 的舊戳（年齡剛好等於 <var>W</var> 算窗外），剩下的筆數小於 <var>L</var> 才放行，並把自己的時間戳推進去。任意一段長度為 <var>W</var> 的區間都不會超過 <var>L</var>，邊界突刺消失。熱路徑的記憶體等於窗內放行筆數：上限 1 萬就是 1 萬個時間戳，每次還得在原子腳本裡刪舊的、數剩下的。低頻或上限很小的時候這很舒服；每秒幾萬筆的熱鍵會把腳本與記憶體一起撐大。</p>
-  <p>Sliding Counter 用兩個整數換這份精確。只留上一格的放行數 <var>prev</var> 與這一格已經放行的 <var>curr</var>。請求落在格子內的偏移是 <var>elapsed</var>，用上一格還「掛在」滑動窗裡的比例來估計：</p>
+  <p class="sec-sub">Fixed Window 的毛病出在「格子」。要守住「任意一段 W 內不超過 L」，有兩條路：把每一筆記下來，或用上一格的總數去估。</p>
+
+  <h3>Sliding Window Log：記下每一筆</h3>
+  <p>最直接的做法是保留這個身份在窗內每一次放行的時間戳。新請求到達時，先丟掉年齡已經達到 <var>W</var> 的舊戳（年齡剛好等於 <var>W</var> 算窗外），剩下的筆數小於 <var>L</var> 才放行，並把自己的時間戳推進去。在 Redis 上通常用一個 sorted set，分數就是時間戳，整段放進同一支 Lua 腳本裡原子執行：</p>
+  <pre><code>cutoff = now − W
+ZREMRANGEBYSCORE key -inf cutoff    -- 丟掉年齡 ≥ W 的時間戳
+n = ZCARD key                       -- 窗內還剩幾筆
+if n &lt; L then
+  ZADD key now member               -- member 要唯一：時間戳 + 序號
+  PEXPIRE key W
+放行 ⇔ n &lt; L</code></pre>
+  <p class="cap">分數是時間，所以「丟掉窗外的」就是一次範圍刪除。member 若直接用時間戳，同一毫秒的兩筆會被 sorted set 合併成一筆，計數就少了。</p>
+  <p>它的好處是<strong>絕對不超發</strong>：任意一段長度為 <var>W</var> 的區間都不會超過 <var>L</var>，邊界突刺消失。痛點是記憶體隨上限線性成長：若規則是「每小時 10,000 次」，一個活躍的身份就得存 10,000 個時間戳，每次判定還要在腳本裡刪舊的、數剩下的。低頻、上限小、又不能超發的端點（登入、OTP、寄信）用它很舒服；每秒幾萬筆的熱鍵會把腳本與記憶體一起撐大。</p>
+  <p>還有一個實作分歧：被拒絕的請求要不要也記進日誌？有些實作會記，這樣持續濫用的客戶端只要不停打，就永遠出不了窗——比較嚴，但也可能讓一個重試迴圈把自己永久鎖死。本篇與實驗室採「只記放行」。</p>
+
+  <h3>Sliding Window Counter：兩個整數的面積近似</h3>
+  <p>Sliding Counter 用兩個整數換掉整份日誌。它只留上一格的放行總數 <var>prev</var> 與這一格已經放行的 <var>curr</var>。請求落在這一格的偏移是 <var>elapsed</var>，此時滑動窗 <code>[now − W, now)</code> 還蓋住上一格的最後 <code>(W − elapsed)</code> 毫秒。假設上一格的請求沿時間均勻鋪開，被蓋住的那部分大約就是 <var>prev</var> 乘上這個比例：</p>
   <div class="formula">estimate = prev × (W − elapsed) / W + curr</div>
-  <p><var>estimate</var> 小於 <var>L</var> 才放行，然後 <var>curr</var> 加一。它假設上一格的請求沿時間均勻鋪開——這通常不是真的。</p>
-  <p>上一格 5 筆若都擠在格子一開頭，新格子剛開始時它們的年齡已經到達 <var>W</var>，日誌會把它們全部丟掉、估計應為 0。加權仍然把 <var>prev</var> 整段算進去，<var>estimate</var> = 5，上限若也是 5 就會拒絕。這是偏嚴。反過來，5 筆若都擠在上一格的末端，過了半窗它們其實還全部活著；加權只算一半，<var>estimate</var> 偏低，可能在日誌已經超限時仍然放行。這是偏鬆。兩個整數買到的是「大多時候接近滑動窗」，不是證明。</p>
+  <p><var>estimate</var> 小於 <var>L</var> 才放行，然後 <var>curr</var> 加一。熱路徑只有格號、<var>prev</var>、<var>curr</var> 三個數字，和 Fixed Window 一樣是 O(1)。下圖把這個公式畫成面積：</p>
+  <div class="rla-fig">
+    <svg viewBox="0 0 720 240" role="img" aria-labelledby="rla-sc-t">
+      <title id="rla-sc-t">Sliding Counter 的加權幾何：同一個估計值，對應上一格請求的不同真實分布</title>
+      <text class="rla-tl" x="265" y="14" text-anchor="middle">上一格 · prev = 3</text>
+      <text class="rla-tl" x="555" y="14" text-anchor="middle">這一格 · curr = 0</text>
+      <rect class="rla-frame acc" x="207" y="24" width="290" height="182" rx="4"></rect>
+      <line class="rla-div" x1="410" y1="22" x2="410" y2="206"></line>
+      <line class="rla-now" x1="497" y1="22" x2="497" y2="206"></line>
+      <text class="rla-tn" x="8" y="62">加權的假設</text>
+      <rect class="rla-uni" x="120" y="42" width="290" height="32" rx="3"></rect>
+      <rect class="rla-ovl" x="207" y="42" width="203" height="32"></rect>
+      <text class="rla-tl" x="163.5" y="62" text-anchor="middle">鋪滿整格</text>
+      <text class="rla-tx" x="308.5" y="62" text-anchor="middle">70% 還在窗內 → 2.1 筆</text>
+      <text class="rla-txt-acc" x="512" y="62">估計 = 3 × 0.7 = 2.1</text>
+      <text class="rla-tn" x="8" y="118">擠在格頭</text>
+      <circle class="rla-dot pass" cx="126" cy="114" r="5"></circle>
+      <circle class="rla-dot pass" cx="137.6" cy="114" r="5"></circle>
+      <circle class="rla-dot pass" cx="149.2" cy="114" r="5"></circle>
+      <text class="rla-txt-warn" x="512" y="112">實際 0 筆在窗內</text>
+      <text class="rla-tl" x="512" y="128">估 2.1 → 高估，會誤拒</text>
+      <text class="rla-tn" x="8" y="172">擠在格尾</text>
+      <circle class="rla-dot pass" cx="381" cy="168" r="5"></circle>
+      <circle class="rla-dot pass" cx="392.6" cy="168" r="5"></circle>
+      <circle class="rla-dot pass" cx="404.2" cy="168" r="5"></circle>
+      <text class="rla-txt-bad" x="512" y="166">實際 3 筆在窗內</text>
+      <text class="rla-tl" x="512" y="182">估 2.1 → 低估，會多放</text>
+      <text class="rla-txt-acc" x="352" y="200" text-anchor="middle">滑動窗 [now − 1000, now)</text>
+      <line class="rla-ax" x1="120" y1="214" x2="700" y2="214"></line>
+      <text class="rla-tick" x="120" y="230" text-anchor="middle">0</text>
+      <text class="rla-tick" x="207" y="230" text-anchor="middle">300</text>
+      <text class="rla-tick" x="410" y="230" text-anchor="middle">1000</text>
+      <text class="rla-tick" x="497" y="230" text-anchor="middle">now = 1300</text>
+      <text class="rla-tick" x="700" y="230" text-anchor="end">2000</text>
+    </svg>
+  </div>
+  <p class="cap">三列都是同一個時刻 now = 1300（elapsed = 300）、同一個估計值 2.1。藍框是滑動窗，它蓋住上一格的 70%。Sliding Counter 只記得上一格共有 3 筆，不知道它們落在格子的哪裡：擠在格頭時它們早已滑出窗外，估計偏高；擠在格尾時它們全都還在窗內，估計偏低。</p>
+
+  <h3>近似的代價：兩個算例</h3>
+  <p>同樣 <var>W</var> = 1000 ms、<var>L</var> = 3，把上一格的 3 筆分別擠到格頭與格尾，逐筆算一次：</p>
+  <div class="rla-split">
+    <div class="rla-pane warn">
+      <b>前一格擠在格頭 → 偏嚴（誤拒）</b>
+      <ol>
+        <li>上一格在 0、10、20 ms 放行，prev = 3</li>
+        <li>1200 ms：3 × 0.80 + 0 = 2.40 → 放行</li>
+        <li>1220 ms：3 × 0.78 + 1 = 3.34 → 拒絕</li>
+        <li>1240 ms：3 × 0.76 + 1 = 3.28 → 拒絕</li>
+        <li>真實滑動窗：1220 時窗內只有 1 筆、1240 時 2 筆。Sliding Log 兩筆都會放行</li>
+      </ol>
+    </div>
+    <div class="rla-pane bad">
+      <b>前一格擠在格尾 → 偏鬆（多放）</b>
+      <ol>
+        <li>上一格在 970、980、990 ms 放行，prev = 3</li>
+        <li>1500 ms：3 × 0.50 + 0 = 1.50 → 放行</li>
+        <li>1510 ms：3 × 0.49 + 1 = 2.47 → 放行</li>
+        <li>1520 ms：3 × 0.48 + 2 = 3.44 → 拒絕</li>
+        <li>真實滑動窗：970 到 1510 這 540 ms 放進 5 筆，上限是 3。Sliding Log 在 1500 時窗內已有 3 筆，會全部拒絕</li>
+      </ol>
+    </div>
+  </div>
+  <p class="cap">左欄是誤拒（False Reject），右欄是超發（Overshoot）。兩欄的數字就是第 5 節實驗室「前窗擠在開頭」與「前窗擠在末端」兩個劇本，可以逐筆對照。</p>
+  <p>誤差是雙向的，但在大量、彼此獨立的流量上通常不大：Cloudflare 的邊緣限流就公開說明採用這個加權近似，用兩個計數器換掉每筆時間戳，讓每個限流鍵在數百萬個網域上都只佔固定大小。它適合「要比 Fixed Window 平滑得多、又存不起時間戳」的場合；不適合拿來當「絕對不能超過」的契約。</p>
   <div class="callout warn">
     <div class="c-title"><span class="ic">陷阱</span>加權不是保守的下界</div>
-    <p>它會雙向偏。流量在格子裡越不均勻，偏得越多。需要「任意窗絕對不超過」當契約時，不要用它交差；需要「比 Fixed Window 少很多突刺、又不能存時間戳」時，它是實務上的妥協。</p>
+    <p>很多人以為近似值「最多偏嚴一點」。它會雙向偏：流量在格子裡越不均勻，偏得越多，而且偏鬆的方向一樣會超過上限。需要「任意窗絕對不超過」當契約時，不要用它交差；需要「比 Fixed Window 少很多突刺、又不能存時間戳」時，它是實務上的妥協。</p>
   </div>
   <div class="oneliner">
-    <b>一句話答法</b>Sliding Log 用時間戳守住任意窗寬；Sliding Counter 用上一格加權，只留兩個整數，均勻假設不成立時會偏嚴或偏鬆。
+    <b>一句話答法</b>Sliding Log 用 sorted set 存每筆時間戳，精確守住任意窗寬，記憶體 O(L)。Sliding Counter 只留 prev 與 curr，用 prev × (W − elapsed) / W + curr 估計，O(1) 但假設均勻：前一格擠在格頭會誤拒，擠在格尾會多放。
   </div>
 </section>
 
 <section id="s4">
   <div class="sec-head">
     <span class="sec-num">04</span>
-    <h2>兩種桶：立刻送出，或排開再送</h2>
+    <h2>Token Bucket vs Leaky Bucket：放行突發，還是排隊整形</h2>
   </div>
-  <p class="sec-sub">Token Bucket 允許閒置後一次倒出容量。Leaky Bucket 把已接受的工作排成固定間隔。放行筆數可以一樣，上游看到的形狀不一樣。</p>
-  <p>Token Bucket 記兩個數：現在還有幾個 token、上次補充的時刻。閒置時以固定速率把 token 加到不超過容量。來一筆成本為 1 的請求，餘額至少是 1 就扣掉並立刻轉發，否則拒絕。容量是突發的寬度，每秒補充量是穩態速率。閒置夠久之後，下游會在很短的時間裡收到整整一桶——因為放行的當下請求就進了上游，桶並不幫你排隊。</p>
+  <p class="sec-sub">視窗家族在數「這段時間放了幾筆」。桶家族換一個問法：長期速率是多少、瞬間最多能衝多少。兩種桶的差別，在於桶裡裝的是什麼。</p>
+
+  <h3>Token Bucket：桶裡裝的是許可</h3>
+  <p>Token Bucket 記兩個數：桶裡還有幾個許可（token）、上次補充的時刻。桶以固定速率補充，最多補到容量 <var>capacity</var>。請求到達時先把這段時間該補的許可補上，餘額夠付這次的成本就扣掉並<strong>立刻轉發上游</strong>，否則拒絕。</p>
   <div class="formula">tokens = min(capacity, tokens + 經過秒數 × 每秒補充)</div>
-  <p>Leaky Bucket 把同一組數字用來排隊。出發間隔是 <code>1 / 每秒補充</code>。桶深 <var>capacity</var> 表示最多有這麼多筆可以在途，最晚那筆要比到達時間晚 <code>(capacity − 1)</code> 個間隔。排不進去就拒絕，而不是先放行再祈禱上游撐住。已經排進去的請求，出發時刻彼此相隔一個間隔；上游看到的是平滑的流水，不是一桶倒下來。</p>
-  <p>同一組數字可以讓兩種桶放行同樣的筆數。容量 3、每秒補充 2，請求在 0、10、20、30 ms 到達：Token 立刻放行前三筆、拒絕第四筆，三筆在 30 ms 內都已進上游。Leaky 的間隔是 500 ms，前三筆的出發時刻是 0、500、1000 ms，第四筆要排到 1500 ms、超過桶深，拒絕。放行數都是 3。</p>
-  <div class="rla-split">
-    <div class="rla-pane token">
-      <b>Token Bucket · 立刻送出</b>
-      <ol>
-        <li>0 ms 送出</li>
-        <li>10 ms 送出</li>
-        <li>20 ms 送出</li>
-        <li>30 ms 拒絕</li>
-      </ol>
-    </div>
-    <div class="rla-pane leaky">
-      <b>Leaky Bucket · 排開再送</b>
-      <ol>
-        <li>0 ms 送出</li>
-        <li>500 ms 送出</li>
-        <li>1000 ms 送出</li>
-        <li>30 ms 那筆拒絕</li>
-      </ol>
-    </div>
+  <p>兩個參數各管一件事：每秒補充是長期速率，容量是突發的寬度。閒置夠久之後桶是滿的，下一波突發可以一口氣花掉整桶——放行的當下請求就進了上游，桶並不幫你排隊。因為「扣幾個」可以不是 1，它也是表達加權成本最自然的演算法。</p>
+  <p>要注意它守的不是「任意窗寬不超過 <var>L</var>」。容量 3、每秒補 3，看起來和「每秒 3 筆」對齊：0 ms 連發 3 筆把桶花光，334 ms 與 667 ms 又各補回 1 個許可、各放 1 筆，同一個 1000 ms 內共放了 5 筆。一般化來說，任意窗寬 <var>W</var> 內最多約 <code>capacity + 每秒補充 × W</code> 筆。這是設計上允許的突發，不是 bug，但要說得出來。</p>
+
+  <h3>Leaky Bucket 的兩種面貌</h3>
+  <p>「Leaky Bucket」這個名字在文獻與實作裡指兩種不同的東西，面試最常在這裡混淆。</p>
+  <p><strong>當佇列用（Traffic Shaping）</strong>：桶裡裝的是排隊中的請求。桶底有一個洞，以固定間隔 <code>1 / 每秒補充</code> 把請求漏向上游；桶深 <var>capacity</var> 是最多能有幾筆在桶裡，最晚那筆會比到達晚 <code>(capacity − 1)</code> 個間隔才出發。滿了就拒絕。瞬間的突發不會打進上游，而是被轉換成<strong>排隊延遲</strong>，上游看到的是平滑的等距流水。</p>
+  <p><strong>當計量器用（Policing，也就是 GCRA）</strong>：沒有實體佇列，只記一個時刻 TAT（Theoretical Arrival Time，下一筆理論上最早可出發的時刻），當場決定放或拒：</p>
+  <pre><code>間隔 T = 1 / 每秒補充        容忍 τ = (capacity − 1) × T
+請求在 now 到達：
+  TAT = max(TAT, now)
+  若 TAT − now &gt; τ   → 拒絕（TAT 不動）
+  否則               → 放行並立刻轉發，TAT = TAT + T</code></pre>
+  <p class="cap">佇列版只差一行：放行的請求不是現在送出，而是等到 TAT 那一刻才送出。判斷「要等多久、超不超過桶深」的算式完全一樣。</p>
+  <p>關鍵在這裡：把 <code>TAT − now</code> 換算成「欠了幾個許可」，<code>TAT − now ≤ τ</code> 恰好等價於 Token Bucket 的「餘額 ≥ 1」。<strong>同樣的容量與速率下，GCRA 放行與拒絕的請求和 Token Bucket 一模一樣</strong>，它不會把任何突發排開；它只是用一個時刻代替「餘額＋上次補充時刻」兩個數字，記帳方向相反。真正改變上游所見形狀的，只有佇列版。</p>
+  <p>用同一組數字看兩種形狀：容量 3、每秒補 2，四筆請求在 0、10、20、30 ms 到達。</p>
+  <div class="rla-fig">
+    <svg viewBox="0 0 720 300" role="img" aria-labelledby="rla-bk-t">
+      <title id="rla-bk-t">Token Bucket 與 Leaky Bucket（佇列）對同一波突發的處理：桶裡裝什麼，以及上游收到的時刻</title>
+      <defs>
+        <marker id="rla-bk-mk" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+          <path d="M 0 1 L 8 5 L 0 9 z" fill="#9aa0a8"></path>
+        </marker>
+      </defs>
+      <line class="rla-div" x1="360" y1="8" x2="360" y2="292"></line>
+
+      <text class="rla-tn" x="12" y="22">Token Bucket · 桶裡是許可</text>
+      <rect class="rla-box" x="12" y="92" width="76" height="50" rx="6"></rect>
+      <text class="rla-tx" x="50" y="113" text-anchor="middle">4 筆請求</text>
+      <text class="rla-tl" x="50" y="130" text-anchor="middle">0–30 ms</text>
+      <line class="rla-edge" x1="90" y1="117" x2="116" y2="117" marker-end="url(#rla-bk-mk)"></line>
+      <line class="rla-edge" x1="175" y1="38" x2="175" y2="66" marker-end="url(#rla-bk-mk)"></line>
+      <text class="rla-tl" x="185" y="52">每秒補 2 個</text>
+      <path class="rla-pail" d="M 118 70 L 128 170 L 222 170 L 232 70"></path>
+      <circle class="rla-token" cx="150" cy="154" r="11"></circle>
+      <circle class="rla-token" cx="175" cy="154" r="11"></circle>
+      <circle class="rla-token" cx="200" cy="154" r="11"></circle>
+      <text class="rla-tl" x="175" y="188" text-anchor="middle">滿桶 3 個許可</text>
+      <line class="rla-edge" x1="234" y1="117" x2="262" y2="117" marker-end="url(#rla-bk-mk)"></line>
+      <rect class="rla-box" x="264" y="92" width="84" height="50" rx="6"></rect>
+      <text class="rla-tx" x="306" y="113" text-anchor="middle">上游</text>
+      <text class="rla-tl" x="306" y="130" text-anchor="middle">立刻收到</text>
+      <text class="rla-txt-warn" x="12" y="214">第 4 筆（30 ms）：只剩 0.06 個 → 拒絕</text>
+      <text class="rla-tl" x="12" y="238">上游收到的時刻</text>
+      <rect class="rla-up pass" x="19" y="256" width="2" height="22"></rect>
+      <rect class="rla-up pass" x="21.1" y="256" width="2" height="22"></rect>
+      <rect class="rla-up pass" x="23.1" y="256" width="2" height="22"></rect>
+      <text class="rla-txt-ok" x="34" y="271">3 筆擠在 20 ms 內</text>
+      <line class="rla-ax" x1="20" y1="280" x2="330" y2="280"></line>
+      <text class="rla-tick" x="20" y="294" text-anchor="middle">0</text>
+      <text class="rla-tick" x="123.3" y="294" text-anchor="middle">500</text>
+      <text class="rla-tick" x="226.7" y="294" text-anchor="middle">1000</text>
+      <text class="rla-tick" x="330" y="294" text-anchor="end">1500 ms</text>
+
+      <text class="rla-tn" x="382" y="22">Leaky Bucket（佇列）· 桶裡是工作</text>
+      <rect class="rla-box" x="382" y="92" width="76" height="50" rx="6"></rect>
+      <text class="rla-tx" x="420" y="113" text-anchor="middle">4 筆請求</text>
+      <text class="rla-tl" x="420" y="130" text-anchor="middle">0–30 ms</text>
+      <line class="rla-edge" x1="460" y1="117" x2="486" y2="117" marker-end="url(#rla-bk-mk)"></line>
+      <text class="rla-tl" x="545" y="52" text-anchor="middle">最多排 3 筆，每 500 ms 漏出 1 筆</text>
+      <path class="rla-pail" d="M 488 70 L 498 170 L 592 170 L 602 70"></path>
+      <rect class="rla-job" x="507" y="146" width="22" height="16" rx="2"></rect>
+      <rect class="rla-job" x="534" y="146" width="22" height="16" rx="2"></rect>
+      <rect class="rla-job" x="561" y="146" width="22" height="16" rx="2"></rect>
+      <text class="rla-tl" x="545" y="188" text-anchor="middle">桶深 3 筆</text>
+      <line class="rla-edge" x1="594" y1="162" x2="632" y2="134" marker-end="url(#rla-bk-mk)"></line>
+      <rect class="rla-box" x="634" y="92" width="84" height="50" rx="6"></rect>
+      <text class="rla-tx" x="676" y="113" text-anchor="middle">上游</text>
+      <text class="rla-tl" x="676" y="130" text-anchor="middle">等距收到</text>
+      <text class="rla-txt-warn" x="382" y="214">第 4 筆（30 ms）：要排 1470 ms &gt; 1000 → 拒絕</text>
+      <text class="rla-tl" x="382" y="238">上游收到的時刻</text>
+      <rect class="rla-up wait" x="389" y="256" width="2" height="22"></rect>
+      <rect class="rla-up wait" x="492.3" y="256" width="2" height="22"></rect>
+      <rect class="rla-up wait" x="595.7" y="256" width="2" height="22"></rect>
+      <text class="rla-tl" x="398" y="252">立刻</text>
+      <text class="rla-tl" x="501.3" y="252">等 490 ms</text>
+      <text class="rla-tl" x="604.7" y="252">等 980 ms</text>
+      <line class="rla-ax" x1="390" y1="280" x2="700" y2="280"></line>
+      <text class="rla-tick" x="390" y="294" text-anchor="middle">0</text>
+      <text class="rla-tick" x="493.3" y="294" text-anchor="middle">500</text>
+      <text class="rla-tick" x="596.7" y="294" text-anchor="middle">1000</text>
+      <text class="rla-tick" x="700" y="294" text-anchor="end">1500 ms</text>
+    </svg>
   </div>
-  <p class="cap">容量 3、每秒 2 筆、四筆擠在 30 ms 內。放行數相同；差在上游何時看見它們。沒有佇列就做不出右欄的延後。</p>
-  <p>所以選擇不在「哪個比較先進」，而在你有沒有地方讓請求等。同步的 HTTP 中介層通常只能現在放或現在拒絕，Token Bucket 跟這個模型一致，突發會真實打進上游——上游要另有容量或別的保護才接得住。前面若有佇列，Leaky Bucket 用延遲換輸出間隔。nginx 的 <code>limit_req</code> 就是漏桶：超出速率的請求預設被延後；<code>burst</code> 加上 <code>nodelay</code> 則把突發立刻轉發，再超出才拒絕。那是「有沒有排隊」的開關。Envoy 的本地限流配置用的是 token bucket，放行即走。</p>
-  <p>補充速率拉到 0 時兩種桶也不再是對偶：Token 仍能把初始那一桶倒完，Leaky 沒有出發間隔，一筆都排不出去。這是模型的邊界，不是生產參數。</p>
+  <p class="cap">兩邊都放行前三筆、拒絕第四筆，放行數相同。差在最下面那條線：左邊上游在 20 ms 內收到三筆；右邊收到的是 0、500、1000 ms 三個等距脈衝，代價是後兩筆各多等了 490 與 980 ms。若右邊換成 GCRA，決策不變，但三筆會像左邊一樣立刻送出。</p>
+  <p>所以選擇不在「哪個比較先進」，而在<strong>你有沒有地方讓請求等</strong>。同步的 HTTP 中介層通常只能現在放或現在拒，Token Bucket 或 GCRA 跟這個模型一致，突發會真實打進上游——上游要另有容量或別的保護才接得住。Envoy 的本地限流設定直接就是 token bucket（<code>max_tokens</code>、<code>tokens_per_fill</code>、<code>fill_interval</code>）。前面若有佇列，Leaky Bucket 用延遲換平滑的輸出。</p>
+  <p>nginx 的 <code>limit_req</code> 是三種行為都能切的漏桶，正好拿來對照：沒設 <code>burst</code> 時佇列深度為 0，超過速率的請求立刻被拒（預設回 503，可用 <code>limit_req_status</code> 改成 429）；設了 <code>burst=N</code> 就是佇列版，多出來的請求排進深度 N 的佇列、按速率放出；再加上 <code>nodelay</code>，突發內的請求立刻轉發、只佔用額度，超過才拒絕——這就變回計量器，行為等同 Token Bucket。</p>
   <div class="callout accent">
-    <div class="c-title"><span class="ic">關鍵</span>GCRA 不是第三種桶</div>
-    <p>GCRA（Generic Cell Rate Algorithm）記的是「下一筆理論上最早可以到的時刻」，而不是水位。和漏桶同一件事，只是記帳方向相反。面試聽到這個名字，把它歸到 Leaky Bucket，然後問對方：放行之後請求是立刻進上游，還是在佇列裡等到那個時刻。</p>
+    <div class="c-title"><span class="ic">關鍵</span>GCRA 不是第三種桶，也不會幫你平滑</div>
+    <p>面試聽到 GCRA，把它歸到「漏桶當計量器」，並指出它和同參數的 Token Bucket 決策等價。接著反問對方：放行之後，請求是立刻進上游，還是在佇列裡等到 TAT 那一刻？前者是計量器，突發照樣打進上游；後者才是整形，代價是延遲與一個要被管理的佇列。</p>
   </div>
   <div class="oneliner">
-    <b>一句話答法</b>Token Bucket 用閒置累積的容量換一次突發，放行就立刻打進上游。Leaky Bucket 把出發時間排開；沒有佇列時，它只能拒絕，不能延後。
+    <b>一句話答法</b>Token Bucket 存許可，用閒置累積的容量換一次突發，放行就立刻打進上游，任意窗內最多約 capacity + 速率 × W。Leaky Bucket 當佇列時存待送的工作，把突發轉成等距輸出與排隊延遲；當計量器（GCRA）時只記 TAT，決策與 Token Bucket 完全相同。
   </div>
 </section>
 
 <section id="s5">
   <div class="sec-head">
     <span class="sec-num">05</span>
-    <h2>同一條到達序列，兩種演算法並排</h2>
+    <h2>互動實驗室：同一條請求序列，兩種演算法並排</h2>
   </div>
-  <p class="sec-sub">把窗寬、上限、容量、補充速率定成同一份預算，差異就只來自演算法，不來自你偷偷換了一組數字。</p>
-  <p>下面這把尺是：「任意一段窗寬裡最多放行 limit 筆」。它就是 Sliding Log 的契約。Fixed Window 會在邊界上超過它；Token 與 Leaky 根本不沿格子歸零，它們的穩態由每秒補充決定，突發由容量決定。要讓桶的穩態和這把尺對齊，把每秒補充設成 <code>limit / (窗寬秒數)</code>。預設是 1000 ms、3 筆、每秒補充 3、容量 4——比視窗上限多 1，用來看見多出來的那一點突發。表的每一列是你填的順序，不是時間順序；圖的橫軸才是時間。</p>
-  <p>暖色表示這一筆被拒絕，那是限流器在履行職務，不是故障。變紅的「任意視窗超出」才是相對精確契約多放的筆數。底線上的圓點是左欄、頂端的方點是右欄，實線與虛線是兩邊的累計放行。淡的直虛線是對齊視窗的邊界，只作對照：Token 與 Leaky 不會在那條線上歸零。</p>
+  <p class="sec-sub">把窗寬、上限、容量、補充速率鎖成同一份預算，差異就只來自演算法，而不是你偷偷換了一組數字。</p>
+  <p>這裡只用一把量尺：<strong>上游在任意一段窗寬內最多收到幾筆</strong>，拿去和視窗上限比。這正是 Sliding Log 的契約，所以 Sliding Log 在這把尺下永遠不會超出；其他演算法若超出，時間軸上會用紅框圈出是哪一段。Leaky · 佇列的請求要排隊，所以量的是它真正送出的時刻，而不是到達時刻。</p>
+  <p>每條時間軌分兩行：上面是請求到達的時刻，圓圈裡的數字對應下方表格的第幾筆；下面是上游真正收到的時刻。綠色是立刻放行，藍色是排隊後才送出（虛線箭頭從到達指向送出），白底橘框是拒絕——拒絕是限流器在履行職務，不是故障；紅框才是相對契約多放的部分。淡灰直虛線是對齊視窗的邊界，只有 Fixed Window 與 Sliding Counter 會在那裡換格。把滑鼠停在圓圈上，可以看到這一筆當下的狀態。</p>
   <div class="demo" id="demo-pair">
     <div class="demo-bar">
       <span class="label">互動 · 同一序列、兩種演算法</span>
-      <span class="label" style="text-transform:none;font-family:var(--sans);font-size:12px;color:var(--text-2)">改到達時間、容量或補充速率，兩邊一起重算</span>
+      <span class="label" style="text-transform:none;font-family:var(--sans);font-size:12px;color:var(--text-2)">選一個劇本，或自己改到達時間與參數</span>
     </div>
     <div class="demo-body">
+      <div class="rla-presets">
+        <div class="seg" role="group" aria-label="流量劇本">
+          <button type="button" data-preset="boundary" aria-pressed="true">跨邊界突刺</button>
+          <button type="button" data-preset="lenient" aria-pressed="false">前窗擠在末端</button>
+          <button type="button" data-preset="strict" aria-pressed="false">前窗擠在開頭</button>
+          <button type="button" data-preset="burst" aria-pressed="false">瞬間突發</button>
+          <button type="button" data-preset="steady" aria-pressed="false">平穩流量</button>
+        </div>
+        <p class="rla-hint" id="rla-hint">載入劇本後，所有結果都依目前的輸入即時重算。</p>
+      </div>
       <div class="rla-controls">
         <label>左欄
           <select id="rla-algo-l" aria-label="左欄演算法">
@@ -1482,16 +1817,18 @@
             <option value="1">Sliding Counter</option>
             <option value="2">Sliding Log</option>
             <option value="3">Token Bucket</option>
-            <option value="4">Leaky Bucket</option>
+            <option value="4">Leaky · 佇列</option>
+            <option value="5">GCRA · 計量</option>
           </select>
         </label>
         <label>右欄
           <select id="rla-algo-r" aria-label="右欄演算法">
             <option value="0">Fixed Window</option>
             <option value="1">Sliding Counter</option>
-            <option value="2">Sliding Log</option>
-            <option value="3" selected>Token Bucket</option>
-            <option value="4">Leaky Bucket</option>
+            <option value="2" selected>Sliding Log</option>
+            <option value="3">Token Bucket</option>
+            <option value="4">Leaky · 佇列</option>
+            <option value="5">GCRA · 計量</option>
           </select>
         </label>
       </div>
@@ -1502,109 +1839,171 @@
         <label>視窗上限 <b id="rla-limit-v">3 筆</b>
           <input id="rla-limit" type="range" min="1" max="12" step="1" value="3">
         </label>
-        <label>桶容量 <b id="rla-cap-v">4</b>
-          <input id="rla-cap" type="range" min="1" max="16" step="1" value="4">
+      </div>
+      <div class="rla-sliders rla-bucket" id="rla-bucket">
+        <label>桶容量 <b id="rla-cap-v">3</b>
+          <input id="rla-cap" type="range" min="1" max="16" step="1" value="3">
         </label>
         <label>每秒補充 <b id="rla-refill-v">3 / 秒</b>
-          <input id="rla-refill" type="range" min="0" max="20" step="1" value="3">
+          <input id="rla-refill" type="range" min="1" max="20" step="1" value="3">
         </label>
+        <p class="rla-off-note">目前兩欄都不是桶，容量與補充速率不影響結果。</p>
       </div>
-      <svg id="rla-svg" viewBox="0 0 720 200" role="img" style="width:100%;height:auto">
-        <title>兩種演算法的累計放行曲線</title>
+      <svg id="rla-svg" viewBox="0 0 720 284" role="img">
+        <title>同一組到達時間經過兩種演算法：每筆的判定與上游收到的時刻</title>
       </svg>
-      <p class="cap">折線往上跳的那一筆被接受。實線是左欄，虛線是右欄。把容量加大或把補充拉高，右欄的 Token 曲線會在突發處一次爬升。</p>
+      <div class="legend">
+        <span><i class="dot ns-ok"></i>立刻放行</span>
+        <span><i class="dot ns-wait"></i>排隊後送出</span>
+        <span><i class="dot ns-lock"></i>拒絕（保護生效）</span>
+        <span><i class="dot ns-bad"></i>超出上限的那一段窗</span>
+      </div>
+      <div class="status-line" id="rla-status">調整參數後，兩邊會一起重算。</div>
       <div class="rla-score">
         <article>
           <h3 id="rla-l-name">Fixed Window</h3>
           <dl>
-            <dt>放行</dt><dd id="rla-l-allowed">0</dd>
-            <dt>拒絕</dt><dd id="rla-l-denied">0</dd>
-            <dt>任意視窗超出</dt><dd id="rla-l-over">0</dd>
-            <dt>邊界半窗放行</dt><dd id="rla-l-cross">0</dd>
-            <dt>熱路徑數字</dt><dd id="rla-l-mem">0</dd>
-            <dt>零等待送出</dt><dd id="rla-l-imm">0</dd>
-            <dt>最大延後 ms</dt><dd id="rla-l-delay">0</dd>
-            <dt>送出最小間隔</dt><dd id="rla-l-gap">0</dd>
+            <dt>放行 / 拒絕</dt><dd id="rla-l-allowed">0</dd>
+            <dt id="rla-peak-l">上游任意 1000 ms 內最多</dt><dd id="rla-l-peak">0</dd>
+            <dt>超出上限</dt><dd id="rla-l-over">0</dd>
+            <dt>最長排隊</dt><dd id="rla-l-delay">0</dd>
+            <dt>每個鍵的熱路徑狀態</dt><dd id="rla-l-mem">0</dd>
           </dl>
         </article>
         <article>
-          <h3 id="rla-r-name">Token Bucket</h3>
+          <h3 id="rla-r-name">Sliding Log</h3>
           <dl>
-            <dt>放行</dt><dd id="rla-r-allowed">0</dd>
-            <dt>拒絕</dt><dd id="rla-r-denied">0</dd>
-            <dt>任意視窗超出</dt><dd id="rla-r-over">0</dd>
-            <dt>邊界半窗放行</dt><dd id="rla-r-cross">0</dd>
-            <dt>熱路徑數字</dt><dd id="rla-r-mem">0</dd>
-            <dt>零等待送出</dt><dd id="rla-r-imm">0</dd>
-            <dt>最大延後 ms</dt><dd id="rla-r-delay">0</dd>
-            <dt>送出最小間隔</dt><dd id="rla-r-gap">0</dd>
+            <dt>放行 / 拒絕</dt><dd id="rla-r-allowed">0</dd>
+            <dt id="rla-peak-r">上游任意 1000 ms 內最多</dt><dd id="rla-r-peak">0</dd>
+            <dt>超出上限</dt><dd id="rla-r-over">0</dd>
+            <dt>最長排隊</dt><dd id="rla-r-delay">0</dd>
+            <dt>每個鍵的熱路徑狀態</dt><dd id="rla-r-mem">0</dd>
           </dl>
         </article>
       </div>
       <div class="tbl-wrap">
         <table class="rla-ledger">
           <thead>
-            <tr><th>到達 ms</th><th>左欄</th><th>右欄</th></tr>
+            <tr><th>#</th><th>到達 ms</th><th id="rla-th-l">左</th><th id="rla-th-r">右</th></tr>
           </thead>
           <tbody>
-            <tr><td><input id="rla-t0" type="number" min="0" max="30000" step="10" value="200" aria-label="第 1 筆到達時間"></td><td id="rla-ld0"></td><td id="rla-rd0"></td></tr>
-            <tr><td><input id="rla-t1" type="number" min="0" max="30000" step="10" value="400" aria-label="第 2 筆到達時間"></td><td id="rla-ld1"></td><td id="rla-rd1"></td></tr>
-            <tr><td><input id="rla-t2" type="number" min="0" max="30000" step="10" value="700" aria-label="第 3 筆到達時間"></td><td id="rla-ld2"></td><td id="rla-rd2"></td></tr>
-            <tr><td><input id="rla-t3" type="number" min="0" max="30000" step="10" value="850" aria-label="第 4 筆到達時間"></td><td id="rla-ld3"></td><td id="rla-rd3"></td></tr>
-            <tr><td><input id="rla-t4" type="number" min="0" max="30000" step="10" value="950" aria-label="第 5 筆到達時間"></td><td id="rla-ld4"></td><td id="rla-rd4"></td></tr>
-            <tr><td><input id="rla-t5" type="number" min="0" max="30000" step="10" value="1000" aria-label="第 6 筆到達時間"></td><td id="rla-ld5"></td><td id="rla-rd5"></td></tr>
-            <tr><td><input id="rla-t6" type="number" min="0" max="30000" step="10" value="1100" aria-label="第 7 筆到達時間"></td><td id="rla-ld6"></td><td id="rla-rd6"></td></tr>
-            <tr><td><input id="rla-t7" type="number" min="0" max="30000" step="10" value="1200" aria-label="第 8 筆到達時間"></td><td id="rla-ld7"></td><td id="rla-rd7"></td></tr>
+            <tr><td>1</td><td><input id="rla-t0" type="number" min="0" max="30000" step="10" value="820" aria-label="第 1 筆到達時間"></td><td id="rla-ld0"></td><td id="rla-rd0"></td></tr>
+            <tr><td>2</td><td><input id="rla-t1" type="number" min="0" max="30000" step="10" value="880" aria-label="第 2 筆到達時間"></td><td id="rla-ld1"></td><td id="rla-rd1"></td></tr>
+            <tr><td>3</td><td><input id="rla-t2" type="number" min="0" max="30000" step="10" value="940" aria-label="第 3 筆到達時間"></td><td id="rla-ld2"></td><td id="rla-rd2"></td></tr>
+            <tr><td>4</td><td><input id="rla-t3" type="number" min="0" max="30000" step="10" value="960" aria-label="第 4 筆到達時間"></td><td id="rla-ld3"></td><td id="rla-rd3"></td></tr>
+            <tr><td>5</td><td><input id="rla-t4" type="number" min="0" max="30000" step="10" value="1000" aria-label="第 5 筆到達時間"></td><td id="rla-ld4"></td><td id="rla-rd4"></td></tr>
+            <tr><td>6</td><td><input id="rla-t5" type="number" min="0" max="30000" step="10" value="1060" aria-label="第 6 筆到達時間"></td><td id="rla-ld5"></td><td id="rla-rd5"></td></tr>
+            <tr><td>7</td><td><input id="rla-t6" type="number" min="0" max="30000" step="10" value="1120" aria-label="第 7 筆到達時間"></td><td id="rla-ld6"></td><td id="rla-rd6"></td></tr>
+            <tr><td>8</td><td><input id="rla-t7" type="number" min="0" max="30000" step="10" value="1850" aria-label="第 8 筆到達時間"></td><td id="rla-ld7"></td><td id="rla-rd7"></td></tr>
           </tbody>
         </table>
       </div>
-      <div class="legend">
-        <span><i class="dot ns-wait"></i>左欄放行</span>
-        <span><i class="dot ns-ok"></i>右欄放行</span>
-        <span><i class="dot ns-lock"></i>拒絕（保護生效）</span>
-      </div>
-      <div class="status-line" id="rla-status">調整參數後，兩邊會一起重算。</div>
       <button class="btn" type="button" id="rla-reset">重置</button>
     </div>
   </div>
-  <p class="cap">預設左欄是 Fixed Window、右欄是 Token Bucket，請求擠在 1000 ms 邊界兩側。把右欄改成 Sliding Log，任意視窗超出應落到 0。再改成 Leaky Bucket，看最大延後與送出間隔。把前四筆改成 0、10、20、30，容量維持 4，就能看見一次倒出的突發。</p>
+  <p class="cap">建議的玩法：先看預設的「跨邊界突刺」，左欄紅框圈住 6 筆、超出 3；右欄 Sliding Log 一筆都沒超。再點「前窗擠在末端」與「前窗擠在開頭」，對照第 3 節兩個算例裡 Sliding Counter 何時多放、何時誤拒。接著點「瞬間突發」，比較兩條「上游收到」線的形狀，再把右欄換成 GCRA，看決策與送出時刻是否與 Token Bucket 完全重合。最後在「瞬間突發」裡把桶容量從 3 拉到 6：Token Bucket 的紅框出現（4 筆擠在 30 ms 內），佇列那一欄只是排得更長，上游仍是每 500 ms 一筆。</p>
   <div class="oneliner">
-    <b>一句話答法</b>比較演算法時先鎖同一份預算與同一條到達序列。超出精確視窗的筆數、零等待送出的筆數、送出間隔，三個數字就分開了五種演算法。
+    <b>一句話答法</b>比較演算法時先鎖同一份預算與同一條到達序列，再用「上游在任意窗寬內最多收到幾筆」這把尺去量：Fixed Window 在邊界超出、Sliding Counter 雙向偏差、Token 與 GCRA 允許容量內的突發、Leaky 佇列用延遲換等距。
   </div>
 </section>
 
 <section id="s6">
   <div class="sec-head">
     <span class="sec-num">06</span>
-    <h2>多節點：原子扣額度，或先預取再承擔不公平</h2>
+    <h2>分散式限流：原子性、時鐘與熱鍵預取</h2>
   </div>
-  <p class="sec-sub">每一台都在本地數，上限就被乘上台數。共用一個計數器之後，下一題才是：每筆請求都去問，還是一次借一批。</p>
-  <svg class="rla-fan" viewBox="0 0 660 210" role="img" style="width:100%;height:auto">
-    <title>三個節點共用一個計數器</title>
-    <defs>
-      <marker id="rla-mk" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
-        <path d="M 0 1.2 L 8 5 L 0 8.8 z" fill="#9aa0a8"></path>
-      </marker>
-    </defs>
-    <rect x="0" y="0" width="660" height="210" fill="#fafaf9"></rect>
-    <line x1="105" y1="78" x2="310" y2="132" stroke="var(--border-strong)" stroke-width="1.5" marker-end="url(#rla-mk)"></line>
-    <line x1="330" y1="78" x2="330" y2="132" stroke="var(--border-strong)" stroke-width="1.5" marker-end="url(#rla-mk)"></line>
-    <line x1="555" y1="78" x2="350" y2="132" stroke="var(--border-strong)" stroke-width="1.5" marker-end="url(#rla-mk)"></line>
-    <rect x="30" y="22" width="150" height="56" rx="8" fill="#fff" stroke="var(--border-strong)"></rect>
-    <rect x="255" y="22" width="150" height="56" rx="8" fill="#fff" stroke="var(--border-strong)"></rect>
-    <rect x="480" y="22" width="150" height="56" rx="8" fill="#fff" stroke="var(--border-strong)"></rect>
-    <rect x="255" y="132" width="150" height="56" rx="8" fill="#fff" stroke="var(--accent)"></rect>
-    <text x="105" y="46" text-anchor="middle" font-size="12" fill="#262a2f" font-family="var(--mono)">節點 A</text>
-    <text x="105" y="64" text-anchor="middle" font-size="11" fill="#6b7078" font-family="var(--mono)">本地餘額</text>
-    <text x="330" y="46" text-anchor="middle" font-size="12" fill="#262a2f" font-family="var(--mono)">節點 B</text>
-    <text x="330" y="64" text-anchor="middle" font-size="11" fill="#6b7078" font-family="var(--mono)">本地餘額</text>
-    <text x="555" y="46" text-anchor="middle" font-size="12" fill="#262a2f" font-family="var(--mono)">節點 C</text>
-    <text x="555" y="64" text-anchor="middle" font-size="11" fill="#6b7078" font-family="var(--mono)">本地餘額</text>
-    <text x="330" y="156" text-anchor="middle" font-size="12" fill="#262a2f" font-family="var(--mono)">共用計數器</text>
-    <text x="330" y="174" text-anchor="middle" font-size="11" fill="#6b7078" font-family="var(--mono)">原子扣減</text>
-  </svg>
-  <p class="cap">三個行程可以各留一份本地餘額，但扣減要打到同一個計數器。各數各的，等於每個節點都擁有完整上限。</p>
-  <p>集中式的固定視窗是一次原子加一。key 帶規則、身份與視窗編號，值是這個格子已經放行的筆數。兩條命令拆開寫會留下一個經典洞：<code>INCR</code> 成功、行程在 <code>PEXPIRE</code> 之前死掉，key 沒有到期時間，這個身份之後每一筆都算在同一個永不歸零的計數上，等於被永久限流。修法是一支腳本：加一之後若發現沒有 TTL（<code>PTTL</code> 小於 0），就補上。視窗編號用計數器自己的時間來算，應用機器的時鐘歪了也不會把同一筆算進不同格。</p>
+  <p class="sec-sub">演算法在單機上很好寫。多台無狀態服務一起數同一個鍵時，要依序解決四件事：共用、原子、熱鍵，以及計數器掛掉時怎麼辦。</p>
+
+  <h3>各台自己數，上限就乘上台數</h3>
+  <p>服務通常是 N 台無狀態副本，前面有負載平衡把同一個使用者的請求散到各台。若每台在自己的記憶體裡數，每台都以為自己守住了上限，全域實際放行的是 N 倍。所以計數必須放到所有副本共用的地方，最常見的是一組 Redis。</p>
+  <div class="rla-fig">
+    <svg viewBox="0 0 720 228" role="img" aria-labelledby="rla-fan-t">
+      <title id="rla-fan-t">各台自己數與共用一個計數器的對照</title>
+      <defs>
+        <marker id="rla-fan-mk" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+          <path d="M 0 1 L 8 5 L 0 9 z" fill="#9aa0a8"></path>
+        </marker>
+      </defs>
+      <line class="rla-div" x1="360" y1="8" x2="360" y2="220"></line>
+      <text class="rla-tn" x="12" y="22">各台自己數</text>
+      <text class="rla-tl" x="12" y="40">每台都以為上限是每秒 10</text>
+      <rect class="rla-box" x="12" y="54" width="96" height="46" rx="6"></rect>
+      <rect class="rla-box" x="127" y="54" width="96" height="46" rx="6"></rect>
+      <rect class="rla-box" x="242" y="54" width="96" height="46" rx="6"></rect>
+      <text class="rla-tx" x="60" y="74" text-anchor="middle">節點 A</text>
+      <text class="rla-tl" x="60" y="90" text-anchor="middle">本地計數</text>
+      <text class="rla-tx" x="175" y="74" text-anchor="middle">節點 B</text>
+      <text class="rla-tl" x="175" y="90" text-anchor="middle">本地計數</text>
+      <text class="rla-tx" x="290" y="74" text-anchor="middle">節點 C</text>
+      <text class="rla-tl" x="290" y="90" text-anchor="middle">本地計數</text>
+      <line class="rla-edge" x1="60" y1="102" x2="60" y2="126" marker-end="url(#rla-fan-mk)"></line>
+      <line class="rla-edge" x1="175" y1="102" x2="175" y2="126" marker-end="url(#rla-fan-mk)"></line>
+      <line class="rla-edge" x1="290" y1="102" x2="290" y2="126" marker-end="url(#rla-fan-mk)"></line>
+      <text class="rla-txt-ok" x="60" y="146" text-anchor="middle">放行 10</text>
+      <text class="rla-txt-ok" x="175" y="146" text-anchor="middle">放行 10</text>
+      <text class="rla-txt-ok" x="290" y="146" text-anchor="middle">放行 10</text>
+      <text class="rla-txt-bad" x="175" y="190" text-anchor="middle">全域實際放行 30 = 3 × 上限</text>
+
+      <text class="rla-tn" x="382" y="22">共用一個計數器</text>
+      <text class="rla-tl" x="382" y="40">所有節點扣同一個數字</text>
+      <rect class="rla-box" x="382" y="54" width="96" height="46" rx="6"></rect>
+      <rect class="rla-box" x="497" y="54" width="96" height="46" rx="6"></rect>
+      <rect class="rla-box" x="612" y="54" width="96" height="46" rx="6"></rect>
+      <text class="rla-tx" x="430" y="74" text-anchor="middle">節點 A</text>
+      <text class="rla-tl" x="430" y="90" text-anchor="middle">不存計數</text>
+      <text class="rla-tx" x="545" y="74" text-anchor="middle">節點 B</text>
+      <text class="rla-tl" x="545" y="90" text-anchor="middle">不存計數</text>
+      <text class="rla-tx" x="660" y="74" text-anchor="middle">節點 C</text>
+      <text class="rla-tl" x="660" y="90" text-anchor="middle">不存計數</text>
+      <line class="rla-edge" x1="430" y1="102" x2="500" y2="132" marker-end="url(#rla-fan-mk)"></line>
+      <line class="rla-edge" x1="545" y1="102" x2="545" y2="132" marker-end="url(#rla-fan-mk)"></line>
+      <line class="rla-edge" x1="660" y1="102" x2="590" y2="132" marker-end="url(#rla-fan-mk)"></line>
+      <rect class="rla-box" x="487" y="134" width="116" height="44" rx="6"></rect>
+      <rect class="rla-strip acc" x="487" y="134" width="116" height="3"></rect>
+      <text class="rla-tx" x="545" y="154" text-anchor="middle">Redis 計數器</text>
+      <text class="rla-tl" x="545" y="170" text-anchor="middle">全域上限 10</text>
+      <text class="rla-txt-ok" x="545" y="208" text-anchor="middle">全域放行 10，但每筆多一趟往返</text>
+    </svg>
+  </div>
+  <p class="cap">左邊三台各自守「每秒 10 筆」，總和變成 30；右邊所有節點扣同一個計數器，上限才是全域的 10。代價是每筆判定都多一趟網路往返，這是本節後半要處理的事。</p>
+
+  <h3>集中計數的兩個坑：讀改寫競態與漏設到期</h3>
+  <p><strong>坑一：讀、算、寫拆成三步。</strong>Token Bucket 最容易踩：先讀餘額、在應用裡算補充與扣減、再寫回。兩台同時處理同一個身份時，會讀到同一個餘額、各扣一次、各自寫回，最後一個許可被花了兩次：</p>
+  <pre class="mermaid">
+sequenceDiagram
+    participant A as 節點 A
+    participant R as Redis
+    participant B as 節點 B
+    A->>R: 讀餘額
+    B->>R: 讀餘額
+    R-->>A: 1
+    R-->>B: 1
+    A->>R: 寫回 0，放行
+    B->>R: 寫回 0，放行
+    Note over A,B: 一個許可花兩次
+  </pre>
+  <p class="cap">兩次寫回都成功、也都「正確」地寫了 0——錯的是兩邊都基於同一個舊值做決定。用 WATCH／MULTI 樂觀鎖也行，但熱鍵上重試會很多；限流通常直接把整段搬進一支腳本。</p>
+  <p>解法是把讀、算、寫放進同一支 Lua 腳本。Redis 執行腳本時不會穿插其他命令，整段就是一次原子讀改寫，而且只花一趟往返：</p>
+  <pre><code>-- KEYS[1]：這個身份的桶；ARGV：容量、每秒補充、這次要扣幾個許可
+local cap  = tonumber(ARGV[1])
+local rate = tonumber(ARGV[2]) / 1000              -- 每毫秒補多少
+local cost = tonumber(ARGV[3])
+local t    = redis.call('TIME')                    -- 用 Redis 的時鐘，不信任應用機器
+local now  = tonumber(t[1]) * 1000 + math.floor(tonumber(t[2]) / 1000)
+local s    = redis.call('HMGET', KEYS[1], 'tokens', 'ts')
+local tokens = tonumber(s[1]) or cap                 -- 第一次見到這個鍵：滿桶
+local ts     = tonumber(s[2]) or now
+tokens = math.min(cap, tokens + math.max(0, now - ts) * rate)
+local ok = 0
+if tokens &gt;= cost then
+  tokens = tokens - cost
+  ok = 1
+end
+redis.call('HSET', KEYS[1], 'tokens', tokens, 'ts', now)
+redis.call('PEXPIRE', KEYS[1], math.ceil(cap / rate))  -- 閒置到補滿就可以丟掉
+return ok</code></pre>
+  <p class="cap">補充、比較、扣減、寫回與設到期全在同一支腳本裡。到期時間設成「從空桶補到滿」所需的時間：閒置超過這麼久的鍵，下次出現時當成滿桶即可，不必一直佔記憶體。</p>
+  <p><strong>坑二：<code>INCR</code> 成功、<code>PEXPIRE</code> 沒送到。</strong>第 2 節的 Fixed Window 若把兩條命令分開送，行程在兩者之間崩潰或網路斷掉，key 就沒有到期時間。這個身份之後每一筆都加在同一個永不歸零的計數上，等於被永久封鎖，而且不會有任何錯誤日誌。修法同樣是一支腳本：加一之後若發現沒有 TTL（<code>PTTL</code> 小於 0）就補上。</p>
   <pre><code>local t = redis.call('TIME')
 local ms = tonumber(t[1]) * 1000 + math.floor(tonumber(t[2]) / 1000)
 local wid = math.floor(ms / tonumber(ARGV[1]))
@@ -1614,35 +2013,23 @@ if redis.call('PTTL', key) &lt; 0 then
   redis.call('PEXPIRE', key, ARGV[1])
 end
 return c</code></pre>
-  <p class="cap">腳本整段是一次往返。PTTL 小於 0 才補到期時間，避免「第一次設定 TTL 失敗後，這個 key 永遠不再被補上」。</p>
-  <p>Token Bucket 的競態更明顯：先讀餘額、本地扣、再寫回，兩個請求會讀到同一個餘額、各扣一次，最後一個 token 被花兩次。讀、算、寫必須在同一支腳本裡。Sliding Log 則是同一支腳本裡做刪除窗外時間戳、計數、條件寫入。這些都還是「儲存提供原子讀改寫」，不是 Redis 內部怎麼持久化。</p>
-  <pre class="mermaid">
-sequenceDiagram
-    participant C as 客戶端
-    participant L as 限流器
-    participant R as 計數器
-    C->>L: 帶身份
-    L->>R: 原子加一
-    R-->>L: 回傳計數
-    alt 未超過
-        L-->>C: 轉交上游
-    else 已超過
-        L-->>C: 直接拒絕
-    end
-  </pre>
-  <p class="cap">每筆請求都在關鍵路徑上等這一趟往返。計數器慢，限流器就比上游還慢。</p>
-  <p>本地預取是用公平性換往返。節點手上沒有餘額時，向中央一次原子借走 <code>min(批次, 剩餘)</code>，然後在本地花。借到 0 就記住這一窗已經空了，不要每筆都再打一次。全域計數不會超過上限，因為借走的當下已經從中央扣掉。吃虧的是額度會卡在借走它的那台機器上。</p>
-  <p>兩個節點、各兩筆請求、全域上限 6、一次借 4：節點 A 借走 4、用掉 2、手上還留 2；節點 B 只能再借到剩下的 2，兩筆都用掉。這一批四筆全部放行，但有 2 個額度鎖在 A 上直到視窗結束。此時若第 5 筆打到 B，中央已經是 0、B 手上也是 0，請求被拒絕——額度還在 A 手上，搬不過去。</p>
+  <p class="cap">檢查 <code>PTTL &lt; 0</code> 而不是 <code>c == 1</code>：即使某一次設定 TTL 失敗，下一筆請求也會把它補上。視窗編號用 Redis 的時間算，應用機器的時鐘歪了也不會把同一時刻的請求算進不同格。</p>
+  <p>兩支腳本都用 <code>redis.call('TIME')</code> 取時間，這同時解決了多機時鐘偏移（Clock Skew）：所有判定都以同一台 Redis 的時鐘為準。Redis 5 起腳本預設以「效果」複製到副本，先取 <code>TIME</code> 再寫入是允許的；更早的版本要在寫入前呼叫 <code>redis.replicate_commands()</code>。叢集模式下，腳本用到的 key 必須在同一個 slot，一條規則一個 key 天然滿足。Sliding Log 的刪舊、計數、條件寫入也是同樣的道理，整段放進一支腳本即可。</p>
+
+  <h3>熱鍵：不拆 key，改成本地預取</h3>
+  <p>集中計數讓每筆請求都多一趟往返。對大多數鍵這不是問題——不同身份落在不同 key，Redis 叢集本來就把它們分散到不同分片。麻煩的是<strong>單一熱身份</strong>：一個大客戶每秒幾萬筆，全部打在同一個 key、同一個分片上。</p>
+  <p>直覺的解法是把它拆成 <code>user:42:0</code> 到 <code>user:42:3</code> 四片再加總，但這會讓上限失準：每片各有一份上限，總和就超了；若把每片上限調成四分之一，流量在片之間一不均勻，某片先滿就提早拒絕。限流的上限是一個全域數字，硬拆只是把「多節點各數各的」的問題搬進 Redis。</p>
+  <p>正確的降壓手段是<strong>本地預取（Local Quota Prefetch）</strong>：節點手上沒有餘額時，向中央一次原子借走 <code>min(批次, 剩餘)</code> 個額度，然後在本地花。借到 0 就記住這一窗已經空了，不要每筆再打一次。全域放行數不會超過上限，因為借走的當下已經從中央扣掉；吃虧的是額度會卡在借走它的那台機器上（Stranded Quota）。</p>
+  <p>兩個節點、全域上限 6、一次借 4：節點 A 借走 4、用掉 2、手上還留 2；節點 B 只借得到剩下的 2，兩筆都用掉。此時若第 5 筆打到 B，中央已經是 0、B 手上也是 0，請求被拒絕——額度明明還在 A 手上，卻搬不過去。這就是預取的代價：提早誤拒（False Reject）。</p>
   <div class="callout warn">
-    <div class="c-title"><span class="ic">陷阱</span>預取不是超發</div>
-    <p>上面這種原子預取，全域放行數不會超過上限。會超發的是另一種設計：每台用自己的本地計數放行，過一秒才回寫。4 台各允許每秒 10 筆、全域目標若是每秒 10，這一秒最多進去 40。預取解決的是往返與「額度卡在別台」；過期本地計數解決不了超發，它就是超發的來源。</p>
+    <div class="c-title"><span class="ic">陷阱</span>預取不是超發，延遲回寫才是</div>
+    <p>上面這種原子預取，全域放行數不會超過上限。會超發的是另一種設計：每台用自己的本地計數放行，每秒才把數字回寫中央。4 台各允許每秒 10 筆、全域目標若是每秒 10，這一秒最多進去 40。預取解決的是往返次數，代價是卡額與誤拒；延遲回寫解決不了超發，它就是超發的來源。</p>
   </div>
-  <p>熱鍵也不要幻想成「把同一個使用者的 key 拆成好幾片再加總」。不同身份本來就會落到不同 key，這已經把負載分開。單一熱身份若再拆片，每片各有一份上限，總和會超；若把每片上限調低，流量不均時又會提早拒絕。熱身份能做的是少打中央：批次借、接受卡額。計數器掛了要事先選邊。登入、驗證碼這類安全上限應失敗即拒絕，否則攻擊者只要打掛計數器就沒有門。讀取類的禮貌上限可以失敗即放行，但每台仍要一個很小的本地天花板，避免「中央失聯」變成無限放行。</p>
-  <p>下面把同一批請求同時送給兩種共用方式。請求以輪替順序到達各節點。集中式每筆都打一次中央；預取只在本地沒餘額時借一批。紅字是卡在節點上的餘額、最終少放行的筆數，以及拒絕發生時別的節點仍握有餘額的次數。後兩個不必相等：最終總量仍可能補滿，只是拿到額度的不是先被拒絕的那台。</p>
+  <p>下面把同一批請求同時送給兩種共用方式。請求以輪替順序打到各節點；集中式每筆都打一次中央，預取只在本地沒餘額時借一批。每個節點一條配額條：綠色是已放行、橘色是已從中央扣掉卻卡在手上的額度、紅色是被拒絕的請求。橘色與紅色同時出現在不同節點上，就是「額度在 A，請求在 B」。</p>
   <div class="demo" id="demo-share">
     <div class="demo-bar">
       <span class="label">互動 · 集中計數與本地預取</span>
-      <span class="label" style="text-transform:none;font-family:var(--sans);font-size:12px;color:var(--text-2)">同一批請求，比較往返、卡額與少放行</span>
+      <span class="label" style="text-transform:none;font-family:var(--sans);font-size:12px;color:var(--text-2)">同一批請求，比較往返、卡額與誤拒</span>
     </div>
     <div class="demo-body">
       <div class="rls-sliders">
@@ -1664,7 +2051,7 @@ sequenceDiagram
       </div>
       <div class="rls-cols">
         <article>
-          <h3>每筆都原子加一</h3>
+          <h3>每筆都原子扣一次</h3>
           <dl>
             <dt>放行</dt><dd id="rls-c-allowed">0</dd>
             <dt>中央往返次數</dt><dd id="rls-c-redis">0</dd>
@@ -1677,93 +2064,186 @@ sequenceDiagram
             <dt>放行</dt><dd id="rls-p-allowed">0</dd>
             <dt>中央往返次數</dt><dd id="rls-p-redis">0</dd>
             <dt>等待合計 ms</dt><dd id="rls-p-wait">0</dd>
-            <dt>少打的往返</dt><dd id="rls-saved">0</dd>
+            <dt>中央剩餘</dt><dd id="rls-p-left">0</dd>
             <dt>卡在節點上</dt><dd id="rls-p-strand">0</dd>
-            <dt>最終少放行</dt><dd id="rls-p-short">0</dd>
+            <dt>比集中式少放行</dt><dd id="rls-p-short">0</dd>
             <dt>拒絕時別處仍有餘額</dt><dd id="rls-p-false">0</dd>
           </dl>
         </article>
       </div>
-      <div id="rls-rack" class="rls-rack"></div>
+      <div id="rls-rack" class="rls-quota"></div>
       <div class="legend">
-        <span><i class="dot ns-ok"></i>數字是算出的結果</span>
-        <span><i class="dot ns-bad"></i>卡額、少放行、不公平的拒絕</span>
+        <span><i class="dot ns-ok"></i>已放行</span>
+        <span><i class="dot ns-lock"></i>卡在手上（中央已扣）</span>
+        <span><i class="dot ns-bad"></i>被拒絕</span>
       </div>
       <div class="status-line" id="rls-status">調整節點、批次與上限後重算。</div>
       <button class="btn" type="button" id="rls-reset">重置</button>
     </div>
   </div>
-  <p class="cap">預設 4 個節點、各 2 筆、上限 20、一次預取 8。把批次收到 1，卡額會消失，往返會靠近集中式。節點數拉高時，同一份上限被更多人同時預借。</p>
+  <p class="cap">預設 4 個節點、各 2 筆、上限 20、一次預取 8：前三個節點借走全部 20 個額度，各自只用掉 2 個；節點 4 一個都借不到，兩筆被拒，而別人手上還握著 14 個。把批次收到 1，卡額與誤拒都消失，往返次數回到與集中式相同；把節點數拉高，同一份上限被更多人同時預借，誤拒更早出現。</p>
+
+  <h3>計數器掛掉時：Fail-open 還是 Fail-closed</h3>
+  <p>限流器多了一個依賴，就多了一種失敗。Redis 逾時或失聯時要事先選邊，而且不同端點的選擇不一樣：</p>
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>端點類型</th>
+          <th>計數器失聯時</th>
+          <th>理由</th>
+          <th>保底</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>登入、OTP、重設密碼</td>
+          <td class="hl">Fail-closed：拒絕</td>
+          <td>攻擊者只要打掛計數器，就能無限次嘗試</td>
+          <td>回明確的暫時錯誤；或退回更嚴格的本地上限</td>
+        </tr>
+        <tr>
+          <td>一般讀取 API</td>
+          <td class="hl">Fail-open：放行</td>
+          <td>限流只是禮貌，不該讓它的故障變成全站 429</td>
+          <td>每台一個小的本地 token bucket，避免失聯變成無限放行</td>
+        </tr>
+        <tr>
+          <td>昂貴或計費的呼叫</td>
+          <td class="hl">本地保底後放行</td>
+          <td>全拒會中斷業務，全放會燒帳單</td>
+          <td>本地上限約為全域上限 ÷ 台數</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="cap">Fail-open 不等於「不限流」：本地保底上限讓中央失聯時的最壞情況仍是有界的。</p>
+  <p>另外兩件事一起做：呼叫 Redis 的逾時要設得很短（幾毫秒），否則限流器自己成了延遲來源；對一個已經失聯的 Redis 也不要每筆都去碰，熔斷、艙壁隔離與降級那篇的熔斷器正好適用。</p>
   <div class="oneliner">
-    <b>一句話答法</b>多節點必須共用一個原子計數，否則上限乘上台數。每筆都問中央最準也最慢；一次預取省往返，但額度會卡在借走它的那台機器上，全域計數仍不超發。
+    <b>一句話答法</b>多節點必須共用一個原子計數，否則上限乘上台數。讀、算、寫與設到期全放進一支 Lua 腳本，時間用 Redis 的 TIME。熱身份不拆 key，改本地預取：省往返、全域不超發，代價是額度卡在節點上造成誤拒。計數器失聯時，安全端點 Fail-closed，禮貌端點 Fail-open 加本地保底。
   </div>
 </section>
 
 <section id="s7">
   <div class="sec-head">
     <span class="sec-num">07</span>
-    <h2>面試時按這個順序講完</h2>
+    <h2>面試實戰：15 分鐘答題骨架與選型總表</h2>
   </div>
-  <p class="sec-sub">十五分鐘夠用的骨架：先鎖契約，再選演算法，再講多節點與計數器掛掉。不要從 Redis 命令開始。</p>
-  <p>先問清楚鍵是使用者、IP 還是 API key，上限是每秒幾筆還是任意窗，允不允許突發，有沒有多台應用。接著選演算法，用第 5 節那把精確契約說明你放棄了什麼。儲存只需要「單一 key 上的原子讀改寫與 TTL」。熱身份不拆 key，改預取。最後講計數器失聯時安全上限失敗即拒絕、禮貌上限失敗即放行並加上本地天花板。429 的本體與標頭不要在這裡發明，指到 API 設計風格與演進裡已經定的那一套。</p>
+  <p class="sec-sub">不要從 Redis 命令開始。先鎖契約，再選演算法，再講多節點，最後講失敗與回應。</p>
+  <ol>
+    <li><strong>釐清契約與規模（約 3 分鐘）</strong>：鍵是使用者、API key 還是 IP？上限是「任意窗」還是「速率＋突發」？允不允許突發、多大？有幾台應用、多少個活躍鍵、尖峰 QPS？不同端點成本是否不同？</li>
+    <li><strong>選演算法與狀態結構（約 5 分鐘）</strong>：用下表選一列，說出它放棄了什麼（邊界突刺、近似誤差、突發打進上游、排隊延遲），以及每個鍵在熱路徑上要存什麼。</li>
+    <li><strong>分散式與原子性（約 4 分鐘）</strong>：共用計數、一支 Lua 腳本完成讀改寫與設到期、用 Redis 的時鐘；熱身份不拆 key，改本地預取並承認卡額。</li>
+    <li><strong>失敗、監控與回應（約 3 分鐘）</strong>：計數器失聯時哪些端點 Fail-closed、哪些 Fail-open 加本地保底；監控每條規則的 429 比例與 Redis 延遲；拒絕時回 429 與 Retry-After，標頭與本體的格式指到 API 設計風格與演進那篇談速率與配額的段落，不要在這裡發明。</li>
+  </ol>
   <div class="tbl-wrap">
     <table>
       <thead>
         <tr>
-          <th>你要守住的契約</th>
           <th>演算法</th>
-          <th>熱路徑留什麼</th>
+          <th>每個鍵存什麼</th>
+          <th>單次判定</th>
+          <th>突發與邊界行為</th>
+          <th>任意 W 內最多放行</th>
           <th>主要代價</th>
+          <th>常見落點</th>
         </tr>
       </thead>
       <tbody>
         <tr>
-          <td>好寫，接受邊界約 2 倍</td>
           <td class="hl">Fixed Window</td>
-          <td>計數與視窗編號</td>
+          <td>計數＋格號，O(1)</td>
+          <td>O(1)，一次 INCR</td>
+          <td>邊界兩側各吃滿一次</td>
+          <td>約 2 × L</td>
           <td>邊界突刺</td>
+          <td>自建 Redis INCR＋到期；按日／月歸零的配額</td>
         </tr>
         <tr>
-          <td>任意窗寬絕不超過上限</td>
           <td class="hl">Sliding Log</td>
-          <td>窗內每個時間戳</td>
-          <td>記憶體與腳本長度</td>
+          <td>窗內每筆時間戳，O(L)</td>
+          <td>O(log L)＋清掉的筆數</td>
+          <td>沒有突刺</td>
+          <td>L，精確</td>
+          <td>記憶體與腳本成本隨上限成長</td>
+          <td>低頻高價值端點：登入、OTP、寄信</td>
         </tr>
         <tr>
-          <td>接近滑動窗，只能留幾個整數</td>
           <td class="hl">Sliding Counter</td>
-          <td>上一格與這一格</td>
-          <td>不均勻時偏嚴或偏鬆</td>
+          <td>prev、curr、格號，O(1)</td>
+          <td>O(1)</td>
+          <td>近似平滑，雙向偏差</td>
+          <td>近似 L，不均勻時可超出</td>
+          <td>誤拒或多放，無法證明不超</td>
+          <td>Cloudflare 邊緣限流</td>
         </tr>
         <tr>
-          <td>允許閒置後突發，放行即進上游</td>
           <td class="hl">Token Bucket</td>
-          <td>餘額與上次補充時刻</td>
-          <td>不保證任意窗 ≤ 上限</td>
+          <td>餘額＋上次補充時刻，O(1)</td>
+          <td>O(1)</td>
+          <td>閒置後一次倒出整桶，放行即進上游</td>
+          <td>約 capacity＋速率 × W</td>
+          <td>突發直接打到上游</td>
+          <td>AWS API Gateway throttle、Envoy 本地限流、Stripe API</td>
         </tr>
         <tr>
-          <td>上游要固定間隔，前面有佇列</td>
-          <td class="hl">Leaky Bucket</td>
-          <td>下次可出發時刻</td>
-          <td>延遲；沒有佇列就只能拒絕</td>
+          <td class="hl">GCRA（漏桶計量）</td>
+          <td>TAT 一個時刻，O(1)</td>
+          <td>O(1)</td>
+          <td>與同參數的 Token Bucket 相同</td>
+          <td>約 capacity＋速率 × W</td>
+          <td>突發直接打到上游</td>
+          <td>redis-cell 這類 Redis 限流模組</td>
+        </tr>
+        <tr>
+          <td class="hl">Leaky Bucket（佇列）</td>
+          <td>下次出發時刻＋佇列本身</td>
+          <td>O(1) 判定</td>
+          <td>突發轉成排隊延遲，輸出等距</td>
+          <td>約速率 × W</td>
+          <td>延遲；必須有地方排隊</td>
+          <td>nginx limit_req 設了 burst、沒加 nodelay</td>
         </tr>
       </tbody>
     </table>
   </div>
-  <p class="cap">選型先看契約，再看熱路徑放得下幾個數字。同一張表也能用來檢查現成閘道：它實作的是哪一列，不是它叫不叫 rate limit。</p>
+  <p class="cap">選型先看契約，再看熱路徑放得下幾個數字。同一張表也能用來檢查現成元件：它實作的是哪一列，而不是它叫不叫 rate limit。</p>
   <div class="oneliner">
-    <b>一句話答法</b>先定鍵、上限與突發，再選上表的一列並說出放棄的那個性質。多節點用原子讀改寫；熱鍵預取而不拆 key；計數器掛掉時，安全上限與禮貌上限分開處理。
+    <b>一句話答法</b>先定鍵、上限與突發，再從表上選一列並說出放棄的性質；多節點用一支原子腳本、熱鍵用預取；計數器失聯時安全端點與禮貌端點分開處理，拒絕回 429 加 Retry-After。
   </div>
 </section>
 
 <section id="s8">
   <div class="sec-head">
     <span class="sec-num">08</span>
-    <h2>Usage Plan 與 WAF 各管一種粒度</h2>
+    <h2>雲端實務：多層限流與 AWS 的兩套現成工具</h2>
   </div>
-  <p class="sec-sub">AWS 已經有兩套現成限流。它們不是同一種演算法，也不能互相替代你服務內部的使用者級預算。</p>
-  <p>API Gateway 的 usage plan 把 throttle 與 quota 拆開。throttle 的 <code>rate</code> 是穩態每秒請求數，<code>burst</code> 是桶容量，也就是 token bucket：閒置時可以一次打進 burst 筆，然後回到 rate。quota 是另一個計數，按日、週或月歸零，不負責抹平秒級突發。計劃綁在 API key 與 stage 上。就算計劃寫得很寬，stage 與帳號層還有自己的 throttle，請求可能先死在那兩層。超限時請求已經到達閘道，回應是 429；標頭怎麼寫不在這篇。</p>
-  <p>WAF 的 rate-based rule 粗得多。評估視窗可以是 1、2、5 或 10 分鐘，預設 5 分鐘，依來源 IP、轉送過來的 IP，或你指定的自訂鍵計數。超過門檻就對該鍵執行動作，直到速率掉回門檻以下。門檻下限以帳號當下的限制為準：文件上的下限曾是每視窗 100，後來改成 10。它適合擋邊緣上的大量濫用，不適合「每個使用者每秒 5 次」這種契約——視窗最短 1 分鐘，而且被擋下的請求常常到不了你的應用，你的 429 本體不會出現。</p>
+  <p class="sec-sub">真實系統很少只有一層限流。邊緣、閘道、服務內各自擋一種粒度，AWS 的 WAF 與 API Gateway 各管其中一層，都不能取代服務內部那一層。</p>
+  <p>每一層看得到的身份不同，能擋的流量也不同。越外層越便宜、越粗；越內層越貴、越精細：</p>
+  <div class="rla-row">
+    <div class="rla-node warn">
+      <div class="nn">AWS WAF</div>
+      <div class="ns">邊緣 · 依 IP<br>分鐘級視窗</div>
+    </div>
+    <span class="rla-arrow">▸</span>
+    <div class="rla-node accent">
+      <div class="nn">API Gateway</div>
+      <div class="ns">閘道 · 依 API key<br>token bucket</div>
+    </div>
+    <span class="rla-arrow">▸</span>
+    <div class="rla-node ok">
+      <div class="nn">服務內限流</div>
+      <div class="ns">依使用者 id<br>依成本扣點</div>
+    </div>
+    <span class="rla-arrow">▸</span>
+    <div class="rla-node">
+      <div class="nn">業務邏輯</div>
+      <div class="ns">只看到通過<br>三層的流量</div>
+    </div>
+  </div>
+  <p class="cap">客戶端的流量由左往右穿過三層。WAF 擋 DDoS 與爬蟲的 IP 洪峰，被擋的請求根本到不了你的服務；API Gateway 管合作夥伴的 API key；服務內那一層才認得資料庫裡的使用者與每個端點的真實成本。三層缺一層，就有一種流量沒人管。</p>
+  <p>API Gateway 的 usage plan 把 throttle 與 quota 拆開。throttle 的 <code>rate</code> 是穩態每秒請求數，<code>burst</code> 是桶容量，也就是 token bucket：閒置時可以一次打進 burst 筆，然後回到 rate。quota 是另一個計數，按日、週或月歸零，屬於固定視窗，不負責抹平秒級突發。計劃綁在 API key 與 stage 上；就算計劃寫得很寬，stage 與帳號層還有自己的 throttle，請求可能先死在那兩層。AWS 的文件也明說 usage plan 的 throttle 與 quota 是盡力而為，不是硬上限，不該拿它來控制成本或阻擋存取。超限時請求已經到達閘道，回應是 429。</p>
+  <p>WAF 的 rate-based rule 粗得多。評估視窗可以是 1、2、5 或 10 分鐘，預設 5 分鐘，依來源 IP、轉送過來的 IP，或你指定的自訂鍵計數。超過門檻就對該鍵執行動作，直到速率掉回門檻以下。門檻下限以帳號當下的限制為準：文件上的下限曾是每視窗 100，後來改成 10。它適合擋邊緣上的大量濫用，不適合「每個使用者每秒 5 次」這種契約——視窗最短 1 分鐘，而且被擋下的請求到不了你的應用，你的 429 本體不會出現。</p>
   <div class="tbl-wrap">
     <table>
       <thead>
@@ -1781,7 +2261,7 @@ sequenceDiagram
         </tr>
         <tr>
           <td>怎麼數</td>
-          <td class="hl">throttle 是 token bucket</td>
+          <td class="hl">throttle 是 token bucket，quota 是固定視窗</td>
           <td>視窗內的請求數</td>
         </tr>
         <tr>
@@ -1792,11 +2272,11 @@ sequenceDiagram
         <tr>
           <td>超限時</td>
           <td>請求到了閘道，回 429</td>
-          <td>動作在邊緣執行，應用可能看不到</td>
+          <td>動作在邊緣執行，應用看不到</td>
         </tr>
         <tr>
           <td>不要拿它做</td>
-          <td>服務內部的使用者 id、或依端點加權</td>
+          <td>服務內部的使用者 id、依端點加權、硬性的成本上限</td>
           <td>每秒幾筆的合作夥伴契約</td>
         </tr>
       </tbody>
@@ -1808,7 +2288,7 @@ sequenceDiagram
     <p>Usage plan 看的是 API key，不是你資料庫裡的使用者。金鑰被共享、或流量從內部服務直接打進來時，閘道的桶根本看不到。WAF 擋住的是粗暴流量，擋不住已經通過認證、慢慢磨配額的客戶。自己的限流器仍要放在認得出身份的那一層前面。</p>
   </div>
   <div class="oneliner">
-    <b>一句話答法</b>API Gateway usage plan 用 token bucket 管 API key 的每秒速率與突發，quota 另算。WAF rate-based rule 用分鐘級視窗擋邊緣濫用。使用者級、加權、亞秒級的契約要自己做。
+    <b>一句話答法</b>多層限流：WAF 用分鐘級視窗擋邊緣的 IP 洪峰，API Gateway usage plan 用 token bucket 管 API key 的速率與突發、quota 另算且只是盡力而為，使用者級、依成本加權、亞秒級的契約要在服務內自己做。
   </div>
 </section>
 
@@ -2005,10 +2485,45 @@ sequenceDiagram
     "Sliding Counter",
     "Sliding Log",
     "Token Bucket",
-    "Leaky Bucket"
+    "Leaky · 佇列",
+    "GCRA · 計量"
   ];
-  var TIME_DEFAULTS = [200, 400, 700, 850, 950, 1000, 1100, 1200];
+  var USES_BUCKET = [0, 0, 0, 1, 1, 1];
+  var TIME_KEYS = ["t0", "t1", "t2", "t3", "t4", "t5", "t6", "t7"];
+  var EPS = 1e-9;
 
+  // 劇本只負責把一組輸入填進控制項；放行、延後、超出與每筆的狀態全部由 computePair 重算。
+  var PRESETS = {
+    boundary: {
+      algoL: 0, algoR: 2, windowMs: 1000, limit: 3, capacity: 3, refillPerSec: 3,
+      times: [820, 880, 940, 960, 1000, 1060, 1120, 1850],
+      hint: "前一格的最後 200 ms 與後一格的開頭都擠滿請求。看左欄「上游收到」那條線被紅框圈住幾筆；再看右欄為什麼從 960 ms 起連拒四筆，直到 1850 ms 窗內只剩兩筆才又放行。"
+    },
+    lenient: {
+      algoL: 1, algoR: 2, windowMs: 1000, limit: 3, capacity: 3, refillPerSec: 3,
+      times: [970, 980, 990, 1500, 1510, 1520, 1530, 2400],
+      hint: "上一格的 3 筆全擠在格尾。到了 1500 ms，加權只把它們算一半，左欄因此多放；右欄的日誌知道那 3 筆其實都還在窗內。"
+    },
+    strict: {
+      algoL: 1, algoR: 2, windowMs: 1000, limit: 3, capacity: 3, refillPerSec: 3,
+      times: [0, 10, 20, 1200, 1220, 1240, 1260, 1280],
+      hint: "上一格的 3 筆全擠在格頭，1200 ms 時它們早已離開滑動窗。左欄的加權仍把它們算進八成，於是拒絕了右欄會放行的請求。"
+    },
+    burst: {
+      algoL: 3, algoR: 4, windowMs: 1000, limit: 3, capacity: 3, refillPerSec: 2,
+      times: [0, 10, 20, 30, 1200, 1210, 2600, 2610],
+      hint: "四筆擠在 30 ms 內。兩欄放行與拒絕的是同樣幾筆，差別在「上游收到」那條線：左邊擠成一束，右邊被排成固定間隔。再把右欄換成 GCRA，看它是否與左欄完全重合。"
+    },
+    steady: {
+      algoL: 0, algoR: 3, windowMs: 1000, limit: 3, capacity: 3, refillPerSec: 3,
+      times: [0, 400, 800, 1200, 1600, 2000, 2400, 2800],
+      hint: "每 400 ms 一筆，低於每秒 3 筆的上限。把左右換成任何兩種演算法，結果都一樣：差異只出現在突發與邊界。"
+    }
+  };
+  var DEFAULT_PRESET = "boundary";
+  var CUSTOM_HINT = "自訂序列：每一筆的判定、送出時刻與紅框都依你目前的輸入重算。點任一劇本可回到教材情境。";
+
+  /* (2) compute* 純函式 */
   function clampNum(n, lo, hi) {
     n = Number(n);
     if (!Number.isFinite(n)) n = lo;
@@ -2017,82 +2532,71 @@ sequenceDiagram
     return n;
   }
 
-  function maxInWindow(ts, W) {
-    if (!ts.length || !(W > 0)) return 0;
+  function fmt2(x) {
+    return (Math.round(x * 100) / 100).toFixed(2);
+  }
+
+  function arrivalOrder(times) {
+    var order = [];
+    for (var i = 0; i < times.length; i++) order.push(i);
+    order.sort(function (a, b) {
+      if (times[a] !== times[b]) return times[a] - times[b];
+      return a - b;
+    });
+    return order;
+  }
+
+  // 任意半開區間 [s, s + W) 內最多有幾筆，以及達到最多時的區間起點
+  function peakInWindow(ts, W) {
+    if (!ts.length || !(W > 0)) return { peak: 0, start: 0 };
     var s = ts.slice().sort(function (a, b) { return a - b; });
     var best = 0;
+    var bestStart = s[0];
     var i = 0;
     for (var j = 0; j < s.length; j++) {
       while (s[j] - s[i] >= W) i += 1;
-      var c = j - i + 1;
-      if (c > best) best = c;
-    }
-    return best;
-  }
-
-  function crossBurst(admitted, W) {
-    if (!admitted.length || !(W > 0)) return 0;
-    var minT = admitted[0];
-    var maxT = admitted[0];
-    var i;
-    for (i = 1; i < admitted.length; i++) {
-      if (admitted[i] < minT) minT = admitted[i];
-      if (admitted[i] > maxT) maxT = admitted[i];
-    }
-    var best = 0;
-    var k0 = Math.floor(minT / W);
-    var k1 = Math.floor(maxT / W);
-    for (var k = k0; k <= k1; k++) {
-      var b = k * W;
-      var lo = b - W / 2;
-      var hi = b + W / 2;
-      var c = 0;
-      for (i = 0; i < admitted.length; i++) {
-        if (admitted[i] >= lo && admitted[i] < hi) c += 1;
+      if (j - i + 1 > best) {
+        best = j - i + 1;
+        bestStart = s[i];
       }
-      if (c > best) best = c;
     }
-    return best;
+    return { peak: best, start: bestStart };
   }
 
-  function minDepartGap(times, allow, delay) {
-    var dep = [];
-    for (var i = 0; i < allow.length; i++) {
-      if (allow[i]) dep.push(times[i] + delay[i]);
+  // 佇列模式下，任一筆被放行的當下有幾筆還在桶裡等著出發
+  function maxQueueDepth(times, allow, delay) {
+    var best = 0;
+    for (var k = 0; k < times.length; k++) {
+      if (!allow[k]) continue;
+      var waiting = 0;
+      for (var j = 0; j < times.length; j++) {
+        if (allow[j] && times[j] <= times[k] && times[j] + delay[j] > times[k]) waiting += 1;
+      }
+      if (waiting > best) best = waiting;
     }
-    if (dep.length < 2) return 0;
-    dep.sort(function (a, b) { return a - b; });
-    var best = dep[1] - dep[0];
-    for (var j = 2; j < dep.length; j++) {
-      var g = dep[j] - dep[j - 1];
-      if (g < best) best = g;
-    }
-    return Math.round(best);
+    return best;
   }
 
   function runAlgo(kind, times, W, L, B, R) {
     var n = times.length;
     var allow = [];
     var delay = [];
-    var admittedTs = [];
+    var note = [];
     var i;
     for (i = 0; i < n; i++) {
       allow.push(0);
       delay.push(0);
+      note.push("");
     }
-    var order = [];
-    for (i = 0; i < n; i++) order.push(i);
-    order.sort(function (a, b) {
-      if (times[a] !== times[b]) return times[a] - times[b];
-      return a - b;
-    });
-
-    var memory = 2;
+    var order = arrivalOrder(times);
+    var memory = 0;
+    var memoryLabel = "";
     var k;
     var idx;
     var t;
 
     if (kind === 0) {
+      // Fixed Window：每個對齊格子一個計數
       var counts = {};
       for (k = 0; k < order.length; k++) {
         idx = order[k];
@@ -2102,11 +2606,15 @@ sequenceDiagram
         if (c < L) {
           counts[wid] = c + 1;
           allow[idx] = 1;
-          admittedTs.push(t);
+          note[idx] = "視窗 " + wid + " 計數 " + (c + 1) + "/" + L;
+        } else {
+          note[idx] = "視窗 " + wid + " 已滿 " + c + "/" + L;
         }
       }
+      memory = 2;
+      memoryLabel = "2 個數字";
     } else if (kind === 1) {
-      memory = 4;
+      // Sliding Counter：上一格加權 + 這一格
       var prevC = 0;
       var curW = null;
       var curC = 0;
@@ -2124,15 +2632,20 @@ sequenceDiagram
         }
         var elapsed = t - w * W;
         var estimate = prevC * ((W - elapsed) / W) + curC;
-        if (estimate < L) {
+        if (estimate < L - EPS) {
           curC += 1;
           allow[idx] = 1;
-          admittedTs.push(t);
+          note[idx] = "估 " + fmt2(estimate) + " < " + L;
+        } else {
+          note[idx] = "估 " + fmt2(estimate) + " ≥ " + L;
         }
       }
+      memory = 3;
+      memoryLabel = "3 個數字";
     } else if (kind === 2) {
+      // Sliding Log：保留窗內每一筆放行的時間戳
       var log = [];
-      var peak = 0;
+      var peakLen = 0;
       for (k = 0; k < order.length; k++) {
         idx = order[k];
         t = times[idx];
@@ -2142,129 +2655,175 @@ sequenceDiagram
         }
         log = keep;
         if (log.length < L) {
+          note[idx] = "窗內原有 " + log.length + " 筆";
           log.push(t);
-          if (log.length > peak) peak = log.length;
+          if (log.length > peakLen) peakLen = log.length;
           allow[idx] = 1;
-          admittedTs.push(t);
+        } else {
+          note[idx] = "窗內已有 " + log.length + " 筆";
         }
       }
-      memory = peak;
+      memory = peakLen;
+      memoryLabel = "最多 " + peakLen + " 個時間戳";
     } else if (kind === 3) {
+      // Token Bucket：餘額隨時間補充，放行即送出
       var tokens = B;
       var last = null;
-      var rate = R / 1000;
+      var perMs = R / 1000;
       for (k = 0; k < order.length; k++) {
         idx = order[k];
         t = times[idx];
         if (last !== null && t > last) {
-          tokens = Math.min(B, tokens + (t - last) * rate);
+          tokens = Math.min(B, tokens + (t - last) * perMs);
         }
         last = t;
-        if (tokens >= 1) {
-          tokens -= 1;
+        if (tokens >= 1 - EPS) {
+          note[idx] = "餘 " + fmt2(tokens) + " → " + fmt2(Math.max(0, tokens - 1));
+          tokens = Math.max(0, tokens - 1);
           allow[idx] = 1;
-          admittedTs.push(t);
+        } else {
+          note[idx] = "餘 " + fmt2(tokens) + "，不足 1";
         }
       }
+      memory = 2;
+      memoryLabel = "2 個數字";
     } else {
-      var perMs = R / 1000;
-      var interval = perMs > 0 ? (1 / perMs) : 0;
-      var maxDelay = interval > 0 ? (B - 1) * interval : 0;
-      var nextSlot = -1e15;
+      // Leaky Bucket：kind 4 是佇列（延後送出），kind 5 是 GCRA 計量（只決定放或拒，放行即送出）
+      var interval = 1000 / R;
+      var tau = (B - 1) * interval;
+      var tat = -Infinity;
       for (k = 0; k < order.length; k++) {
         idx = order[k];
         t = times[idx];
-        if (!(perMs > 0) || !(B >= 1)) continue;
-        var slot = t > nextSlot ? t : nextSlot;
-        var dly = slot - t;
-        if (dly <= maxDelay + 1e-6) {
+        var slot = t > tat ? t : tat;
+        var wait = slot - t;
+        if (wait <= tau + 1e-6) {
           allow[idx] = 1;
-          delay[idx] = Math.round(dly);
-          admittedTs.push(t);
-          nextSlot = slot + interval;
+          tat = slot + interval;
+          if (kind === 4) {
+            delay[idx] = Math.round(wait);
+            note[idx] = delay[idx] > 0 ? "排隊 " + delay[idx] + " ms" : "不用排隊";
+          } else {
+            note[idx] = "TAT 超前 " + Math.round(wait) + " ≤ " + Math.round(tau);
+          }
+        } else {
+          note[idx] = (kind === 4 ? "需排 " : "TAT 超前 ") + Math.round(wait) + " > " + Math.round(tau);
         }
+      }
+      if (kind === 4) {
+        var q = maxQueueDepth(times, allow, delay);
+        memory = 1 + q;
+        memoryLabel = "1 個時刻＋最多 " + q + " 筆排隊";
+      } else {
+        memory = 1;
+        memoryLabel = "1 個數字（TAT）";
       }
     }
 
-    return { allow: allow, delay: delay, admittedTs: admittedTs, memory: memory };
+    return { allow: allow, delay: delay, note: note, memory: memory, memoryLabel: memoryLabel };
   }
 
   function summarize(run, times, W, L) {
     var allowed = 0;
-    var immediate = 0;
     var maxDelay = 0;
-    var mask = 0;
-    for (var i = 0; i < run.allow.length; i++) {
+    var departs = [];
+    var lastDepart = 0;
+    for (var i = 0; i < times.length; i++) {
       if (!run.allow[i]) continue;
       allowed += 1;
-      mask += Math.pow(2, i);
-      if (run.delay[i] <= 0) immediate += 1;
+      var d = times[i] + run.delay[i];
+      departs.push(d);
+      if (d > lastDepart) lastDepart = d;
       if (run.delay[i] > maxDelay) maxDelay = run.delay[i];
     }
-    var peak = maxInWindow(run.admittedTs, W);
-    var over = peak - L;
+    // 契約量的是「上游實際收到的時刻」：佇列模式用送出時刻，其餘送出即到達
+    var pk = peakInWindow(departs, W);
+    var over = pk.peak - L;
     if (over < 0) over = 0;
     return {
       allowed: allowed,
-      denied: run.allow.length - allowed,
+      denied: times.length - allowed,
+      peak: pk.peak,
+      peakStart: pk.start,
       overshoot: over,
-      crossBurst: crossBurst(run.admittedTs, W),
-      memory: run.memory,
-      immediate: immediate,
       maxDelay: maxDelay,
-      gap: minDepartGap(times, run.allow, run.delay),
-      mask: mask,
+      lastDepart: lastDepart,
+      memory: run.memory,
+      memoryLabel: run.memoryLabel,
       allow: run.allow,
-      delay: run.delay
+      delay: run.delay,
+      note: run.note
     };
   }
 
-  /* (2) compute* 純函式 */
   // @probe fn       computePair
   // @probe baseline {"algoL":0,"algoR":3,"windowMs":1000,"limit":3,"capacity":4,"refillPerSec":3,"t0":200,"t1":400,"t2":700,"t3":850,"t4":950,"t5":1000,"t6":1100,"t7":1200}
-  // @probe sweep    {"algoL":[2,4],"algoR":[0,4],"windowMs":[200,5000],"limit":[1,12],"capacity":[1,16],"refillPerSec":[0,20],"t0":[0,8000],"t1":[0,8000],"t2":[0,8000],"t3":[0,8000],"t4":[0,8000],"t5":[0,8000],"t6":[0,8000],"t7":[0,8000]}
+  // @probe sweep    {"algoL":[2,5],"algoR":[0,4],"windowMs":[200,5000],"limit":[1,12],"capacity":[1,16],"refillPerSec":[1,20],"t0":[0,8000],"t1":[0,8000],"t2":[0,8000],"t3":[0,8000],"t4":[0,8000],"t5":[0,8000],"t6":[0,8000],"t7":[0,8000]}
   function computePair(p) {
     var W = Math.round(clampNum(p.windowMs, 50, 20000));
     var L = Math.round(clampNum(p.limit, 1, 30));
     var B = Math.round(clampNum(p.capacity, 1, 40));
-    var R = Math.round(clampNum(p.refillPerSec, 0, 100));
-    var algoL = Math.round(clampNum(p.algoL, 0, 4));
-    var algoR = Math.round(clampNum(p.algoR, 0, 4));
-    var keys = ["t0", "t1", "t2", "t3", "t4", "t5", "t6", "t7"];
+    var R = Math.round(clampNum(p.refillPerSec, 1, 100));
+    var algoL = Math.round(clampNum(p.algoL, 0, 5));
+    var algoR = Math.round(clampNum(p.algoR, 0, 5));
     var times = [];
-    for (var i = 0; i < keys.length; i++) {
-      times.push(Math.round(clampNum(p[keys[i]], 0, 30000)));
+    var i;
+    for (i = 0; i < TIME_KEYS.length; i++) {
+      times.push(Math.round(clampNum(p[TIME_KEYS[i]], 0, 30000)));
     }
     var left = summarize(runAlgo(algoL, times, W, L, B, R), times, W, L);
     var right = summarize(runAlgo(algoR, times, W, L, B, R), times, W, L);
+
     var diverge = 0;
+    var timingDiffer = 0;
+    var tMin = times[0];
+    var tMax = times[0];
     for (i = 0; i < times.length; i++) {
       if (left.allow[i] !== right.allow[i]) diverge += 1;
+      else if (left.allow[i] && left.delay[i] !== right.delay[i]) timingDiffer += 1;
+      if (times[i] < tMin) tMin = times[i];
+      if (times[i] > tMax) tMax = times[i];
     }
+    if (left.lastDepart > tMax) tMax = left.lastDepart;
+    if (right.lastDepart > tMax) tMax = right.lastDepart;
+    // 時間軸：從最早到達所在的對齊視窗起點，畫到最晚送出所在視窗的終點，至少兩個窗寬
+    var axisStart = Math.floor(tMin / W) * W;
+    var axisEnd = (Math.floor(tMax / W) + 1) * W;
+    if (axisEnd - axisStart < 2 * W) axisEnd = axisStart + 2 * W;
+
     return {
+      windowMs: W,
+      limit: L,
+      times: times,
+      leftName: ALGO_NAME[algoL],
+      rightName: ALGO_NAME[algoR],
+      bucketInUse: (USES_BUCKET[algoL] || USES_BUCKET[algoR]) ? 1 : 0,
       leftAllowed: left.allowed,
       leftDenied: left.denied,
+      leftPeak: left.peak,
+      leftPeakStart: left.peakStart,
       leftOvershoot: left.overshoot,
-      leftCross: left.crossBurst,
-      leftMemory: left.memory,
-      leftImmediate: left.immediate,
       leftMaxDelay: left.maxDelay,
-      leftGap: left.gap,
-      leftMask: left.mask,
+      leftMemory: left.memory,
+      leftMemoryLabel: left.memoryLabel,
+      leftAllow: left.allow,
+      leftDelay: left.delay,
+      leftNote: left.note,
       rightAllowed: right.allowed,
       rightDenied: right.denied,
+      rightPeak: right.peak,
+      rightPeakStart: right.peakStart,
       rightOvershoot: right.overshoot,
-      rightCross: right.crossBurst,
-      rightMemory: right.memory,
-      rightImmediate: right.immediate,
       rightMaxDelay: right.maxDelay,
-      rightGap: right.gap,
-      rightMask: right.mask,
-      diverge: diverge,
-      leftAllow: left.allow,
+      rightMemory: right.memory,
+      rightMemoryLabel: right.memoryLabel,
       rightAllow: right.allow,
-      leftDelay: left.delay,
-      rightDelay: right.delay
+      rightDelay: right.delay,
+      rightNote: right.note,
+      diverge: diverge,
+      timingDiffer: timingDiffer,
+      axisStart: axisStart,
+      axisEnd: axisEnd
     };
   }
 
@@ -2293,13 +2852,13 @@ sequenceDiagram
     }
     var prefAllowed = 0;
     var redisOps = 0;
-    var waited = 0;
     var falseReject = 0;
     var exhausted = false;
     var a;
     var heldNow;
     var h;
 
+    // 請求以輪替順序打到各節點：本地有餘額就直接花，沒有才向中央借一批
     for (a = 0; a < arrivals; a++) {
       for (i = 0; i < nodes; i++) {
         if (local[i] > 0) {
@@ -2312,7 +2871,6 @@ sequenceDiagram
           for (h = 0; h < nodes; h++) heldNow += local[h];
           if (heldNow > 0) falseReject += 1;
         } else {
-          waited += 1;
           redisOps += 1;
           var take = remaining < batch ? remaining : batch;
           remaining -= take;
@@ -2333,8 +2891,7 @@ sequenceDiagram
 
     var stranded = 0;
     for (i = 0; i < nodes; i++) stranded += local[i];
-    var optimal = total < limit ? total : limit;
-    var shortfall = optimal - prefAllowed;
+    var shortfall = centralAllowed - prefAllowed;
     if (shortfall < 0) shortfall = 0;
 
     return {
@@ -2343,10 +2900,11 @@ sequenceDiagram
       shortfall: shortfall,
       stranded: stranded,
       falseReject: falseReject,
+      centralLeft: remaining,
       centralRedis: centralRedis,
       prefetchRedis: redisOps,
       centralWaitSum: rtt * centralRedis,
-      prefetchWaitSum: rtt * waited,
+      prefetchWaitSum: rtt * redisOps,
       savedRoundTrips: centralRedis - redisOps,
       held: local,
       served: served,
@@ -2369,28 +2927,151 @@ sequenceDiagram
     el("rla-rd0"), el("rla-rd1"), el("rla-rd2"), el("rla-rd3"),
     el("rla-rd4"), el("rla-rd5"), el("rla-rd6"), el("rla-rd7")
   ];
+  var presetBtns = Array.prototype.slice.call(
+    document.querySelectorAll("#demo-pair [data-preset]")
+  );
+  var pairSvg = el("rla-svg");
 
   /* (4) render —— 只把 compute 的結果畫出來 */
-  function selectedName(id) {
-    var sel = el(id);
-    return sel.options[sel.selectedIndex].text;
+  var SVG_X0 = 128;
+  var SVG_X1 = 704;
+  var AXIS_Y = 262;
+  var TRACK_TOP = [0, 130];
+  var MK_GAP = 15;
+  var MK_LEVELS = 4;
+
+  function esc(s) {
+    return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
   }
 
-  function setNum(id, n, hot) {
+  function setText(id, text, hot) {
     var node = el(id);
-    node.textContent = String(n);
-    if (hot && n > 0) node.classList.add("hot");
+    node.textContent = String(text);
+    if (hot) node.classList.add("hot");
     else node.classList.remove("hot");
   }
 
-  function paintCell(cell, allow, delay, side) {
+  function paintCell(cell, allow, delay, note) {
     if (!allow) {
       cell.className = "ns-lock";
-      cell.textContent = "拒絕";
+      cell.textContent = "拒絕 · " + note;
       return;
     }
-    cell.className = side === "l" ? "ns-wait" : "ns-ok";
-    cell.textContent = delay > 0 ? ("放行 · 延後 " + delay + " ms") : "放行 · 立刻";
+    cell.className = delay > 0 ? "ns-wait" : "ns-ok";
+    cell.textContent = (delay > 0 ? "延後送出 · " : "放行 · ") + note;
+  }
+
+  function trackSvg(top, name, s, side, xOf) {
+    var times = s.times;
+    var allow = s[side + "Allow"];
+    var delay = s[side + "Delay"];
+    var note = s[side + "Note"];
+    var peak = s[side + "Peak"];
+    var peakStart = s[side + "PeakStart"];
+    var W = s.windowMs;
+    var L = s.limit;
+    var arrY = top + 70;
+    var upY = top + 100;
+    var out = "";
+    out += '<text class="rla-tn" x="8" y="' + (top + 14) + '">' + esc(name) + "</text>";
+    out += '<text class="rla-tl" x="8" y="' + (arrY + 4) + '">到達</text>';
+    out += '<text class="rla-tl" x="8" y="' + (upY + 4) + '">上游收到</text>';
+    out += '<line class="rla-base" x1="' + SVG_X0 + '" y1="' + arrY + '" x2="' + SVG_X1 + '" y2="' + arrY + '"></line>';
+    out += '<line class="rla-base" x1="' + SVG_X0 + '" y1="' + (upY + 9) + '" x2="' + SVG_X1 + '" y2="' + (upY + 9) + '"></line>';
+
+    if (peak > 0) {
+      var over = peak > L;
+      var px0 = xOf(peakStart);
+      var px1 = Math.min(SVG_X1, xOf(peakStart + W));
+      out += '<rect class="rla-pk ' + (over ? "over" : "fine") + '" x="' + px0.toFixed(1) + '" y="' + (upY - 13) +
+        '" width="' + Math.max(3, px1 - px0).toFixed(1) + '" height="26" rx="4"></rect>';
+      var label = "任意 " + W + " ms 內最多 " + peak + " 筆" +
+        (over ? "，超出上限 " + (peak - L) : "，未超過上限 " + L);
+      var lx = Math.max(SVG_X0, Math.min(px0 + 4, SVG_X1 - 236));
+      out += '<text class="rla-pkt ' + (over ? "over" : "fine") + '" x="' + lx.toFixed(1) + '" y="' + (upY + 26) + '">' +
+        esc(label) + "</text>";
+    }
+
+    var order = [];
+    var i;
+    for (i = 0; i < times.length; i++) order.push(i);
+    order.sort(function (a, b) {
+      if (times[a] !== times[b]) return times[a] - times[b];
+      return a - b;
+    });
+    var lastX = [];
+    for (i = 0; i < MK_LEVELS; i++) lastX.push(-1e9);
+    var bars = "";
+    var arrows = "";
+    var marks = "";
+    for (var k = 0; k < order.length; k++) {
+      i = order[k];
+      var x = xOf(times[i]);
+      var lv = -1;
+      var l;
+      for (l = 0; l < MK_LEVELS; l++) {
+        if (x - lastX[l] >= MK_GAP) {
+          lv = l;
+          break;
+        }
+      }
+      if (lv < 0) {
+        lv = 0;
+        for (l = 1; l < MK_LEVELS; l++) if (lastX[l] < lastX[lv]) lv = l;
+      }
+      lastX[lv] = x;
+      var cy = arrY - lv * MK_GAP;
+      var kind = !allow[i] ? "deny" : (delay[i] > 0 ? "wait" : "pass");
+      var tip = "#" + (i + 1) + " 到達 " + times[i] + " ms · " +
+        (!allow[i] ? "拒絕" : (delay[i] > 0 ? "排隊後於 " + (times[i] + delay[i]) + " ms 送出" : "立刻送出")) +
+        " · " + note[i];
+      marks += '<g class="rla-mk ' + kind + '"><title>' + esc(tip) + "</title>" +
+        '<circle cx="' + x.toFixed(1) + '" cy="' + cy + '" r="7"></circle>' +
+        '<text x="' + x.toFixed(1) + '" y="' + (cy + 4) + '" text-anchor="middle">' + (i + 1) + "</text></g>";
+      if (allow[i]) {
+        var xd = xOf(times[i] + delay[i]);
+        bars += '<rect class="rla-up ' + kind + '" x="' + (xd - 1.5).toFixed(1) + '" y="' + (upY - 9) +
+          '" width="3" height="18"></rect>';
+        if (delay[i] > 0) {
+          arrows += '<path class="rla-dl" d="M ' + x.toFixed(1) + " " + (arrY + 8) + " L " + xd.toFixed(1) + " " +
+            (upY - 11) + '" marker-end="url(#rla-dl-mk)"></path>';
+        }
+      }
+    }
+    return out + bars + arrows + marks;
+  }
+
+  function renderChart(s) {
+    var span = s.axisEnd - s.axisStart;
+    var W = s.windowMs;
+    function xOf(t) { return SVG_X0 + ((t - s.axisStart) / span) * (SVG_X1 - SVG_X0); }
+    var grid = "";
+    var nLines = Math.round(span / W);
+    if (nLines <= 60) {
+      var every = Math.max(1, Math.ceil(nLines / 10));
+      for (var k = 0; k <= nLines; k++) {
+        var tk = s.axisStart + k * W;
+        var gx = xOf(tk).toFixed(1);
+        grid += '<line class="rla-grid" x1="' + gx + '" y1="4" x2="' + gx + '" y2="' + AXIS_Y + '"></line>';
+        if (k % every === 0) {
+          grid += '<text class="rla-tick" x="' + gx + '" y="' + (AXIS_Y + 14) + '" text-anchor="middle">' + tk + "</text>";
+        }
+      }
+    } else {
+      grid += '<text class="rla-tick" x="' + SVG_X0 + '" y="' + (AXIS_Y + 14) + '" text-anchor="middle">' + s.axisStart + "</text>";
+      grid += '<text class="rla-tick" x="' + SVG_X1 + '" y="' + (AXIS_Y + 14) + '" text-anchor="middle">' + s.axisEnd + "</text>";
+    }
+    pairSvg.innerHTML =
+      "<title>同一組到達時間經過兩種演算法：每筆的判定與上游收到的時刻</title>" +
+      '<defs><marker id="rla-dl-mk" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto">' +
+      '<path d="M 0 1 L 8 5 L 0 9 z" fill="#3f6188"></path></marker></defs>' +
+      '<rect class="rla-bg" x="0" y="0" width="720" height="284"></rect>' +
+      grid +
+      '<line class="rla-sep" x1="0" y1="129" x2="720" y2="129"></line>' +
+      trackSvg(TRACK_TOP[0], "左 · " + s.leftName, s, "left", xOf) +
+      trackSvg(TRACK_TOP[1], "右 · " + s.rightName, s, "right", xOf) +
+      '<line class="rla-ax" x1="' + SVG_X0 + '" y1="' + AXIS_Y + '" x2="' + SVG_X1 + '" y2="' + AXIS_Y + '"></line>' +
+      '<text class="rla-tl" x="8" y="' + (AXIS_Y + 14) + '">時間 (ms)</text>';
   }
 
   function readPair() {
@@ -2412,117 +3093,47 @@ sequenceDiagram
     };
   }
 
-  function stepPoints(times, allow, tMax, yMax) {
-    var order = [];
-    var i;
-    for (i = 0; i < times.length; i++) order.push(i);
-    order.sort(function (a, b) {
-      if (times[a] !== times[b]) return times[a] - times[b];
-      return a - b;
-    });
-    function xOf(t) { return 44 + (t / tMax) * 650; }
-    function yOf(c) { return 168 - (c / yMax) * 136; }
-    var pts = [];
-    var cum = 0;
-    pts.push(xOf(0).toFixed(1) + "," + yOf(0).toFixed(1));
-    for (i = 0; i < order.length; i++) {
-      var idx = order[i];
-      var x = xOf(times[idx]);
-      pts.push(x.toFixed(1) + "," + yOf(cum).toFixed(1));
-      if (allow[idx]) {
-        cum += 1;
-        pts.push(x.toFixed(1) + "," + yOf(cum).toFixed(1));
-      }
-    }
-    pts.push(xOf(tMax).toFixed(1) + "," + yOf(cum).toFixed(1));
-    return pts.join(" ");
-  }
-
-  function renderChart(times, state) {
-    var tMax = 1;
-    var i;
-    for (i = 0; i < times.length; i++) if (times[i] > tMax) tMax = times[i];
-    var W = Math.round(clampNum(Number(el("rla-window").value), 50, 20000));
-    if (W > tMax) tMax = W;
-    var yMax = state.leftAllowed > state.rightAllowed ? state.leftAllowed : state.rightAllowed;
-    if (yMax < 1) yMax = 1;
-    function xOf(t) { return 44 + (t / tMax) * 650; }
-
-    var grid = "";
-    var lines = Math.floor(tMax / W);
-    if (lines > 24) lines = 24;
-    for (var k = 0; k <= lines; k++) {
-      var x = xOf(k * W).toFixed(1);
-      grid += '<line x1="' + x + '" y1="22" x2="' + x + '" y2="172" stroke="var(--border-strong)" stroke-dasharray="3 4" />';
-    }
-
-    var dots = "";
-    for (i = 0; i < times.length; i++) {
-      var cx = xOf(times[i]).toFixed(1);
-      if (state.leftAllow[i]) {
-        dots += '<circle cx="' + cx + '" cy="172" r="3.5" fill="var(--accent)" />';
-      } else {
-        dots += '<circle cx="' + cx + '" cy="172" r="3.5" fill="#fff" stroke="var(--warn)" stroke-width="1.5" />';
-      }
-      if (state.rightAllow[i]) {
-        dots += '<rect x="' + (Number(cx) - 3) + '" y="16" width="6" height="6" fill="var(--ok)" />';
-      } else {
-        dots += '<rect x="' + (Number(cx) - 3) + '" y="16" width="6" height="6" fill="#fff" stroke="var(--warn)" stroke-width="1.5" />';
-      }
-    }
-
-    var leftPts = stepPoints(times, state.leftAllow, tMax, yMax);
-    var rightPts = stepPoints(times, state.rightAllow, tMax, yMax);
-    el("rla-svg").innerHTML =
-      '<title>兩種演算法的累計放行曲線</title>' +
-      '<rect x="0" y="0" width="720" height="200" fill="#fafaf9"></rect>' +
-      grid +
-      '<polyline fill="none" stroke="var(--ok)" stroke-width="2" stroke-dasharray="5 4" points="' + rightPts + '" />' +
-      '<polyline fill="none" stroke="var(--accent)" stroke-width="2" points="' + leftPts + '" />' +
-      dots +
-      '<text x="44" y="192" font-size="11" fill="#6b7078" font-family="var(--mono)">0</text>' +
-      '<text x="680" y="192" font-size="11" fill="#6b7078" font-family="var(--mono)" text-anchor="end">' + tMax + ' ms</text>' +
-      '<text x="8" y="36" font-size="11" fill="#6b7078" font-family="var(--mono)">' + yMax + '</text>';
+  function renderSide(prefix, s, side) {
+    setText(prefix + "-name", s[side + "Name"], false);
+    setText(prefix + "-allowed", s[side + "Allowed"] + " / " + s[side + "Denied"], false);
+    setText(prefix + "-peak", s[side + "Peak"] + " 筆", s[side + "Peak"] > s.limit);
+    setText(prefix + "-over", s[side + "Overshoot"] > 0 ? "+" + s[side + "Overshoot"] : "0", s[side + "Overshoot"] > 0);
+    setText(prefix + "-delay", s[side + "MaxDelay"] + " ms", false);
+    setText(prefix + "-mem", s[side + "MemoryLabel"], false);
   }
 
   function renderPair() {
-    var p = readPair();
-    var s = computePair(p);
-    var times = [p.t0, p.t1, p.t2, p.t3, p.t4, p.t5, p.t6, p.t7];
-    el("rla-window-v").textContent = el("rla-window").value + " ms";
-    el("rla-limit-v").textContent = el("rla-limit").value + " 筆";
+    var s = computePair(readPair());
+    el("rla-window-v").textContent = s.windowMs + " ms";
+    el("rla-limit-v").textContent = s.limit + " 筆";
     el("rla-cap-v").textContent = el("rla-cap").value;
     el("rla-refill-v").textContent = el("rla-refill").value + " / 秒";
-    el("rla-l-name").textContent = selectedName("rla-algo-l");
-    el("rla-r-name").textContent = selectedName("rla-algo-r");
-    setNum("rla-l-allowed", s.leftAllowed, false);
-    setNum("rla-l-denied", s.leftDenied, false);
-    setNum("rla-l-over", s.leftOvershoot, true);
-    setNum("rla-l-cross", s.leftCross, false);
-    setNum("rla-l-mem", s.leftMemory, false);
-    setNum("rla-l-imm", s.leftImmediate, false);
-    setNum("rla-l-delay", s.leftMaxDelay, false);
-    setNum("rla-l-gap", s.leftGap, false);
-    setNum("rla-r-allowed", s.rightAllowed, false);
-    setNum("rla-r-denied", s.rightDenied, false);
-    setNum("rla-r-over", s.rightOvershoot, true);
-    setNum("rla-r-cross", s.rightCross, false);
-    setNum("rla-r-mem", s.rightMemory, false);
-    setNum("rla-r-imm", s.rightImmediate, false);
-    setNum("rla-r-delay", s.rightMaxDelay, false);
-    setNum("rla-r-gap", s.rightGap, false);
-    var i;
-    for (i = 0; i < 8; i++) {
-      paintCell(leftCells[i], s.leftAllow[i], s.leftDelay[i], "l");
-      paintCell(rightCells[i], s.rightAllow[i], s.rightDelay[i], "r");
+    el("rla-bucket").classList.toggle("rla-off", !s.bucketInUse);
+    el("rla-peak-l").textContent = "上游任意 " + s.windowMs + " ms 內最多";
+    el("rla-peak-r").textContent = "上游任意 " + s.windowMs + " ms 內最多";
+    el("rla-th-l").textContent = "左 · " + s.leftName;
+    el("rla-th-r").textContent = "右 · " + s.rightName;
+    renderSide("rla-l", s, "left");
+    renderSide("rla-r", s, "right");
+    for (var i = 0; i < 8; i++) {
+      paintCell(leftCells[i], s.leftAllow[i], s.leftDelay[i], s.leftNote[i]);
+      paintCell(rightCells[i], s.rightAllow[i], s.rightDelay[i], s.rightNote[i]);
     }
-    renderChart(times, s);
-    el("rla-status").innerHTML =
-      "兩邊有 <b>" + s.diverge + "</b> 筆決策不同。以 " +
-      el("rla-window").value + " ms、上限 " + el("rla-limit").value +
-      " 筆這份精確契約來看，左欄任意一段視窗最多超出 <b>" + s.leftOvershoot +
-      "</b> 筆，右欄超出 <b>" + s.rightOvershoot +
-      "</b> 筆。零等待送出：左 " + s.leftImmediate + "、右 " + s.rightImmediate + "。";
+    renderChart(s);
+
+    var msg;
+    if (s.diverge > 0) {
+      msg = "兩欄有 <b>" + s.diverge + "</b> 筆判定不同。";
+    } else if (s.timingDiffer > 0) {
+      msg = "兩欄放行與拒絕的是同樣幾筆，但有 <b>" + s.timingDiffer + "</b> 筆送達上游的時刻不同。";
+    } else {
+      msg = "兩欄的判定與送出時刻完全相同。";
+    }
+    msg += "上游在任意 " + s.windowMs + " ms 內最多收到：左 <b>" + s.leftPeak + "</b> 筆、右 <b>" + s.rightPeak +
+      "</b> 筆，上限是 " + s.limit + " 筆。";
+    var longest = s.leftMaxDelay > s.rightMaxDelay ? s.leftMaxDelay : s.rightMaxDelay;
+    if (longest > 0) msg += "排隊最久的一筆等了 <b>" + longest + "</b> ms。";
+    el("rla-status").innerHTML = msg;
   }
 
   function readShare() {
@@ -2535,76 +3146,110 @@ sequenceDiagram
     };
   }
 
+  function quotaSeg(kind, n, unit, label) {
+    if (n <= 0) return "";
+    return '<i class="rls-q ' + kind + '" style="width:' + (n * unit).toFixed(2) + '%" title="' + label + " " + n + '"></i>';
+  }
+
   function renderShare() {
-    var p = readShare();
-    var s = computeShare(p);
+    var s = computeShare(readShare());
     el("rls-nodes-v").textContent = el("rls-nodes").value;
     el("rls-arrivals-v").textContent = el("rls-arrivals").value + " / 節點";
     el("rls-limit-v").textContent = el("rls-limit").value;
     el("rls-batch-v").textContent = el("rls-batch").value;
     el("rls-rtt-v").textContent = el("rls-rtt").value + " ms";
-    setNum("rls-c-allowed", s.centralAllowed, false);
-    setNum("rls-c-redis", s.centralRedis, false);
-    setNum("rls-c-wait", s.centralWaitSum, false);
-    setNum("rls-p-allowed", s.prefetchAllowed, false);
-    setNum("rls-p-redis", s.prefetchRedis, false);
-    setNum("rls-p-wait", s.prefetchWaitSum, false);
-    setNum("rls-p-strand", s.stranded, true);
-    setNum("rls-p-short", s.shortfall, true);
-    setNum("rls-p-false", s.falseReject, true);
-    setNum("rls-saved", s.savedRoundTrips, false);
+    setText("rls-c-allowed", s.centralAllowed, false);
+    setText("rls-c-redis", s.centralRedis, false);
+    setText("rls-c-wait", s.centralWaitSum, false);
+    setText("rls-p-allowed", s.prefetchAllowed, false);
+    setText("rls-p-redis", s.prefetchRedis, false);
+    setText("rls-p-wait", s.prefetchWaitSum, false);
+    setText("rls-p-left", s.centralLeft, false);
+    setText("rls-p-strand", s.stranded, s.stranded > 0);
+    setText("rls-p-short", s.shortfall, s.shortfall > 0);
+    setText("rls-p-false", s.falseReject, s.falseReject > 0);
+
+    var maxTotal = 1;
+    var i;
+    for (i = 0; i < s.held.length; i++) {
+      var tot = s.served[i] + s.held[i] + s.deniedByNode[i];
+      if (tot > maxTotal) maxTotal = tot;
+    }
+    var unit = 100 / maxTotal;
     var html = "";
-    for (var i = 0; i < s.held.length; i++) {
-      html += '<div class="rls-cell">' +
-        '<div class="rls-id">節點 ' + (i + 1) + "</div>" +
-        '<div class="rls-held">' + s.held[i] + "</div>" +
-        '<div class="rls-sub">留在手上</div>' +
-        '<div class="rls-sub">放行 ' + s.served[i] + " · 拒絕 " + s.deniedByNode[i] + "</div>" +
+    for (i = 0; i < s.held.length; i++) {
+      html += '<div class="rls-qrow">' +
+        '<span class="rls-qname">節點 ' + (i + 1) + "</span>" +
+        '<div class="rls-qtrack">' +
+        quotaSeg("served", s.served[i], unit, "已放行") +
+        quotaSeg("held", s.held[i], unit, "卡在手上") +
+        quotaSeg("denied", s.deniedByNode[i], unit, "被拒絕") +
+        "</div>" +
+        '<span class="rls-qnum">放 ' + s.served[i] + " · 留 " + s.held[i] + " · 拒 " + s.deniedByNode[i] + "</span>" +
         "</div>";
     }
     el("rls-rack").innerHTML = html;
-    el("rls-status").innerHTML =
-      "相對全域上限內能服務的筆數，預取最終少放行 <b>" + s.shortfall +
-      "</b> 筆；拒絕發生的當下、別的節點仍握有餘額的有 <b>" + s.falseReject +
-      "</b> 筆。少打的往返是 <b>" + s.savedRoundTrips + "</b> 次。";
-  }
 
-  function resetPair() {
-    el("rla-algo-l").value = "0";
-    el("rla-algo-r").value = "3";
-    el("rla-window").value = "1000";
-    el("rla-limit").value = "3";
-    el("rla-cap").value = "4";
-    el("rla-refill").value = "3";
-    for (var i = 0; i < timeEls.length; i++) timeEls[i].value = String(TIME_DEFAULTS[i]);
-    renderPair();
-  }
-
-  function resetShare() {
-    el("rls-nodes").value = "4";
-    el("rls-arrivals").value = "2";
-    el("rls-limit").value = "20";
-    el("rls-batch").value = "8";
-    el("rls-rtt").value = "5";
-    renderShare();
+    var msg = "預取少打了 <b>" + s.savedRoundTrips + "</b> 次中央往返。";
+    if (s.falseReject > 0) {
+      msg += "但有 <b>" + s.falseReject + "</b> 筆在被拒絕的當下，別的節點手上還握著餘額；最終比集中式少放行 <b>" +
+        s.shortfall + "</b> 筆，<b>" + s.stranded + "</b> 個額度直到視窗結束都卡在節點上。";
+    } else if (s.stranded > 0) {
+      msg += "沒有人被提早拒絕，但有 <b>" + s.stranded + "</b> 個額度已從中央扣掉、卻卡在節點上沒用到。";
+    } else {
+      msg += "沒有額度卡在節點上，兩種做法放行數相同。";
+    }
+    el("rls-status").innerHTML = msg;
   }
 
   /* (5) 事件綁定 */
+  function applyPreset(key) {
+    var ps = PRESETS[key];
+    el("rla-algo-l").value = String(ps.algoL);
+    el("rla-algo-r").value = String(ps.algoR);
+    el("rla-window").value = String(ps.windowMs);
+    el("rla-limit").value = String(ps.limit);
+    el("rla-cap").value = String(ps.capacity);
+    el("rla-refill").value = String(ps.refillPerSec);
+    for (var i = 0; i < timeEls.length; i++) timeEls[i].value = String(ps.times[i]);
+    presetBtns.forEach(function (b) {
+      b.setAttribute("aria-pressed", b.getAttribute("data-preset") === key ? "true" : "false");
+    });
+    el("rla-hint").textContent = ps.hint;
+    renderPair();
+  }
+
+  function onPairEdit() {
+    presetBtns.forEach(function (b) { b.setAttribute("aria-pressed", "false"); });
+    el("rla-hint").textContent = CUSTOM_HINT;
+    renderPair();
+  }
+
+  presetBtns.forEach(function (b) {
+    b.addEventListener("click", function () { applyPreset(b.getAttribute("data-preset")); });
+  });
   [
     "rla-algo-l", "rla-algo-r", "rla-window", "rla-limit", "rla-cap", "rla-refill",
     "rla-t0", "rla-t1", "rla-t2", "rla-t3", "rla-t4", "rla-t5", "rla-t6", "rla-t7"
   ].forEach(function (id) {
-    el(id).addEventListener("input", renderPair);
-    el(id).addEventListener("change", renderPair);
+    el(id).addEventListener("input", onPairEdit);
+    el(id).addEventListener("change", onPairEdit);
   });
   [
     "rls-nodes", "rls-arrivals", "rls-limit", "rls-batch", "rls-rtt"
   ].forEach(function (id) {
     el(id).addEventListener("input", renderShare);
   });
-  el("rla-reset").addEventListener("click", resetPair);
-  el("rls-reset").addEventListener("click", resetShare);
-  renderPair();
+  el("rla-reset").addEventListener("click", function () { applyPreset(DEFAULT_PRESET); });
+  el("rls-reset").addEventListener("click", function () {
+    el("rls-nodes").value = "4";
+    el("rls-arrivals").value = "2";
+    el("rls-limit").value = "20";
+    el("rls-batch").value = "8";
+    el("rls-rtt").value = "5";
+    renderShare();
+  });
+  applyPreset(DEFAULT_PRESET);
   renderShare();
 })();
 </script>
