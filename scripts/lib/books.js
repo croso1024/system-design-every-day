@@ -97,6 +97,18 @@ function extractRootTokens(baseHtml) {
 }
 
 /**
+ * 從 templates/base.html 抽出 <link rel="icon" ...> 標籤（單一真相來源），供首頁 <head> 使用。
+ * 找不到時 throw，讓呼叫端零副作用中止，避免首頁與文章頁圖示脫節。
+ */
+function extractFaviconLink(baseHtml) {
+  const match = String(baseHtml).match(/<link\s+rel="icon"\s+[^>]*>/);
+  if (!match) {
+    throw new Error('templates/base.html 找不到 <link rel="icon"> 標籤，無法組出首頁');
+  }
+  return `  ${match[0].replace(/\r\n/g, '\n')}`;
+}
+
+/**
  * 組出完整首頁 HTML（純計算，不落檔）。
  * 傳入 in-memory completed，讓 payload 與 ledger 同源（勿讓 builder 自行讀磁碟，
  * 否則會在「尚未 saveCompleted」的呼叫端出現節點落後的 off-by-one bug）。
@@ -111,7 +123,9 @@ function buildBooksIndexHtml(completed) {
   // 反斜線在 CSS / JS 字串語境中皆為透明轉義（`<\/style` 等價 `</style`），故對合法內容無副作用。
   const learningMapCss = readTemplate(HOME_MAP_CSS_PATH, 'home-learning-map.css').replace(/<\/(style)/gi, '<\\/$1');
   const learningMapJs = readTemplate(HOME_MAP_JS_PATH, 'home-learning-map.js').replace(/<\/(script)/gi, '<\\/$1');
-  const rootTokens = extractRootTokens(readTemplate(BASE_TEMPLATE_PATH, 'base.html'));
+  const baseHtml = readTemplate(BASE_TEMPLATE_PATH, 'base.html');
+  const rootTokens = extractRootTokens(baseHtml);
+  const faviconLink = extractFaviconLink(baseHtml);
 
   return `<!DOCTYPE html>
 <html lang="zh-Hant">
@@ -119,6 +133,7 @@ function buildBooksIndexHtml(completed) {
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>System Design Every Day | 系統設計學習手冊</title>
+${faviconLink}
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@300;400;500;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
