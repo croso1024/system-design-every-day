@@ -1,0 +1,852 @@
+<!-- demo-archetype: D｜空間視覺化（主，第 4 節）＋C｜並排對照（次，第 8 節） — 主 demo 讓讀者在一棵 inline SVG 畫出的 B+Tree 上
+     插入、刪除 key（含遞增／亂序批次與兩種葉頁分裂點），再拉一段 BETWEEN 範圍，由 computeBTree() 從空樹重播操作，算出樹高、
+     頁分裂次數、葉頁數與平均填充率、葉鏈頁號不連號次數，以及範圍掃描的下探路徑、走過的葉頁與讀頁數。選 D 是因為本篇的核心命題
+     「樹高、頁分裂、葉節點鏈」本身就是空間結構：同一批 key 換個插入順序或頁容量，樹的形狀就不一樣，只有看得到形狀才講得清楚。
+     次 demo 把同一條查詢並排餵給 (user_id, created_at) 與 (created_at, user_id) 兩個複合索引，computeComposite() 算出各自的
+     定位欄、掃描條目、葉頁、索引內過濾、回表次數與觸及的資料頁。最近 3 篇為 B／E／F，主 archetype D 未撞形。 -->
+<style>
+  .ix-sub { font-weight: 700; font-size: 15px; margin: 24px 0 8px; padding-left: 10px; border-left: 3px solid var(--accent); color: var(--text); }
+
+  /* 盒 + 箭頭：節點與邊是不同元素 */
+  .ix-row {
+    display: flex; flex-wrap: wrap; gap: 10px;
+    align-items: stretch; justify-content: center;
+    margin: 14px 0 0;
+  }
+  .ix-node {
+    border: 1px solid var(--border-strong); border-radius: 8px;
+    background: #fff; padding: 10px 12px;
+    min-width: 110px; max-width: 170px; text-align: center;
+  }
+  .ix-node .nn { font-family: var(--mono); font-size: 12px; font-weight: 700; color: var(--text); }
+  .ix-node .ns { font-size: 11px; color: var(--text-2); margin-top: 3px; line-height: 1.45; }
+  .ix-node.accent { border-top: 3px solid var(--accent); }
+  .ix-node.ok { border-top: 3px solid var(--ok); }
+  .ix-node.warn { border-top: 3px solid var(--warn); }
+  .ix-arrow {
+    display: flex; align-items: center;
+    font-family: var(--mono); font-size: 13px; color: var(--text-3);
+    white-space: nowrap;
+  }
+
+  /* 分層：一個 InnoDB 頁的組成 */
+  .ix-stack {
+    margin: 14px 0 0; border: 1px solid var(--border-strong); border-radius: 8px;
+    background: #fff; padding: 8px; display: grid; gap: 4px;
+  }
+  .ix-layer {
+    display: grid; grid-template-columns: 168px 1fr; gap: 10px; align-items: baseline;
+    border: 1px solid var(--border); border-radius: 6px; padding: 7px 10px;
+    background: var(--bg-soft); font-size: 12.5px;
+  }
+  .ix-layer .ln { font-family: var(--mono); font-weight: 700; font-size: 12px; color: var(--text); }
+  .ix-layer .ln i { font-style: normal; font-weight: 400; color: var(--text-3); margin-left: 4px; }
+  .ix-layer .ld { color: var(--text-2); line-height: 1.55; }
+  .ix-layer.data { background: var(--accent-soft); border-color: var(--accent-line); }
+  .ix-layer.free { background: #fff; border-style: dashed; }
+  @media (max-width: 560px) { .ix-layer { grid-template-columns: 1fr; gap: 2px; } }
+
+  /* 並排：兩種引擎的索引條目 */
+  .ix-split { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin: 14px 0 0; }
+  @media (max-width: 640px) { .ix-split { grid-template-columns: 1fr; } }
+  .ix-pane {
+    border: 1px solid var(--border); border-radius: var(--radius-sm);
+    background: #fff; padding: 12px 14px; border-top: 3px solid var(--border-strong);
+  }
+  .ix-pane.a { border-top-color: var(--accent); }
+  .ix-pane.o { border-top-color: var(--ok); }
+  .ix-pane .pt { font-weight: 700; font-size: 14px; }
+  .ix-pane .ps { font-family: var(--mono); font-size: 11px; color: var(--text-3); margin-bottom: 8px; letter-spacing: .03em; }
+  .ix-box {
+    font-family: var(--mono); font-size: 12px; color: var(--text);
+    border: 1px solid var(--border-strong); border-radius: 6px;
+    padding: 7px 9px; background: #fff; text-align: center;
+  }
+  .ix-box.soft { background: var(--bg-soft); }
+  .ix-down {
+    font-family: var(--mono); font-size: 11.5px; color: var(--text-3);
+    text-align: center; padding: 5px 0; line-height: 1.45;
+  }
+
+  /* 排序表的兩種命中標記 */
+  .ix-tbl td.b { background: var(--warn-soft); }
+  .ix-tbl td.mono, .ix-tbl th.mono { font-family: var(--mono); font-size: 12.5px; }
+
+  /* ---------- 第 4 節 demo：B+Tree 實驗台 ---------- */
+  .bt-ctl { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin: 0 0 10px; }
+  .bt-grp { display: inline-flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .bt-gl { font-family: var(--mono); font-size: 11.5px; color: var(--text-2); }
+  .bt-field {
+    display: inline-flex; align-items: center; gap: 6px;
+    font-family: var(--mono); font-size: 12px; color: var(--text-2);
+  }
+  .bt-field input, .bt-ctl input[type="number"] {
+    width: 64px; font-family: var(--mono); font-size: 13px; color: var(--text);
+    border: 1px solid var(--border-strong); border-radius: 6px; padding: 5px 7px; background: #fff;
+  }
+  .bt-canvas {
+    overflow-x: auto; border: 1px solid var(--border); border-radius: var(--radius-sm);
+    background: #fafaf9; padding: 10px 0 6px; text-align: center; margin-top: 4px;
+  }
+  .bt-canvas svg { display: inline-block; max-width: none; }
+  .bt-svg rect.box { fill: #ffffff; stroke: #dedcd8; stroke-width: 1.2; }
+  .bt-svg .inner rect.box { fill: #fafaf9; }
+  .bt-svg .path rect.box { stroke: #3f6188; stroke-width: 2; }
+  .bt-svg .seen rect.box { fill: #eef2f7; stroke: #3f6188; stroke-width: 2; }
+  .bt-svg .tch rect.box { stroke: #a3743e; stroke-width: 2; stroke-dasharray: 5 3; }
+  .bt-svg rect.cell { fill: none; stroke: #ecebe8; }
+  .bt-svg rect.cell.hit { fill: #eef4f1; stroke: #4d7d68; }
+  .bt-svg text.k { font-family: var(--mono); font-size: 12px; fill: #262a2f; text-anchor: middle; }
+  .bt-svg text.k.hit { fill: #4d7d68; font-weight: 700; }
+  .bt-svg text.pg { font-family: var(--mono); font-size: 11px; fill: #9aa0a8; }
+  .bt-svg text.pg.tch { fill: #a3743e; font-weight: 700; }
+  .bt-svg line.edge { stroke: #dedcd8; stroke-width: 1.2; }
+  .bt-svg line.edge.hot { stroke: #3f6188; stroke-width: 2; }
+  .bt-svg line.link { stroke: #9aa0a8; stroke-width: 1.2; }
+  .bt-svg line.link.hot { stroke: #4d7d68; stroke-width: 2; }
+  .bt-key-sw { display: inline-block; width: 12px; height: 9px; border-radius: 2px; border: 1px solid; }
+  .bt-key-sw.hit { background: var(--ok-soft); border-color: var(--ok); }
+  .bt-key-sw.tch { background: #fff; border: 1.5px dashed var(--warn); }
+
+  .bt-cells { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-top: 14px; }
+  @media (max-width: 640px) { .bt-cells { grid-template-columns: 1fr 1fr; } }
+  .bt-cell {
+    border: 1px solid var(--border); border-left: 3px solid var(--border-strong);
+    border-radius: var(--radius-sm); background: #fff; padding: 8px 10px; min-width: 0;
+  }
+  .bt-cell .k { display: block; font-size: 11px; color: var(--text-3); line-height: 1.4; }
+  .bt-cell b { display: block; font-family: var(--mono); font-size: 16px; color: var(--text); margin: 2px 0; }
+  .bt-cell .s { display: block; font-family: var(--mono); font-size: 10.5px; color: var(--text-2); line-height: 1.45; overflow-wrap: anywhere; }
+  .bt-cell.acc { border-left-color: var(--accent); }
+  .bt-cell.ok { border-left-color: var(--ok); }
+  .bt-cell.ok b { color: var(--ok); }
+  .bt-cell.warn { border-left-color: var(--warn); }
+  .bt-cell.warn b { color: var(--warn); }
+
+  /* ---------- 第 8 節 demo：欄位順序並排 ---------- */
+  .cx-q { display: grid; gap: 8px; margin-bottom: 10px; }
+  .cx-chk {
+    display: flex; flex-wrap: wrap; align-items: center; gap: 8px;
+    font-family: var(--mono); font-size: 12.5px; color: var(--text);
+    border: 1px solid var(--border); background: var(--bg-soft);
+    border-radius: var(--radius-sm); padding: 6px 10px;
+  }
+  .cx-chk input[type="number"] {
+    width: 58px; font-family: var(--mono); font-size: 13px;
+    border: 1px solid var(--border-strong); border-radius: 6px; padding: 3px 6px; background: #fff;
+  }
+  .cx-chk input[type="range"] { width: 150px; accent-color: var(--accent); }
+  .cx-chk b { color: var(--accent); min-width: 22px; text-align: right; }
+  .cx-chk .note { font-family: var(--sans); font-size: 11.5px; color: var(--text-3); }
+  .cx-sql {
+    font-family: var(--mono); font-size: 12.5px; line-height: 1.6; color: var(--text);
+    background: var(--code-bg); border: 1px solid var(--border); border-radius: var(--radius-sm);
+    padding: 10px 12px; margin: 10px 0 12px; white-space: pre-wrap;
+  }
+  .cx-cols { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  @media (max-width: 720px) { .cx-cols { grid-template-columns: 1fr; } }
+  .cx-pane {
+    border: 1px solid var(--border); border-radius: var(--radius-sm);
+    background: #fff; padding: 12px; border-top: 3px solid var(--border-strong); min-width: 0;
+  }
+  .cx-pane.win { border-top-color: var(--ok); }
+  .cx-ph .nm { font-family: var(--mono); font-weight: 700; font-size: 13px; }
+  .cx-ph code { font-size: 12px; }
+  .cx-win {
+    font-family: var(--mono); font-size: 10.5px; color: var(--ok);
+    border: 1px solid var(--ok); border-radius: 4px; padding: 0 5px; margin-left: 4px;
+  }
+  .cx-desc { font-size: 12.5px; color: var(--text-2); line-height: 1.6; margin: 6px 0 8px; }
+  .cx-desc .ok { color: var(--ok); }
+  .cx-desc .warn { color: var(--warn); }
+  .cx-desc .bad { color: var(--bad); }
+  .cx-sl { font-family: var(--mono); font-size: 11px; color: var(--text-3); margin: 8px 0 2px; }
+  .cx-strip svg { width: 100%; height: 22px; display: block; }
+  .cx-strip rect { stroke-width: 1; }
+  .cx-strip rect.ix.h0 { fill: #ffffff; stroke: #dedcd8; }
+  .cx-strip rect.ix.h1 { fill: #eef2f7; stroke: #cdd9e6; }
+  .cx-strip rect.ix.h2 { fill: #3f6188; stroke: #3f6188; }
+  .cx-strip rect.tb.h0 { fill: #ffffff; stroke: #dedcd8; }
+  .cx-strip rect.tb.h1 { fill: #a3743e; stroke: #a3743e; }
+  .cx-cells { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-top: 10px; }
+  .cx-cell {
+    border: 1px solid var(--border); border-left: 3px solid var(--border-strong);
+    border-radius: 6px; padding: 5px 8px; background: #fff;
+  }
+  .cx-cell .k { display: block; font-size: 10.5px; color: var(--text-3); }
+  .cx-cell b { font-family: var(--mono); font-size: 14px; color: var(--text); }
+  .cx-cell.ok { border-left-color: var(--ok); }
+  .cx-cell.ok b { color: var(--ok); }
+  .cx-cell.warn { border-left-color: var(--warn); }
+  .cx-cell.warn b { color: var(--warn); }
+  .cx-cell.bad { border-left-color: var(--bad); }
+  .cx-cell.bad b { color: var(--bad); }
+  .cx-sw { display: inline-block; width: 12px; height: 9px; border-radius: 2px; border: 1px solid; }
+  .cx-sw.h1 { background: var(--accent-soft); border-color: var(--accent-line); }
+  .cx-sw.h2 { background: var(--accent); border-color: var(--accent); }
+  .cx-sw.tb { background: var(--warn); border-color: var(--warn); }
+  .cx-foot { display: flex; justify-content: flex-end; margin-top: 10px; }
+</style>
+
+<header class="hero">
+  <div class="eyebrow">系統設計 · 田野手冊</div>
+  <h1>資料庫索引原理 (B+Tree / Composite / Covering Index)</h1>
+  <p class="lede">「這條查詢為什麼沒走索引？」是後端面試最常見的追問之一。答案幾乎都落在三個問題上：索引能不能讓查詢定位到起點、定位之後要掃多少條目、掃到的條目夠不夠回答查詢，還是得回表。本篇從 B+Tree 的頁結構與樹高估算講起，對照 InnoDB 的聚簇索引與 PostgreSQL 的 Heap + TID，再走過複合索引的最左前綴、Covering Index、選擇性，以及函式包欄位、隱式轉型、前置萬用字元這些讓索引「建了卻用不上」的情境。</p>
+  <div class="meta">
+    <span class="tag">B+Tree</span>
+    <span class="tag">Clustered Index</span>
+    <span class="tag">Composite Index</span>
+    <span class="tag">Covering Index</span>
+    <span class="tag">InnoDB</span>
+    <span class="tag">PostgreSQL</span>
+  </div>
+</header>
+
+<section id="s1">
+  <div class="sec-head">
+    <span class="sec-num">01</span>
+    <h2>總覽：一條查詢走不走得到索引</h2>
+  </div>
+  <p class="sec-sub">索引是一份依 key 排好序、可以跳著找的副本；用不用得上它，取決於查詢的形狀。</p>
+
+  <p>沒有索引時，資料庫只能把整張表的每一頁讀一遍，也就是全表掃描。索引是另一棵依某些欄位排好序的樹，讓查詢直接跳到起點，只讀需要的那一段。代價是它佔空間，而且每一次寫入都要同步維護。</p>
+  <p>「這條為什麼沒走索引」幾乎都能拆成三個依序發生的問題。本篇的章節就照這三問展開：</p>
+
+  <div class="ix-row">
+    <div class="ix-node"><div class="nn">WHERE 條件</div><div class="ns">比較的是哪些欄位、什麼形狀</div></div>
+    <span class="ix-arrow">▸</span>
+    <div class="ix-node accent"><div class="nn">① 定位得到起點嗎</div><div class="ns">最左前綴、欄位有沒有被函式或轉型包住</div></div>
+    <span class="ix-arrow">▸</span>
+    <div class="ix-node warn"><div class="nn">② 要掃多少</div><div class="ns">範圍有多寬、選擇性高不高</div></div>
+    <span class="ix-arrow">▸</span>
+    <div class="ix-node ok"><div class="nn">③ 要不要回表</div><div class="ns">索引條目夠不夠回答查詢</div></div>
+  </div>
+  <p class="cap">三個問題有先後：① 不成立，② 就變成「整棵掃」；① ② 都便宜，③ 仍可能因為回表次數太多而讓優化器放棄索引。</p>
+
+  <p>讀者設定是日常寫 SQL、看過 EXPLAIN、知道「建索引會變快」，但還說不清楚「為什麼這條不會變快」的後端工程師。範例以 PostgreSQL 與 MySQL（InnoDB）為主，兩者在第 5 節會分開談，因為它們對「索引指向哪裡」的答案不同，很多面試追問就出在這裡。</p>
+
+  <div class="callout accent">
+    <div class="c-title"><span class="ic">範圍</span>本篇只談索引的結構，以及查詢怎麼使用它</div>
+    <p>B-Tree 與 LSM-Tree 的寫入路徑對照在<a href="../embedded-database/">嵌入式資料庫</a>篇。優化器如何估成本、EXPLAIN 怎麼讀、Join 演算法怎麼選，會在談查詢計畫的主題處理。InnoDB 的 Row Lock、Gap Lock 為什麼鎖在索引記錄上，則由談資料庫鎖與死鎖的主題負責。本篇在需要的地方點到為止。</p>
+  </div>
+
+  <div class="oneliner">
+    <b>一句話答法</b>索引是依欄位排好序的 B+Tree；查詢要用上它，得先能從最左欄位定位到起點，掃描範圍要夠窄，最好還不用回表。三者任一不成立，優化器就可能選全表掃描。
+  </div>
+</section>
+
+<section id="s2">
+  <div class="sec-head">
+    <span class="sec-num">02</span>
+    <h2>為什麼是 B+Tree：頁、fanout 與葉節點鏈</h2>
+  </div>
+  <p class="sec-sub">記憶體與磁碟之間搬的是頁，不是列；B+Tree 讓每一頁塞滿分隔鍵，樹因此又矮又寬。</p>
+
+  <p>資料庫以頁（page）為單位讀寫。InnoDB 預設 16 KiB，PostgreSQL 8 KiB。就算只要一列，也得把整頁讀進 InnoDB 的 buffer pool 或 PostgreSQL 的 shared buffers。所以索引結構要壓低的不是比較次數，而是<strong>從根走到目標要讀幾頁</strong>。</p>
+  <p>B+Tree 的設計全部圍繞這件事：</p>
+  <ul>
+    <li><strong>內部頁只放「分隔鍵 + 子頁指標」</strong>，不放整列資料。一頁能放幾百個子頁指標，這個數字叫 fanout。fanout 越大，樹越矮。</li>
+    <li><strong>所有 key 都在葉頁</strong>，而且所有葉頁在同一深度。任何查詢走的頁數都一樣，延遲可以預期。</li>
+    <li><strong>同一層的葉頁串成雙向鏈</strong>。範圍查詢只要定位起點一次，之後沿葉鏈往右讀，不必回到上層。</li>
+  </ul>
+
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr><th>結構</th><th>等值查詢</th><th>範圍 / 排序</th><th>1 億筆的高度</th><th>為什麼不用它當主力</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>二元搜尋樹（含紅黑樹）</td><td>可以</td><td>可以</td><td>約 27 層</td><td>每個節點只分兩路。一層一頁，就是 27 次可能的隨機讀</td></tr>
+        <tr><td>Hash 索引</td><td>O(1)</td><td>不行</td><td>—</td><td>不保序：範圍、排序、前綴比對都用不上。PostgreSQL 有 Hash 索引，InnoDB 可以替熱點頁在記憶體裡建 Adaptive Hash Index（預設是否開啟依版本而定），兩者都只是等值查詢的補充</td></tr>
+        <tr><td>B-Tree（經典定義）</td><td>可以</td><td>可以，但要在各層之間上下穿梭</td><td>比 B+Tree 高</td><td>內部節點也存資料，fanout 變小；範圍掃描無法只走葉層</td></tr>
+        <tr><td class="hl">B+Tree</td><td class="hl">可以</td><td class="hl">沿葉鏈循序讀</td><td class="hl">3–4 層</td><td class="hl">內部頁只放分隔鍵，fanout 最大</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="cap">二元樹的 27 層來自 log₂(10⁸) ≈ 26.6。B+Tree 的 log 底數是幾百，同樣 1 億筆只要 3 到 4 層，第 3 節會把這個數字算出來。</p>
+
+  <p>命名上要注意：PostgreSQL 的文件與 InnoDB 的原始碼都把它們的索引叫 B-tree，但實作上都是 B+Tree 的變體。PostgreSQL 用的是 Lehman–Yao 版本，每頁多帶一個 high key（這頁的上界）與右鄰頁指標，讓並行的頁分裂不必鎖住整條下探路徑。</p>
+
+  <div class="ix-sub">一頁裡面長什麼樣</div>
+  <p>以 InnoDB 的索引頁為例。聚簇索引與二級索引用的是同一種頁格式，差別只在記錄裡放什麼。</p>
+  <div class="ix-stack">
+    <div class="ix-layer"><span class="ln">File Header<i>38 B</i></span><span class="ld">頁號、checksum，以及上一頁／下一頁指標：同一層葉頁的雙向鏈就存在這裡</span></div>
+    <div class="ix-layer"><span class="ln">Page Header<i>56 B</i></span><span class="ld">頁內記錄數、這頁在第幾層（0 = 葉頁）、空閒空間從哪裡開始</span></div>
+    <div class="ix-layer"><span class="ln">Infimum / Supremum</span><span class="ld">兩筆虛擬記錄，標出頁內最小與最大的邊界</span></div>
+    <div class="ix-layer data"><span class="ln">User Records</span><span class="ld">真正的記錄，依 key 順序串成單向鏈。實體位置不一定有序，新記錄通常寫在空閒空間的開頭</span></div>
+    <div class="ix-layer free"><span class="ln">Free Space</span><span class="ld">尚未使用的空間</span></div>
+    <div class="ix-layer"><span class="ln">Page Directory</span><span class="ld">每 4 到 8 筆記錄放一個 slot。頁內查找先對 slot 二分搜尋，再沿記錄鏈走幾步</span></div>
+    <div class="ix-layer"><span class="ln">File Trailer<i>8 B</i></span><span class="ld">與 File Header 對照的校驗值，用來偵測只寫了一半的頁</span></div>
+  </div>
+  <p class="cap">頁內找 key 一樣是二分搜尋，只是對象是 Page Directory 的 slot；跨頁靠的是 File Header 裡的上一頁／下一頁指標。</p>
+
+  <p>PostgreSQL 的 B-tree 頁格式不同，道理相同：頁頭之後是一排行指標（line pointer），索引條目從頁尾往前長，頁尾的 special space 放左右鄰頁指標與層級；不是最右邊的頁，第一筆條目是 high key。</p>
+
+  <div class="callout warn">
+    <div class="c-title"><span class="ic">陷阱</span>「B+Tree 查詢是 O(log N)」答得太快</div>
+    <p>二元樹也是 O(log N)。面試官想聽的是底數：fanout 讓 1 億筆只有 3 到 4 層，而上面幾層小到幾乎一定在記憶體裡，所以一次等值查詢的實體 I/O 往往只剩葉頁那一次。B+Tree 贏在每次 I/O 能篩掉的範圍，不在 big-O。</p>
+  </div>
+
+  <div class="oneliner">
+    <b>一句話答法</b>磁碟以頁為單位讀寫，B+Tree 讓內部頁只放分隔鍵、把 fanout 拉到幾百，1 億筆只要 3 到 4 層；資料全在同深度的葉頁，葉頁串成鏈，範圍查詢定位一次就能循序讀。
+  </div>
+</section>
+
+<section id="s3">
+  <div class="sec-head">
+    <span class="sec-num">03</span>
+    <h2>樹高估算：三四層撐起上億列</h2>
+  </div>
+  <p class="sec-sub">把頁大小、key 大小、列寬代進去，就能心算一棵樹有幾層。面試時寫出假設，比背出某個數字重要。</p>
+
+  <div class="formula">容量(h) = fanout<sup>h−1</sup> × 每葉筆數</div>
+  <p>fanout 是一個內部頁能放幾組「分隔鍵 + 子頁指標」，每葉筆數是一個葉頁能放幾筆記錄，<var>h</var> 是樹的層數（含根與葉）。以下假設刻意取整，方便驗算：</p>
+  <ul>
+    <li><strong>InnoDB 頁</strong> 16 KiB = 16,384 B。扣掉頁頭、頁尾、Page Directory 與保留空間，假設可用約 15,000 B。</li>
+    <li><strong>主鍵 BIGINT</strong>（8 B）。內部頁每筆 = 8 B 主鍵 + 4 B 子頁號 + 約 5 B 記錄標頭 ≈ 17 B，fanout ≈ 15,000 ÷ 17 ≈ <strong>880</strong>。</li>
+    <li><strong>聚簇索引的葉頁存整列</strong>。假設列寬 200 B（含記錄標頭，以及 InnoDB 每列隱藏的 6 B 交易 ID 與 7 B 回滾指標），每葉 <strong>75</strong> 列。</li>
+    <li><strong>二級索引 (user_id BIGINT)</strong>：葉頁每筆 = 8 B user_id + 8 B 主鍵 + 5 B 標頭 ≈ 21 B，每葉約 <strong>714</strong> 筆。非唯一的二級索引，內部頁也要帶主鍵才能唯一定位，每筆 ≈ 8 + 8 + 4 + 5 = 25 B，fanout <strong>600</strong>。</li>
+    <li><strong>PostgreSQL 頁</strong> 8 KiB。bigint 的 B-tree 條目 = 8 B 條目標頭（內含 6 B 的 TID）+ 8 B key + 4 B 行指標 ≈ 20 B，每頁約 <strong>400</strong> 筆，內部頁也取 400。</li>
+  </ul>
+
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr><th>索引</th><th>每葉筆數</th><th>fanout</th><th>2 層</th><th>3 層</th><th>4 層</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>InnoDB 聚簇，列寬 200 B</td><td>75</td><td>880</td><td>66,000</td><td class="hl">5,808 萬</td><td>約 511 億</td></tr>
+        <tr><td>InnoDB 聚簇，列寬 100 B</td><td>150</td><td>880</td><td>132,000</td><td class="hl">1.16 億</td><td>約 1,022 億</td></tr>
+        <tr><td>InnoDB 二級 (user_id)</td><td>714</td><td>600</td><td>428,400</td><td class="hl">2.57 億</td><td>約 1,542 億</td></tr>
+        <tr><td>PostgreSQL bigint B-tree</td><td>400</td><td>400</td><td>160,000</td><td class="hl">6,400 萬</td><td>256 億</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="cap">驗算：880² × 75 = 774,400 × 75 = 58,080,000。列寬減半，3 層就從 5,808 萬撐到 1.16 億。「欄位能小就小」在索引層的意義，是樹可能少一層。</p>
+
+  <p>所以 1 億列、列寬 200 B 的 InnoDB 表落在 4 層；把列寬壓到 100 B，3 層就夠。實際數字會因變長欄位、頁的填充率與碎片而上下浮動，但量級不會錯，而且最多差一層。</p>
+  <p>更值得算的是<strong>哪幾層會在記憶體裡</strong>。以 5,808 萬列、3 層的聚簇索引為例：葉頁有 58,080,000 ÷ 75 = 774,400 頁，約 11.8 GiB；中間層只有 880 頁，約 13.75 MiB；根 1 頁。上兩層小到一定常駐 buffer pool，所以一次主鍵等值查詢最多一次實體 I/O，而且只發生在葉頁沒被快取的時候。</p>
+
+  <div class="callout accent">
+    <div class="c-title"><span class="ic">關鍵</span>回表的成本要乘上命中筆數</div>
+    <p>走二級索引再回表，每一筆命中都要從聚簇索引的根再下探一次。命中 1 筆時是 3 + 3 頁的邏輯讀，沒什麼感覺；命中 5,000 筆、而且散在 5,000 個不同的葉頁時，就是 5,000 次可能的隨機 I/O。這正是第 7 節「選擇性」要處理的問題。</p>
+  </div>
+
+  <div class="oneliner">
+    <b>一句話答法</b>樹高 ≈ log 以 fanout 為底；16 KiB 頁、8 B 主鍵的 fanout 約 880，列寬 200 B 時每葉 75 列，3 層約 5,800 萬、4 層數百億。上層常駐記憶體，所以一次查詢大約只有葉頁那一次 I/O。
+  </div>
+</section>
+
+<section id="s4">
+  <div class="sec-head">
+    <span class="sec-num">04</span>
+    <h2>互動：在 B+Tree 上增刪 key，看頁分裂與範圍掃描</h2>
+  </div>
+  <p class="sec-sub">頁分裂、樹高與葉鏈要自己插幾個 key 才有手感。這棵樹的每個數字都由你的操作算出來。</p>
+
+  <p>這棵樹把頁容量刻意調得很小（每頁 3、4 或 6 個 key），讓幾十個 key 就長到 3 到 4 層。畫面與下方所有數字，都由 <code>computeBTree()</code> 把你的操作紀錄從空樹重播一遍算出來；切換頁容量或分裂點，就是用同一串操作重建一棵新樹。</p>
+  <ul>
+    <li><strong>插入／刪除</strong>：輸入 1–99 的 key。葉頁超過容量就分裂，新右頁的第一個 key 當分隔鍵往父頁推；父頁也滿就繼續往上，推到根就長出新根，樹高 +1。</li>
+    <li><strong>遞增 vs 亂序</strong>：「遞增 1–30」模擬 AUTO_INCREMENT 主鍵，「亂序 30 筆」模擬隨機 UUID。比較兩者的填充率與葉鏈不連號次數。</li>
+    <li><strong>葉頁分裂點</strong>：「中點對半」是教科書做法；「遞增最佳化」模擬 InnoDB 偵測到循序插入時改在插入點分裂，舊頁留滿、新頁只放新 key。示範把它簡化成：新 key 落在最右葉頁的尾端時才套用，而且只套在葉頁。</li>
+    <li><strong>範圍掃描</strong>：改 BETWEEN 的上下界，看下探經過哪幾頁、葉鏈走過哪幾頁、一共讀幾頁。</li>
+  </ul>
+
+  <div class="demo" id="demo-btree">
+    <div class="demo-bar">
+      <span class="label">互動 · B+Tree 頁分裂實驗台</span>
+      <span class="label" style="text-transform:none;font-family:var(--sans);font-size:12px;color:var(--text-2)">插入、刪除 key，再拉一段範圍掃描</span>
+    </div>
+    <div class="demo-body">
+      <div class="bt-ctl">
+        <div class="bt-grp">
+          <span class="bt-gl">每頁最多</span>
+          <div class="seg" role="group" aria-label="每頁最多幾個 key" id="bt-cap">
+            <button type="button" data-cap="3" aria-pressed="false">3 個 key</button>
+            <button type="button" data-cap="4" aria-pressed="true">4 個 key</button>
+            <button type="button" data-cap="6" aria-pressed="false">6 個 key</button>
+          </div>
+        </div>
+        <div class="bt-grp">
+          <span class="bt-gl">葉頁分裂點</span>
+          <div class="seg" role="group" aria-label="葉頁分裂點" id="bt-split">
+            <button type="button" data-split="mid" aria-pressed="true">中點對半</button>
+            <button type="button" data-split="seq" aria-pressed="false">遞增最佳化</button>
+          </div>
+        </div>
+      </div>
+      <div class="bt-ctl">
+        <label class="bt-field">key <input type="number" id="bt-key" min="1" max="99" value="37"></label>
+        <button type="button" class="btn primary" id="bt-ins">插入</button>
+        <button type="button" class="btn" id="bt-del">刪除</button>
+        <button type="button" class="btn" id="bt-seq6">+6 個遞增 key</button>
+        <button type="button" class="btn" id="bt-rnd6">+6 個亂序 key</button>
+      </div>
+      <div class="bt-ctl">
+        <span class="bt-gl">從空樹重來</span>
+        <button type="button" class="btn" id="bt-pre-seq">遞增 1–30</button>
+        <button type="button" class="btn" id="bt-pre-rnd">亂序 30 筆</button>
+        <button type="button" class="btn" id="bt-reset">Reset</button>
+      </div>
+      <div class="bt-ctl">
+        <span class="bt-gl">範圍掃描 WHERE k BETWEEN</span>
+        <input type="number" id="bt-lo" min="1" max="99" value="20" aria-label="範圍下界">
+        <span class="bt-gl">AND</span>
+        <input type="number" id="bt-hi" min="1" max="99" value="45" aria-label="範圍上界">
+      </div>
+      <div class="bt-canvas" id="bt-canvas"></div>
+      <div class="legend">
+        <span><i class="dot ns-wait"></i>範圍掃描下探路徑與走過的葉頁</span>
+        <span><i class="bt-key-sw hit"></i>命中範圍的 key</span>
+        <span><i class="bt-key-sw tch"></i>最後一次操作動到的頁</span>
+        <span><i class="dot ns-idle"></i>其他頁（N# 內部頁、L# 葉頁）</span>
+      </div>
+      <div class="bt-cells" id="bt-cells"></div>
+      <div class="status-line" id="bt-status">載入中…</div>
+    </div>
+  </div>
+  <p class="cap">藍框是範圍掃描的下探路徑與走過的葉頁，綠格是命中的 key，橘色虛線框是最後一次操作動到的頁。葉頁編號 L# 依配置順序遞增，葉鏈上的不連號，代表邏輯相鄰的兩頁在配置上並不相鄰。</p>
+
+  <p>可以照這三組實驗操作，數字都是按下按鈕後算出來的：</p>
+  <ol>
+    <li><strong>遞增插入與分裂點。</strong>按「遞增 1–30」（每頁 4 個 key、中點對半）：3 層、10 個葉頁、平均填充 75%、葉鏈不連號 0 處。切到「遞增最佳化」：還是 3 層，但葉頁減為 8 個、填充 94%。再把頁容量改成 3：中點對半長到 4 層、15 個葉頁、填充 67%；遞增最佳化只要 3 層、10 個葉頁、填充 100%。</li>
+    <li><strong>亂序插入。</strong>按「亂序 30 筆」（每頁 4 個、中點對半）：3 層、9 個葉頁、填充 83%，但葉鏈不連號 8 處（L1 → L8 → L4 → L9 → L3 → …）。範圍 20–45 依序讀 L4、L9、L3：邏輯上相鄰，配置上散在各處。</li>
+    <li><strong>多讀一頁才知道結束。</strong>回到「遞增 1–30」、每頁 4 個、中點對半，範圍 8–15 會讀 L3 → L4 → L5 → L6，共 6 頁（含下探的 2 個內部頁）。L6 [16 17 18] 一個都沒命中：它被讀進來，只是為了確認範圍已經結束。</li>
+  </ol>
+
+  <p>實驗 2 的填充率反而比實驗 1 的「遞增 + 中點對半」高，這不是巧合。遞增插入時，每次中點分裂留下的左半頁再也不會有新 key 進來，所以永遠半滿；這就是 InnoDB 要偵測循序插入、改在插入點分裂的原因（PostgreSQL 在分裂最右葉頁時，也會依 fillfactor 讓左頁保持接近滿，B-tree 的預設 fillfactor 是 90）。隨機插入的頁長期平均大約七成滿，理論值是 ln 2 ≈ 69%。隨機主鍵真正的代價不在填充率，在後面兩件事：葉鏈在磁碟上不連續，範圍掃描變成跳著讀；插入位置散在整棵樹，每一頁都可能是熱點，快取命中率跟著下降。</p>
+
+  <div class="ix-sub">刪除為什麼不會讓樹變小</div>
+  <p>示範用的是最保守的刪除策略：頁要整個刪空才歸還，不做合併或借位。PostgreSQL 的 B-tree 就是這樣：半空的頁不合併，只有完全空掉的頁，才會在 VACUUM 時被回收。InnoDB 比較積極，頁的使用率低於 <code>MERGE_THRESHOLD</code>（預設 50%）時會嘗試與相鄰頁合併。兩者的共同結論是：大量刪除之後，索引不會自動縮小，樹高也很少下降，要靠 PostgreSQL 的 <code>REINDEX</code> 或 InnoDB 的 <code>OPTIMIZE TABLE</code>（重建整張表）才會重新變得緊實。</p>
+  <p>你可以在「遞增 1–30」之後刪掉 8、10、12、14：葉頁還是 10 個，範圍 8–15 一樣讀 6 頁，命中卻從 8 個掉到 4 個，平均填充降到 65%。另一個值得觀察的細節是：內部頁上的分隔鍵在刪除後可能已經「過期」，它指的那個 key 早就不在了。這是合法的，分隔鍵只負責分流，不代表資料存在。</p>
+
+  <div class="callout warn">
+    <div class="c-title"><span class="ic">陷阱</span>InnoDB 用隨機 UUID 當主鍵</div>
+    <p>InnoDB 的表本身就是主鍵 B+Tree。主鍵用隨機的 UUIDv4 時，每次插入都落在樹中的隨機位置：寫入熱點分散到整棵樹、buffer pool 命中率下降、頁頻繁從中間分裂，而且 16 B 的主鍵會被複製進每一個二級索引。改用遞增整數，或 UUIDv7 這類時間有序的 ID，插入就集中在最右葉頁。PostgreSQL 的 Heap 不依主鍵排序，表本身不受影響，但主鍵那棵 B-tree 一樣要承受隨機插入的分裂與膨脹。</p>
+  </div>
+
+  <div class="oneliner">
+    <b>一句話答法</b>葉頁滿了就分裂、分隔鍵往上推，推到根才會長高，所以樹高隨資料量對數成長；遞增插入集中在最右頁，搭配插入點分裂能讓頁幾乎填滿，隨機插入則讓頁散開、葉鏈不連續。刪除通常不會讓樹變矮，要重建索引才會緊實。
+  </div>
+</section>
+
+<section id="s5">
+  <div class="sec-head">
+    <span class="sec-num">05</span>
+    <h2>Clustered 與 Secondary Index：InnoDB 回表 vs PostgreSQL Heap + TID</h2>
+  </div>
+  <p class="sec-sub">兩個引擎的索引都叫 B-tree，但 InnoDB 的葉頁直接放整列，PostgreSQL 的葉頁只放「去 Heap 的哪一格拿」。</p>
+
+  <p><strong>InnoDB：表就是聚簇索引（Clustered Index）。</strong>主鍵 B+Tree 的葉頁直接存整列，所以表的實體順序就是主鍵順序。表沒有宣告主鍵時，InnoDB 拿第一個所有欄位都是 NOT NULL 的 UNIQUE 索引當聚簇鍵；再沒有，就自己產生一個 6 B 的隱藏 row ID。其他索引都是二級索引（Secondary Index），葉頁存「索引欄位 + 主鍵值」。用二級索引找到主鍵之後，再拿主鍵去聚簇索引下探一次取整列，這一步就是<strong>回表</strong>。</p>
+  <p><strong>PostgreSQL：表是 Heap。</strong>新列寫在哪一頁有空間就放哪裡，不依任何 key 排序。所有索引，包括主鍵，都是 Heap 之外的獨立結構，條目存「索引欄位 + TID」。TID（系統欄位 <code>ctid</code>）是「頁號 + 頁內行指標序號」組成的 6 B 實體位址，拿到它就能直接讀那一頁的那一格，不必再走另一棵樹。</p>
+
+  <div class="ix-split">
+    <div class="ix-pane a">
+      <div class="pt">InnoDB：二級索引 → 聚簇索引</div>
+      <div class="ps">INDEX (user_id)</div>
+      <div class="ix-box soft">葉頁條目 (user_id=7, id=1042)</div>
+      <div class="ix-down">▼ 拿 id=1042<br>從根下探聚簇索引（3–4 頁）</div>
+      <div class="ix-box">聚簇索引葉頁：整列<br>(id, user_id, status, amount, …)</div>
+    </div>
+    <div class="ix-pane o">
+      <div class="pt">PostgreSQL：索引 → Heap</div>
+      <div class="ps">INDEX (user_id)</div>
+      <div class="ix-box soft">葉頁條目 (user_id=7, TID=(118,3))</div>
+      <div class="ix-down">▼ 直接讀 Heap 第 118 頁<br>第 3 個行指標（1 頁）</div>
+      <div class="ix-box">Heap tuple：整列<br>＋ xmin / xmax 可見性資訊</div>
+    </div>
+  </div>
+  <p class="cap">InnoDB 的二級索引記的是「邏輯位址」（主鍵），回表要再走一棵樹；PostgreSQL 記的是「實體位址」（TID），回表只讀一頁，但這個位址會隨每次 UPDATE 換掉。</p>
+
+  <p>InnoDB 回表的時序長這樣。重點在「每一筆」：</p>
+  <pre class="mermaid">
+sequenceDiagram
+    participant Q as 執行器
+    participant S as 二級索引
+    participant C as 聚簇索引
+    Q->>S: 下探 user_id=7
+    S-->>Q: (7, id=1042)
+    Q->>C: 用 id=1042 下探
+    C-->>Q: 整列
+    Q->>S: 沿葉鏈讀下一筆
+    S-->>Q: (7, id=2210)
+    Q->>C: 用 id=2210 再下探
+    C-->>Q: 整列
+  </pre>
+  <p class="cap">二級索引那一側是循序讀，聚簇索引那一側是每筆一次的獨立下探；命中的主鍵越分散，回表越接近隨機 I/O。</p>
+
+  <p>PostgreSQL 的 Index Only Scan 多了一個步驟：查 Visibility Map。</p>
+  <pre class="mermaid">
+sequenceDiagram
+    participant Q as 執行器
+    participant I as B-tree 索引
+    participant V as Visibility Map
+    participant H as Heap
+    Q->>I: 下探 user_id=7
+    I-->>Q: (7, TID=(118,3))
+    Q->>V: 第 118 頁 all-visible?
+    alt 是
+        V-->>Q: 直接用索引裡的值
+    else 否
+        Q->>H: 讀第 118 頁第 3 格
+        H-->>Q: tuple 與可見性
+    end
+  </pre>
+  <p class="cap">這是 Index Only Scan 的路徑：查詢要的欄位都在索引裡時，才會先問 Visibility Map。一般的 Index Scan 每一筆都直接讀 Heap。</p>
+
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr><th>面向</th><th>InnoDB</th><th>PostgreSQL</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>表的組織</td><td>主鍵 B+Tree（聚簇）</td><td>Heap，不排序</td></tr>
+        <tr><td>二級索引指向</td><td>主鍵值</td><td>TID（實體位址）</td></tr>
+        <tr><td>回表成本</td><td>再走一次聚簇索引，3–4 頁邏輯讀</td><td>直接讀 TID 指的 Heap 頁，1 頁</td></tr>
+        <tr><td>主鍵查詢</td><td class="hl">一次下探就拿到整列</td><td>索引下探 + 讀 Heap</td></tr>
+        <tr><td>列被搬到別頁時</td><td class="hl">主鍵沒變，二級索引不用改</td><td>UPDATE 產生的新版本有新 TID；除非走 HOT，否則每個索引都要插新條目</td></tr>
+        <tr><td>主鍵寬度的影響</td><td>主鍵被複製進每個二級索引，寬主鍵讓所有索引一起變胖</td><td class="hl">主鍵只是一般索引，不影響其他索引</td></tr>
+        <tr><td>覆蓋查詢</td><td>二級索引自帶主鍵欄</td><td>欄位要在 key 或 INCLUDE 裡，且受 Visibility Map 影響</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="cap">兩種設計各自把成本押在不同地方：InnoDB 讀主鍵快、回表貴；PostgreSQL 回表便宜，UPDATE 卻可能讓每個索引一起多一筆條目。</p>
+
+  <div class="callout accent">
+    <div class="c-title"><span class="ic">關鍵</span>為什麼 InnoDB 不讓二級索引存實體位址</div>
+    <p>聚簇索引的列會因為頁分裂而搬到別頁。如果二級索引存的是實體位址，每次分裂都要回頭改所有二級索引裡指向被搬走的那幾列的條目。存主鍵值就不怕搬家，代價是每次回表都多走一棵樹。PostgreSQL 反過來：Heap 裡的 tuple 不會因為別人插入而搬家，所以敢存 TID；代價是 UPDATE 寫出的新版本換了位址，索引得跟著補條目。第 10 節的 HOT 更新，就是為了減少這件事。</p>
+  </div>
+
+  <div class="oneliner">
+    <b>一句話答法</b>InnoDB 的表就是主鍵 B+Tree，二級索引存主鍵，回表等於再查一次聚簇索引；PostgreSQL 的表是無序的 Heap，所有索引都存 TID，回表只讀一頁，但 UPDATE 換了 TID 就可能要更新所有索引。
+  </div>
+</section>
+
+<section id="s6">
+  <div class="sec-head">
+    <span class="sec-num">06</span>
+    <h2>複合索引：最左前綴與欄位順序</h2>
+  </div>
+  <p class="sec-sub">(a, b) 索引就是一份「先依 a 排，a 相同再依 b 排」的清單。最左前綴不是規則，是這個排序的直接推論。</p>
+
+  <p>複合索引 (user_id, created_at) 的葉頁條目，等於把資料先依 user_id 排序、user_id 相同時再依 created_at 排序；InnoDB 最後還會以主鍵收尾。下面這張排序表就是所有規則的來源：</p>
+
+  <div class="tbl-wrap ix-tbl">
+    <table>
+      <thead>
+        <tr><th class="mono">#</th><th class="mono">user_id</th><th class="mono">created_at</th><th class="mono">id</th><th>條件 A：user_id = 7 AND created_at ≥ 05-03</th><th>條件 B：created_at = 05-08</th></tr>
+      </thead>
+      <tbody>
+        <tr><td class="mono">1</td><td class="mono">3</td><td class="mono">05-02</td><td class="mono">88</td><td></td><td></td></tr>
+        <tr><td class="mono">2</td><td class="mono">3</td><td class="mono">05-09</td><td class="mono">412</td><td></td><td></td></tr>
+        <tr><td class="mono">3</td><td class="mono">7</td><td class="mono">05-01</td><td class="mono">17</td><td></td><td></td></tr>
+        <tr><td class="mono">4</td><td class="mono">7</td><td class="mono">05-03</td><td class="mono">230</td><td class="hl">命中</td><td></td></tr>
+        <tr><td class="mono">5</td><td class="mono">7</td><td class="mono">05-08</td><td class="mono">391</td><td class="hl">命中</td><td class="b">命中</td></tr>
+        <tr><td class="mono">6</td><td class="mono">7</td><td class="mono">05-11</td><td class="mono">545</td><td class="hl">命中</td><td></td></tr>
+        <tr><td class="mono">7</td><td class="mono">9</td><td class="mono">05-02</td><td class="mono">61</td><td></td><td></td></tr>
+        <tr><td class="mono">8</td><td class="mono">9</td><td class="mono">05-08</td><td class="mono">377</td><td></td><td class="b">命中</td></tr>
+        <tr><td class="mono">9</td><td class="mono">12</td><td class="mono">05-03</td><td class="mono">205</td><td></td><td></td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="cap">條件 A 命中第 4–6 列，是連續的一段：定位一次、往後讀到不符合為止。條件 B 命中第 5 列與第 8 列，中間夾著不相干的條目；沒有 user_id 當前綴，created_at 在整份清單裡是亂的，只能整份掃過。</p>
+
+  <p>把這個觀察推廣到 (a, b, c)：</p>
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr><th>WHERE 的形狀，索引 (a, b, c)</th><th>能用來定位的欄位</th><th>原因</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><code>a = ?</code></td><td>a</td><td>最左前綴</td></tr>
+        <tr><td><code>a = ? AND b = ?</code></td><td>a, b</td><td>連續的等值前綴</td></tr>
+        <tr><td><code>a = ? AND b = ? AND c &gt; ?</code></td><td class="hl">a, b, c</td><td>等值都在前，最後一欄可以是範圍</td></tr>
+        <tr><td><code>a = ? AND c = ?</code></td><td>a</td><td>跳過 b，c 只能在索引條目上逐筆過濾</td></tr>
+        <tr><td><code>a &gt; ? AND b = ?</code></td><td>a</td><td>a 一旦是範圍，b 在這段範圍裡不再有序</td></tr>
+        <tr><td><code>b = ? AND c = ?</code></td><td>無</td><td>缺最左欄，定位不到起點（Skip Scan 例外，見下方）</td></tr>
+        <tr><td><code>b = ? AND a = ?</code></td><td>a, b</td><td>WHERE 的書寫順序無關，優化器會自己對應到索引欄位</td></tr>
+        <tr><td><code>a = ? ORDER BY b</code></td><td>a 定位，b 免排序</td><td>同一個 a 底下 b 已經有序，可以直接依索引順序輸出</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="cap">能用來定位的，是從最左欄開始連續的等值欄，再加最多一個範圍欄。其餘條件仍可以在索引條目上過濾，但已經無法縮小要掃的範圍。</p>
+
+  <div class="callout accent">
+    <div class="c-title"><span class="ic">關鍵</span>「不能定位」不等於「完全沒用」</div>
+    <p>MySQL 5.6 起的 Index Condition Pushdown（EXPLAIN 顯示 <code>Using index condition</code>）會在回表之前，先用索引條目上其他欄位的條件過濾。PostgreSQL 的 B-tree 掃描也會把非前綴欄位的條件放在索引內檢查。兩者省下的是回表次數，不是掃描的條目數；第 8 節的 demo 會把這兩個數字分開算。</p>
+  </div>
+
+  <div class="ix-sub">欄位順序怎麼排</div>
+  <ol>
+    <li><strong>等值條件的欄位放前面，範圍或排序欄位放後面。</strong>(user_id, created_at) 同時服務「某人最近 30 天的訂單」與「某人的訂單依時間排序」兩種查詢。</li>
+    <li><strong>一個索引盡量服務多條查詢。</strong>有了 (a, b)，單獨的 (a) 就是冗餘的，因為 (a, b) 的最左前綴已經涵蓋它。</li>
+    <li><strong>「選擇性高的欄位放前面」只是次要準則。</strong>決定順序的是查詢形狀。如果每條查詢都帶 <code>status = ?</code>、只對 created_at 做範圍，(status, created_at) 就比 (created_at, status) 好，即使 status 只有四種值。</li>
+  </ol>
+
+  <div class="callout warn">
+    <div class="c-title"><span class="ic">陷阱</span>Skip Scan 不是可以忽略欄位順序的理由</div>
+    <p>MySQL 8.0.13 起有 Skip Scan：最左欄的相異值很少時，優化器可以把 <code>b = ?</code> 拆成「對 a 的每一個值各定位一次」。PostgreSQL 18 的 B-tree 也加入了類似的能力。它能在特定情況下救回缺最左欄的查詢，但成本隨最左欄的相異值數量線性增加。拿它當「欄位順序不重要」的理由，是在賭優化器。</p>
+  </div>
+
+  <div class="oneliner">
+    <b>一句話答法</b>(a, b) 是先依 a 再依 b 的排序，所以只有從 a 開始、連續的等值欄加最後一個範圍欄能定位；欄位順序依查詢形狀決定，等值在前、範圍與排序在後，選擇性只是次要考量。
+  </div>
+</section>
+
+<section id="s7">
+  <div class="sec-head">
+    <span class="sec-num">07</span>
+    <h2>Covering Index 與選擇性</h2>
+  </div>
+  <p class="sec-sub">不回表的查詢最快；回表多到一定程度，優化器寧可全表掃描。</p>
+
+  <p><strong>Covering Index（覆蓋索引）</strong>：查詢用到的每一個欄位，包括 SELECT、WHERE、ORDER BY 裡的，都能從索引條目拿到，就不必回表。</p>
+  <ul>
+    <li><strong>InnoDB</strong>：二級索引條目自帶主鍵，所以 (user_id, created_at) 已經覆蓋 <code>SELECT id, user_id, created_at</code>，EXPLAIN 的 Extra 會出現 <code>Using index</code>。MySQL 沒有 INCLUDE 語法，要覆蓋其他欄位只能把它們加進索引的 key。</li>
+    <li><strong>PostgreSQL</strong>：索引條目只有 key 與 TID，id 不會自動在裡面。PostgreSQL 11 起可以寫 <code>CREATE INDEX ... ON orders (user_id, created_at) INCLUDE (id, amount)</code>，把不參與排序、只用來回答查詢的欄位放進葉頁條目。執行計畫會顯示 Index Only Scan。</li>
+  </ul>
+
+  <div class="callout warn">
+    <div class="c-title"><span class="ic">陷阱</span>覆蓋了，也可能還是要回表</div>
+    <p>PostgreSQL 的索引沒有可見性資訊。Index Only Scan 對每一筆條目先查 Visibility Map：對應的 Heap 頁被標成 all-visible，才能直接信任索引裡的值，否則照樣去 Heap 確認（EXPLAIN ANALYZE 的 <code>Heap Fetches</code> 就是這個次數）。剛大量寫入、VACUUM 還沒跑過的表，Index Only Scan 可能退化得跟一般 Index Scan 差不多。InnoDB 也有對應的邊界：二級索引條目不帶交易資訊，若條目被標記刪除，或該頁最近被比你的讀取視圖更新的交易改過，就得回聚簇索引確認正確版本，這時覆蓋索引的優勢就用不上。</p>
+  </div>
+
+  <div class="ix-sub">選擇性：為什麼優化器有時寧可全表掃描</div>
+  <p><strong>選擇性（selectivity）</strong>是條件命中的列數佔全表的比例，常用欄位的相異值數量（cardinality）來近似。它決定的是第三個問題的成本：命中越多列，回表次數越多。</p>
+  <p>回表是隨機讀；全表掃描是循序讀，一次讀一整頁，每頁裡的每一列都用得上。所以存在一個交叉點：命中比例超過某個值之後，「走索引加大量回表」反而比「直接掃全表」慢，優化器就會放棄索引。這個交叉點沒有固定百分比，取決於列寬、命中的列是否集中在少數頁、快取命中率，以及統計資訊準不準。常聽到的「超過 20% 就不走索引」只是經驗值。</p>
+  <p>典型例子是 gender、status、is_deleted 這類低基數欄位的單欄索引：<code>WHERE status = 'paid'</code> 若命中六成的列，索引幾乎不會被選。這類欄位不是沒用，而是適合放進複合索引當等值前綴；在 PostgreSQL 還可以改成部分索引（Partial Index），例如只索引 <code>WHERE status = 'pending'</code> 的那一小撮。MySQL 沒有部分索引。</p>
+
+  <div class="callout accent">
+    <div class="c-title"><span class="ic">邊界</span>成本怎麼估，會在談查詢計畫的主題處理</div>
+    <p>優化器怎麼估命中列數（統計資訊、直方圖），PostgreSQL 的 Bitmap Heap Scan 怎麼把散落的 TID 先依頁號排序再讀，都屬於執行計畫的範圍。這裡只建立「選擇性 × 回表成本」的直覺。</p>
+  </div>
+
+  <div class="oneliner">
+    <b>一句話答法</b>Covering Index 讓查詢只讀索引不回表：InnoDB 的二級索引天生帶主鍵，PostgreSQL 要靠 INCLUDE，而且還要 Visibility Map 配合。選擇性低時回表次數爆量，全表循序掃描反而便宜，所以優化器會放棄索引。
+  </div>
+</section>
+
+<section id="s8">
+  <div class="sec-head">
+    <span class="sec-num">08</span>
+    <h2>互動：同一條查詢，兩種欄位順序</h2>
+  </div>
+  <p class="sec-sub">把同一條查詢同時餵給 (user_id, created_at) 與 (created_at, user_id)，比較掃描條目、讀頁數與回表次數。</p>
+
+  <p>模擬一張 orders 表：1,200 列，id 依下單時間遞增，平均分布在 90 天內（第 90 天是今天），40 個使用者，status 有四種值，約一成是 refunded。兩個複合索引的欄位相同、順序相反。勾選 WHERE 條件、切換 SELECT 的欄位，<code>computeComposite()</code> 會在兩邊各自算出：</p>
+  <ul>
+    <li>能用來定位的欄位、掃了幾筆索引條目、讀了幾個索引葉頁（每頁 40 筆）。</li>
+    <li>有幾筆在索引內就被過濾掉、要回表幾次、回表碰到幾個資料頁（每頁 30 列，依 id 排列）。</li>
+    <li>邏輯讀頁數 = 索引的根 1 頁 + 索引葉頁 + 回表次數 × 2（這張表的聚簇索引是 2 層）。</li>
+  </ul>
+  <p>示範採 InnoDB 語意：二級索引條目自帶主鍵 id。</p>
+
+  <div class="demo" id="demo-composite">
+    <div class="demo-bar">
+      <span class="label">互動 · 複合索引欄位順序</span>
+      <span class="label" style="text-transform:none;font-family:var(--sans);font-size:12px;color:var(--text-2)">同一條查詢，左右兩個索引同時計算</span>
+    </div>
+    <div class="demo-body">
+      <div class="cx-q">
+        <label class="cx-chk"><input type="checkbox" id="cx-use-user" checked> user_id = <input type="number" id="cx-user" min="1" max="40" value="7"> <span class="note">（1–40）</span></label>
+        <label class="cx-chk"><input type="checkbox" id="cx-use-date" checked> created_at ≥ 最近 <input type="range" id="cx-days" min="1" max="90" value="30"> <b id="cx-days-v">30</b> 天</label>
+        <label class="cx-chk"><input type="checkbox" id="cx-use-status"> status = 'refunded' <span class="note">（status 不在任何一個索引裡）</span></label>
+        <div class="seg" role="group" aria-label="SELECT 的欄位" id="cx-proj">
+          <button type="button" data-proj="narrow" aria-pressed="true">SELECT id, user_id, created_at</button>
+          <button type="button" data-proj="star" aria-pressed="false">SELECT *</button>
+        </div>
+      </div>
+      <pre class="cx-sql" id="cx-sql"></pre>
+      <div class="cx-cols">
+        <div class="cx-pane" id="cx-pane-l"></div>
+        <div class="cx-pane" id="cx-pane-r"></div>
+      </div>
+      <div class="legend">
+        <span><i class="cx-sw h2"></i>有命中條目的索引葉頁</span>
+        <span><i class="cx-sw h1"></i>掃過但全被過濾的索引葉頁</span>
+        <span><i class="cx-sw tb"></i>回表碰到的資料頁</span>
+      </div>
+      <div class="status-line" id="cx-status">載入中…</div>
+      <div class="cx-foot"><button type="button" class="btn" id="cx-reset">Reset</button></div>
+    </div>
+  </div>
+  <p class="cap">每個面板上方的色條是索引的 30 個葉頁（依索引順序），下方是 40 個資料頁（依 id，也就是下單時間）。看深藍是「連成一段」還是「散開一大片」，就知道哪一邊掃得少。</p>
+
+  <p>建議依序試這四組：</p>
+  <ol>
+    <li><strong>預設</strong>（user_id = 7、最近 30 天、只取索引欄）：左邊定位到 user_id = 7 且 created_at ≥ 第 61 天，掃 10 筆、讀 3 頁；右邊只能用 created_at 定位，掃 400 筆、讀 11 頁，再把其中 390 筆在索引內濾掉。兩邊都不回表。</li>
+    <li><strong>取消 user_id，只留時間</strong>：局勢反轉。左邊第一欄沒有條件，只能整棵掃（1,200 筆、31 頁）；右邊掃 400 筆、11 頁。沒有一個欄位順序對所有查詢都最好。</li>
+    <li><strong>切到 SELECT *</strong>：兩邊都要回表 10 次、碰到 9 個資料頁，讀頁數變成 23 對 31，差距從 3.7 倍縮到 1.3 倍。回表次數由命中幾列決定，跟用哪個索引無關；欄位順序只決定要掃多少條目。</li>
+    <li><strong>勾 status = 'refunded'</strong>：status 不在索引裡，每筆候選都得回表才能判斷。user_id = 7 最近 30 天的 10 筆訂單沒有一筆是 refunded，於是回表 10 次、回傳 0 列，全是白工。這種查詢要嘛把 status 放進索引，要嘛接受回表。</li>
+  </ol>
+
+  <div class="callout accent">
+    <div class="c-title"><span class="ic">關鍵</span>把三個數字分開看</div>
+    <p>「掃描條目」由能定位的前綴決定，是欄位順序的責任；「回表次數」由索引內過濾後剩幾筆決定，與欄位順序無關；「回表碰到幾頁」由命中的列在表裡集中還是分散決定。InnoDB 裡依時間遞增的 id，讓「最近 30 天」的列集中在表尾那幾頁；同一個使用者的訂單則散在全表各處。</p>
+  </div>
+
+  <div class="oneliner">
+    <b>一句話答法</b>同一條查詢給 (user_id, created_at) 只掃該使用者那一小段，給 (created_at, user_id) 就得掃整段時間再過濾；欄位順序決定掃描量，覆蓋與否決定要不要回表，兩件事分開診斷。
+  </div>
+</section>
+
+<section id="s9">
+  <div class="sec-head">
+    <span class="sec-num">09</span>
+    <h2>索引失效的常見情境</h2>
+  </div>
+  <p class="sec-sub">索引存在不代表用得上：只要查詢比較的不是欄位的原始值，索引的排序就幫不上忙。</p>
+
+  <p>所有「失效」情境有同一個原理：B+Tree 的排序建立在欄位的原始值上。條件一旦比較的是欄位經過運算之後的結果，那個結果在索引裡沒有順序，就無法定位起點。</p>
+
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr><th>情境</th><th>範例</th><th>為什麼用不上</th><th>修法</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>函式或運算包住欄位</td>
+          <td><code>WHERE DATE(created_at) = '2026-11-10'</code><br><code>WHERE amount * 1.05 &gt; 100</code></td>
+          <td>索引依 created_at 排序，不依 DATE(created_at) 排序</td>
+          <td>改寫成欄位上的範圍：<code>created_at &gt;= '2026-11-10' AND created_at &lt; '2026-11-11'</code>；或建表達式索引（PostgreSQL 的 expression index、MySQL 8.0.13 起的 functional key part）</td>
+        </tr>
+        <tr>
+          <td>隱式轉型（MySQL）</td>
+          <td>phone 是 VARCHAR：<code>WHERE phone = 13800000000</code></td>
+          <td>字串欄位與數字比較時，MySQL 把兩邊都轉成數值再比，等於對每一列的欄位套函式</td>
+          <td>常數加引號、型別一致。反方向（INT 欄位比字串常數）轉的是常數，索引仍可用</td>
+        </tr>
+        <tr>
+          <td>隱式轉型（PostgreSQL）</td>
+          <td>bigint 欄位與 numeric 參數比較</td>
+          <td>PostgreSQL 型別較嚴，字串欄位直接比整數會報錯而不是偷偷轉；但 bigint 與 numeric 比較時，欄位會被提升成 numeric，bigint 上的索引用不到</td>
+          <td>讓參數型別與欄位一致，特別注意 ORM 與 driver 綁定的型別</td>
+        </tr>
+        <tr>
+          <td>字元集或定序不一致</td>
+          <td>JOIN 的兩個欄位一個 utf8mb3、一個 utf8mb4</td>
+          <td>比較前得轉換其中一邊；被轉的若是有索引的那一邊，就用不上</td>
+          <td>統一字元集與定序</td>
+        </tr>
+        <tr>
+          <td>前置萬用字元</td>
+          <td><code>WHERE name LIKE '%son'</code></td>
+          <td>字串索引依前綴排序，<code>'%son'</code> 沒有固定前綴</td>
+          <td><code>'abc%'</code> 可以走範圍；「包含」搜尋改用全文索引或 PostgreSQL 的 pg_trgm GIN 索引；「結尾」搜尋可以多存一個反轉字串欄位再建索引</td>
+        </tr>
+        <tr>
+          <td>缺最左欄</td>
+          <td>索引 (user_id, created_at)，<code>WHERE created_at &gt; ?</code></td>
+          <td>見第 6 節的排序表</td>
+          <td>依查詢形狀調整欄位順序，或另建索引</td>
+        </tr>
+        <tr>
+          <td>選擇性太低</td>
+          <td><code>WHERE status = 'paid'</code>（命中六成）</td>
+          <td>不是用不上，是優化器判斷全表掃描比較便宜</td>
+          <td>改用複合索引或部分索引，或接受全表掃描</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="cap">前五列是「結構上用不上」：查詢比較的值在索引裡沒有順序。最後一列是「優化器選擇不用」：索引可以用，只是不划算。</p>
+
+  <div class="callout warn">
+    <div class="c-title"><span class="ic">陷阱</span>PostgreSQL 的 <code>LIKE 'abc%'</code> 也不一定走索引</div>
+    <p>資料庫的定序（collation）不是 C 時，一般的 B-tree 索引不能拿來做 LIKE 前綴比對，因為語系定序的排序規則不等於逐位元組比較。要建索引時指定 <code>text_pattern_ops</code>（或 <code>varchar_pattern_ops</code>），或讓欄位使用 C 定序。全文與模糊搜尋的完整做法，見<a href="../search-analytics-engine/">搜尋與分析引擎</a>篇的倒排索引。</p>
+  </div>
+
+  <div class="callout accent">
+    <div class="c-title"><span class="ic">關鍵</span>這些常被誤列為「索引失效」</div>
+    <p><code>!=</code>、<code>NOT IN</code>、<code>IS NULL</code>、<code>OR</code>。它們不是結構上用不到索引：MySQL 可以把 <code>IS NULL</code> 當等值查詢，跨欄位的 <code>OR</code> 可以用 index merge 合併；PostgreSQL 用 BitmapOr；<code>!=</code> 也能拆成兩段範圍。它們常常不走索引，是因為命中太多列，或計畫成本不划算，而不是排序被破壞。面試時把「結構上用不上」和「優化器選擇不用」分開講，是加分的地方。</p>
+  </div>
+
+  <div class="oneliner">
+    <b>一句話答法</b>索引依欄位原始值排序，所以函式包欄位、隱式轉型、前置萬用字元與缺最左欄都會讓查詢定位不到起點；選擇性低則是另一回事，索引可用，只是優化器判斷全表掃描更便宜。
+  </div>
+</section>
+
+<section id="s10">
+  <div class="sec-head">
+    <span class="sec-num">10</span>
+    <h2>索引的寫入成本</h2>
+  </div>
+  <p class="sec-sub">每多一個索引，就多一棵每次寫入都要維護的樹。</p>
+
+  <p>讀取變快的代價在寫入端。兩個引擎在不同操作上的成本分布如下：</p>
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr><th>操作</th><th>InnoDB</th><th>PostgreSQL</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>INSERT</td><td>聚簇索引插一列，每個二級索引各插一筆條目</td><td>Heap 插一個 tuple，每個索引各插一筆條目</td></tr>
+        <tr><td>UPDATE 非索引欄位</td><td class="hl">改聚簇索引裡的那一列（舊版本進 undo log），二級索引不動</td><td>寫一個新版本 tuple。若沒改到任何索引欄位、而且同一頁放得下，走 HOT（Heap-Only Tuple），索引不動；否則每個索引都要插新條目</td></tr>
+        <tr><td>UPDATE 索引欄位</td><td>該二級索引：舊條目標記刪除、插入新條目</td><td>新 tuple，而且所有索引都插新條目（HOT 不適用）</td></tr>
+        <tr><td>UPDATE 主鍵</td><td>等於刪除再插入整列，所有二級索引都要更新</td><td>與更新其他索引欄位相同</td></tr>
+        <tr><td>DELETE</td><td>標記刪除，背景 purge 再清掉聚簇與二級索引的條目</td><td>標記 tuple 失效，VACUUM 再清掉 Heap 與各索引的條目</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="cap">InnoDB 把成本押在「二級索引存主鍵」：列搬家不必改索引。PostgreSQL 押在「Heap 不搬家」：但每個新版本都可能讓所有索引各多一筆，HOT 是它的減壓閥。</p>
+
+  <p>除了每次寫入要多改幾棵樹，還有幾項容易被忽略的成本：</p>
+  <ul>
+    <li><strong>頁分裂與空間</strong>：插入位置隨機時頁頻繁分裂、填充率下降，索引總大小超過資料本身並不少見。</li>
+    <li><strong>記憶體</strong>：每個索引都要搶 buffer pool 或 shared buffers；熱索引放不進記憶體時，寫入就變成隨機 I/O。</li>
+    <li><strong>唯一性檢查</strong>：UNIQUE 索引在插入前必須讀到對應的葉頁，確認沒有重複，這一步無法延後。</li>
+    <li><strong>日誌量</strong>：每個索引頁的修改都要寫 redo log 或 WAL，複製到備援節點的量也跟著放大。</li>
+    <li><strong>建索引本身</strong>：大表加索引要用 PostgreSQL 的 <code>CREATE INDEX CONCURRENTLY</code>，或 MySQL 的 Online DDL，避免長時間擋住寫入。</li>
+  </ul>
+
+  <div class="callout accent">
+    <div class="c-title"><span class="ic">實務</span>找出沒在用、或重複的索引</div>
+    <p>PostgreSQL 看 <code>pg_stat_user_indexes</code> 裡 <code>idx_scan</code> 長期為 0 的索引。MySQL 可以查 <code>sys.schema_unused_indexes</code> 與 <code>sys.schema_redundant_indexes</code>（例如已經有 (a, b)，又另外建了 (a)）。MySQL 8.0 還能先把索引設成 INVISIBLE，觀察一段時間再刪。注意這些統計是從上次重置或重啟後才開始累計；只看主庫，也會漏掉只在副本上跑的查詢。</p>
+  </div>
+
+  <div class="callout warn">
+    <div class="c-title"><span class="ic">邊界</span>索引與鎖、索引與 LSM</div>
+    <p>InnoDB 的 Row Lock 實際上加在索引記錄上，沒有走到合適索引的 UPDATE，鎖住的範圍可能遠超過預期；這件事在談資料庫鎖與死鎖的主題處理。LSM-Tree 怎麼用寫入放大換取寫入吞吐，見<a href="../embedded-database/">嵌入式資料庫</a>篇。</p>
+  </div>
+
+  <div class="oneliner">
+    <b>一句話答法</b>每個索引都是一棵寫入時要同步維護的樹，會帶來額外的頁分裂、redo/WAL、記憶體佔用與唯一性檢查；InnoDB 更新非索引欄位不碰二級索引，PostgreSQL 靠 HOT 避免改索引。沒在用的索引要定期清掉。
+  </div>
+</section>
+
+<section id="s11">
+  <div class="sec-head">
+    <span class="sec-num">11</span>
+    <h2>面試答題框架</h2>
+  </div>
+  <p class="sec-sub">先用三個問題定位，再談兩種引擎的差異與取捨。</p>
+
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr><th>常見問題</th><th>答題骨架</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>為什麼用 B+Tree，不用 Hash 或二元樹</td><td>磁碟以頁為單位；B+Tree 內部頁只放分隔鍵，fanout 幾百、樹只有 3 到 4 層；葉頁串成鏈，支援範圍與排序。Hash 不保序，二元樹太高。</td></tr>
+        <tr><td>這條 SQL 為什麼沒走索引</td><td>依序檢查：定位得到嗎（最左前綴、函式、轉型、前置萬用字元）→ 命中多少（選擇性）→ 要不要回表（覆蓋）。最後才懷疑統計資訊過期。</td></tr>
+        <tr><td>1 億筆的表，樹有幾層</td><td>先寫假設：16 KiB 頁、8 B 主鍵、fanout 約 880、列寬 200 B 時每葉 75 列，3 層約 5,800 萬，所以是 4 層。上層常駐記憶體，一次查詢大約一次實體 I/O。</td></tr>
+        <tr><td>InnoDB 為什麼建議遞增主鍵</td><td>表就是主鍵 B+Tree。遞增讓插入集中在最右葉頁、頁能填滿；隨機讓分裂分散、葉鏈不連續、快取命中下降。主鍵還會被複製進每個二級索引，越窄越好。</td></tr>
+        <tr><td>什麼是回表，怎麼避免</td><td>二級索引只有索引欄位加主鍵（InnoDB）或 TID（PostgreSQL），要其他欄位就得回表。用覆蓋索引避免：InnoDB 把欄位加進索引，PostgreSQL 用 INCLUDE，並留意 Visibility Map。</td></tr>
+        <tr><td>(a, b) 還是 (b, a)</td><td>看查詢形狀：等值欄在前，範圍與排序欄在後；一個索引盡量服務多條查詢。選擇性只是次要考量。</td></tr>
+        <tr><td>索引是不是越多越好</td><td>每個索引都是寫入時要維護的樹：多一份頁分裂、redo/WAL、記憶體與唯一性檢查。依查詢建索引，定期清掉沒在用與冗餘的。</td></tr>
+        <tr><td>Index Only Scan 為什麼還有 Heap Fetches</td><td>PostgreSQL 的索引沒有可見性資訊，Heap 頁沒被標成 all-visible 時，仍要讀 Heap 確認。VACUUM 之後會改善。</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="cap">每一題都可以回到同一個起點：索引是一份排序過的副本，查詢能不能利用它的排序、要讀多少頁、讀到的夠不夠用。</p>
+
+  <div class="callout warn">
+    <div class="c-title"><span class="ic">失分點</span>三種常見的扣分答法</div>
+    <p>只背「最左前綴」口訣，卻說不出它來自排序；把所有「沒走索引」都叫「索引失效」，分不出結構問題與成本問題；估樹高不給頁大小、key 大小與列寬的假設，只丟一個「三層」。</p>
+  </div>
+
+  <div class="oneliner">
+    <b>一句話答法</b>索引是依欄位排序的 B+Tree，3 到 4 層撐起上億列；查詢要用上它，得能從最左欄定位、掃描範圍夠窄，最好再加上覆蓋避免回表。InnoDB 回表走主鍵，PostgreSQL 回表走 TID，而每個索引都會讓寫入變重。
+  </div>
+</section>

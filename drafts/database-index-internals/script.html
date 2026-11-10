@@ -1,0 +1,893 @@
+<script>
+(function () {
+  "use strict";
+
+  /* ================================================================
+   * (1) 常數與參數表
+   * ================================================================ */
+
+  /* ---------- 第 4 節：B+Tree 頁分裂實驗台 ---------- */
+  var BT_KEY_MIN = 1, BT_KEY_MAX = 99;
+  var BT_MAX_LIVE = 40;          /* 樹裡同時存在的 key 上限（畫面可讀性） */
+  var BT_MAX_OPS = 160;          /* 操作紀錄上限 */
+  var BT_CAPS = [3, 4, 6];       /* 每頁最多幾個 key */
+  var BT_BASE_OPS = [
+    ["i", 10], ["i", 20], ["i", 30], ["i", 40], ["i", 50], ["i", 60],
+    ["i", 70], ["i", 80], ["i", 35], ["i", 15], ["i", 65], ["i", 25]
+  ];
+  var BT_PRESET_RND_KEYS = [
+    47, 12, 83, 5, 66, 29, 91, 38, 74, 18, 55, 2, 61, 33, 97,
+    24, 79, 9, 50, 70, 15, 88, 42, 27, 63, 7, 95, 36, 58, 21
+  ];
+  var BT_DEFAULT = { cap: 4, split: "mid", lo: 20, hi: 45 };
+
+  /* render 用的版面常數（不參與計算） */
+  var BT_CELL = 26, BT_PADX = 5, BT_NODE_H = 28, BT_LEVEL_GAP = 58;
+  var BT_LEAF_GAP = 22, BT_MARGIN = 16, BT_TOP = 26;
+
+  /* ---------- 第 8 節：兩種欄位順序的複合索引 ---------- */
+  var CX_ROWS = 1200;            /* orders 表列數（模擬） */
+  var CX_USERS = 40;
+  var CX_DAYS = 90;              /* 第 90 天 = 今天 */
+  var CX_EPP = 40;               /* 每個索引葉頁的條目數 */
+  var CX_RPP = 30;               /* 每個資料頁（聚簇索引葉頁）的列數 */
+  var CX_SEED = 20261110;
+  var CX_STATUS_TARGET = "refunded";
+  var CX_INDEXES = [
+    { name: "idx_user_created", cols: ["user_id", "created_at"] },
+    { name: "idx_created_user", cols: ["created_at", "user_id"] }
+  ];
+  var CX_DEFAULT = { useUser: true, userId: 7, useDate: true, days: 30, useStatus: false, proj: "narrow" };
+
+  /* ================================================================
+   * (2) compute* 純函式 —— 不碰 DOM
+   * ================================================================ */
+
+  function clampInt(v, lo, hi, dflt) {
+    var n = Math.round(Number(v));
+    if (!isFinite(n)) n = dflt;
+    if (n < lo) n = lo;
+    if (n > hi) n = hi;
+    return n;
+  }
+
+  /* ---------- 第 4 節：B+Tree ---------- */
+
+  /* 內部頁分流：回傳 keys 中 <= k 的個數 = 要走的子頁索引 */
+  function btCountLE(keys, k) {
+    var n = 0;
+    while (n < keys.length && keys[n] <= k) n += 1;
+    return n;
+  }
+
+  function btLowerBound(keys, k) {
+    var n = 0;
+    while (n < keys.length && keys[n] < k) n += 1;
+    return n;
+  }
+
+  function btFmt(keys) { return "[" + keys.join(" ") + "]"; }
+
+  function btPageNo(id) { return Number(id.slice(1)); }
+
+  /* 葉頁與內部頁分開編號（InnoDB 的索引也把葉頁與非葉頁放在不同的 segment） */
+  function btAlloc(t, leaf) {
+    var id;
+    if (leaf) { id = "L" + t.nextLeaf; t.nextLeaf += 1; }
+    else { id = "N" + t.nextInner; t.nextInner += 1; }
+    var n = { id: id, leaf: leaf, keys: [], kids: [], next: null, prev: null };
+    t.nodes[id] = n;
+    return n;
+  }
+
+  function btDescend(t, k) {
+    var path = [];
+    var node = t.nodes[t.root];
+    while (!node.leaf) {
+      var i = btCountLE(node.keys, k);
+      path.push({ node: node, idx: i });
+      node = t.nodes[node.kids[i]];
+    }
+    return { path: path, leaf: node };
+  }
+
+  function btInsert(t, k) {
+    var ev = { kind: "ins", key: k, ok: false, msg: "", touched: [] };
+    if (t.live >= BT_MAX_LIVE) {
+      ev.msg = "樹裡已有 " + BT_MAX_LIVE + " 個 key（示範上限），插入 " + k + " 略過。";
+      return ev;
+    }
+    var d = btDescend(t, k);
+    var leaf = d.leaf;
+    if (leaf.keys.indexOf(k) !== -1) {
+      ev.msg = "key " + k + " 已經在 " + leaf.id + "，示範樹不收重複 key，略過。";
+      return ev;
+    }
+    var pos = btLowerBound(leaf.keys, k);
+    leaf.keys.splice(pos, 0, k);
+    t.live += 1;
+    ev.ok = true;
+    ev.touched.push(leaf.id);
+    if (leaf.keys.length <= t.cap) {
+      ev.msg = "插入 " + k + "：下探 " + d.path.length + " 個內部頁後寫進葉頁 " + leaf.id + " " + btFmt(leaf.keys) +
+        "，" + leaf.keys.length + "/" + t.cap + " 滿，沒有分裂。";
+      return ev;
+    }
+
+    /* 葉頁溢位 → 分裂 */
+    var atTail = leaf.next === null && pos === leaf.keys.length - 1;
+    var seq = t.split === "seq" && atTail;
+    var cut = seq ? t.cap : Math.ceil(leaf.keys.length / 2);
+    var right = btAlloc(t, true);
+    right.keys = leaf.keys.slice(cut);
+    leaf.keys = leaf.keys.slice(0, cut);
+    right.next = leaf.next;
+    right.prev = leaf.id;
+    if (leaf.next) t.nodes[leaf.next].prev = right.id;
+    leaf.next = right.id;
+    t.leafSplits += 1;
+    if (seq) t.seqSplits += 1;
+    ev.touched.push(right.id);
+
+    var parts = ["插入 " + k + "：葉頁 " + leaf.id + " 溢位，分裂成 " + leaf.id + " " + btFmt(leaf.keys) +
+      " 與新頁 " + right.id + " " + btFmt(right.keys) +
+      (seq ? "（插入點在最右葉頁尾端：舊頁留滿，新頁只放新 key）" : "（從中點對半切）")];
+
+    var upKey = right.keys[0];
+    var newKid = right.id;
+    var carried = true;
+    var i;
+    for (i = d.path.length - 1; i >= 0; i -= 1) {
+      var p = d.path[i].node;
+      var at = d.path[i].idx;
+      p.keys.splice(at, 0, upKey);
+      p.kids.splice(at + 1, 0, newKid);
+      ev.touched.push(p.id);
+      if (p.keys.length <= t.cap) {
+        parts.push("分隔鍵 " + upKey + " 上推到 " + p.id + " " + btFmt(p.keys));
+        carried = false;
+        break;
+      }
+      var mid = Math.floor(p.keys.length / 2);
+      var promote = p.keys[mid];
+      var r = btAlloc(t, false);
+      r.keys = p.keys.slice(mid + 1);
+      r.kids = p.kids.slice(mid + 1);
+      p.keys = p.keys.slice(0, mid);
+      p.kids = p.kids.slice(0, mid + 1);
+      t.innerSplits += 1;
+      ev.touched.push(r.id);
+      parts.push("分隔鍵 " + upKey + " 擠爆內部頁 " + p.id + "，它也分裂出 " + r.id + "，再把 " + promote + " 往上推");
+      upKey = promote;
+      newKid = r.id;
+    }
+    if (carried) {
+      var oldRoot = t.root;
+      var nr = btAlloc(t, false);
+      nr.keys = [upKey];
+      nr.kids = [oldRoot, newKid];
+      t.root = nr.id;
+      t.grow += 1;
+      ev.touched.push(nr.id);
+      parts.push("根頁也滿了：長出新根 " + nr.id + " [" + upKey + "]，樹高 +1");
+    }
+    ev.msg = parts.join("；") + "。";
+    return ev;
+  }
+
+  /* 刪除：只有刪空的頁才歸還，不做合併或借位（見第 4 節說明） */
+  function btDelete(t, k) {
+    var ev = { kind: "del", key: k, ok: false, msg: "", touched: [] };
+    var d = btDescend(t, k);
+    var leaf = d.leaf;
+    var pos = leaf.keys.indexOf(k);
+    if (pos === -1) {
+      ev.msg = "找不到 key " + k + "（下探到 " + leaf.id + " 沒有它），沒有變動。";
+      return ev;
+    }
+    leaf.keys.splice(pos, 1);
+    t.live -= 1;
+    ev.ok = true;
+    ev.touched.push(leaf.id);
+    if (leaf.keys.length > 0 || d.path.length === 0) {
+      ev.msg = "刪除 " + k + "：從葉頁 " + leaf.id + " 移除，剩 " + leaf.keys.length + "/" + t.cap +
+        "。頁還沒空就不回收，樹的形狀不變。";
+      return ev;
+    }
+
+    var parts = ["刪除 " + k + "：葉頁 " + leaf.id + " 刪空，從葉鏈摘除並歸還"];
+    if (leaf.prev) t.nodes[leaf.prev].next = leaf.next;
+    if (leaf.next) t.nodes[leaf.next].prev = leaf.prev;
+    delete t.nodes[leaf.id];
+    t.freed += 1;
+
+    var i;
+    for (i = d.path.length - 1; i >= 0; i -= 1) {
+      var p = d.path[i].node;
+      var at = d.path[i].idx;
+      p.kids.splice(at, 1);
+      p.keys.splice(at > 0 ? at - 1 : 0, 1);
+      if (p.kids.length > 0) {
+        ev.touched.push(p.id);
+        parts.push("父頁 " + p.id + " 少一個分隔鍵");
+        break;
+      }
+      if (i === 0) break;
+      parts.push("內部頁 " + p.id + " 也空了，一併歸還");
+      delete t.nodes[p.id];
+      t.freed += 1;
+    }
+    while (!t.nodes[t.root].leaf && t.nodes[t.root].kids.length === 1) {
+      var old = t.root;
+      t.root = t.nodes[old].kids[0];
+      delete t.nodes[old];
+      t.freed += 1;
+      t.shrink += 1;
+      parts.push("根頁 " + old + " 只剩一個子頁，被拿掉，樹高 −1");
+    }
+    ev.msg = parts.join("；") + "。";
+    return ev;
+  }
+
+  // @probe fn       computeBTree
+  // @probe baseline {"cap":4,"split":"mid","lo":20,"hi":45,"ops":[["i",10],["i",20],["i",30],["i",40],["i",50],["i",60],["i",70],["i",80],["i",35],["i",15],["i",65],["i",25]]}
+  // @probe sweep    {"cap":[3,6],"split":["seq"],"lo":[1,60],"hi":[25,99],"ops":[[],[["i",5],["i",50],["d",5],["i",95]]]}
+  function computeBTree(p) {
+    p = p || {};
+    var cap = BT_CAPS.indexOf(Number(p.cap)) !== -1 ? Number(p.cap) : BT_DEFAULT.cap;
+    var split = p.split === "seq" ? "seq" : "mid";
+    var ops = Array.isArray(p.ops) ? p.ops.slice(0, BT_MAX_OPS) : [];
+    var lo = clampInt(p.lo, BT_KEY_MIN, BT_KEY_MAX, BT_DEFAULT.lo);
+    var hi = clampInt(p.hi, BT_KEY_MIN, BT_KEY_MAX, BT_DEFAULT.hi);
+    if (lo > hi) { var tmp = lo; lo = hi; hi = tmp; }
+
+    var t = {
+      cap: cap, split: split, nodes: {}, root: null, nextLeaf: 1, nextInner: 1,
+      leafSplits: 0, seqSplits: 0, innerSplits: 0, grow: 0, shrink: 0, freed: 0, live: 0
+    };
+    t.root = btAlloc(t, true).id;
+
+    var last = null, rejected = 0, applied = 0, i;
+    for (i = 0; i < ops.length; i += 1) {
+      var op = ops[i];
+      if (!op || op.length < 2) continue;
+      var k = clampInt(op[1], BT_KEY_MIN, BT_KEY_MAX, BT_KEY_MIN);
+      last = op[0] === "d" ? btDelete(t, k) : btInsert(t, k);
+      applied += 1;
+      if (!last.ok) rejected += 1;
+    }
+
+    /* 逐層攤開（BFS；B+Tree 所有葉頁同深度，最後一層即葉鏈順序） */
+    var levels = [];
+    var frontier = [t.root];
+    while (frontier.length) {
+      var row = [], nextFrontier = [], j;
+      for (j = 0; j < frontier.length; j += 1) {
+        var n = t.nodes[frontier[j]];
+        row.push({ id: n.id, leaf: n.leaf, keys: n.keys.slice(), kids: n.kids.slice() });
+        if (!n.leaf) nextFrontier = nextFrontier.concat(n.kids);
+      }
+      levels.push(row);
+      frontier = nextFrontier;
+    }
+    var leaves = levels[levels.length - 1];
+    var height = levels.length;
+    var innerCount = 0;
+    for (i = 0; i < levels.length - 1; i += 1) innerCount += levels[i].length;
+
+    var leafKeys = 0, allKeys = [];
+    for (i = 0; i < leaves.length; i += 1) {
+      leafKeys += leaves[i].keys.length;
+      allKeys = allKeys.concat(leaves[i].keys);
+    }
+    var avgFill = leaves.length ? Math.round(leafKeys / (leaves.length * cap) * 100) : 0;
+
+    /* 葉鏈：從最左葉頁沿 next 走，計算頁號不連號的次數 */
+    var chain = [], jumps = 0;
+    var cur = t.nodes[leaves[0].id];
+    while (cur) {
+      chain.push(cur.id);
+      if (cur.next && btPageNo(cur.next) !== btPageNo(cur.id) + 1) jumps += 1;
+      cur = cur.next ? t.nodes[cur.next] : null;
+    }
+
+    /* 範圍掃描 BETWEEN lo AND hi：以 lo 下探，沿葉鏈讀到第一個超過 hi 的 key 為止 */
+    var sd = btDescend(t, lo);
+    var visited = [], rowsHit = [], emptyReads = 0, stop = false;
+    cur = sd.leaf;
+    while (cur && !stop) {
+      visited.push(cur.id);
+      var got = 0;
+      for (j = 0; j < cur.keys.length; j += 1) {
+        if (cur.keys[j] > hi) { stop = true; break; }
+        if (cur.keys[j] >= lo) { rowsHit.push(cur.keys[j]); got += 1; }
+      }
+      if (!got) emptyReads += 1;
+      if (!stop) cur = cur.next ? t.nodes[cur.next] : null;
+    }
+    var pathIds = [];
+    for (i = 0; i < sd.path.length; i += 1) pathIds.push(sd.path[i].node.id);
+
+    return {
+      cap: cap,
+      split: split,
+      height: height,
+      leafCount: leaves.length,
+      innerCount: innerCount,
+      live: t.live,
+      leafSplits: t.leafSplits,
+      seqSplits: t.seqSplits,
+      innerSplits: t.innerSplits,
+      grow: t.grow,
+      shrink: t.shrink,
+      freed: t.freed,
+      avgFill: avgFill,
+      chain: chain,
+      chainJumps: jumps,
+      levels: levels,
+      allKeys: allKeys,
+      maxKey: allKeys.length ? allKeys[allKeys.length - 1] : 0,
+      opsApplied: applied,
+      rejected: rejected,
+      last: last ? { kind: last.kind, ok: last.ok, msg: last.msg, touched: last.touched }
+                 : { kind: "none", ok: true, msg: "空樹：只有一個空的根葉頁 L1。插入幾個 key 看它長大。", touched: [] },
+      scan: {
+        lo: lo,
+        hi: hi,
+        path: pathIds,
+        leaves: visited,
+        rows: rowsHit,
+        emptyReads: emptyReads,
+        pagesRead: pathIds.length + visited.length
+      }
+    };
+  }
+
+  /* ---------- 第 8 節：複合索引欄位順序 ---------- */
+
+  /* 決定性的模擬資料：id 依下單時間遞增，90 天平均分布 */
+  function cxTable() {
+    var s = CX_SEED % 2147483647;
+    function next() { s = (s * 48271) % 2147483647; return s / 2147483647; }
+    var rows = [], i;
+    for (i = 1; i <= CX_ROWS; i += 1) {
+      var u = 1 + Math.floor(next() * CX_USERS);
+      var r = next();
+      var st = r < 0.6 ? "paid" : (r < 0.8 ? "pending" : (r < 0.9 ? "refunded" : "cancelled"));
+      rows.push({ id: i, user_id: u, created_at: 1 + Math.floor((i - 1) * CX_DAYS / CX_ROWS), status: st });
+    }
+    return rows;
+  }
+
+  /* 索引條目的排序：依欄位順序，最後以主鍵 id 收尾（InnoDB 二級索引自帶主鍵） */
+  function cxSorted(rows, cols) {
+    return rows.slice().sort(function (a, b) {
+      var i;
+      for (i = 0; i < cols.length; i += 1) {
+        if (a[cols[i]] !== b[cols[i]]) return a[cols[i]] - b[cols[i]];
+      }
+      return a.id - b.id;
+    });
+  }
+
+  function cxMatch(row, col, pr) {
+    return pr.op === "eq" ? row[col] === pr.v : row[col] >= pr.v;
+  }
+
+  function cxPredText(col, pr) {
+    return pr.op === "eq" ? col + " = " + pr.v : col + " ≥ 第 " + pr.v + " 天";
+  }
+
+  function cxRun(rows, idx, preds, q) {
+    /* 定位欄 = 從最左開始連續的等值欄，再加最多一個範圍欄；其餘有條件的欄位只能在索引內過濾 */
+    var seek = [], filt = [], open = true, i, j;
+    for (i = 0; i < idx.cols.length; i += 1) {
+      var c = idx.cols[i];
+      var pr = preds[c];
+      if (open && pr) {
+        seek.push(c);
+        if (pr.op !== "eq") open = false;
+      } else {
+        open = false;
+        if (pr) filt.push(c);
+      }
+    }
+
+    var sorted = cxSorted(rows, idx.cols);
+    var nLeaf = Math.ceil(rows.length / CX_EPP);
+    var nData = Math.ceil(rows.length / CX_RPP);
+    var heat = [], tHeat = [];
+    for (i = 0; i < nLeaf; i += 1) heat.push(0);
+    for (i = 0; i < nData; i += 1) tHeat.push(0);
+
+    var needTable = q.proj === "star" || q.useStatus;
+    var scanned = 0, kept = 0, returned = 0, first = -1, lastPos = -1, tablePages = 0;
+    for (i = 0; i < sorted.length; i += 1) {
+      var row = sorted[i];
+      var inSeek = true;
+      for (j = 0; j < seek.length; j += 1) {
+        if (!cxMatch(row, seek[j], preds[seek[j]])) { inSeek = false; break; }
+      }
+      if (!inSeek) continue;
+      scanned += 1;
+      if (first < 0) first = i;
+      lastPos = i;
+      var pg = Math.floor(i / CX_EPP);
+      if (heat[pg] < 1) heat[pg] = 1;
+      var pass = true;
+      for (j = 0; j < filt.length; j += 1) {
+        if (!cxMatch(row, filt[j], preds[filt[j]])) { pass = false; break; }
+      }
+      if (!pass) continue;
+      kept += 1;
+      heat[pg] = 2;
+      if (needTable) {
+        var tp = Math.floor((row.id - 1) / CX_RPP);
+        if (!tHeat[tp]) { tHeat[tp] = 1; tablePages += 1; }
+      }
+      if (!q.useStatus || row.status === CX_STATUS_TARGET) returned += 1;
+    }
+
+    var leafPages = scanned ? Math.floor(lastPos / CX_EPP) - Math.floor(first / CX_EPP) + 1 : (seek.length ? 1 : nLeaf);
+    var lookups = needTable ? kept : 0;
+    var reads = 1 + leafPages + lookups * 2;
+
+    var seekDesc = seek.length
+      ? "定位：" + seek.map(function (c) { return cxPredText(c, preds[c]); }).join(" AND ") + "，只讀連續的一段"
+      : "第一欄 " + idx.cols[0] + " 沒有條件 → 定位不到起點，只能從頭掃完整棵索引（優化器多半改走全表掃描）";
+    var filtDesc = filt.length
+      ? "索引內過濾：" + filt.map(function (c) { return cxPredText(c, preds[c]); }).join(" AND ") + "（不縮小掃描範圍，只省回表）"
+      : "";
+    var tableDesc = needTable
+      ? (q.useStatus ? "status 不在索引裡，每筆候選都要回表才能判斷" : "SELECT * 要的欄位不在索引裡，每筆候選都要回表")
+      : "要的欄位都在索引條目裡（二級索引自帶主鍵 id）→ 覆蓋，不回表";
+
+    return {
+      name: idx.name,
+      cols: idx.cols.slice(),
+      seek: seek,
+      filt: filt,
+      fullScan: seek.length === 0,
+      scanned: scanned,
+      leafPages: leafPages,
+      kept: kept,
+      dropped: scanned - kept,
+      covering: !needTable,
+      lookups: lookups,
+      tablePages: tablePages,
+      returned: returned,
+      reads: reads,
+      heat: heat,
+      tHeat: tHeat,
+      seekDesc: seekDesc,
+      filtDesc: filtDesc,
+      tableDesc: tableDesc
+    };
+  }
+
+  // @probe fn       computeComposite
+  // @probe baseline {"useUser":true,"userId":7,"useDate":true,"days":30,"useStatus":false,"proj":"narrow"}
+  // @probe sweep    {"useUser":[false],"userId":[1,40],"useDate":[false],"days":[1,90],"useStatus":[true],"proj":["star"]}
+  function computeComposite(p) {
+    p = p || {};
+    var q = {
+      useUser: !!p.useUser,
+      userId: clampInt(p.userId, 1, CX_USERS, CX_DEFAULT.userId),
+      useDate: !!p.useDate,
+      days: clampInt(p.days, 1, CX_DAYS, CX_DEFAULT.days),
+      useStatus: !!p.useStatus,
+      proj: p.proj === "star" ? "star" : "narrow"
+    };
+    var from = CX_DAYS - q.days + 1;
+    var preds = {
+      user_id: q.useUser ? { op: "eq", v: q.userId } : null,
+      created_at: q.useDate ? { op: "ge", v: from } : null
+    };
+    var rows = cxTable();
+    var L = cxRun(rows, CX_INDEXES[0], preds, q);
+    var R = cxRun(rows, CX_INDEXES[1], preds, q);
+
+    var where = [];
+    if (q.useUser) where.push("user_id = " + q.userId);
+    if (q.useDate) where.push("created_at >= NOW() - INTERVAL " + q.days + " DAY");
+    if (q.useStatus) where.push("status = '" + CX_STATUS_TARGET + "'");
+    var sql = (q.proj === "star" ? "SELECT *" : "SELECT id, user_id, created_at") +
+      "\nFROM orders" + (where.length ? "\nWHERE " + where.join("\n  AND ") : "") + ";";
+
+    var better = L.reads === R.reads ? "tie" : (L.reads < R.reads ? "L" : "R");
+    var hiReads = Math.max(L.reads, R.reads), loReads = Math.min(L.reads, R.reads);
+    var ratio = Math.round(hiReads / loReads * 10) / 10;
+    var summary;
+    if (better === "tie") {
+      summary = "兩個索引的邏輯讀頁數相同（" + L.reads + " 頁）：這條查詢沒有任何欄位能讓其中一邊少掃。";
+    } else {
+      var w = better === "L" ? L : R, s = better === "L" ? R : L;
+      summary = "(" + w.cols.join(", ") + ") 掃 " + w.scanned + " 筆、讀 " + w.reads + " 頁；(" +
+        s.cols.join(", ") + ") 掃 " + s.scanned + " 筆、讀 " + s.reads + " 頁，相差 " + ratio + " 倍。" +
+        (w.lookups ? "兩邊回表次數都是 " + w.lookups + "：命中幾列就回表幾次，欄位順序只決定要掃多少條目。" : "");
+    }
+
+    return {
+      q: q,
+      fromDay: from,
+      sql: sql,
+      L: L,
+      R: R,
+      better: better,
+      ratio: ratio,
+      summary: summary
+    };
+  }
+
+  /* ================================================================
+   * (3) DOM 參照
+   * ================================================================ */
+
+  var btCapSeg = document.getElementById("bt-cap");
+  var btSplitSeg = document.getElementById("bt-split");
+  var btKeyInput = document.getElementById("bt-key");
+  var btInsBtn = document.getElementById("bt-ins");
+  var btDelBtn = document.getElementById("bt-del");
+  var btSeq6Btn = document.getElementById("bt-seq6");
+  var btRnd6Btn = document.getElementById("bt-rnd6");
+  var btPreSeqBtn = document.getElementById("bt-pre-seq");
+  var btPreRndBtn = document.getElementById("bt-pre-rnd");
+  var btResetBtn = document.getElementById("bt-reset");
+  var btLoInput = document.getElementById("bt-lo");
+  var btHiInput = document.getElementById("bt-hi");
+  var btCanvas = document.getElementById("bt-canvas");
+  var btCells = document.getElementById("bt-cells");
+  var btStatus = document.getElementById("bt-status");
+
+  var cxUseUser = document.getElementById("cx-use-user");
+  var cxUser = document.getElementById("cx-user");
+  var cxUseDate = document.getElementById("cx-use-date");
+  var cxDays = document.getElementById("cx-days");
+  var cxDaysVal = document.getElementById("cx-days-v");
+  var cxUseStatus = document.getElementById("cx-use-status");
+  var cxProjSeg = document.getElementById("cx-proj");
+  var cxSql = document.getElementById("cx-sql");
+  var cxPaneL = document.getElementById("cx-pane-l");
+  var cxPaneR = document.getElementById("cx-pane-r");
+  var cxStatus = document.getElementById("cx-status");
+  var cxResetBtn = document.getElementById("cx-reset");
+
+  if (!btCanvas || !cxPaneL) return;
+
+  var btState = {
+    cap: BT_DEFAULT.cap, split: BT_DEFAULT.split, lo: BT_DEFAULT.lo, hi: BT_DEFAULT.hi,
+    ops: BT_BASE_OPS.map(function (o) { return o.slice(); }), seed: 7
+  };
+  var btLast = null;
+  var cxState = {
+    useUser: CX_DEFAULT.useUser, userId: CX_DEFAULT.userId, useDate: CX_DEFAULT.useDate,
+    days: CX_DEFAULT.days, useStatus: CX_DEFAULT.useStatus, proj: CX_DEFAULT.proj
+  };
+
+  /* ================================================================
+   * (4) render —— 只讀 compute 的結果畫出來
+   * ================================================================ */
+
+  function esc(s) {
+    return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  }
+
+  function setPressed(seg, attr, value) {
+    var btns = seg.querySelectorAll("button");
+    var i;
+    for (i = 0; i < btns.length; i += 1) {
+      btns[i].setAttribute("aria-pressed", btns[i].getAttribute(attr) === String(value) ? "true" : "false");
+    }
+  }
+
+  /* ---------- 第 4 節 ---------- */
+
+  function btLayout(st) {
+    var W = st.cap * BT_CELL + BT_PADX * 2;
+    var depth = st.levels.length;
+    var leaves = st.levels[depth - 1];
+    var pos = {};
+    var i, d;
+    for (i = 0; i < leaves.length; i += 1) {
+      pos[leaves[i].id] = { x: BT_MARGIN + i * (W + BT_LEAF_GAP), y: BT_TOP + (depth - 1) * (BT_NODE_H + BT_LEVEL_GAP) };
+    }
+    for (d = depth - 2; d >= 0; d -= 1) {
+      for (i = 0; i < st.levels[d].length; i += 1) {
+        var n = st.levels[d][i];
+        var a = pos[n.kids[0]], b = pos[n.kids[n.kids.length - 1]];
+        pos[n.id] = { x: (a.x + b.x) / 2, y: BT_TOP + d * (BT_NODE_H + BT_LEVEL_GAP) };
+      }
+    }
+    var width = Math.max(BT_MARGIN * 2 + leaves.length * (W + BT_LEAF_GAP) - BT_LEAF_GAP, 240);
+    var height = BT_TOP + depth * BT_NODE_H + (depth - 1) * BT_LEVEL_GAP + 16;
+    return { W: W, pos: pos, width: width, height: height };
+  }
+
+  function btRenderSvg(st) {
+    var lay = btLayout(st);
+    var W = lay.W;
+    var onPath = {}, seen = {}, touched = {}, hit = {};
+    var i, j, d;
+    for (i = 0; i < st.scan.path.length; i += 1) onPath[st.scan.path[i]] = true;
+    for (i = 0; i < st.scan.leaves.length; i += 1) seen[st.scan.leaves[i]] = true;
+    if (st.scan.leaves.length) onPath[st.scan.leaves[0]] = true;
+    for (i = 0; i < st.last.touched.length; i += 1) touched[st.last.touched[i]] = true;
+    for (i = 0; i < st.scan.rows.length; i += 1) hit[st.scan.rows[i]] = true;
+
+    var out = [];
+    out.push('<svg class="bt-svg" viewBox="0 0 ' + lay.width + ' ' + lay.height + '" width="' + lay.width +
+      '" height="' + lay.height + '" role="img" xmlns="http://www.w3.org/2000/svg">');
+    out.push('<title>B+Tree：' + st.height + ' 層、' + st.leafCount + ' 個葉頁</title>');
+    out.push('<defs>' +
+      '<marker id="bt-mk" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#9aa0a8"/></marker>' +
+      '<marker id="bt-mk-hot" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#4d7d68"/></marker>' +
+      '</defs>');
+
+    /* 邊：內部頁的指標槽 → 子頁 */
+    for (d = 0; d < st.levels.length - 1; d += 1) {
+      for (i = 0; i < st.levels[d].length; i += 1) {
+        var n = st.levels[d][i];
+        var pp = lay.pos[n.id];
+        for (j = 0; j < n.kids.length; j += 1) {
+          var cp = lay.pos[n.kids[j]];
+          var hot = onPath[n.id] && onPath[n.kids[j]];
+          out.push('<line class="edge' + (hot ? ' hot' : '') + '" x1="' + (pp.x + BT_PADX + j * BT_CELL) + '" y1="' + (pp.y + BT_NODE_H) +
+            '" x2="' + (cp.x + W / 2) + '" y2="' + cp.y + '"/>');
+        }
+      }
+    }
+
+    /* 葉鏈 */
+    var leaves = st.levels[st.levels.length - 1];
+    for (i = 0; i + 1 < leaves.length; i += 1) {
+      var lp = lay.pos[leaves[i].id], rp = lay.pos[leaves[i + 1].id];
+      var walk = seen[leaves[i].id] && seen[leaves[i + 1].id];
+      out.push('<line class="link' + (walk ? ' hot' : '') + '" x1="' + (lp.x + W) + '" y1="' + (lp.y + BT_NODE_H / 2) +
+        '" x2="' + (rp.x - 1) + '" y2="' + (rp.y + BT_NODE_H / 2) + '" marker-end="url(#' + (walk ? 'bt-mk-hot' : 'bt-mk') + ')"/>');
+    }
+
+    /* 節點 */
+    for (d = 0; d < st.levels.length; d += 1) {
+      for (i = 0; i < st.levels[d].length; i += 1) {
+        var nd = st.levels[d][i];
+        var p0 = lay.pos[nd.id];
+        var cls = "nd" + (nd.leaf ? " leaf" : " inner") + (seen[nd.id] ? " seen" : "") +
+          (onPath[nd.id] && !nd.leaf ? " path" : "") + (touched[nd.id] ? " tch" : "");
+        out.push('<g class="' + cls + '">');
+        out.push('<rect class="box" x="' + p0.x + '" y="' + p0.y + '" width="' + W + '" height="' + BT_NODE_H + '" rx="4"/>');
+        for (j = 0; j < st.cap; j += 1) {
+          var cx = p0.x + BT_PADX + j * BT_CELL;
+          var key = nd.keys[j];
+          var isHit = nd.leaf && key !== undefined && hit[key];
+          out.push('<rect class="cell' + (isHit ? ' hit' : '') + '" x="' + (cx + 1) + '" y="' + (p0.y + 4) + '" width="' + (BT_CELL - 2) +
+            '" height="' + (BT_NODE_H - 8) + '" rx="2"/>');
+          if (key !== undefined) {
+            out.push('<text class="k' + (isHit ? ' hit' : '') + '" x="' + (cx + BT_CELL / 2) + '" y="' + (p0.y + BT_NODE_H / 2 + 4) + '">' + key + '</text>');
+          }
+        }
+        out.push('<text class="pg' + (touched[nd.id] ? ' tch' : '') + '" x="' + p0.x + '" y="' + (p0.y - 6) + '">' + nd.id + '</text>');
+        out.push('</g>');
+      }
+    }
+    out.push('</svg>');
+    return out.join("");
+  }
+
+  function btCell(label, value, sub, tone) {
+    return '<div class="bt-cell' + (tone ? ' ' + tone : '') + '"><span class="k">' + label + '</span><b>' + value + '</b>' +
+      (sub ? '<span class="s">' + sub + '</span>' : '') + '</div>';
+  }
+
+  function renderBTree(st) {
+    btCanvas.innerHTML = btRenderSvg(st);
+    var fillTone = st.avgFill >= 85 ? "ok" : (st.avgFill < 65 ? "warn" : "");
+    btCells.innerHTML = [
+      btCell("樹高", st.height + " 層", "長高 " + st.grow + " 次 · 變矮 " + st.shrink + " 次", "acc"),
+      btCell("頁分裂", st.leafSplits + st.innerSplits + " 次", "葉頁 " + st.leafSplits + "（尾端 " + st.seqSplits + "）· 內部頁 " + st.innerSplits, ""),
+      btCell("葉頁 · 平均填充", st.leafCount + " 頁 · " + st.avgFill + "%", st.live + " 個 key ÷（" + st.leafCount + " × " + st.cap + "）", fillTone),
+      btCell("葉鏈不連號", st.chainJumps + " 處", st.chain.join(" → "), st.chainJumps ? "warn" : "ok"),
+      btCell("範圍掃描讀頁", st.scan.pagesRead + " 頁", "下探 " + st.scan.path.length + " 個內部頁 + 葉頁 " + st.scan.leaves.length, "acc"),
+      btCell("命中 key", st.scan.rows.length + " 個", st.scan.rows.length ? st.scan.rows.join(", ") : "範圍內沒有 key", "")
+    ].join("");
+
+    var scanLine = "範圍 [" + st.scan.lo + ", " + st.scan.hi + "]：" +
+      (st.scan.path.length ? "從根經 " + st.scan.path.join(" → ") + " 下探，" : "根就是葉頁，") +
+      "沿葉鏈讀 " + st.scan.leaves.join(" → ") + "，共 " + st.scan.pagesRead + " 頁，命中 " + st.scan.rows.length + " 個 key" +
+      (st.scan.emptyReads ? "；其中 " + st.scan.emptyReads + " 頁沒有命中，只是讀到才知道範圍已經結束" : "") + "。";
+    btStatus.innerHTML = "<b>最後一次操作</b>　" + esc(st.last.msg) + "<br><b>掃描</b>　" + esc(scanLine) +
+      (st.rejected ? "<br><b>略過</b>　" + st.rejected + " 筆操作（重複 key、找不到或超過上限）。" : "") +
+      "<br><b>操作紀錄</b>　" + st.opsApplied + " 筆（上限 " + BT_MAX_OPS + "）；切換頁容量或分裂點時，會用同一串操作從空樹重播。";
+
+    setPressed(btCapSeg, "data-cap", st.cap);
+    setPressed(btSplitSeg, "data-split", st.split);
+    btKeyInput.max = String(BT_KEY_MAX);
+    btLoInput.value = String(btState.lo);
+    btHiInput.value = String(btState.hi);
+    var full = btState.ops.length >= BT_MAX_OPS;
+    btInsBtn.disabled = full;
+    btDelBtn.disabled = full;
+    btSeq6Btn.disabled = full;
+    btRnd6Btn.disabled = full;
+  }
+
+  /* ---------- 第 8 節 ---------- */
+
+  function cxStrip(heat, cls) {
+    var n = heat.length, w = 600 / n, out = [], i;
+    out.push('<svg viewBox="0 0 600 24" preserveAspectRatio="none" role="img" xmlns="http://www.w3.org/2000/svg"><title>' + n + ' 頁</title>');
+    for (i = 0; i < n; i += 1) {
+      var lvl = heat[i];
+      out.push('<rect class="' + cls + ' h' + lvl + '" x="' + (i * w + 1) + '" y="2" width="' + (w - 2) + '" height="20" rx="2"/>');
+    }
+    out.push('</svg>');
+    return out.join("");
+  }
+
+  function cxCell(label, value, tone) {
+    return '<div class="cx-cell' + (tone ? ' ' + tone : '') + '"><span class="k">' + label + '</span><b>' + value + '</b></div>';
+  }
+
+  function cxPaneHtml(r, win) {
+    return '<div class="cx-ph"><span class="nm">' + r.name + '</span> <code>(' + r.cols.join(", ") + ')</code>' +
+      (win ? ' <span class="cx-win">讀得少</span>' : '') + '</div>' +
+      '<div class="cx-desc"><span class="' + (r.fullScan ? 'bad' : 'ok') + '">' + esc(r.seekDesc) + '</span>' +
+      (r.filtDesc ? '<br>' + esc(r.filtDesc) : '') + '<br><span class="' + (r.covering ? 'ok' : 'warn') + '">' + esc(r.tableDesc) + '</span></div>' +
+      '<div class="cx-sl">索引葉頁 × ' + r.heat.length + '（依索引順序）</div>' +
+      '<div class="cx-strip">' + cxStrip(r.heat, "ix") + '</div>' +
+      '<div class="cx-sl">資料頁 × ' + r.tHeat.length + '（依主鍵 id，也就是下單時間）</div>' +
+      '<div class="cx-strip">' + cxStrip(r.tHeat, "tb") + '</div>' +
+      '<div class="cx-cells">' +
+      cxCell("掃描索引條目", r.scanned + " 筆", r.fullScan ? "bad" : "") +
+      cxCell("讀索引葉頁", r.leafPages + " 頁", "") +
+      cxCell("索引內濾掉", r.dropped + " 筆", "") +
+      cxCell("回表次數", r.lookups + " 次", r.lookups ? "warn" : "ok") +
+      cxCell("回表碰到資料頁", r.tablePages + " 頁", r.tablePages ? "warn" : "") +
+      cxCell("回傳列數", r.returned + " 列", "") +
+      cxCell("邏輯讀頁數", r.reads + " 頁", win ? "ok" : "") +
+      '</div>';
+  }
+
+  function renderComposite(st) {
+    cxSql.textContent = st.sql;
+    cxPaneL.innerHTML = cxPaneHtml(st.L, st.better === "L");
+    cxPaneR.innerHTML = cxPaneHtml(st.R, st.better === "R");
+    cxPaneL.className = "cx-pane" + (st.better === "L" ? " win" : "");
+    cxPaneR.className = "cx-pane" + (st.better === "R" ? " win" : "");
+    cxStatus.textContent = st.summary;
+    cxDaysVal.textContent = String(st.q.days);
+    cxUser.disabled = !st.q.useUser;
+    cxDays.disabled = !st.q.useDate;
+    setPressed(cxProjSeg, "data-proj", st.q.proj);
+  }
+
+  /* ================================================================
+   * (5) 事件綁定
+   * ================================================================ */
+
+  function btRefresh() {
+    btLast = computeBTree(btState);
+    renderBTree(btLast);
+  }
+
+  function btPush(op, k) {
+    if (btState.ops.length >= BT_MAX_OPS) return;
+    btState.ops.push([op, k]);
+  }
+
+  function btReadKey() {
+    return clampInt(btKeyInput.value, BT_KEY_MIN, BT_KEY_MAX, 37);
+  }
+
+  btCapSeg.addEventListener("click", function (e) {
+    var b = e.target.closest("button");
+    if (!b) return;
+    btState.cap = Number(b.dataset.cap);
+    btRefresh();
+  });
+
+  btSplitSeg.addEventListener("click", function (e) {
+    var b = e.target.closest("button");
+    if (!b) return;
+    btState.split = b.dataset.split;
+    btRefresh();
+  });
+
+  btInsBtn.addEventListener("click", function () { btPush("i", btReadKey()); btRefresh(); });
+  btDelBtn.addEventListener("click", function () { btPush("d", btReadKey()); btRefresh(); });
+  btKeyInput.addEventListener("keydown", function (e) {
+    if (e.key === "Enter") { btPush("i", btReadKey()); btRefresh(); }
+  });
+
+  btSeq6Btn.addEventListener("click", function () {
+    var k = (btLast ? btLast.maxKey : 0) + 1, n = 0;
+    while (n < 6 && k <= BT_KEY_MAX) { btPush("i", k); k += 1; n += 1; }
+    btRefresh();
+  });
+
+  btRnd6Btn.addEventListener("click", function () {
+    var have = {}, n = 0, guard = 0, i;
+    var keys = btLast ? btLast.allKeys : [];
+    for (i = 0; i < keys.length; i += 1) have[keys[i]] = true;
+    while (n < 6 && guard < 500) {
+      btState.seed = (btState.seed * 48271) % 2147483647;
+      var k = BT_KEY_MIN + (btState.seed % (BT_KEY_MAX - BT_KEY_MIN + 1));
+      guard += 1;
+      if (have[k]) continue;
+      have[k] = true;
+      btPush("i", k);
+      n += 1;
+    }
+    btRefresh();
+  });
+
+  btPreSeqBtn.addEventListener("click", function () {
+    var i;
+    btState.ops = [];
+    for (i = 1; i <= 30; i += 1) btState.ops.push(["i", i]);
+    btState.lo = 8;
+    btState.hi = 15;
+    btRefresh();
+  });
+
+  btPreRndBtn.addEventListener("click", function () {
+    btState.ops = BT_PRESET_RND_KEYS.map(function (k) { return ["i", k]; });
+    btState.lo = 20;
+    btState.hi = 45;
+    btRefresh();
+  });
+
+  btResetBtn.addEventListener("click", function () {
+    btState.cap = BT_DEFAULT.cap;
+    btState.split = BT_DEFAULT.split;
+    btState.lo = BT_DEFAULT.lo;
+    btState.hi = BT_DEFAULT.hi;
+    btState.ops = BT_BASE_OPS.map(function (o) { return o.slice(); });
+    btState.seed = 7;
+    btRefresh();
+  });
+
+  btLoInput.addEventListener("change", function () {
+    btState.lo = clampInt(btLoInput.value, BT_KEY_MIN, BT_KEY_MAX, BT_DEFAULT.lo);
+    btRefresh();
+  });
+  btHiInput.addEventListener("change", function () {
+    btState.hi = clampInt(btHiInput.value, BT_KEY_MIN, BT_KEY_MAX, BT_DEFAULT.hi);
+    btRefresh();
+  });
+
+  function cxRefresh() {
+    renderComposite(computeComposite(cxState));
+  }
+
+  cxUseUser.addEventListener("change", function () { cxState.useUser = cxUseUser.checked; cxRefresh(); });
+  cxUser.addEventListener("input", function () { cxState.userId = clampInt(cxUser.value, 1, CX_USERS, CX_DEFAULT.userId); cxRefresh(); });
+  cxUseDate.addEventListener("change", function () { cxState.useDate = cxUseDate.checked; cxRefresh(); });
+  cxDays.addEventListener("input", function () { cxState.days = clampInt(cxDays.value, 1, CX_DAYS, CX_DEFAULT.days); cxRefresh(); });
+  cxUseStatus.addEventListener("change", function () { cxState.useStatus = cxUseStatus.checked; cxRefresh(); });
+
+  cxProjSeg.addEventListener("click", function (e) {
+    var b = e.target.closest("button");
+    if (!b) return;
+    cxState.proj = b.dataset.proj;
+    cxRefresh();
+  });
+
+  cxResetBtn.addEventListener("click", function () {
+    cxState.useUser = CX_DEFAULT.useUser;
+    cxState.userId = CX_DEFAULT.userId;
+    cxState.useDate = CX_DEFAULT.useDate;
+    cxState.days = CX_DEFAULT.days;
+    cxState.useStatus = CX_DEFAULT.useStatus;
+    cxState.proj = CX_DEFAULT.proj;
+    cxUseUser.checked = cxState.useUser;
+    cxUser.value = String(cxState.userId);
+    cxUseDate.checked = cxState.useDate;
+    cxDays.value = String(cxState.days);
+    cxUseStatus.checked = cxState.useStatus;
+    cxRefresh();
+  });
+
+  btRefresh();
+  cxRefresh();
+})();
+</script>
