@@ -1,0 +1,900 @@
+<!-- demo-archetype: B｜參數掃描（主，第 6 節）＋C｜並排對照（次，第 8 節） — 主 demo 讓讀者調整兩表列數、外層選擇性、關聯係數、內外索引與覆蓋狀態及 work_mem，由 computePlanner() 依 PostgreSQL 風格成本公式即時算出 Seq Scan、Index Scan、Index Only Scan、Bitmap Heap Scan 與 Nested Loop、Hash Join、Merge Join 的 startup/total 成本、記憶體溢寫批次、勝出計畫與估計誤差放大。選 B 是因為本篇核心命題是「統計參數與選擇性如何翻轉優化器的掃描與 Join 決策」。次 demo 把同一組頁碼、每頁筆數、總列數與 N+1 附帶查詢同時餵給 OFFSET 分頁與 Keyset 分頁兩個面板，由 computePagination() 算出丟棄列數、B+Tree 讀取頁數、資料庫往返次數與端到端延遲。最近 3 篇未撞形。 -->
+<style>
+  .qp-sub { font-weight: 700; font-size: 15px; margin: 24px 0 8px; padding-left: 10px; border-left: 3px solid var(--accent); color: var(--text); }
+
+  /* 盒 + 箭頭：查詢生命週期管線（節點 <= 6） */
+  .qp-row {
+    display: flex; flex-wrap: wrap; gap: 10px;
+    align-items: stretch; justify-content: center;
+    margin: 14px 0 0;
+  }
+  .qp-node {
+    border: 1px solid var(--border-strong); border-radius: 8px;
+    background: #fff; padding: 10px 12px;
+    min-width: 112px; max-width: 165px; text-align: center;
+  }
+  .qp-node .nn { font-family: var(--mono); font-size: 12px; font-weight: 700; color: var(--text); }
+  .qp-node .ns { font-size: 11px; color: var(--text-2); margin-top: 3px; line-height: 1.45; }
+  .qp-node.accent { border-top: 3px solid var(--accent); }
+  .qp-node.ok { border-top: 3px solid var(--ok); }
+  .qp-node.warn { border-top: 3px solid var(--warn); }
+  .qp-arrow {
+    display: flex; align-items: center;
+    font-family: var(--mono); font-size: 13px; color: var(--text-3);
+    white-space: nowrap;
+  }
+
+  /* 並排雙欄：估計 vs 實際 / 機制對照 */
+  .qp-split { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin: 14px 0 0; }
+  @media (max-width: 660px) { .qp-split { grid-template-columns: 1fr; } }
+  .qp-pane {
+    border: 1px solid var(--border); border-radius: var(--radius-sm);
+    background: #fff; padding: 13px 15px; border-top: 3px solid var(--border-strong);
+  }
+  .qp-pane.acc { border-top-color: var(--accent); }
+  .qp-pane.ok  { border-top-color: var(--ok); }
+  .qp-pane.warn { border-top-color: var(--warn); }
+  .qp-pane.bad { border-top-color: var(--bad); }
+  .qp-pane .pt { font-weight: 700; font-size: 14px; margin-bottom: 3px; }
+  .qp-pane .ps { font-family: var(--mono); font-size: 11px; color: var(--text-3); margin-bottom: 8px; }
+  .qp-pane p { font-size: 13.5px; color: var(--text-2); margin: 0 0 8px; line-height: 1.65; }
+  .qp-pane p:last-child { margin-bottom: 0; }
+
+  /* 直向分層：EXPLAIN 執行樹拆解盒 */
+  .qp-stack {
+    margin: 14px 0 0; border: 1px solid var(--border-strong); border-radius: 8px;
+    background: #fff; padding: 10px; display: grid; gap: 6px;
+  }
+  .qp-lv {
+    border: 1px solid var(--border); border-radius: 6px; padding: 8px 11px;
+    background: var(--bg-soft); font-size: 12.5px; line-height: 1.55;
+  }
+  .qp-lv.indent-1 { margin-left: 18px; }
+  .qp-lv.indent-2 { margin-left: 36px; }
+  .qp-lv.hot { background: var(--bad-soft); border-color: var(--bad); }
+  .qp-lv.good { background: var(--ok-soft); border-color: var(--ok); }
+  .qp-lv .hd { font-family: var(--mono); font-weight: 700; font-size: 12px; color: var(--text); }
+  .qp-lv .meta-ln { font-family: var(--mono); font-size: 11.5px; color: var(--text-2); margin-top: 2px; }
+  .qp-lv .note-ln { font-size: 12px; color: var(--text-2); margin-top: 4px; }
+  .qp-badge {
+    display: inline-block; font-family: var(--mono); font-size: 10.5px;
+    padding: 1px 6px; border-radius: 4px; margin-left: 6px; border: 1px solid var(--border-strong);
+    background: #fff; color: var(--text-2);
+  }
+  .qp-badge.bad { border-color: var(--bad); color: var(--bad); background: #fff; }
+  .qp-badge.ok  { border-color: var(--ok); color: var(--ok); background: #fff; }
+
+  /* 時序 Swimlane：Nested Loop / Hash / Merge 單輪互動對比 */
+  .qp-lane {
+    display: grid; grid-template-columns: 62px repeat(3, 1fr); gap: 1px;
+    background: var(--border); border: 1px solid var(--border);
+    border-radius: 8px; overflow: hidden; margin: 14px 0 0;
+  }
+  .qp-lane > div { background: #fff; padding: 8px 10px; font-size: 12px; line-height: 1.5; }
+  .qp-lane .lh { background: var(--bg-soft); font-family: var(--mono); font-size: 11px; font-weight: 700; color: var(--text-2); }
+  .qp-lane .lt { background: var(--bg-soft); font-family: var(--mono); font-size: 11px; color: var(--text-3); }
+  .qp-lane .lc.act { background: var(--accent-soft); }
+  .qp-lane .lc.ok  { background: var(--ok-soft); }
+  .qp-lane .lc.warn { background: var(--warn-soft); }
+  @media (max-width: 720px) { .qp-lane { grid-template-columns: 48px repeat(3, minmax(0, 1fr)); font-size: 11px; } }
+
+  /* ---------- 第 6 節主 Demo：Query Planner 成本掃描儀 ---------- */
+  .pl-grid { display: grid; grid-template-columns: 280px 1fr; gap: 16px; align-items: start; }
+  @media (max-width: 760px) { .pl-grid { grid-template-columns: 1fr; } }
+  .pl-ctl {
+    border: 1px solid var(--border); border-radius: var(--radius-sm);
+    background: var(--bg-soft); padding: 12px 13px; display: grid; gap: 11px;
+  }
+  .pl-fld { display: grid; gap: 4px; }
+  .pl-lbl {
+    display: flex; justify-content: space-between; align-items: baseline;
+    font-family: var(--mono); font-size: 11.5px; color: var(--text-2);
+  }
+  .pl-lbl b { color: var(--accent); font-weight: 700; }
+  .pl-fld input[type="range"] { width: 100%; accent-color: var(--accent); cursor: pointer; }
+  .pl-seg-wrap { display: grid; gap: 5px; }
+  .pl-seg-wrap .seg { flex-wrap: wrap; border-radius: 8px; }
+  .pl-seg-wrap .seg button { flex: 1 1 auto; padding: 5px 8px; font-size: 11.5px; }
+  .pl-chk-row { display: flex; flex-wrap: wrap; gap: 8px; font-size: 12px; color: var(--text-2); }
+  .pl-chk-row label { display: inline-flex; align-items: center; gap: 5px; cursor: pointer; }
+
+  .pl-main { display: grid; gap: 12px; min-width: 0; }
+  .pl-panel {
+    border: 1px solid var(--border); border-radius: var(--radius-sm);
+    background: #fff; padding: 12px 14px;
+  }
+  .pl-panel-hd {
+    display: flex; justify-content: space-between; align-items: baseline; flex-wrap: wrap; gap: 6px;
+    margin-bottom: 9px;
+  }
+  .pl-panel-hd .tt { font-weight: 700; font-size: 13.5px; color: var(--text); }
+  .pl-panel-hd .sub { font-family: var(--mono); font-size: 11px; color: var(--text-3); }
+
+  .pl-bars { display: grid; gap: 8px; }
+  .pl-bar-row { display: grid; grid-template-columns: 132px 1fr 86px; gap: 8px; align-items: center; font-size: 12px; }
+  @media (max-width: 560px) { .pl-bar-row { grid-template-columns: 110px 1fr 74px; } }
+  .pl-bar-nm { font-family: var(--mono); font-size: 11.5px; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .pl-bar-nm.win { color: var(--ok); font-weight: 700; }
+  .pl-bar-nm.na  { color: var(--text-3); text-decoration: line-through; }
+  .pl-track { height: 16px; background: var(--bg-soft); border: 1px solid var(--border); border-radius: 4px; overflow: hidden; position: relative; }
+  .pl-fill { height: 100%; background: var(--accent-line); border-radius: 3px; transition: width .12s ease; }
+  .pl-fill.win { background: var(--ok); }
+  .pl-fill.spill { background: var(--warn); }
+  .pl-cost-v { font-family: var(--mono); font-size: 11.5px; text-align: right; color: var(--text-2); }
+  .pl-cost-v.win { color: var(--ok); font-weight: 700; }
+
+  .pl-explain {
+    font-family: var(--mono); font-size: 11.5px; line-height: 1.6;
+    background: var(--code-bg); border: 1px solid var(--border); border-radius: var(--radius-sm);
+    padding: 10px 12px; overflow-x: auto; white-space: pre; color: var(--text);
+  }
+  .pl-kpis { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+  @media (max-width: 560px) { .pl-kpis { grid-template-columns: 1fr; } }
+  .pl-kpi {
+    border: 1px solid var(--border); border-left: 3px solid var(--accent);
+    border-radius: 6px; padding: 7px 10px; background: #fff;
+  }
+  .pl-kpi.ok { border-left-color: var(--ok); }
+  .pl-kpi.warn { border-left-color: var(--warn); }
+  .pl-kpi.bad { border-left-color: var(--bad); }
+  .pl-kpi .k { display: block; font-size: 10.5px; color: var(--text-3); }
+  .pl-kpi b { display: block; font-family: var(--mono); font-size: 14.5px; color: var(--text); margin-top: 2px; }
+  .pl-kpi .s { display: block; font-family: var(--mono); font-size: 10.5px; color: var(--text-2); margin-top: 1px; }
+  .pl-foot { display: flex; justify-content: flex-end; margin-top: 8px; }
+
+  /* ---------- 第 8 節次 Demo：OFFSET vs Keyset 分頁與 N+1 並排對照 ---------- */
+  .pg-ctl {
+    display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px 16px;
+    background: var(--bg-soft); border: 1px solid var(--border); border-radius: var(--radius-sm);
+    padding: 12px 14px; margin-bottom: 12px;
+  }
+  @media (max-width: 640px) { .pg-ctl { grid-template-columns: 1fr; } }
+  .pg-fld { display: grid; gap: 4px; }
+  .pg-lbl { display: flex; justify-content: space-between; font-family: var(--mono); font-size: 11.5px; color: var(--text-2); }
+  .pg-lbl b { color: var(--accent); }
+  .pg-fld input[type="range"] { width: 100%; accent-color: var(--accent); cursor: pointer; }
+  .pg-seg-line { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; justify-content: space-between; margin-bottom: 12px; }
+
+  .pg-cols { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  @media (max-width: 700px) { .pg-cols { grid-template-columns: 1fr; } }
+  .pg-card {
+    border: 1px solid var(--border); border-top: 3px solid var(--border-strong);
+    border-radius: var(--radius-sm); background: #fff; padding: 12px 14px; display: grid; gap: 9px;
+  }
+  .pg-card.bad { border-top-color: var(--bad); }
+  .pg-card.ok  { border-top-color: var(--ok); }
+  .pg-card-hd { display: flex; justify-content: space-between; align-items: baseline; gap: 6px; }
+  .pg-card-hd .nm { font-weight: 700; font-size: 14px; }
+  .pg-card-hd .tag-sm { font-family: var(--mono); font-size: 10.5px; padding: 1px 6px; border-radius: 4px; border: 1px solid var(--border-strong); color: var(--text-2); }
+  .pg-sql {
+    font-family: var(--mono); font-size: 11.5px; line-height: 1.5;
+    background: var(--code-bg); border: 1px solid var(--border); border-radius: 6px;
+    padding: 8px 10px; white-space: pre-wrap; color: var(--text);
+  }
+  .pg-strip-lbl { font-family: var(--mono); font-size: 10.5px; color: var(--text-3); }
+  .pg-strip { height: 18px; border: 1px solid var(--border-strong); border-radius: 4px; background: #fafaf9; overflow: hidden; display: flex; }
+  .pg-seg-skip { background: var(--bad-soft); border-right: 1px solid var(--bad); height: 100%; }
+  .pg-seg-seek { background: var(--accent-soft); height: 100%; }
+  .pg-seg-take { background: var(--ok); height: 100%; }
+  .pg-metrics { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+  .pg-m { border: 1px solid var(--border); border-radius: 6px; padding: 6px 8px; background: #fff; }
+  .pg-m .k { display: block; font-size: 10.5px; color: var(--text-3); }
+  .pg-m b { font-family: var(--mono); font-size: 14px; color: var(--text); }
+  .pg-m.bad b { color: var(--bad); }
+  .pg-m.ok  b { color: var(--ok); }
+</style>
+
+<header class="hero">
+  <div class="eyebrow">系統設計 · 田野手冊</div>
+  <h1>查詢計畫與 EXPLAIN (Query Planner &amp; Join Algorithms)</h1>
+  <p class="lede">SQL 是宣告式語言：你只描述「要什麼結果」，不指定「先讀哪張表、走不走索引、用哪種演算法把兩張表接起來」。把語意翻譯成執行路徑的，是資料庫裡的基於成本優化器（Cost-Based Optimizer, CBO）。線上慢查詢有八成不是資料庫壞了，而是優化器拿著過期或失真的統計資訊，算出一份「帳面最便宜、實跑卻災難」的執行計畫。本篇拆解四種掃描算子、三種 Join 演算法、統計直方圖與基數估計，並帶你從 EXPLAIN ANALYZE 一眼抓出估計列數與實際列數的致命落差。</p>
+  <div class="meta">
+    <span class="tag">Query Planner</span>
+    <span class="tag">EXPLAIN ANALYZE</span>
+    <span class="tag">Bitmap Scan</span>
+    <span class="tag">Hash / Merge / Nested Loop Join</span>
+    <span class="tag">Cardinality Estimation</span>
+    <span class="tag">Keyset Pagination</span>
+  </div>
+</header>
+
+<section id="s1">
+  <div class="sec-head">
+    <span class="sec-num">01</span>
+    <h2>總覽：一條 SQL 如何變成執行樹</h2>
+  </div>
+  <p class="sec-sub">你寫的是關聯代數的目標，資料庫跑的是一棵由算子組成的實體執行樹。</p>
+
+  <p>當應用程式送出一條 SQL，資料庫並不會直接打開磁碟找資料，而是依序走過四個階段。理解這個管線，才能區分「語法改寫能救的事」與「必須修統計資訊或索引才能救的事」：</p>
+
+  <div class="qp-row">
+    <div class="qp-node"><div class="nn">Parser &amp; Rewriter</div><div class="ns">語法樹、展開 View、常數折疊與謂詞下推</div></div>
+    <span class="qp-arrow">▸</span>
+    <div class="qp-node accent"><div class="nn">Catalog 統計資訊</div><div class="ns">總頁數、NDV、MCV 與等頻直方圖</div></div>
+    <span class="qp-arrow">▸</span>
+    <div class="qp-node warn"><div class="nn">Planner / CBO</div><div class="ns">枚舉掃描路徑與 Join 順序，挑最低成本樹</div></div>
+    <span class="qp-arrow">▸</span>
+    <div class="qp-node ok"><div class="nn">Executor</div><div class="ns">火山模型拉取 tuple，管理記憶體與溢寫</div></div>
+  </div>
+  <p class="cap">慢查詢診斷的核心切口在中間兩格：Catalog 給錯統計數字，CBO 就會用正確的算術選出錯誤的執行樹。</p>
+
+  <p>優化器比較的不是毫秒，而是抽象的<strong>成本單位（cost units）</strong>。以 PostgreSQL 為例，預設以「循序讀一個 8 KiB 磁碟頁」為基準 <code>seq_page_cost = 1.0</code>，隨機讀一頁為 <code>random_page_cost = 4.0</code>（SSD 環境常調降為 <code>1.1</code>），每處理一筆 tuple 的 CPU 成本為 <code>cpu_tuple_cost = 0.01</code>。每個節點都會報出兩個數字：</p>
+  <ul>
+    <li><strong>Startup cost（啟動成本）</strong>：吐出第一筆結果前必須先付的代價。例如 <code>Seq Scan</code> 讀到第一頁就能吐資料，啟動成本為 <code>0.00</code>；<code>Sort</code> 或 <code>Hash Join</code> 必須先把子節點整批讀完才能吐第一筆，啟動成本很高。</li>
+    <li><strong>Total cost（總成本）</strong>：假設把這個節點的所有結果全部讀完的累積代價。一般查詢看總成本；但如果查詢帶有 <code>LIMIT 10</code>，優化器會按比例折算，這時<strong>低啟動成本</strong>的算子（如走索引免排序的 <code>Nested Loop</code>）就會反超總成本較低的 <code>Hash Join</code>。</li>
+  </ul>
+
+  <div class="callout accent">
+    <div class="c-title"><span class="ic">邊界</span>本篇與前後主題的分工</div>
+    <p>B+Tree 的頁結構、複合索引最左前綴、聚簇索引回表與索引失效條件，已在<a href="../database-index-internals/">資料庫索引原理</a>篇完整展開；跨網路節點的分散式執行計畫（DistSQL、Shuffle、1PC/2PC 與租約讀取）則見<a href="../distributed-sql/">分散式 SQL 資料庫</a>篇。本篇聚焦於<strong>單機資料庫內部的優化器決策、單表掃描算子、多表 Join 演算法與 EXPLAIN 診斷</strong>，範例以成本模型最透明的 PostgreSQL 為主，關鍵處對照 MySQL（InnoDB）。</p>
+  </div>
+
+  <div class="oneliner">
+    <b>一句話答法</b>Query Planner 是基於成本的搜尋器：它根據統計資訊估計每個條件會留下幾列（基數），再把掃描與 Join 算子的 I/O 與 CPU 單位成本加總，挑出預期總成本（或 LIMIT 下的部分成本）最低的執行樹。
+  </div>
+</section>
+
+<section id="s2">
+  <div class="sec-head">
+    <span class="sec-num">02</span>
+    <h2>單表掃描四種路徑：Seq、Index、Index Only 與 Bitmap Scan</h2>
+  </div>
+  <p class="sec-sub">「有索引卻不走」不見得是失效，往往是因為隨機回表的頁數算起來比循序掃全表還貴。</p>
+
+  <p>給定一張單表與 <code>WHERE</code> 條件，優化器手上有四種主要的取數算子。它們的取捨完全圍繞兩件事：<strong>要讀多少頁</strong>，以及<strong>這些頁在磁碟上是循序還是隨機</strong>。</p>
+
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>掃描算子</th>
+          <th>讀取路徑</th>
+          <th>I/O 型態</th>
+          <th>輸出是否有序</th>
+          <th>典型勝出區間（經驗量級）</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><strong>Seq Scan</strong><br>（全表掃描）</td>
+          <td>從頭到尾直讀整張表的所有資料頁，逐列過濾 <code>WHERE</code></td>
+          <td>純循序 I/O，OS 預讀友善，一頁讀進來全頁列都檢查</td>
+          <td>無序（依實體頁順序）</td>
+          <td>高命中率（通常 &gt; 15%–25%）、小表（僅數十頁），或無可用索引</td>
+        </tr>
+        <tr>
+          <td class="hl"><strong>Index Scan</strong></td>
+          <td class="hl">沿 B+Tree 葉鏈找符合條目，每命中一筆立刻去資料表抓整列（回表）</td>
+          <td class="hl">索引葉鏈循序，但回表若實體位置分散則為<strong>隨機 I/O</strong>，同一頁可能被反覆觸碰</td>
+          <td class="hl"><strong>依索引鍵有序</strong>（可省下 <code>ORDER BY</code>，搭配 <code>LIMIT</code> 極快）</td>
+          <td class="hl">高選擇性（命中 &lt; 1%–5%）、欄位高度聚簇（correlation ≈ 1），或有 <code>ORDER BY ... LIMIT</code></td>
+        </tr>
+        <tr>
+          <td><strong>Index Only Scan</strong></td>
+          <td>查詢所需欄位全在索引條目裡，不回資料表（PostgreSQL 需先查 Visibility Map）</td>
+          <td>只讀索引頁，體積遠小於主表</td>
+          <td>依索引鍵有序</td>
+          <td>Covering Index 成立且主表頁近期已 VACUUM（<code>Heap Fetches</code> 低）</td>
+        </tr>
+        <tr>
+          <td class="hl"><strong>Bitmap Index + Bitmap Heap Scan</strong></td>
+          <td class="hl">先掃索引把命中的 TID 在記憶體建成頁級與列級點陣圖，<strong>依實體頁號排序去重後</strong>再批次讀表</td>
+          <td class="hl">把散落的隨機回表轉成<strong>跳躍式循序 I/O</strong>，且每個資料頁保證只讀一次；可合併多個索引</td>
+          <td class="hl"><strong>無序</strong>（已改依實體頁號排序，不再保索引序）</td>
+          <td class="hl">中度選擇性（約 2%–20%，單走 Index Scan 太隨機、走 Seq Scan 又讀太多廢頁），或跨索引 <code>AND / OR</code></td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="cap">Bitmap Scan 是連結 Index Scan 與 Seq Scan 的橋樑：它放棄了索引原本的排序，換取「每一頁最多讀一次、依頁號順序讀」的 I/O 效率；MySQL 對應的機制是 MRR（Multi-Range Read）與 Index Merge。</p>
+
+  <div class="qp-sub">為什麼 Bitmap Scan 能組合兩個獨立的單欄索引？</div>
+  <p>假設查詢寫了 <code>WHERE region = 'APAC' AND tier = 'PRO'</code>，表上只有 <code>idx_region</code> 與 <code>idx_tier</code> 兩個獨立索引，沒有複合索引。一般 <code>Index Scan</code> 一次只能沿一棵樹走；<code>Bitmap Scan</code> 則可以各自掃出兩份 TID 點陣圖，在記憶體裡做位元級的 <code>BitmapAnd</code>（若是 <code>OR</code> 條件就是 <code>BitmapOr</code>），只對交集留下的頁號去讀主表。</p>
+  <p>但點陣圖有記憶體上限：它受限於連線層級的 <code>work_mem</code>（PostgreSQL 預設僅 <code>4MB</code>）。當命中筆數太多、精確記錄每一列位址的點陣圖塞不進 <code>work_mem</code> 時，它會自動退化成<strong>Lossy（失真）模式</strong>——只記「哪一個 8 KiB 資料頁有命中」，不記頁內第幾列。進到 <code>Bitmap Heap Scan</code> 時就必須把整個標記頁的每一列都撈出來重跑一次 <code>Recheck Cond</code>。如果你在 <code>EXPLAIN ANALYZE</code> 看到 <code>Heap Blocks: exact=120 lossy=48000</code>，代表 <code>work_mem</code> 不夠裝點陣圖，大量無關列被拖進來重驗。</p>
+
+  <div class="callout warn">
+    <div class="c-title"><span class="ic">陷阱</span>實體聚簇相關係數（Correlation）會讓同一條查詢成本差十倍</div>
+    <p>同樣命中 10,000 列，若條件是自增時間欄 <code>created_at</code>，這 10,000 列緊密擠在相鄰的 150 個資料頁裡（<code>pg_stats.correlation ≈ 0.99</code>），<code>Index Scan</code> 回表幾乎等同循序讀；若條件是隨機的 <code>user_id</code>（<code>correlation ≈ 0.02</code>），這 10,000 列散在 9,500 個不同頁，隨機讀成本暴增數十倍。優化器在計算 <code>Index Scan</code> 成本時，會依 correlation 在 <code>seq_page_cost</code> 與 <code>random_page_cost</code> 之間插值——這就是為什麼欄位命中率一樣，一個走 <code>Index Scan</code>、另一個卻切去 <code>Bitmap Heap Scan</code> 或 <code>Seq Scan</code>。</p>
+  </div>
+
+  <div class="oneliner">
+    <b>一句話答法</b>命中極少或需保序配 LIMIT 用 Index Scan；欄位全覆蓋且可見性乾淨用 Index Only Scan；命中率落在中間尷尬帶、或需跨多個索引做 AND/OR 交聯集時用 Bitmap Scan 把隨機回表排成頁序；命中過高就直接 Seq Scan 循序掃全表。
+  </div>
+</section>
+
+<section id="s3">
+  <div class="sec-head">
+    <span class="sec-num">03</span>
+    <h2>三種 Join 演算法：Nested Loop、Hash Join 與 Merge Join</h2>
+  </div>
+  <p class="sec-sub">所有多表查詢都會被拆成兩兩相接的二元節點；選哪一種接法，看外層列數、內層有無索引與記憶體夠不夠。</p>
+
+  <p>資料庫執行 <code>A JOIN B JOIN C</code> 時，並不是三張表同時混在一起算，而是先挑兩張表（例如 <code>A ⋈ B</code>）透過某種物理算子接成中間結果流，再把這個結果流當成外層（Outer），與 <code>C</code> 做第二次二元 Join。優化器在每一個接合點上，都從以下三種物理演算法擇一：</p>
+
+  <div class="qp-lane">
+    <div class="lh">階段</div>
+    <div class="lh">Nested Loop Join</div>
+    <div class="lh">Hash Join</div>
+    <div class="lh">Merge Join</div>
+
+    <div class="lt">準備期<br>(Startup)</div>
+    <div class="lc ok">零準備（Startup ≈ 0）：拿到外層第 1 列立刻開跑</div>
+    <div class="lc warn"><strong>Build 階段</strong>：把較小的內層表整批讀完，依 Join key 算雜湊塞進記憶體 Hash Table</div>
+    <div class="lc act">確認兩側輸入皆依 Join key 排好序；若無索引序，先對未排序側做完整 <code>Sort</code></div>
+
+    <div class="lt">配對期<br>(Probe)</div>
+    <div class="lc act">外層每吐 1 列，就拿 key 去內層查一次（無索引掃全表，有索引下探 B+Tree）</div>
+    <div class="lc ok"><strong>Probe 階段</strong>：流式掃過外層大表，每列算一次雜湊去桶子裡 O(1) 比對</div>
+    <div class="lc ok">雙指標同步往後滑（類似歸併排序合併步），兩側無重複鍵時各只掃過一遍</div>
+
+    <div class="lt">記憶體<br>與弱點</div>
+    <div class="lc warn">記憶體 O(1)；但外層列數一旦被低估，內層下探次數呈乘法爆炸</div>
+    <div class="lc warn">只支援<strong>等值條件（<code>=</code>）</strong>；Hash Table 超出 <code>work_mem</code> 時分批溢寫磁碟</div>
+    <div class="lc act">支援等值與部分不等值範圍；若兩側都得現場 <code>Sort</code>，大表排序也可能溢寫磁碟</div>
+  </div>
+  <p class="cap">三種演算法的本質取捨：Nested Loop 賭「外層極少＋內層有索引」、Hash Join 賭「等值連接＋小表塞得進記憶體」、Merge Join 賭「輸入本來就有序，或大到 Hash Table 裝不下」。</p>
+
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>演算法</th>
+          <th>時間複雜度（外層 <var>M</var> 列、內層 <var>N</var> 列）</th>
+          <th>Join 條件限制</th>
+          <th>啟動延遲（配 LIMIT 表現）</th>
+          <th>最怕遇到的退化情境</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><strong>Nested Loop</strong><br>（無內層索引）</td>
+          <td><var>O(M × N)</var>（實務搭配 Join Buffer 批次掃描）</td>
+          <td>任意條件（含 <code>&lt;</code>、<code>BETWEEN</code>、函式交叉比對）</td>
+          <td>極低</td>
+          <td>兩表稍大即成笛卡兒積級別災難（MySQL 8.0.18 前無 Hash Join 時的常見痛點）</td>
+        </tr>
+        <tr>
+          <td class="hl"><strong>Indexed Nested Loop</strong></td>
+          <td class="hl"><var>O(M × log N)</var></td>
+          <td class="hl">內層索引支援的等值或範圍條件</td>
+          <td class="hl"><strong>最低</strong>（吐前幾筆最快）</td>
+          <td class="hl">統計過期把 <var>M</var> = 50 萬誤估成 <var>M</var> = 5，導致 50 萬次隨機 B+Tree 下探與回表</td>
+        </tr>
+        <tr>
+          <td class="hl"><strong>Hash Join</strong></td>
+          <td class="hl"><var>O(M + N)</var>（記憶體充足時）</td>
+          <td class="hl"><strong>僅限等值 Join</strong>（<code>a.k = b.k</code>）</td>
+          <td class="hl">高（須等 Build 表建完）</td>
+          <td class="hl">Build 側超標觸發多輪 Grace Hash 磁碟分批（<code>Batches: 16</code>），或嚴重 Key Skew 塞爆單一桶</td>
+        </tr>
+        <tr>
+          <td><strong>Merge Join</strong><br>（Sort-Merge）</td>
+          <td>已排序 <var>O(M + N)</var>；未排序加 <var>O(M log M + N log N)</var></td>
+          <td>等值為主（右端重複鍵多時需 Mark/Restore 回捲）</td>
+          <td>依賴索引序時極低；需現場 Sort 時極高</td>
+          <td>兩側皆無對齊索引，被迫在磁碟上做 External Merge Sort，且內層存在大量重複鍵反覆回捲</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="cap">MySQL 直到 8.0.18 才正式引入 Hash Join 取代無索引時的 Block Nested-Loop（BNL），且 MySQL 至今沒有獨立的 Merge Join 算子；PostgreSQL、Oracle、SQL Server 則三者俱全。</p>
+
+  <div class="callout accent">
+    <div class="c-title"><span class="ic">關鍵</span>Hash Join 記憶體不夠時怎麼辦？Grace Hash Join 的 <code>Batches</code></div>
+    <p>當優化器或執行器發現內層表建出的 Hash Table 超過 <code>work_mem</code>，並不會直接 OOM，而是把雜湊值切分成 <var>B</var> 個分區（例如 <code>Batches: 8</code>，必為 2 的次方）：第 1 批留在記憶體當場配對，第 2 到第 8 批的內層與外層 tuple 各自按雜湊分區寫進磁碟暫存檔，第一輪跑完再一桶一桶讀回來建表配對。代價是原本只讀一次的資料變成<strong>多一輪磁碟寫入＋讀取</strong>。在 <code>EXPLAIN ANALYZE</code> 裡看到 <code>Batches: 1</code> 代表全程在記憶體完成；看到 <code>Batches &gt; 1</code> 且伴隨 <code>temp read/written</code>，調高該查詢 session 的 <code>work_mem</code> 往往能立竿見影。</p>
+  </div>
+
+  <div class="oneliner">
+    <b>一句話答法</b>外層列數少且內層有索引時選 Indexed Nested Loop（啟動最快）；兩表都大且為等值條件時選 Hash Join（用小表建記憶體雜湊表、<var>O(M+N)</var> 掃過）；若兩側已具備索引順序、或大到 Hash Table 會嚴重溢寫磁碟時，選 Merge Join。
+  </div>
+</section>
+<section id="s4">
+  <div class="sec-head">
+    <span class="sec-num">04</span>
+    <h2>統計資訊與基數估計：Planner 的眼睛</h2>
+  </div>
+  <p class="sec-sub">優化器不會為了算成本先把表讀一遍；它所有的判斷都建立在抽樣統計的「猜測列數」上。</p>
+
+  <p>前面兩節反覆出現同一個關鍵詞：<strong>命中幾列</strong>。在優化器術語裡，一個節點預計輸出的列數稱為<strong>基數（Cardinality）</strong>，而條件留下的比例稱為<strong>選擇性（Selectivity）</strong>：</p>
+
+  <div class="formula">估計列數 (Estimated Rows) = 表總列數 (reltuples) × 選擇性 (Selectivity)</div>
+
+  <p>資料庫背景的 <code>ANALYZE</code>（或 <code>autovacuum</code>）會隨機抽樣固定數量的資料頁（PostgreSQL 在 <code>default_statistics_target = 100</code> 時抽樣 30,000 列），將以下四項摘要存進系統目錄（如 <code>pg_statistic</code>，可由檢視表 <code>pg_stats</code> 查詢）：</p>
+  <ul>
+    <li><strong>Null 比例（<code>null_frac</code>）</strong>：該欄為 <code>NULL</code> 的列佔比，算等值或範圍前先扣除。</li>
+    <li><strong>相異值數量（<code>n_distinct</code> / NDV）</strong>：正數代表估計有幾個不同值，負數（如 <code>-1</code>）代表相異值隨表長等比例成長（例如唯一主鍵）。</li>
+    <li><strong>高頻值清單（Most Common Values, MCV）與對應頻率（MCF）</strong>：專門抓傾斜分布（Skew）。例如 <code>status = 'PAID'</code> 佔 78%、<code>'CANCELLED'</code> 佔 19%、<code>'DISPUTED'</code> 佔 0.05%，查詢常數只要落在 MCV 名單內，優化器直接查表拿精確比例；不在名單內才用剩餘機率除以剩餘相異值數。</li>
+    <li><strong>等高直方圖（Equi-depth Histogram）</strong>：把排除 MCV 後的值排序切成 100 個桶，每桶裝幾乎一樣多的列。遇到 <code>amount BETWEEN 500 AND 2000</code> 這類範圍條件，數一數跨了幾個桶就能估出比例。</li>
+  </ul>
+
+  <div class="qp-split">
+    <div class="qp-pane bad">
+      <div class="pt">為什麼多欄位條件最容易估錯？</div>
+      <div class="ps">獨立性假設 (Independence Assumption)</div>
+      <p>預設統計都是<strong>逐欄獨立收集</strong>的。當查詢寫 <code>WHERE country = 'TW' AND currency = 'TWD'</code>，假設全表 <code>TW</code> 佔 <code>1/20</code>、<code>TWD</code> 也佔 <code>1/20</code>，優化器預設兩者獨立，直接相乘得出 <code>1/400</code>。</p>
+      <p>但現實中台灣訂單幾乎全用台幣，真實比例接近 <code>1/20</code>——<strong>基數當場被低估 20 倍</strong>。三個高度相關欄位連乘，低估幾百倍是家常便飯。</p>
+    </div>
+    <div class="qp-pane ok">
+      <div class="pt">怎麼修多欄位與表達式失真？</div>
+      <div class="ps">Extended Statistics &amp; Expression Index</div>
+      <p>PostgreSQL 10+ 提供 <code>CREATE STATISTICS s1 (dependencies, ndistinct, mcv) ON country, currency FROM orders;</code>，MySQL 8.0 也支援欄位直方圖與複合索引基數統計，讓優化器知道欄位間的函數依賴與聯合分布。</p>
+      <p>若是 <code>WHERE lower(email) = ?</code>，一般欄位統計完全不認得函式結果，優化器只能盲猜固定常數（如 <code>0.5%</code>）；建立表達式索引後再跑 <code>ANALYZE</code>，資料庫就會替該表達式單獨收集 MCV 與直方圖。</p>
+    </div>
+  </div>
+  <p class="cap">基數低估是慢查詢的頭號元兇：低估 100 倍會誘導優化器選出 Nested Loop，讓原本該一次掃完的 Hash Join 退化成十萬次隨機索引查找。</p>
+
+  <div class="callout warn">
+    <div class="c-title"><span class="ic">陷阱</span>綁定參數（Prepared Statement）看不到常數值時怎麼辦？</div>
+    <p>當 ORM 使用 <code>WHERE merchant_id = $1</code> 預編譯語句時，通用計畫（Generic Plan）在規劃當下不知道 <code>$1</code> 是佔全表 40% 的超大商戶，還是只有 3 筆訂單的小商戶，只能拿平均頻率去估——結果大商戶被塞進 Index Scan 跑死，或小商戶被迫跑全表掃描。PostgreSQL 12+ 採混合策略：前 5 次執行根據實際傳入參數量身打造 <strong>Custom Plan</strong>，第 6 次起比較通用計畫成本是否明顯較差，只有不吃虧時才切去快取的 Generic Plan（也可用 <code>plan_cache_mode</code> 強制指定）。</p>
+  </div>
+
+  <div class="oneliner">
+    <b>一句話答法</b>優化器靠 MCV 清單抓傾斜熱點、靠等高直方圖算範圍比例；它最脆弱的地方是「跨欄位預設獨立相乘」與「剛大批量寫入尚未 ANALYZE」，一旦基數被嚴重低估，後面上層的所有 Join 演算法都會跟著選錯。
+  </div>
+</section>
+
+<section id="s5">
+  <div class="sec-head">
+    <span class="sec-num">05</span>
+    <h2>讀懂 EXPLAIN ANALYZE：拆解成本、列數與迴圈倍數</h2>
+  </div>
+  <p class="sec-sub">看執行計畫不是從第一行往下唸，而是由內而外找「估計與實際差幾個數量級」以及「loops 乘了幾次」。</p>
+
+  <p>單純的 <code>EXPLAIN</code> 只問優化器「你打算怎麼跑」，不真正碰資料，耗時幾毫秒；加上 <code>ANALYZE</code>（MySQL 8.0.18+ 同為 <code>EXPLAIN ANALYZE</code>）則會<strong>真的把 SQL 跑完一遍</strong>，在每個算子旁邊同時印出「規劃時的預測」與「執行器的真實碼錶紀錄」。建議實務上一律加開緩衝區統計：<code>EXPLAIN (ANALYZE, BUFFERS)</code>。</p>
+
+  <div class="callout warn">
+    <div class="c-title"><span class="ic">陷阱</span>對 <code>UPDATE / DELETE / INSERT</code> 跑 <code>EXPLAIN ANALYZE</code> 會真的改資料！</div>
+    <p>因為 <code>ANALYZE</code> 會完整執行語句，測試寫入類慢查詢時務必包在交易裡：<code>BEGIN; EXPLAIN (ANALYZE, BUFFERS) DELETE FROM ...; ROLLBACK;</code>，否則診斷完資料也刪光了。</p>
+  </div>
+
+  <p>來看一段典型的線上慢查詢輸出，我們把文字樹逐層拆開對照：</p>
+
+  <div class="qp-stack">
+    <div class="qp-lv">
+      <div class="hd">Nested Loop  (cost=0.85..48.20 rows=6 width=128) (actual time=0.09..1842.60 ms rows=94500 loops=1)<span class="qp-badge bad">估 6 列 vs 實 94,500 列</span></div>
+      <div class="meta-ln">Buffers: shared hit=291400 read=62180</div>
+      <div class="note-ln">頂層節點的 <code>actual time</code> 右側數字（1842.60 ms）包含所有子節點時間。問題不在這層本身，在下面兩個子節點的乘積。</div>
+    </div>
+    <div class="qp-lv indent-1 hot">
+      <div class="hd">-> Index Scan using idx_orders_region_tier on orders  (cost=0.42..16.50 rows=3 width=72) (actual time=0.05..28.40 ms rows=31500 loops=1)<span class="qp-badge bad">禍首：低估 10,500 倍</span></div>
+      <div class="meta-ln">Index Cond: ((region = 'APAC') AND (tier = 'PRO'))</div>
+      <div class="note-ln">跨欄位相關性導致 Planner 以為外層只吐 3 列，信心滿滿選了 Nested Loop；實際吐出 31,500 列，雖然這步本身只花 28 ms，卻把災難傳給了內層。</div>
+    </div>
+    <div class="qp-lv indent-1 hot">
+      <div class="hd">-> Index Scan using idx_items_order_id on order_items  (cost=0.43..10.54 rows=2 width=56) (actual time=0.01..0.055 ms rows=3 loops=31500)<span class="qp-badge bad">0.055 ms × 31,500 圈 = 1,732 ms</span></div>
+      <div class="meta-ln">Index Cond: (order_id = orders.id) ｜ Filter: (refunded = false) ｜ Rows Removed by Filter: 1</div>
+      <div class="note-ln"><strong>關鍵讀法：<code>actual time</code> 與 <code>rows</code> 都是「單圈平均值」！</strong>單圈 0.055 ms 看似神速，乘上 <code>loops=31500</code> 就吃掉 1.73 秒與 35 萬次頁讀取。</div>
+    </div>
+  </div>
+  <p class="cap">讀樹四口訣：① 先看最內層葉節點誰先啟動；② 對比預計 <code>rows=</code> 與實際 <code>rows=</code> 是否差超過 10 倍；③ 任何內層節點的真實總耗時與總列數都要<strong>乘上 <code>loops</code></strong>；④ 看 <code>Buffers: shared hit / read</code> 與 <code>Rows Removed by Filter</code> 抓白工。</p>
+
+  <pre class="mermaid">
+sequenceDiagram
+    participant P as Root (Nested Loop)
+    participant O as Outer: Scan orders
+    participant I as Inner: Scan order_items
+    P->>O: Next() 取外層第 1 列
+    O-->>P: order_id = 1042
+    P->>I: ReScan(1042) 第 1 圈
+    I-->>P: 吐回 3 筆明細
+    Note over P,I: 外層實際有 31,500 列，上述往返重複 loops=31,500 次！
+    P->>O: Next() 取第 31,501 列
+    O-->>P: EOF 結束
+  </pre>
+  <p class="cap">火山模型（Volcano / Iterator Model）中上層算子呼叫子節點的 <code>Next()</code> 拉取資料；Nested Loop 內層每換一筆外層列就觸發一次 <code>ReScan</code>，這就是 <code>loops</code> 的物理意義。</p>
+
+  <div class="qp-sub">BUFFERS 與 Filter 欄位透露的硬體真相</div>
+  <ul>
+    <li><strong><code>shared hit</code> vs <code>shared read</code></strong>：<code>hit</code> 代表頁已在資料庫共享記憶體（Shared Buffers）中命中，只需幾百奈秒；<code>read</code> 代表向作業系統發起讀取（可能命中 OS Page Cache，也可能真的打到 SSD/磁碟）。第一次跑慢、第二次跑飛快，看這兩個數字一秒就能證實是冷快取效應而非計畫變了。</li>
+    <li><strong><code>Index Cond</code> vs <code>Filter</code></strong>：<code>Index Cond</code> 是在 B+Tree 導航與葉頁上直接界定範圍；<code>Filter</code> 則是<strong>已經把整列抓回來（含回表）之後才丟掉</strong>。若 <code>Rows Removed by Filter: 980000</code> 而最終只留 <code>rows=20</code>，代表索引缺了關鍵過濾欄，九成九的回表都是白工。</li>
+    <li><strong>MySQL EXPLAIN 對照速查</strong>：MySQL 傳統表格格式的 <code>type</code> 欄由好到壞依序是 <code>system/const</code>（主鍵唯一命中 1 列）▸ <code>eq_ref</code>（Join 時內層走主鍵/唯一索引每圈必只中 1 列）▸ <code>ref</code>（非唯一索引等值查找）▸ <code>range</code>（索引範圍）▸ <code>index</code>（掃整棵索引樹葉鏈）▸ <code>ALL</code>（全表掃描）；<code>Extra</code> 出現 <code>Using filesort</code> 代表無法借索引序被迫額外排序，<code>Using temporary</code> 代表建了記憶體或磁碟暫存表。</li>
+  </ul>
+
+  <div class="oneliner">
+    <b>一句話答法</b>讀 EXPLAIN ANALYZE 先抓「估計列數 vs 實際列數」差一個數量級以上的節點，再把子節點的單圈時間與列數乘上 <code>loops</code> 算真實總開銷，最後看 <code>Rows Removed by Filter</code> 與 <code>Buffers: read / temp written</code> 定位 I/O 浪費在哪裡。
+  </div>
+</section>
+
+<section id="s6">
+  <div class="sec-head">
+    <span class="sec-num">06</span>
+    <h2>互動：Query Planner 成本與演算法選擇模擬器</h2>
+  </div>
+  <p class="sec-sub">親手撥動列數、選擇性、聚簇相關係數、索引條件與 work_mem，看優化器在哪個臨界點切換掃描與 Join 策略。</p>
+
+  <p>模擬一條雙表查詢：<code>SELECT ... FROM orders o JOIN order_items i ON i.order_id = o.id WHERE o.created_at ...</code>。左側調整統計參數與環境配置，右側 <code>computePlanner()</code> 會以簡化但忠於 PostgreSQL CBO 物理結構的公式（<code>seq_page_cost=1.0</code>、<code>random_page_cost=4.0</code>、<code>cpu_tuple_cost=0.01</code>），即時計算<strong>四種外層單表掃描成本</strong>與<strong>三種雙表 Join 總成本</strong>，標出優化器選出的勝出計畫，並模擬「若統計過期低估外層列數時，誤選計畫在真實流量下的代價」。</p>
+
+  <div class="demo" id="demo-planner">
+    <div class="demo-bar">
+      <span class="label">互動 · Cost-Based Query Planner 掃描儀</span>
+      <span class="label" style="text-transform:none;font-family:var(--sans);font-size:12px;color:var(--text-2)">拖動滑桿或切換索引配置，即時重算各路徑成本與勝出執行樹</span>
+    </div>
+    <div class="demo-body">
+      <div class="pl-grid">
+        <div class="pl-ctl">
+          <div class="pl-fld">
+            <div class="pl-lbl"><span>外層表 orders 列數</span><b id="pl-outer-v">200,000</b></div>
+            <input type="range" id="pl-outer" min="10000" max="1000000" step="10000" value="200000">
+          </div>
+          <div class="pl-fld">
+            <div class="pl-lbl"><span>內層表 items 列數</span><b id="pl-inner-v">800,000</b></div>
+            <input type="range" id="pl-inner" min="20000" max="2000000" step="20000" value="800000">
+          </div>
+          <div class="pl-fld">
+            <div class="pl-lbl"><span>WHERE 實際選擇性</span><b id="pl-sel-v">0.8%</b></div>
+            <input type="range" id="pl-sel" min="1" max="500" step="1" value="8">
+          </div>
+          <div class="pl-fld">
+            <div class="pl-lbl"><span>實體聚簇 correlation</span><b id="pl-corr-v">0.15</b></div>
+            <input type="range" id="pl-corr" min="0" max="100" step="5" value="15">
+          </div>
+          <div class="pl-fld">
+            <div class="pl-lbl"><span>work_mem 上限</span><b id="pl-mem-v">16 MB</b></div>
+            <input type="range" id="pl-mem" min="2" max="128" step="2" value="16">
+          </div>
+          <div class="pl-fld">
+            <div class="pl-lbl"><span>統計估計偏差（Planner 以為的倍率）</span><b id="pl-est-v">1.0x（準確）</b></div>
+            <input type="range" id="pl-est" min="1" max="5" step="1" value="3">
+          </div>
+
+          <div class="pl-seg-wrap">
+            <span class="pl-lbl"><span>外層索引狀態</span></span>
+            <div class="seg" role="group" aria-label="外層索引狀態" id="pl-outer-idx">
+              <button type="button" data-oidx="none" aria-pressed="false">無索引</button>
+              <button type="button" data-oidx="idx" aria-pressed="true">一般索引</button>
+              <button type="button" data-oidx="cov" aria-pressed="false">覆蓋索引</button>
+            </div>
+          </div>
+
+          <div class="pl-seg-wrap">
+            <span class="pl-lbl"><span>內層 Join 鍵狀態</span></span>
+            <div class="seg" role="group" aria-label="內層索引狀態" id="pl-inner-idx">
+              <button type="button" data-iidx="none" aria-pressed="false">無索引</button>
+              <button type="button" data-iidx="idx" aria-pressed="true">B+Tree 索引</button>
+              <button type="button" data-iidx="sorted" aria-pressed="false">雙邊已排序索引</button>
+            </div>
+          </div>
+
+          <div class="pl-foot">
+            <button type="button" class="btn" id="pl-reset">Reset 預設情境</button>
+          </div>
+        </div>
+
+        <div class="pl-main">
+          <div class="pl-kpis">
+            <div class="pl-kpi ok" id="pl-kpi-scan-box">
+              <span class="k">勝出外層掃描算子</span>
+              <b id="pl-win-scan">—</b>
+              <span class="s" id="pl-win-scan-sub">—</span>
+            </div>
+            <div class="pl-kpi ok" id="pl-kpi-join-box">
+              <span class="k">勝出雙表 Join 演算法</span>
+              <b id="pl-win-join">—</b>
+              <span class="s" id="pl-win-join-sub">—</span>
+            </div>
+            <div class="pl-kpi" id="pl-kpi-err-box">
+              <span class="k">統計偏差造成的真實成本代價</span>
+              <b id="pl-err-ratio">—</b>
+              <span class="s" id="pl-err-sub">—</span>
+            </div>
+          </div>
+
+          <div class="pl-panel">
+            <div class="pl-panel-hd">
+              <span class="tt">① 單表掃描候選成本比對（依 Planner 估計值排序決策）</span>
+              <span class="sub" id="pl-scan-note">—</span>
+            </div>
+            <div class="pl-bars" id="pl-scan-bars"></div>
+          </div>
+
+          <div class="pl-panel">
+            <div class="pl-panel-hd">
+              <span class="tt">② 雙表 Join 演算法總成本比對（含外層掃描 ＋ 記憶體溢寫懲罰）</span>
+              <span class="sub" id="pl-join-note">—</span>
+            </div>
+            <div class="pl-bars" id="pl-join-bars"></div>
+          </div>
+
+          <div class="pl-panel">
+            <div class="pl-panel-hd">
+              <span class="tt">③ 模擬產出之 EXPLAIN (ANALYZE, BUFFERS) 執行樹</span>
+              <span class="sub">對照 cost/rows（估計）與 actual rows/loops</span>
+            </div>
+            <pre class="pl-explain" id="pl-explain-out"></pre>
+          </div>
+        </div>
+      </div>
+
+      <div class="legend">
+        <span><i class="dot ns-ok"></i>Planner 選定之最低估計成本路徑</span>
+        <span><i class="dot ns-wait"></i>落選但合法的備選算子</span>
+        <span><i class="dot ns-lock"></i>超過 work_mem 觸發磁碟分批 / Lossy 退化</span>
+      </div>
+      <div class="status-line" id="pl-status">載入中…</div>
+    </div>
+  </div>
+  <p class="cap">橫條長度代表各候選算子在 Planner 眼中的估計 cost units。試著把選擇性從 0.2% 慢慢拉到 35%，觀察單表如何走過 Index Scan ▸ Bitmap Heap Scan ▸ Seq Scan 三段切換，以及 Join 如何從 Nested Loop 翻轉成 Hash Join。</p>
+
+  <p>建議動手驗證這四個面試經典轉折點：</p>
+  <ol>
+    <li><strong>選擇性三段跳</strong>：保持預設（correlation 0.15、一般索引），把「WHERE 實際選擇性」設在 <code>0.2%</code> 時 <code>Index Scan + Nested Loop</code> 大勝；拉到 <code>5%</code> 左右，隨機回表太貴，單表切為 <code>Bitmap Heap Scan</code>、Join 切為 <code>Hash Join</code>；繼續拉過 <code>25%</code>，直接變成 <code>Seq Scan + Hash Join</code>。</li>
+    <li><strong>聚簇係數救回 Index Scan</strong>：在選擇性 <code>5%</code> 時原本走 Bitmap Scan；把「實體聚簇 correlation」拉到 <code>0.95</code>（代表資料幾乎照索引順序存放），<code>Index Scan</code> 回表變成近似循序讀，立刻重新奪回冠軍。</li>
+    <li><strong>work_mem 不足引發 Hash Spill</strong>：把內層表拉到 <code>1,600,000</code> 列、<code>work_mem</code> 壓低到 <code>4 MB</code>，觀察 Hash Join 橫條變成橘色並顯示 <code>Batches &gt; 1</code>；若切到「雙邊已排序索引」，免排序的 <code>Merge Join</code> 完全不吃 Hash 記憶體，反超勝出。</li>
+    <li><strong>統計過期低估災難</strong>：把選擇性設在 <code>12%</code>（實際 24,000 列），正常該跑 <code>Hash Join</code>；接著把「統計估計偏差」往左拉到 <code>0.02x（低估 50 倍）</code>，Planner 以為外層只有幾百列而誤選 <code>Nested Loop</code>，右上角會直接算出真實執行成本比最佳計畫暴增數倍。</li>
+  </ol>
+
+  <div class="oneliner">
+    <b>一句話答法</b>沒有哪種掃描或 Join 永遠最快：低選擇性＋內層索引屬於 Index Scan 與 Nested Loop，中高選擇性屬於 Bitmap/Seq Scan 與 Hash Join，預先排好序或記憶體受限時則是 Merge Join 的主場。
+  </div>
+</section>
+<section id="s7">
+  <div class="sec-head">
+    <span class="sec-num">07</span>
+    <h2>三大實務慢查詢模式：N+1、OFFSET 深分頁與統計過期</h2>
+  </div>
+  <p class="sec-sub">很多拖垮資料庫的慢查詢，單看每一條 EXPLAIN 都走了索引，甚至毫秒級返回。</p>
+
+  <div class="qp-sub">1. N+1 查詢：把資料庫內的批次 Hash/Index Join 拆成網路上的迴圈</div>
+  <p>ORM 預設的 Lazy Loading（延遲載入）最容易製造這種隱形殺手：先跑 1 條 <code>SELECT * FROM orders LIMIT 50</code>，接著在應用程式的 <code>for</code> 迴圈裡，每次讀 <code>order.items</code> 就觸發 1 條 <code>SELECT * FROM order_items WHERE order_id = ?</code>，總共打出 <code>1 + 50 = 51</code> 次獨立 SQL。</p>
+  <p>為什麼危險？因為單條子查詢走主鍵或外鍵索引只要 <code>0.3 ms</code>，根本不會進資料庫的 Slow Query Log（門檻常設 <code>200 ms</code> 或 <code>1 s</code>）！但應用程式到資料庫每次跨網路往返（RTT）加協定解析就要 <code>0.8–1.5 ms</code>，50 圈串行累加就是 <code>60–90 ms</code>；列表頁若是 200 筆再套兩層關聯，一個 API 請求就會打出 400 條 SQL、連線池瞬間被佔滿。</p>
+  <ul>
+    <li><strong>修法 A（預先批次載入 `WHERE id IN (...)` / DataLoader）</strong>：外層撈出 50 個 <code>order_id</code> 後，合併成單條 <code>WHERE order_id = ANY($1)</code>。資料庫只付 2 次網路 RTT，且內部能用 Bitmap/Index Scan 一次排好抓回。</li>
+    <li><strong>修法 B（單條 `JOIN` 查詢）</strong>：當需要依子表欄位過濾或排序時直接寫 SQL <code>JOIN</code>，交給優化器在同一個記憶體空間跑 Nested Loop 或 Hash Join；但若一對多比例極懸殊，要注意父表欄位重複傳輸造成的網路封包膨脹。</li>
+  </ul>
+
+  <div class="qp-sub">2. OFFSET 深分頁：越往後翻越慢的「讀完再丟」陷阱</div>
+  <p>傳統分頁寫 <code>SELECT id, title FROM posts ORDER BY created_at DESC, id DESC LIMIT 20 OFFSET 100000</code>。即使 <code>(created_at, id)</code> 上有完美的複合索引，B+Tree 節點預設並不會記載「子樹底下有幾筆對當前 MVCC 快照可見的列」（因為不同並行交易看到的可見列數都不同）。</p>
+  <p>結果執行器別無選擇：它必須老老實實從第 1 筆定位，沿著索引與資料頁<strong>取出前 100,020 列、逐筆檢查可見性、把前 100,000 列直接丟進垃圾桶</strong>，只留下最後 20 列回傳。翻到第 5,000 頁的成本是第 1 頁的五千倍，爬蟲或匯出排程往後翻頁時直接把資料庫 I/O 打爆。</p>
+
+  <div class="qp-split">
+    <div class="qp-pane bad">
+      <div class="pt">延遲關聯（Deferred Join）：只能治標一半</div>
+      <div class="ps">子查詢先走 Covering Index 再回表 20 次</div>
+      <p>改寫為 <code>SELECT p.* FROM posts p JOIN (SELECT id FROM posts ORDER BY created_at DESC, id DESC LIMIT 20 OFFSET 100000) t USING (id)</code>。</p>
+      <p>這省下了前 100,000 筆的<strong>隨機回表</strong>，讓子查詢只掃輕量的覆蓋索引葉鏈，通常能快 5–10 倍；但索引葉鏈掃描本身仍是 <var>O(OFFSET)</var>，百萬級深分頁依然會慢。</p>
+    </div>
+    <div class="qp-pane ok">
+      <div class="pt">Keyset / Cursor 分頁（Seek Method）：真正的 O(log N)</div>
+      <div class="ps">記住上一頁最後一筆的座標當起點</div>
+      <p>前端帶回上一頁最末筆的 <code>(last_ts, last_id)</code>，改查 <code>WHERE (created_at, id) &lt; ($last_ts, $last_id) ORDER BY created_at DESC, id DESC LIMIT 20</code>。</p>
+      <p>B+Tree 直接下探定位到游標旁，往後連讀 20 筆即停，<strong>丟棄列數永遠是 0</strong>，第 1 頁與第 50,000 頁一樣只要 1–2 毫秒。唯一必須遵守的鐵律是<strong>排序鍵必須唯一</strong>（時間欄一定要補上唯一 <code>id</code> 當平手決勝欄 tie-breaker），否則同秒鐘的多筆紀錄會在翻頁邊界漏掉或重複。代價是無法隨機跳去「第 372 頁」，適合無限滾動、歷史時間軸與批次匯出。</p>
+    </div>
+  </div>
+  <p class="cap">OFFSET 是「數人頭跳過」，成本隨頁碼線性惡化；Keyset 是「拿書籤直接翻開」，成本與頁碼完全脫鉤。</p>
+
+  <div class="qp-sub">3. 統計過期造成計畫突變（Plan Flip / Plan Regression）</div>
+  <p>為什麼同一條 SQL 昨天跑 <code>5 ms</code>，今天凌晨突然飆到 <code>40 秒</code>，而且沒人改程式碼？常見劇本有三種：</p>
+  <ol>
+    <li><strong>冷熱水位劇變（佇列表／狀態表反模式）</strong>：一張 <code>job_queue</code> 表平時 <code>status = 'PENDING'</code> 只有幾十筆，<code>autovacuum / ANALYZE</code> 剛好在低水位時跑過，Catalog 記下「PENDING 佔 0.01%」。促銷整點瞬間湧入 30 萬筆 PENDING，<code>autovacuum_analyze_scale_factor</code>（預設變動滿 10% 才觸發背景重算，大表上可能要等很久）還沒來得及更新，優化器仍拿舊統計選 Nested Loop。</li>
+    <li><strong>自增時間欄超出直方圖右邊界（Out-of-Range Predicate）</strong>：直方圖紀錄的最大 <code>created_at</code> 是昨天半夜 <code>23:50</code>。今天早上查詢 <code>WHERE created_at &gt;= '今天 09:00'</code>，落在直方圖已知上限之外！優化器會以為幾乎沒資料（估成 <code>rows=1</code>），一旦這條結果被拿去當 Nested Loop 的外層驅動表，後面串接的所有大表就會被循環狂掃數萬次。</li>
+    <li><strong>大批量匯入後立刻跑報表</strong>：ETL 剛灌進 500 萬列，在同一條腳本下一行馬上跑複雜聚合 JOIN，此時背景統計執行緒根本還沒排程進場。<strong>工程鐵律：任何大批次 <code>COPY / INSERT / DELETE</code> 結束後，在應用程式流程主動執行一次手動 <code>ANALYZE table_name;</code></strong>（它只抽樣讀幾萬列、不鎖讀寫，通常一兩秒就跑完）。</li>
+  </ol>
+
+  <div class="oneliner">
+    <b>一句話答法</b>N+1 死在網路往返累加而非單條慢查詢，用 IN 批次或 JOIN 根治；OFFSET 深分頁死在必須讀完並丟棄前 N 列，用帶唯一 tie-breaker 的 Keyset 游標化為常數時間；統計過期常發生在時間超出直方圖上界或批次灌資料後，主動 ANALYZE 與調低單表抽樣觸發門檻是標準防線。
+  </div>
+</section>
+
+<section id="s8">
+  <div class="sec-head">
+    <span class="sec-num">08</span>
+    <h2>互動：OFFSET 深分頁 vs Keyset 游標分頁與 N+1 放大效應</h2>
+  </div>
+  <p class="sec-sub">同一組頁碼、每頁筆數與關聯載入策略，左右並排比較丟棄列數、讀頁數與端到端回應時間。</p>
+
+  <p>調整下方總列數、目標頁碼與每頁筆數，並切換子表關聯的抓取方式（Lazy N+1 逐筆查 vs <code>WHERE IN</code> 批次預載），<code>computePagination()</code> 會同時算出傳統 <code>OFFSET</code>、<code>Deferred Join（覆蓋索引延遲回表）</code> 與 <code>Keyset Cursor</code> 的掃描與網路成本：</p>
+
+  <div class="demo" id="demo-paging">
+    <div class="demo-bar">
+      <span class="label">互動 · 分頁架構與 N+1 並排對照台</span>
+      <span class="label" style="text-transform:none;font-family:var(--sans);font-size:12px;color:var(--text-2)">同一組查詢條件同時餵給 OFFSET 與 Keyset 面板</span>
+    </div>
+    <div class="demo-body">
+      <div class="pg-ctl">
+        <div class="pg-fld">
+          <div class="pg-lbl"><span>資料表總列數</span><b id="pg-total-v">1,000,000</b></div>
+          <input type="range" id="pg-total" min="100000" max="5000000" step="100000" value="1000000">
+        </div>
+        <div class="pg-fld">
+          <div class="pg-lbl"><span>翻到第幾頁 (Page #)</span><b id="pg-page-v">第 2,000 頁</b></div>
+          <input type="range" id="pg-page" min="1" max="10000" step="1" value="2000">
+        </div>
+        <div class="pg-fld">
+          <div class="pg-lbl"><span>每頁筆數 (Page Size)</span><b id="pg-size-v">25 筆</b></div>
+          <input type="range" id="pg-size" min="10" max="100" step="5" value="25">
+        </div>
+        <div class="pg-fld">
+          <div class="pg-lbl"><span>應用至 DB 單趟網路 RTT</span><b id="pg-rtt-v">1.2 ms</b></div>
+          <input type="range" id="pg-rtt" min="2" max="50" step="2" value="12">
+        </div>
+      </div>
+
+      <div class="pg-seg-line">
+        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+          <span style="font-family:var(--mono);font-size:11.5px;color:var(--text-2)">每筆訂單附帶明細載入方式</span>
+          <div class="seg" role="group" aria-label="關聯載入策略" id="pg-assoc">
+            <button type="button" data-assoc="batch" aria-pressed="true">WHERE IN 批次 (2 SQL)</button>
+            <button type="button" data-assoc="nplus1" aria-pressed="false">ORM Lazy N+1 (1+K SQL)</button>
+          </div>
+        </div>
+        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+          <span style="font-family:var(--mono);font-size:11.5px;color:var(--text-2)">左欄 OFFSET 寫法</span>
+          <div class="seg" role="group" aria-label="OFFSET 變體" id="pg-offmode">
+            <button type="button" data-off="naive" aria-pressed="true">直接 SELECT * OFFSET</button>
+            <button type="button" data-off="deferred" aria-pressed="false">Deferred Join 延遲回表</button>
+          </div>
+          <button type="button" class="btn" id="pg-reset">Reset</button>
+        </div>
+      </div>
+
+      <div class="pg-cols">
+        <div class="pg-card bad" id="pg-card-left">
+          <div class="pg-card-hd">
+            <span class="nm" id="pg-left-title">傳統 OFFSET 分頁</span>
+            <span class="tag-sm" id="pg-left-tag">O(OFFSET + K)</span>
+          </div>
+          <pre class="pg-sql" id="pg-left-sql"></pre>
+          <div>
+            <div class="pg-strip-lbl" id="pg-left-strip-lbl">掃描與丟棄比例</div>
+            <div class="pg-strip">
+              <div class="pg-seg-skip" id="pg-left-skip" style="width:50%"></div>
+              <div class="pg-seg-take" id="pg-left-take" style="width:2%"></div>
+            </div>
+          </div>
+          <div class="pg-metrics">
+            <div class="pg-m bad"><span class="k">掃過後丟棄列數</span><b id="pg-l-discard">—</b></div>
+            <div class="pg-m bad"><span class="k">B+Tree / 表邏輯讀頁</span><b id="pg-l-pages">—</b></div>
+            <div class="pg-m"><span class="k">SQL 往返次數</span><b id="pg-l-rt">—</b></div>
+            <div class="pg-m bad"><span class="k">預估端到端延遲</span><b id="pg-l-lat">—</b></div>
+          </div>
+        </div>
+
+        <div class="pg-card ok" id="pg-card-right">
+          <div class="pg-card-hd">
+            <span class="nm">Keyset / Cursor 游標分頁</span>
+            <span class="tag-sm">O(log N + K)</span>
+          </div>
+          <pre class="pg-sql" id="pg-right-sql"></pre>
+          <div>
+            <div class="pg-strip-lbl" id="pg-right-strip-lbl">B+Tree 直接下探游標起點</div>
+            <div class="pg-strip">
+              <div class="pg-seg-seek" id="pg-right-seek" style="width:3%"></div>
+              <div class="pg-seg-take" id="pg-right-take" style="width:2%"></div>
+            </div>
+          </div>
+          <div class="pg-metrics">
+            <div class="pg-m ok"><span class="k">掃過後丟棄列數</span><b id="pg-r-discard">0 列</b></div>
+            <div class="pg-m ok"><span class="k">B+Tree / 表邏輯讀頁</span><b id="pg-r-pages">—</b></div>
+            <div class="pg-m"><span class="k">SQL 往返次數</span><b id="pg-r-rt">—</b></div>
+            <div class="pg-m ok"><span class="k">預估端到端延遲</span><b id="pg-r-lat">—</b></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="legend">
+        <span><i class="dot ns-bad"></i>OFFSET 被迫讀出又丟棄的前綴範圍</span>
+        <span><i class="dot ns-wait"></i>B+Tree 樹高定位（3–4 頁固定開銷）</span>
+        <span><i class="dot ns-ok"></i>真正取回並渲染的當頁 K 筆資料</span>
+      </div>
+      <div class="status-line" id="pg-status">載入中…</div>
+    </div>
+  </div>
+  <p class="cap">試著做兩個實驗：① 把頁碼從第 1 頁拉到第 8,000 頁，觀察右側 Keyset 讀頁數紋風不動，左側 OFFSET 讀頁數直線飆升；② 把頁碼拉回第 1 頁，但切換成「ORM Lazy N+1」並把每頁筆數拉到 100 筆、RTT 拉到 3 ms，會看到就算用了 Keyset，端到端延遲照樣被 101 次網路往返拖到數百毫秒。</p>
+
+  <div class="oneliner">
+    <b>一句話答法</b>Keyset 分頁解決的是資料庫內部的深頁碼掃描浪費，批次預載（IN / JOIN）解決的是應用與資料庫之間的 N+1 往返浪費；高吞吐列表 API 兩者缺一不可。
+  </div>
+</section>
+
+<section id="s9">
+  <div class="sec-head">
+    <span class="sec-num">09</span>
+    <h2>線上慢查詢診斷與安全調校 SOP</h2>
+  </div>
+  <p class="sec-sub">不要看到慢查詢就反射性亂加索引或硬塞 Optimizer Hint；照固定順序排查才能治本且不留技術債。</p>
+
+  <p>當監控系統（如 PostgreSQL 的 <code>pg_stat_statements</code> 或 MySQL 的 Performance Schema / Slow Query Log）抓出總耗時最高的前五名 SQL 時，建議按這套由淺入深的五步清單執行：</p>
+
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>排查步驟</th>
+          <th>觀察指標（EXPLAIN ANALYZE）</th>
+          <th>根因判讀</th>
+          <th>標準工程處置（優先級由高到低）</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><strong>① 對帳基數估計</strong></td>
+          <td>預計 <code>rows</code> 與實際 <code>actual rows</code> 差距 &gt; 10x</td>
+          <td>統計過期、直方圖顆粒度太粗，或多欄位強相關違反獨立假設</td>
+          <td>跑 <code>ANALYZE tbl</code> ▸ 調高熱點欄位 <code>ALTER TABLE ... ALTER COLUMN c SET STATISTICS 1000</code> ▸ 建多欄位 <code>CREATE STATISTICS</code></td>
+        </tr>
+        <tr>
+          <td class="hl"><strong>② 檢查過濾白工</strong></td>
+          <td class="hl"><code>Rows Removed by Filter</code> 遠大於最終輸出列數</td>
+          <td class="hl">索引只涵蓋部分條件，大量無關列回表後才被篩掉；或欄位被函式包住</td>
+          <td class="hl">補齊複合索引等值欄、把高頻查詢改為 Covering Index（<code>INCLUDE</code>），或改寫 SARGable 條件（見資料庫索引原理篇）</td>
+        </tr>
+        <tr>
+          <td><strong>③ 檢查記憶體溢寫</strong></td>
+          <td>Hash Join <code>Batches &gt; 1</code>、Sort 出現 <code>external merge Disk</code>、Bitmap 出現 <code>lossy</code></td>
+          <td>單算子可用的 <code>work_mem</code> / <code>sort_buffer_size</code> 小於工作集</td>
+          <td>針對該報表連線或交易局部調高 <code>SET LOCAL work_mem = '64MB'</code>（切忌無腦調高全域設定，因每個並行算子都會乘上一份！）</td>
+        </tr>
+        <tr>
+          <td class="hl"><strong>④ 校準硬體成本常數</strong></td>
+          <td class="hl">統計完全準確，但 SSD 環境仍死守 Seq Scan 拒走好索引</td>
+          <td class="hl">預設 <code>random_page_cost = 4.0</code> 是機械硬碟時代的比值，高估了隨機讀代價</td>
+          <td class="hl">在 NVMe / 雲端 SSD 上將 <code>random_page_cost</code> 調至 <code>1.1–1.5</code>，並如實設定 <code>effective_cache_size</code>（約系統記憶體 50%–75%）</td>
+        </tr>
+        <tr>
+          <td><strong>⑤ 最後手段：Hint</strong></td>
+          <td>跨複雜 CTE / 特殊邊界分布，優化器受限模型結構始終選錯</td>
+          <td>CBO 代數模型盲區（如複雜子查詢展開或特定版本限制）</td>
+          <td>MySQL 8.0 <code>/*+ HASH_JOIN(t1, t2) */</code> 或 PG 擴充套件 <code>pg_hint_plan</code>；<strong>必須寫註解壓單號並排程追蹤</strong>，避免日後資料長大反而鎖死爛計畫</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="cap">調校鐵律：先餵給優化器正確的事實（統計資訊與硬體成本比），讓它自己算出好計畫；只有當它看對事實仍算錯決策時，才人工介入綁死執行路徑。</p>
+
+  <div class="callout warn">
+    <div class="c-title"><span class="ic">陷阱</span>千萬別在測試機 500 筆假資料上驗收 EXPLAIN！</div>
+    <p>這是後端團隊最常踩的部署事故：工程師在本地開發庫（只有 500 列）跑 <code>EXPLAIN</code>，看到 <code>Seq Scan</code> 以為索引壞了，硬改語法或硬塞 Hint；殊不知一張只佔 4 個磁碟頁的小表，走 <code>Seq Scan</code> 讀 4 頁本來就比「先讀索引 2 頁再回表讀 3 頁」更快！<strong>執行計畫隨資料規模與值分布動態變化</strong>，驗收查詢計畫必須在等比例資料量與真實分布的 Staging 環境（或生產唯讀副本）上進行。</p>
+  </div>
+
+  <div class="oneliner">
+    <b>一句話答法</b>線上慢查詢排查依序看：① 估計與實際列數落差（修統計）▸ ② Filter 丟棄列數（修索引與語法）▸ ③ Disk Spill 與 Lossy 區塊（局部調 work_mem）▸ ④ SSD 隨機讀成本參數；Optimizer Hint 永遠放最後一招。
+  </div>
+</section>
+
+<section id="s10">
+  <div class="sec-head">
+    <span class="sec-num">10</span>
+    <h2>面試答題框架</h2>
+  </div>
+  <p class="sec-sub">遇到「線上某支 API 突然變慢，怎麼查 SQL？」或「三種 Join 怎麼選？」，用結構化因果鏈拿滿分。</p>
+
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr><th>高頻面試追問</th><th>高分答題骨架</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><strong>Nested Loop、Hash Join、Merge Join 各在什麼時候勝出？</strong></td>
+          <td>先看等值限制，再看資料量與排序：① <strong>外層過濾後列數少＋內層 Join 鍵有索引</strong> → Indexed Nested Loop（啟動成本最低、配 LIMIT 最強）；② <strong>兩表都大＋等值條件＋無現成排序</strong> → Hash Join（小表建記憶體雜湊表、<var>O(M+N)</var> 掃過，留意 <code>work_mem</code> 溢寫分批）；③ <strong>兩側已有 B+Tree 排序或結果需要該順序、或表大到 Hash 嚴重爆記憶體，以及部分範圍配對</strong> → Merge Join。</td>
+        </tr>
+        <tr>
+          <td><strong>有建索引、語法也沒失效，為什麼資料庫還是走全表掃描？</strong></td>
+          <td>因為優化器算的是總頁數與隨機 I/O 成本：當條件選擇性不夠高（例如命中 20%）、且實體存放散亂（低 correlation）時，走索引再隨機回表數萬次的成本遠高於循序預讀掃過全表；或是表本身極小只佔幾頁。中間地帶資料庫常改選 <strong>Bitmap Heap Scan</strong> 先把 TID 按頁號排好再讀。</td>
+        </tr>
+        <tr>
+          <td><strong>給你一份 EXPLAIN ANALYZE，你第一眼看哪裡？</strong></td>
+          <td>四步：① 由最內層節點往外看誰耗時佔比最高（記得扣掉子節點時間）；② 比對每個節點的預計 <code>rows</code> 與 <code>actual rows</code> 是否差一個數量級以上（抓基數估錯引發的錯誤 Nested Loop）；③ 將內層單圈 <code>actual time</code> 與 <code>rows</code> 乘上 <code>loops</code> 還原真實總量；④ 看 <code>Rows Removed by Filter</code>、<code>Heap Fetches</code> 與 <code>Buffers: read / temp written</code>。</td>
+        </tr>
+        <tr>
+          <td><strong>昨天很快的 SQL 今天沒改版卻突然超時，可能原因？</strong></td>
+          <td>典型「計畫突變（Plan Flip）」：① 大批寫入/刪除後尚未 <code>ANALYZE</code>，統計過期；② 查詢時間窗跨出直方圖右邊界被估成 1 列，觸發災難性 Nested Loop；③ 綁定參數快取到為小客戶生成的 Generic/Custom Plan 卻套在大租戶（Data Skew）上；④ 資料量跨過 <code>work_mem</code> 臨界點開始磁碟 Spill。</td>
+        </tr>
+        <tr>
+          <td><strong>百萬筆列表翻到第 5,000 頁很慢，怎麼設計？</strong></td>
+          <td>指出 <code>OFFSET 100000</code> 必須實際掃過並做 MVCC 可見性檢查再丟棄前十萬列，複雜度 <var>O(OFFSET)</var>。產品允許上下頁或無限滾動時，改用 <strong>Keyset / Cursor 分頁</strong> <code>WHERE (created_at, id) &lt; (?, ?) ORDER BY created_at DESC, id DESC LIMIT 20</code>（強調唯一平手欄位 <code>id</code> 防漏列），壓回 <var>O(log N)</var>；若產品硬性要求跳頁碼，則限制最大可翻頁深（如前 100 頁）搭配覆蓋索引 Deferred Join 或搜尋引擎。</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="cap">面試談資料庫效能，能講出「統計直方圖 ▸ 基數估計誤差 ▸ Join 演算法翻轉 ▸ loops 乘法放大」這條完整因果鏈，就能立刻與只會背「加索引、不要 SELECT *」的候選人拉開差距。</p>
+
+  <div class="callout accent">
+    <div class="c-title"><span class="ic">延伸</span>下一步往哪裡走？</div>
+    <p>讀懂單機執行計畫之後，若系統面臨高並發寫入競爭，下一步要搞懂執行器在掃描這些索引紀錄與間隙時到底鎖住了什麼（Row Lock / Gap Lock 與死鎖偵測）；若單機容量見頂需要水平拆表，跨分片的查詢計畫如何做 Predicate Pushdown 與 Shuffle Merge，則可銜接<a href="../distributed-sql/">分散式 SQL 資料庫</a>篇與<a href="../data-sharding-in-practice/">資料分片實戰</a>篇。</p>
+  </div>
+
+  <div class="oneliner">
+    <b>一句話答法</b>SQL 效能調校的本質是讀懂優化器的成本帳本：理解四種掃描與三種 Join 的物理邊界，用 EXPLAIN ANALYZE 抓出「估計列數 vs 實際列數 × loops」的落差，並在應用端消滅 N+1 往返與 OFFSET 深分頁。
+  </div>
+</section>

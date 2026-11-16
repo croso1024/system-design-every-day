@@ -1,0 +1,751 @@
+<script>
+(function () {
+  "use strict";
+
+  /* =========================================================================
+     (1) 常數與參數表
+     ========================================================================= */
+  var SEQ_PAGE_COST = 1.0;
+  var RANDOM_PAGE_COST = 4.0;
+  var CPU_TUPLE_COST = 0.01;
+  var CPU_INDEX_TUPLE_COST = 0.005;
+  var CPU_OPERATOR_COST = 0.0025;
+  var TUPLES_PER_HEAP_PAGE = 80;
+  var TUPLES_PER_IDX_PAGE = 320;
+  var EST_FACTORS = [0.02, 0.1, 1.0, 5.0, 20.0];
+
+  function round1(x) {
+    return Math.round(x * 10) / 10;
+  }
+
+  function clampNum(v, lo, hi) {
+    var n = Number(v);
+    if (!Number.isFinite(n)) return lo;
+    return n < lo ? lo : (n > hi ? hi : n);
+  }
+
+  function calcBtreeHeight(rows) {
+    if (rows <= 320) return 2;
+    if (rows <= 100000) return 3;
+    return 4;
+  }
+
+  /* Mackert-Lohman 近似：從 P 個頁隨機抽 k 次會碰到的不重複頁數 */
+  function uniquePagesTouched(totalPages, draws) {
+    if (draws <= 0 || totalPages <= 0) return 0;
+    if (draws >= totalPages * 6) return totalPages;
+    var ratio = -draws / totalPages;
+    var touched = totalPages * (1 - Math.exp(ratio));
+    return Math.max(1, Math.min(totalPages, Math.round(touched)));
+  }
+
+  function calcScanCosts(outerRows, selFrac, corrFrac, workMemMb, outerIdx) {
+    var heapPages = Math.max(2, Math.ceil(outerRows / TUPLES_PER_HEAP_PAGE));
+    var idxPages = Math.max(2, Math.ceil(outerRows / TUPLES_PER_IDX_PAGE));
+    var treeH = calcBtreeHeight(outerRows);
+    var matchRows = Math.max(1, Math.round(outerRows * selFrac));
+
+    /* 1. Seq Scan */
+    var seqCost = heapPages * SEQ_PAGE_COST + outerRows * (CPU_TUPLE_COST + CPU_OPERATOR_COST);
+
+    /* 2. Index Scan：依 correlation 在隨機讀與循序讀之間平方插值 */
+    var indexCost = null;
+    var idxLeafRead = Math.max(1, Math.ceil(idxPages * selFrac));
+    var idxCpu = matchRows * (CPU_INDEX_TUPLE_COST + CPU_TUPLE_COST) + treeH * 0.05;
+    if (outerIdx !== "none") {
+      var randFetchPages = Math.min(heapPages * 2.5, matchRows * 0.92);
+      var seqFetchPages = Math.max(1, Math.ceil(heapPages * selFrac));
+      var c2 = corrFrac * corrFrac;
+      var ioMax = randFetchPages * RANDOM_PAGE_COST;
+      var ioMin = seqFetchPages * SEQ_PAGE_COST + Math.max(0, (seqFetchPages - 1)) * 0.15;
+      var heapIo = ioMax - c2 * (ioMax - ioMin);
+      var idxTreeIo = treeH * 1.2 + idxLeafRead * 1.4;
+      indexCost = idxTreeIo + heapIo + idxCpu;
+    }
+
+    /* 3. Index Only Scan：僅覆蓋索引可用，假設 92% 頁已在 Visibility Map 標為 all-visible */
+    var indexOnlyCost = null;
+    if (outerIdx === "cov") {
+      var vmMissPages = uniquePagesTouched(heapPages, Math.round(matchRows * 0.08));
+      var vmHeapIo = vmMissPages * (SEQ_PAGE_COST * 0.4 + RANDOM_PAGE_COST * 0.6 * (1 - corrFrac * 0.7));
+      indexOnlyCost = treeH * 1.1 + idxLeafRead * 1.25 + matchRows * CPU_INDEX_TUPLE_COST + vmHeapIo;
+    }
+
+    /* 4. Bitmap Heap Scan：先掃索引建點陣圖，依頁號排序後每頁只讀一次 */
+    var bitmapCost = null;
+    var bitmapLossy = false;
+    if (outerIdx !== "none") {
+      var distinctPages = uniquePagesTouched(heapPages, matchRows);
+      /* 集中分布時觸及頁更少 */
+      var clusteredPages = Math.max(1, Math.ceil(heapPages * selFrac));
+      var targetPages = Math.max(1, Math.round(distinctPages * (1 - corrFrac * 0.82) + clusteredPages * (corrFrac * 0.82)));
+      /* 點陣圖記憶體估算：超過 work_mem 則部分轉為 lossy 需整頁重驗 */
+      var bitmapBytes = matchRows * 12 + targetPages * 64;
+      var memLimitBytes = workMemMb * 1024 * 1024;
+      bitmapLossy = bitmapBytes > memLimitBytes;
+      var density = targetPages / heapPages;
+      /* 密度越高越接近循序 I/O，密度低偏隨機但有預讀攤提 */
+      var perPageCost = RANDOM_PAGE_COST - (RANDOM_PAGE_COST - SEQ_PAGE_COST) * Math.sqrt(Math.min(1, density));
+      var recheckCpu = bitmapLossy ? (targetPages * TUPLES_PER_HEAP_PAGE * CPU_OPERATOR_COST * 1.6) : 0;
+      var bmBuild = treeH * 1.1 + idxLeafRead * 1.2 + matchRows * CPU_INDEX_TUPLE_COST + targetPages * 0.04;
+      bitmapCost = bmBuild + targetPages * perPageCost + matchRows * CPU_TUPLE_COST + recheckCpu;
+    }
+
+    return {
+      heapPages: heapPages,
+      matchRows: matchRows,
+      seqCost: seqCost,
+      indexCost: indexCost,
+      indexOnlyCost: indexOnlyCost,
+      bitmapCost: bitmapCost,
+      bitmapLossy: bitmapLossy
+    };
+  }
+
+  function pickMinScan(sc) {
+    var list = [
+      { id: "Seq Scan", cost: sc.seqCost, spill: false },
+      { id: "Index Scan", cost: sc.indexCost, spill: false },
+      { id: "Index Only Scan", cost: sc.indexOnlyCost, spill: false },
+      { id: "Bitmap Heap Scan", cost: sc.bitmapCost, spill: sc.bitmapLossy }
+    ];
+    var best = list[0];
+    for (var i = 1; i < list.length; i += 1) {
+      if (list[i].cost !== null && list[i].cost < best.cost) {
+        best = list[i];
+      }
+    }
+    return { best: best, list: list };
+  }
+
+  function calcJoinCosts(scanWinCost, outerMatchRows, outerTotalRows, innerRows, workMemMb, outerIdx, innerIdx) {
+    var innerHeapPages = Math.max(4, Math.ceil(innerRows / TUPLES_PER_HEAP_PAGE));
+    var innerIdxH = calcBtreeHeight(innerRows);
+    var fanoutPerOrder = Math.max(1, innerRows / Math.max(1, outerTotalRows));
+    var joinedRows = Math.max(1, Math.round(outerMatchRows * fanoutPerOrder));
+
+    /* 1. Nested Loop Join */
+    var nlCost;
+    var nlMode;
+    if (innerIdx === "none") {
+      nlMode = "Nested Loop (無內層索引)";
+      var innerSeqOnce = innerHeapPages * SEQ_PAGE_COST + innerRows * CPU_TUPLE_COST;
+      /* Join buffer 批次掃描假設每批可裝 256 筆外層列 */
+      var passes = Math.max(1, Math.ceil(outerMatchRows / 256));
+      nlCost = scanWinCost + passes * innerSeqOnce + outerMatchRows * (innerRows * 0.0008);
+    } else {
+      nlMode = "Indexed Nested Loop";
+      /* 內層 B+Tree 上層常駐記憶體，每圈主要是葉頁與回表開銷 */
+      var perLoopIo = (innerIdx === "sorted" ? 0.55 : 1.35) + fanoutPerOrder * 0.42;
+      var perLoopCpu = (innerIdxH + fanoutPerOrder) * (CPU_INDEX_TUPLE_COST + CPU_TUPLE_COST);
+      nlCost = scanWinCost + outerMatchRows * (perLoopIo + perLoopCpu);
+    }
+
+    /* 2. Hash Join：用較小的一側當 Build 表，依 work_mem 決定分批數與雜湊桶碰撞率 */
+    var innerScanAll = innerHeapPages * SEQ_PAGE_COST + innerRows * CPU_TUPLE_COST;
+    var buildRows = Math.min(outerMatchRows, innerRows);
+    var probeRows = Math.max(outerMatchRows, innerRows);
+    var hashBytes = buildRows * 180;
+    var memBytes = workMemMb * 1024 * 1024;
+    var batches = 1;
+    while (batches < 64 && (hashBytes / batches) > memBytes) {
+      batches = batches * 2;
+    }
+    var spillPages = 0;
+    if (batches > 1) {
+      var spillFraction = 1 - (1 / batches);
+      spillPages = Math.ceil(((outerMatchRows + innerRows) * spillFraction) / TUPLES_PER_HEAP_PAGE) * 2;
+    }
+    /* 桶數受 work_mem 限制，負載因子越高 probe 鏈比對次數越多 */
+    var maxBucketsInMem = Math.max(256, Math.floor((memBytes * 0.25) / 16));
+    var chainLen = 1 + (buildRows / batches) / maxBucketsInMem;
+    var hashCpu = buildRows * (CPU_OPERATOR_COST * 2) + probeRows * (CPU_OPERATOR_COST * 2.2 * chainLen) + joinedRows * CPU_TUPLE_COST;
+    var hashCost = scanWinCost + innerScanAll + hashCpu + spillPages * SEQ_PAGE_COST * 1.15;
+
+    /* 3. Merge Join：看雙邊是否已有對齊排序 */
+    var bothSorted = (innerIdx === "sorted" && outerIdx !== "none");
+    var mergeCost;
+    var sortSpill = false;
+    if (bothSorted) {
+      /* 雙邊直接沿 B+Tree 有序輸出歸併，省掉 Sort，只付內層有序索引掃描成本 */
+      var outerOrderedScan = Math.max(scanWinCost, outerMatchRows * 0.55 + 6);
+      var innerOrderedScan = Math.max(8, Math.ceil(innerRows / TUPLES_PER_IDX_PAGE) * 1.15 + innerRows * CPU_INDEX_TUPLE_COST);
+      mergeCost = outerOrderedScan + innerOrderedScan + (outerMatchRows + innerRows) * CPU_OPERATOR_COST + joinedRows * CPU_TUPLE_COST;
+    } else {
+      var sortOuterBytes = outerMatchRows * 160;
+      var sortInnerBytes = (innerIdx === "idx" ? 0 : innerRows * 160);
+      sortSpill = (sortOuterBytes > memBytes) || (sortInnerBytes > memBytes);
+      var outerSortCost = outerMatchRows > 1 ? outerMatchRows * (Math.log(outerMatchRows) / Math.LN2) * CPU_OPERATOR_COST * 2 : 0;
+      var innerStreamCost;
+      if (innerIdx === "idx") {
+        /* 內層有單邊索引可有序讀取，但全索引回表有隨機成本 */
+        innerStreamCost = innerHeapPages * 2.1 + innerRows * (CPU_INDEX_TUPLE_COST + CPU_TUPLE_COST);
+      } else {
+        var innerSortCpu = innerRows * (Math.log(Math.max(2, innerRows)) / Math.LN2) * CPU_OPERATOR_COST * 2;
+        innerStreamCost = innerScanAll + innerSortCpu;
+      }
+      var sortSpillIo = sortSpill ? Math.ceil((sortOuterBytes + sortInnerBytes) / 8192) * 2.2 : 0;
+      mergeCost = scanWinCost + outerSortCost + innerStreamCost + sortSpillIo + (outerMatchRows + innerRows) * CPU_OPERATOR_COST;
+    }
+
+    var candidates = [
+      { id: "Nested Loop", label: nlMode, cost: nlCost, spill: false, batches: 1 },
+      { id: "Hash Join", label: batches > 1 ? ("Hash Join (Batches=" + batches + ")") : "Hash Join", cost: hashCost, spill: batches > 1, batches: batches },
+      { id: "Merge Join", label: bothSorted ? "Merge Join (免 Sort)" : (sortSpill ? "Sort-Merge (Disk Sort)" : "Sort-Merge Join"), cost: mergeCost, spill: sortSpill, batches: 1 }
+    ];
+    var best = candidates[0];
+    for (var j = 1; j < candidates.length; j += 1) {
+      if (candidates[j].cost < best.cost) best = candidates[j];
+    }
+    return {
+      best: best,
+      candidates: candidates,
+      joinedRows: joinedRows,
+      hashBatches: batches,
+      spillPages: spillPages,
+      fanoutPerOrder: round1(fanoutPerOrder)
+    };
+  }
+
+  /* =========================================================================
+     (2) compute* 純函式（不得碰 DOM / console / window）
+     ========================================================================= */
+
+  // @probe fn       computePlanner
+  // @probe baseline {"outerRows":300000,"innerRows":900000,"selPermille":50,"corrPct":15,"workMemMb":16,"estIdx":3,"outerIdx":"idx","innerIdx":"idx"}
+  // @probe sweep    {"outerRows":[20000,1000000],"innerRows":[40000,2000000],"selPermille":[1,400],"corrPct":[0,100],"workMemMb":[2,128],"estIdx":[1,5],"outerIdx":["none","cov"],"innerIdx":["none","sorted"]}
+  function computePlanner(p) {
+    var outerRows = clampNum(p.outerRows, 10000, 1000000);
+    var innerRows = clampNum(p.innerRows, 20000, 2000000);
+    var selPermille = clampNum(p.selPermille, 1, 500);
+    var corrPct = clampNum(p.corrPct, 0, 100);
+    var workMemMb = clampNum(p.workMemMb, 2, 128);
+    var estIdx = clampNum(Math.round(p.estIdx), 1, 5);
+    var outerIdx = (p.outerIdx === "none" || p.outerIdx === "cov") ? p.outerIdx : "idx";
+    var innerIdx = (p.innerIdx === "none" || p.innerIdx === "sorted") ? p.innerIdx : "idx";
+
+    var actualSel = selPermille / 1000;
+    var estFactor = EST_FACTORS[estIdx - 1];
+    var estSel = Math.max(0.00005, Math.min(0.95, actualSel * estFactor));
+    var corrFrac = corrPct / 100;
+
+    /* Planner 根據估計選擇性做決策 */
+    var estScanRaw = calcScanCosts(outerRows, estSel, corrFrac, workMemMb, outerIdx);
+    var estScanPick = pickMinScan(estScanRaw);
+    var estJoinPick = calcJoinCosts(estScanPick.best.cost, estScanRaw.matchRows, outerRows, innerRows, workMemMb, outerIdx, innerIdx);
+
+    /* 真實流量下的各路徑實際成本（用來算統計偏差造成的決策損失） */
+    var actScanRaw = calcScanCosts(outerRows, actualSel, corrFrac, workMemMb, outerIdx);
+    var actScanPick = pickMinScan(actScanRaw);
+    var chosenScanActCost = actScanRaw.seqCost;
+    if (estScanPick.best.id === "Index Scan" && actScanRaw.indexCost !== null) chosenScanActCost = actScanRaw.indexCost;
+    if (estScanPick.best.id === "Index Only Scan" && actScanRaw.indexOnlyCost !== null) chosenScanActCost = actScanRaw.indexOnlyCost;
+    if (estScanPick.best.id === "Bitmap Heap Scan" && actScanRaw.bitmapCost !== null) chosenScanActCost = actScanRaw.bitmapCost;
+
+    var actJoinFromChosenScan = calcJoinCosts(chosenScanActCost, actScanRaw.matchRows, outerRows, innerRows, workMemMb, outerIdx, innerIdx);
+    var actOptimalJoin = calcJoinCosts(actScanPick.best.cost, actScanRaw.matchRows, outerRows, innerRows, workMemMb, outerIdx, innerIdx);
+
+    var chosenJoinActCost = actJoinFromChosenScan.candidates[0].cost;
+    for (var i = 0; i < actJoinFromChosenScan.candidates.length; i += 1) {
+      if (actJoinFromChosenScan.candidates[i].id === estJoinPick.best.id) {
+        chosenJoinActCost = actJoinFromChosenScan.candidates[i].cost;
+      }
+    }
+    var optimalActCost = actOptimalJoin.best.cost;
+    var penaltyRatio = optimalActCost > 0 ? round1(chosenJoinActCost / optimalActCost) : 1.0;
+
+    var scansOut = [];
+    for (var s = 0; s < estScanPick.list.length; s += 1) {
+      var item = estScanPick.list[s];
+      scansOut.push({
+        id: item.id,
+        estCost: item.cost === null ? null : round1(item.cost),
+        spill: item.spill,
+        winner: item.id === estScanPick.best.id
+      });
+    }
+
+    var joinsOut = [];
+    for (var k = 0; k < estJoinPick.candidates.length; k += 1) {
+      var jc = estJoinPick.candidates[k];
+      joinsOut.push({
+        id: jc.id,
+        label: jc.label,
+        estCost: round1(jc.cost),
+        spill: jc.spill,
+        winner: jc.id === estJoinPick.best.id
+      });
+    }
+
+    var innerLoops = estJoinPick.best.id === "Nested Loop" ? actScanRaw.matchRows : 1;
+    var estOuterRows = estScanRaw.matchRows;
+    var actOuterRows = actScanRaw.matchRows;
+
+    return {
+      winnerScan: estScanPick.best.id,
+      winnerScanEstCost: round1(estScanPick.best.cost),
+      winnerJoin: estJoinPick.best.id,
+      winnerJoinLabel: estJoinPick.best.label,
+      winnerJoinEstCost: round1(estJoinPick.best.cost),
+      optimalTrueJoin: actOptimalJoin.best.id,
+      chosenTrueCost: round1(chosenJoinActCost),
+      optimalTrueCost: round1(optimalActCost),
+      penaltyRatio: penaltyRatio,
+      estOuterRows: estOuterRows,
+      actOuterRows: actOuterRows,
+      actJoinedRows: actOptimalJoin.joinedRows,
+      innerLoops: innerLoops,
+      hashBatches: actJoinFromChosenScan.hashBatches,
+      spillPages: actJoinFromChosenScan.spillPages,
+      bitmapLossy: actScanRaw.bitmapLossy,
+      heapPages: actScanRaw.heapPages,
+      scans: scansOut,
+      joins: joinsOut
+    };
+  }
+
+  // @probe fn       computePagination
+  // @probe baseline {"totalRows":1000000,"pageNum":2000,"pageSize":25,"rttTenthsMs":12,"assocMode":"batch","offsetMode":"naive"}
+  // @probe sweep    {"totalRows":[100000,5000000],"pageNum":[1,9000],"pageSize":[10,100],"rttTenthsMs":[2,50],"assocMode":["batch","nplus1"],"offsetMode":["naive","deferred"]}
+  function computePagination(p) {
+    var totalRows = clampNum(p.totalRows, 100000, 5000000);
+    var pageSize = clampNum(p.pageSize, 10, 100);
+    var maxPage = Math.max(1, Math.floor(totalRows / pageSize));
+    var pageNum = clampNum(p.pageNum, 1, maxPage);
+    var rttMs = clampNum(p.rttTenthsMs, 2, 50) / 10;
+    var isNPlus1 = p.assocMode === "nplus1";
+    var isDeferred = p.offsetMode === "deferred";
+
+    var offsetRows = (pageNum - 1) * pageSize;
+    var scanRowsOffset = Math.min(totalRows, offsetRows + pageSize);
+    var treeDepth = totalRows >= 1500000 ? 4 : 3;
+
+    /* 左側：傳統 OFFSET 或 Deferred Join */
+    var idxLeafPagesOffset = Math.max(1, Math.ceil(scanRowsOffset / 280));
+    var heapFetchOffset = isDeferred ? pageSize : Math.ceil(scanRowsOffset * 0.75);
+    var leftPages = treeDepth + idxLeafPagesOffset + heapFetchOffset;
+    var leftDbExecMs = leftPages * 0.018 + scanRowsOffset * 0.00045;
+
+    /* 右側：Keyset / Cursor 分頁 */
+    var idxLeafPagesKeyset = Math.max(1, Math.ceil(pageSize / 280));
+    var rightPages = treeDepth + idxLeafPagesKeyset + pageSize;
+    var rightDbExecMs = rightPages * 0.018 + pageSize * 0.0005;
+
+    /* 子表關聯往返（N+1 vs WHERE IN 批次） */
+    var sqlRoundTrips = isNPlus1 ? (1 + pageSize) : 2;
+    var assocPages = isNPlus1 ? (pageSize * (treeDepth + 1)) : (treeDepth + Math.ceil(pageSize * 1.4));
+    var assocDbMs = assocPages * 0.015;
+    var netMs = sqlRoundTrips * rttMs;
+
+    var leftTotalPages = leftPages + assocPages;
+    var rightTotalPages = rightPages + assocPages;
+    var leftLatencyMs = round1(leftDbExecMs + assocDbMs + netMs);
+    var rightLatencyMs = round1(rightDbExecMs + assocDbMs + netMs);
+    var speedup = rightLatencyMs > 0 ? round1(leftLatencyMs / rightLatencyMs) : 1.0;
+
+    var skipRatioPct = Math.min(96, round1((offsetRows / totalRows) * 100));
+    var takeRatioPct = Math.max(1.5, round1((pageSize / totalRows) * 100));
+
+    return {
+      discardedLeft: offsetRows,
+      leftTotalPages: leftTotalPages,
+      rightTotalPages: rightTotalPages,
+      sqlRoundTrips: sqlRoundTrips,
+      leftLatencyMs: leftLatencyMs,
+      rightLatencyMs: rightLatencyMs,
+      netOverheadMs: round1(netMs),
+      speedupFactor: speedup,
+      skipRatioPct: skipRatioPct,
+      takeRatioPct: takeRatioPct,
+      treeDepth: treeDepth
+    };
+  }
+
+  /* =========================================================================
+     (3) DOM 參照與狀態
+     ========================================================================= */
+  function fmtInt(n) {
+    return Math.round(n).toLocaleString("en-US");
+  }
+
+  function elemFromEvent(ev) {
+    var t = ev.target;
+    if (!t) return null;
+    return t.nodeType === 1 ? t : t.parentElement;
+  }
+
+  function updateSegGroup(container, attrName, activeVal) {
+    if (!container) return;
+    var btns = container.querySelectorAll("button");
+    for (var i = 0; i < btns.length; i += 1) {
+      var v = btns[i].getAttribute(attrName);
+      btns[i].setAttribute("aria-pressed", v === activeVal ? "true" : "false");
+    }
+  }
+
+  /* 主 Demo DOM */
+  var elPlOuter = document.getElementById("pl-outer");
+  var elPlInner = document.getElementById("pl-inner");
+  var elPlSel = document.getElementById("pl-sel");
+  var elPlCorr = document.getElementById("pl-corr");
+  var elPlMem = document.getElementById("pl-mem");
+  var elPlEst = document.getElementById("pl-est");
+  var elPlOuterV = document.getElementById("pl-outer-v");
+  var elPlInnerV = document.getElementById("pl-inner-v");
+  var elPlSelV = document.getElementById("pl-sel-v");
+  var elPlCorrV = document.getElementById("pl-corr-v");
+  var elPlMemV = document.getElementById("pl-mem-v");
+  var elPlEstV = document.getElementById("pl-est-v");
+  var elPlOuterIdx = document.getElementById("pl-outer-idx");
+  var elPlInnerIdx = document.getElementById("pl-inner-idx");
+  var elPlReset = document.getElementById("pl-reset");
+
+  var elPlKpiScanBox = document.getElementById("pl-kpi-scan-box");
+  var elPlWinScan = document.getElementById("pl-win-scan");
+  var elPlWinScanSub = document.getElementById("pl-win-scan-sub");
+  var elPlKpiJoinBox = document.getElementById("pl-kpi-join-box");
+  var elPlWinJoin = document.getElementById("pl-win-join");
+  var elPlWinJoinSub = document.getElementById("pl-win-join-sub");
+  var elPlKpiErrBox = document.getElementById("pl-kpi-err-box");
+  var elPlErrRatio = document.getElementById("pl-err-ratio");
+  var elPlErrSub = document.getElementById("pl-err-sub");
+  var elPlScanNote = document.getElementById("pl-scan-note");
+  var elPlScanBars = document.getElementById("pl-scan-bars");
+  var elPlJoinNote = document.getElementById("pl-join-note");
+  var elPlJoinBars = document.getElementById("pl-join-bars");
+  var elPlExplainOut = document.getElementById("pl-explain-out");
+  var elPlStatus = document.getElementById("pl-status");
+
+  /* 次 Demo DOM */
+  var elPgTotal = document.getElementById("pg-total");
+  var elPgPage = document.getElementById("pg-page");
+  var elPgSize = document.getElementById("pg-size");
+  var elPgRtt = document.getElementById("pg-rtt");
+  var elPgTotalV = document.getElementById("pg-total-v");
+  var elPgPageV = document.getElementById("pg-page-v");
+  var elPgSizeV = document.getElementById("pg-size-v");
+  var elPgRttV = document.getElementById("pg-rtt-v");
+  var elPgAssoc = document.getElementById("pg-assoc");
+  var elPgOffmode = document.getElementById("pg-offmode");
+  var elPgReset = document.getElementById("pg-reset");
+
+  var elPgCardLeft = document.getElementById("pg-card-left");
+  var elPgLeftTitle = document.getElementById("pg-left-title");
+  var elPgLeftTag = document.getElementById("pg-left-tag");
+  var elPgLeftSql = document.getElementById("pg-left-sql");
+  var elPgLeftStripLbl = document.getElementById("pg-left-strip-lbl");
+  var elPgLeftSkip = document.getElementById("pg-left-skip");
+  var elPgLeftTake = document.getElementById("pg-left-take");
+  var elPgLDiscard = document.getElementById("pg-l-discard");
+  var elPgLPages = document.getElementById("pg-l-pages");
+  var elPgLRt = document.getElementById("pg-l-rt");
+  var elPgLLat = document.getElementById("pg-l-lat");
+
+  var elPgRightSql = document.getElementById("pg-right-sql");
+  var elPgRightStripLbl = document.getElementById("pg-right-strip-lbl");
+  var elPgRightSeek = document.getElementById("pg-right-seek");
+  var elPgRightTake = document.getElementById("pg-right-take");
+  var elPgRDiscard = document.getElementById("pg-r-discard");
+  var elPgRPages = document.getElementById("pg-r-pages");
+  var elPgRRt = document.getElementById("pg-r-rt");
+  var elPgRLat = document.getElementById("pg-r-lat");
+  var elPgStatus = document.getElementById("pg-status");
+
+  var plState = {
+    outerRows: 200000,
+    innerRows: 800000,
+    selPermille: 8,
+    corrPct: 15,
+    workMemMb: 16,
+    estIdx: 3,
+    outerIdx: "idx",
+    innerIdx: "idx"
+  };
+
+  var pgState = {
+    totalRows: 1000000,
+    pageNum: 2000,
+    pageSize: 25,
+    rttTenthsMs: 12,
+    assocMode: "batch",
+    offsetMode: "naive"
+  };
+
+  var EST_LABELS = [
+    "0.02x（低估 50 倍）",
+    "0.1x（低估 10 倍）",
+    "1.0x（統計準確）",
+    "5.0x（高估 5 倍）",
+    "20x（高估 20 倍）"
+  ];
+
+  /* =========================================================================
+     (4) render —— 只讀計算結果更新畫面
+     ========================================================================= */
+  function renderBarList(container, items, nameKey) {
+    if (!container) return;
+    var maxCost = 1;
+    for (var i = 0; i < items.length; i += 1) {
+      if (items[i].estCost !== null && items[i].estCost > maxCost) {
+        maxCost = items[i].estCost;
+      }
+    }
+    var html = "";
+    for (var j = 0; j < items.length; j += 1) {
+      var it = items[j];
+      var label = it[nameKey];
+      if (it.estCost === null) {
+        html += '<div class="pl-bar-row">' +
+          '<span class="pl-bar-nm na">' + label + '</span>' +
+          '<div class="pl-track"></div>' +
+          '<span class="pl-cost-v">不可用</span>' +
+          '</div>';
+      } else {
+        var pct = Math.max(3, Math.min(100, Math.round((it.estCost / maxCost) * 100)));
+        var fillCls = it.winner ? "pl-fill win" : (it.spill ? "pl-fill spill" : "pl-fill");
+        var nmCls = it.winner ? "pl-bar-nm win" : "pl-bar-nm";
+        var vCls = it.winner ? "pl-cost-v win" : "pl-cost-v";
+        html += '<div class="pl-bar-row">' +
+          '<span class="' + nmCls + '" title="' + label + '">' + (it.winner ? "★ " : "") + label + '</span>' +
+          '<div class="pl-track"><div class="' + fillCls + '" style="width:' + pct + '%"></div></div>' +
+          '<span class="' + vCls + '">' + fmtInt(it.estCost) + '</span>' +
+          '</div>';
+      }
+    }
+    container.innerHTML = html;
+  }
+
+  function buildExplainText(res) {
+    var joinStartup = res.winnerJoin === "Nested Loop" ? "0.85" : fmtInt(res.winnerJoinEstCost * 0.42);
+    var lines = [];
+    lines.push(res.winnerJoinLabel + "  (cost=" + joinStartup + ".." + fmtInt(res.winnerJoinEstCost) +
+      " rows=" + res.estOuterRows * 4 + ") (actual rows=" + res.actJoinedRows + " loops=1)");
+    if (res.winnerJoin === "Hash Join") {
+      lines.push("  Hash Cond: (i.order_id = o.id)  |  Batches: " + res.hashBatches +
+        (res.spillPages > 0 ? ("  Temp Written: " + fmtInt(res.spillPages) + " pages") : "  (in-memory)"));
+    } else if (res.winnerJoin === "Merge Join") {
+      lines.push("  Merge Cond: (o.id = i.order_id)");
+    }
+    lines.push("  -> " + res.winnerScan + " on orders o  (cost=0.00.." + fmtInt(res.winnerScanEstCost) +
+      " rows=" + res.estOuterRows + ") (actual rows=" + res.actOuterRows + " loops=1)");
+    if (res.winnerScan === "Bitmap Heap Scan") {
+      lines.push("       Recheck Cond: (created_at >= ...)  |  Heap Blocks: " +
+        (res.bitmapLossy ? "exact+lossy (exceeded work_mem)" : "exact"));
+    }
+    if (res.winnerJoin === "Nested Loop") {
+      lines.push("  -> Index/Table Scan on order_items i  (actual rows=4 loops=" + res.innerLoops + ")");
+    } else if (res.winnerJoin === "Hash Join") {
+      lines.push("  -> Hash  (Buckets / Batches=" + res.hashBatches + ")  -> Seq Scan on order_items i");
+    } else {
+      lines.push("  -> Ordered/Sorted Stream on order_items i  (loops=1)");
+    }
+    return lines.join("\n");
+  }
+
+  function renderPlanner() {
+    if (!elPlOuter) return;
+    elPlOuterV.textContent = fmtInt(plState.outerRows);
+    elPlInnerV.textContent = fmtInt(plState.innerRows);
+    elPlSelV.textContent = round1(plState.selPermille / 10) + "%";
+    elPlCorrV.textContent = (plState.corrPct / 100).toFixed(2);
+    elPlMemV.textContent = plState.workMemMb + " MB";
+    elPlEstV.textContent = EST_LABELS[plState.estIdx - 1];
+
+    var res = computePlanner(plState);
+
+    elPlWinScan.textContent = res.winnerScan;
+    elPlWinScanSub.textContent = "估 " + fmtInt(res.estOuterRows) + " 列｜實 " + fmtInt(res.actOuterRows) + " 列";
+    elPlKpiScanBox.className = res.bitmapLossy && res.winnerScan === "Bitmap Heap Scan" ? "pl-kpi warn" : "pl-kpi ok";
+
+    elPlWinJoin.textContent = res.winnerJoin;
+    elPlWinJoinSub.textContent = res.winnerJoinLabel;
+    elPlKpiJoinBox.className = (res.hashBatches > 1 && res.winnerJoin === "Hash Join") ? "pl-kpi warn" : "pl-kpi ok";
+
+    if (res.penaltyRatio > 1.15) {
+      elPlKpiErrBox.className = "pl-kpi bad";
+      elPlErrRatio.textContent = res.penaltyRatio + "x 變慢";
+      elPlErrSub.textContent = "誤選 " + res.winnerJoin + "（最佳應為 " + res.optimalTrueJoin + "）";
+    } else {
+      elPlKpiErrBox.className = "pl-kpi ok";
+      elPlErrRatio.textContent = "1.0x 無誤判";
+      elPlErrSub.textContent = "真實最佳亦為 " + res.optimalTrueJoin;
+    }
+
+    elPlScanNote.textContent = "主表共 " + fmtInt(res.heapPages) + " 頁";
+    elPlJoinNote.textContent = "預計產出約 " + fmtInt(res.actJoinedRows) + " 列";
+
+    renderBarList(elPlScanBars, res.scans, "id");
+    renderBarList(elPlJoinBars, res.joins, "label");
+    elPlExplainOut.textContent = buildExplainText(res);
+
+    var msg = "<b>決策解讀：</b>Planner 估計外層留下 <b>" + fmtInt(res.estOuterRows) + "</b> 列，單表選定 <b>" +
+      res.winnerScan + "</b>，雙表選定 <b>" + res.winnerJoinLabel + "</b>（估計總成本 " + fmtInt(res.winnerJoinEstCost) + "）。";
+    if (res.penaltyRatio > 1.15) {
+      msg += " 因統計偏差，真實外層有 <b>" + fmtInt(res.actOuterRows) + "</b> 列，真實執行成本高達 <b>" +
+        fmtInt(res.chosenTrueCost) + "</b>，比正確計畫 <b>" + res.optimalTrueJoin + "</b>（" + fmtInt(res.optimalTrueCost) + "）貴了 <b>" + res.penaltyRatio + " 倍</b>！";
+    } else if (res.hashBatches > 1 && res.winnerJoin === "Hash Join") {
+      msg += " 注意 Hash Table 超出 work_mem，觸發 <b>Batches=" + res.hashBatches + "</b> 磁碟溢寫（約 " + fmtInt(res.spillPages) + " 頁暫存讀寫）。";
+    }
+    elPlStatus.innerHTML = msg;
+  }
+
+  function renderPagination() {
+    if (!elPgTotal) return;
+    var maxPage = Math.max(1, Math.floor(pgState.totalRows / pgState.pageSize));
+    if (pgState.pageNum > maxPage) {
+      pgState.pageNum = maxPage;
+      elPgPage.value = String(maxPage);
+    }
+    elPgPage.max = String(Math.min(20000, maxPage));
+
+    elPgTotalV.textContent = fmtInt(pgState.totalRows);
+    elPgPageV.textContent = "第 " + fmtInt(pgState.pageNum) + " 頁";
+    elPgSizeV.textContent = pgState.pageSize + " 筆";
+    elPgRttV.textContent = (pgState.rttTenthsMs / 10).toFixed(1) + " ms";
+
+    var res = computePagination(pgState);
+    var isDef = pgState.offsetMode === "deferred";
+    var isN1 = pgState.assocMode === "nplus1";
+
+    elPgLeftTitle.textContent = isDef ? "Deferred Join 延遲回表" : "傳統 OFFSET 分頁";
+    elPgLeftTag.textContent = isDef ? "覆蓋索引掃描 O(OFFSET)" : "全回表掃描 O(OFFSET)";
+    elPgCardLeft.className = res.discardedLeft > 2000 ? "pg-card bad" : "pg-card";
+
+    if (isDef) {
+      elPgLeftSql.textContent = "SELECT o.* FROM orders o JOIN (\n  SELECT id FROM orders ORDER BY created_at DESC, id DESC\n  LIMIT " +
+        pgState.pageSize + " OFFSET " + fmtInt(res.discardedLeft) + "\n) t USING (id);";
+    } else {
+      elPgLeftSql.textContent = "SELECT * FROM orders\nORDER BY created_at DESC, id DESC\nLIMIT " +
+        pgState.pageSize + " OFFSET " + fmtInt(res.discardedLeft) + ";";
+    }
+
+    elPgRightSql.textContent = "SELECT * FROM orders\nWHERE (created_at, id) < ($last_ts, $last_id)\nORDER BY created_at DESC, id DESC LIMIT " +
+      pgState.pageSize + ";";
+
+    elPgLeftStripLbl.textContent = "前綴掃過又丟棄 " + fmtInt(res.discardedLeft) + " 列（佔全表 " + res.skipRatioPct + "%）";
+    elPgLeftSkip.style.width = res.skipRatioPct + "%";
+    elPgLeftTake.style.width = Math.min(100 - res.skipRatioPct, Math.max(2, res.takeRatioPct)) + "%";
+
+    elPgRightStripLbl.textContent = "B+Tree 下探 " + res.treeDepth + " 層直達游標，零丟棄";
+    elPgRightSeek.style.width = "4%";
+    elPgRightTake.style.width = "3%";
+
+    elPgLDiscard.textContent = fmtInt(res.discardedLeft) + " 列";
+    elPgLPages.textContent = fmtInt(res.leftTotalPages) + " 頁";
+    elPgLRt.textContent = res.sqlRoundTrips + " 趟" + (isN1 ? " (N+1)" : "");
+    elPgLLat.textContent = res.leftLatencyMs + " ms";
+
+    elPgRDiscard.textContent = "0 列";
+    elPgRPages.textContent = fmtInt(res.rightTotalPages) + " 頁";
+    elPgRRt.textContent = res.sqlRoundTrips + " 趟" + (isN1 ? " (N+1)" : "");
+    elPgRLat.textContent = res.rightLatencyMs + " ms";
+
+    var summary = "<b>並排結論：</b>翻到第 <b>" + fmtInt(pgState.pageNum) + "</b> 頁時，左側必須先掃過並丟棄 <b>" +
+      fmtInt(res.discardedLeft) + "</b> 列（共讀 <b>" + fmtInt(res.leftTotalPages) + "</b> 頁，耗時 <b>" + res.leftLatencyMs +
+      " ms</b>）；右側 Keyset 游標只讀 <b>" + fmtInt(res.rightTotalPages) + "</b> 頁（耗時 <b>" + res.rightLatencyMs +
+      " ms</b>），快了 <b>" + res.speedupFactor + " 倍</b>。";
+    if (isN1) {
+      summary += " 注意目前開啟了 <b>ORM Lazy N+1</b>，光 " + res.sqlRoundTrips + " 趟網路往返就白白墊高了 <b>" + res.netOverheadMs + " ms</b> 延遲！";
+    }
+    elPgStatus.innerHTML = summary;
+  }
+
+  /* =========================================================================
+     (5) 事件綁定
+     ========================================================================= */
+  function bindPlannerEvents() {
+    if (!elPlOuter) return;
+    elPlOuter.addEventListener("input", function () { plState.outerRows = Number(elPlOuter.value); renderPlanner(); });
+    elPlInner.addEventListener("input", function () { plState.innerRows = Number(elPlInner.value); renderPlanner(); });
+    elPlSel.addEventListener("input", function () { plState.selPermille = Number(elPlSel.value); renderPlanner(); });
+    elPlCorr.addEventListener("input", function () { plState.corrPct = Number(elPlCorr.value); renderPlanner(); });
+    elPlMem.addEventListener("input", function () { plState.workMemMb = Number(elPlMem.value); renderPlanner(); });
+    elPlEst.addEventListener("input", function () { plState.estIdx = Number(elPlEst.value); renderPlanner(); });
+
+    elPlOuterIdx.addEventListener("click", function (ev) {
+      var el = elemFromEvent(ev);
+      var btn = el ? el.closest("button[data-oidx]") : null;
+      if (!btn) return;
+      plState.outerIdx = btn.getAttribute("data-oidx");
+      updateSegGroup(elPlOuterIdx, "data-oidx", plState.outerIdx);
+      renderPlanner();
+    });
+
+    elPlInnerIdx.addEventListener("click", function (ev) {
+      var el = elemFromEvent(ev);
+      var btn = el ? el.closest("button[data-iidx]") : null;
+      if (!btn) return;
+      plState.innerIdx = btn.getAttribute("data-iidx");
+      updateSegGroup(elPlInnerIdx, "data-iidx", plState.innerIdx);
+      renderPlanner();
+    });
+
+    elPlReset.addEventListener("click", function () {
+      plState.outerRows = 200000;
+      plState.innerRows = 800000;
+      plState.selPermille = 8;
+      plState.corrPct = 15;
+      plState.workMemMb = 16;
+      plState.estIdx = 3;
+      plState.outerIdx = "idx";
+      plState.innerIdx = "idx";
+      elPlOuter.value = "200000";
+      elPlInner.value = "800000";
+      elPlSel.value = "8";
+      elPlCorr.value = "15";
+      elPlMem.value = "16";
+      elPlEst.value = "3";
+      updateSegGroup(elPlOuterIdx, "data-oidx", "idx");
+      updateSegGroup(elPlInnerIdx, "data-iidx", "idx");
+      renderPlanner();
+    });
+  }
+
+  function bindPagingEvents() {
+    if (!elPgTotal) return;
+    elPgTotal.addEventListener("input", function () { pgState.totalRows = Number(elPgTotal.value); renderPagination(); });
+    elPgPage.addEventListener("input", function () { pgState.pageNum = Number(elPgPage.value); renderPagination(); });
+    elPgSize.addEventListener("input", function () { pgState.pageSize = Number(elPgSize.value); renderPagination(); });
+    elPgRtt.addEventListener("input", function () { pgState.rttTenthsMs = Number(elPgRtt.value); renderPagination(); });
+
+    elPgAssoc.addEventListener("click", function (ev) {
+      var el = elemFromEvent(ev);
+      var btn = el ? el.closest("button[data-assoc]") : null;
+      if (!btn) return;
+      pgState.assocMode = btn.getAttribute("data-assoc");
+      updateSegGroup(elPgAssoc, "data-assoc", pgState.assocMode);
+      renderPagination();
+    });
+
+    elPgOffmode.addEventListener("click", function (ev) {
+      var el = elemFromEvent(ev);
+      var btn = el ? el.closest("button[data-off]") : null;
+      if (!btn) return;
+      pgState.offsetMode = btn.getAttribute("data-off");
+      updateSegGroup(elPgOffmode, "data-off", pgState.offsetMode);
+      renderPagination();
+    });
+
+    elPgReset.addEventListener("click", function () {
+      pgState.totalRows = 1000000;
+      pgState.pageNum = 2000;
+      pgState.pageSize = 25;
+      pgState.rttTenthsMs = 12;
+      pgState.assocMode = "batch";
+      pgState.offsetMode = "naive";
+      elPgTotal.value = "1000000";
+      elPgPage.value = "2000";
+      elPgSize.value = "25";
+      elPgRtt.value = "12";
+      updateSegGroup(elPgAssoc, "data-assoc", "batch");
+      updateSegGroup(elPgOffmode, "data-off", "naive");
+      renderPagination();
+    });
+  }
+
+  bindPlannerEvents();
+  bindPagingEvents();
+  renderPlanner();
+  renderPagination();
+})();
+</script>
