@@ -143,7 +143,7 @@
 
 **Fallback（僅當平台強行注入、Agent 無法拒絕啟動 Sub-Agent 時）**：這**不是**授權做瀏覽器 QA。若仍被要求啟動 Sub-Agent：
 
-1. 模型必須 **inherit parent**（目前 Cloud Agent 設為 **Grok 4.6**），或顯式指定 Grok 4.6。
+1. 模型必須 **inherit parent**（即 Cloud Agent 當下設定的模型，本文件不寫死型號）。
 2. **禁止**改用 Claude / Sonnet（含 Sonnet 4.5）或其他非 parent 模型。
 3. 若請求的模型在該 Sub-Agent 不可用：**不要啟動**，也不准退回 Sonnet；改走 ReadLints + `validate.js` + `scripts/quality/` demo 閘門收工並在回報中註明「browser Sub-Agent skipped」。
 
