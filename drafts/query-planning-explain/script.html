@@ -12,6 +12,7 @@
   var CPU_OPERATOR_COST = 0.0025;
   var TUPLES_PER_HEAP_PAGE = 80;
   var TUPLES_PER_IDX_PAGE = 320;
+  var ALL_VISIBLE_FRAC = 0.92;
   var EST_FACTORS = [0.02, 0.1, 1.0, 5.0, 20.0];
 
   function round1(x) {
@@ -50,6 +51,7 @@
 
     /* 2. Index Scan：依 correlation 在隨機讀與循序讀之間平方插值 */
     var indexCost = null;
+    var heapIo = 0;
     var idxLeafRead = Math.max(1, Math.ceil(idxPages * selFrac));
     var idxCpu = matchRows * (CPU_INDEX_TUPLE_COST + CPU_TUPLE_COST) + treeH * 0.05;
     if (outerIdx !== "none") {
@@ -58,16 +60,16 @@
       var c2 = corrFrac * corrFrac;
       var ioMax = randFetchPages * RANDOM_PAGE_COST;
       var ioMin = seqFetchPages * SEQ_PAGE_COST + Math.max(0, (seqFetchPages - 1)) * 0.15;
-      var heapIo = ioMax - c2 * (ioMax - ioMin);
+      heapIo = ioMax - c2 * (ioMax - ioMin);
       var idxTreeIo = treeH * 1.2 + idxLeafRead * 1.4;
       indexCost = idxTreeIo + heapIo + idxCpu;
     }
 
-    /* 3. Index Only Scan：僅覆蓋索引可用，假設 92% 頁已在 Visibility Map 標為 all-visible */
+    /* 3. Index Only Scan：僅覆蓋索引可用。仿 PG 把回表 I/O 乘上 (1 - allvisfrac)：
+          假設 92% 頁已在 Visibility Map 標為 all-visible，只剩 8% 需要回表 */
     var indexOnlyCost = null;
     if (outerIdx === "cov") {
-      var vmMissPages = uniquePagesTouched(heapPages, Math.round(matchRows * 0.08));
-      var vmHeapIo = vmMissPages * (SEQ_PAGE_COST * 0.4 + RANDOM_PAGE_COST * 0.6 * (1 - corrFrac * 0.7));
+      var vmHeapIo = heapIo * (1 - ALL_VISIBLE_FRAC);
       indexOnlyCost = treeH * 1.1 + idxLeafRead * 1.25 + matchRows * CPU_INDEX_TUPLE_COST + vmHeapIo;
     }
 
@@ -87,8 +89,21 @@
       /* 密度越高越接近循序 I/O，密度低偏隨機但有預讀攤提 */
       var perPageCost = RANDOM_PAGE_COST - (RANDOM_PAGE_COST - SEQ_PAGE_COST) * Math.sqrt(Math.min(1, density));
       var recheckCpu = bitmapLossy ? (targetPages * TUPLES_PER_HEAP_PAGE * CPU_OPERATOR_COST * 1.6) : 0;
-      var bmBuild = treeH * 1.1 + idxLeafRead * 1.2 + matchRows * CPU_INDEX_TUPLE_COST + targetPages * 0.04;
-      bitmapCost = bmBuild + targetPages * perPageCost + matchRows * CPU_TUPLE_COST + recheckCpu;
+      /* 索引端仿 genericcostestimate：每個葉頁計 random_page_cost，每筆 index tuple 計 cpu_index_tuple_cost + 條件的 cpu_operator_cost */
+      var bmBuild = treeH * 1.1 + idxLeafRead * RANDOM_PAGE_COST + matchRows * (CPU_INDEX_TUPLE_COST + CPU_OPERATOR_COST) + targetPages * 0.04;
+      /* 回表每列計 cpu_tuple_cost + Recheck 條件的 cpu_operator_cost（同 cost_bitmap_heap_scan） */
+      bitmapCost = bmBuild + targetPages * perPageCost + matchRows * (CPU_TUPLE_COST + CPU_OPERATOR_COST) + recheckCpu;
+    }
+
+    /* 保序掃描：Merge Join 免 Sort 時外層只能用依索引鍵有序輸出的 Index Scan / Index Only Scan */
+    var orderedScanId = null;
+    var orderedScanCost = null;
+    if (indexOnlyCost !== null && indexOnlyCost <= indexCost) {
+      orderedScanId = "Index Only Scan";
+      orderedScanCost = indexOnlyCost;
+    } else if (indexCost !== null) {
+      orderedScanId = "Index Scan";
+      orderedScanCost = indexCost;
     }
 
     return {
@@ -98,7 +113,9 @@
       indexCost: indexCost,
       indexOnlyCost: indexOnlyCost,
       bitmapCost: bitmapCost,
-      bitmapLossy: bitmapLossy
+      bitmapLossy: bitmapLossy,
+      orderedScanId: orderedScanId,
+      orderedScanCost: orderedScanCost
     };
   }
 
@@ -118,7 +135,7 @@
     return { best: best, list: list };
   }
 
-  function calcJoinCosts(scanWinCost, outerMatchRows, outerTotalRows, innerRows, workMemMb, outerIdx, innerIdx) {
+  function calcJoinCosts(scanWinCost, orderedScanCost, outerMatchRows, outerTotalRows, innerRows, workMemMb, outerIdx, innerIdx) {
     var innerHeapPages = Math.max(4, Math.ceil(innerRows / TUPLES_PER_HEAP_PAGE));
     var innerIdxH = calcBtreeHeight(innerRows);
     var fanoutPerOrder = Math.max(1, innerRows / Math.max(1, outerTotalRows));
@@ -167,17 +184,17 @@
     var mergeCost;
     var sortSpill = false;
     if (bothSorted) {
-      /* 雙邊直接沿 B+Tree 有序輸出歸併，省掉 Sort，只付內層有序索引掃描成本 */
-      var outerOrderedScan = Math.max(scanWinCost, outerMatchRows * 0.55 + 6);
+      /* 雙邊直接沿 B+Tree 有序輸出歸併，省掉 Sort；外層必須改走保序的 Index Scan / Index Only Scan（Bitmap 輸出無序） */
+      var outerOrderedScan = orderedScanCost;
       var innerOrderedScan = Math.max(8, Math.ceil(innerRows / TUPLES_PER_IDX_PAGE) * 1.15 + innerRows * CPU_INDEX_TUPLE_COST);
       mergeCost = outerOrderedScan + innerOrderedScan + (outerMatchRows + innerRows) * CPU_OPERATOR_COST + joinedRows * CPU_TUPLE_COST;
     } else {
       var sortOuterBytes = outerMatchRows * 160;
-      var sortInnerBytes = (innerIdx === "idx" ? 0 : innerRows * 160);
+      var sortInnerBytes = (innerIdx !== "none" ? 0 : innerRows * 160);
       sortSpill = (sortOuterBytes > memBytes) || (sortInnerBytes > memBytes);
       var outerSortCost = outerMatchRows > 1 ? outerMatchRows * (Math.log(outerMatchRows) / Math.LN2) * CPU_OPERATOR_COST * 2 : 0;
       var innerStreamCost;
-      if (innerIdx === "idx") {
+      if (innerIdx !== "none") {
         /* 內層有單邊索引可有序讀取，但全索引回表有隨機成本 */
         innerStreamCost = innerHeapPages * 2.1 + innerRows * (CPU_INDEX_TUPLE_COST + CPU_TUPLE_COST);
       } else {
@@ -202,6 +219,8 @@
       candidates: candidates,
       joinedRows: joinedRows,
       hashBatches: batches,
+      hashBuildSide: outerMatchRows <= innerRows ? "outer" : "inner",
+      mergeOrderedOuter: bothSorted,
       spillPages: spillPages,
       fanoutPerOrder: round1(fanoutPerOrder)
     };
@@ -232,7 +251,7 @@
     /* Planner 根據估計選擇性做決策 */
     var estScanRaw = calcScanCosts(outerRows, estSel, corrFrac, workMemMb, outerIdx);
     var estScanPick = pickMinScan(estScanRaw);
-    var estJoinPick = calcJoinCosts(estScanPick.best.cost, estScanRaw.matchRows, outerRows, innerRows, workMemMb, outerIdx, innerIdx);
+    var estJoinPick = calcJoinCosts(estScanPick.best.cost, estScanRaw.orderedScanCost, estScanRaw.matchRows, outerRows, innerRows, workMemMb, outerIdx, innerIdx);
 
     /* 真實流量下的各路徑實際成本（用來算統計偏差造成的決策損失） */
     var actScanRaw = calcScanCosts(outerRows, actualSel, corrFrac, workMemMb, outerIdx);
@@ -242,8 +261,8 @@
     if (estScanPick.best.id === "Index Only Scan" && actScanRaw.indexOnlyCost !== null) chosenScanActCost = actScanRaw.indexOnlyCost;
     if (estScanPick.best.id === "Bitmap Heap Scan" && actScanRaw.bitmapCost !== null) chosenScanActCost = actScanRaw.bitmapCost;
 
-    var actJoinFromChosenScan = calcJoinCosts(chosenScanActCost, actScanRaw.matchRows, outerRows, innerRows, workMemMb, outerIdx, innerIdx);
-    var actOptimalJoin = calcJoinCosts(actScanPick.best.cost, actScanRaw.matchRows, outerRows, innerRows, workMemMb, outerIdx, innerIdx);
+    var actJoinFromChosenScan = calcJoinCosts(chosenScanActCost, actScanRaw.orderedScanCost, actScanRaw.matchRows, outerRows, innerRows, workMemMb, outerIdx, innerIdx);
+    var actOptimalJoin = calcJoinCosts(actScanPick.best.cost, actScanRaw.orderedScanCost, actScanRaw.matchRows, outerRows, innerRows, workMemMb, outerIdx, innerIdx);
 
     var chosenJoinActCost = actJoinFromChosenScan.candidates[0].cost;
     for (var i = 0; i < actJoinFromChosenScan.candidates.length; i += 1) {
@@ -280,10 +299,16 @@
     var innerLoops = estJoinPick.best.id === "Nested Loop" ? actScanRaw.matchRows : 1;
     var estOuterRows = estScanRaw.matchRows;
     var actOuterRows = actScanRaw.matchRows;
+    /* 執行樹裡實際接在 Join 下的外層掃描：免 Sort 的 Merge Join 只能用保序掃描 */
+    var mergeOrdered = estJoinPick.best.id === "Merge Join" && estJoinPick.mergeOrderedOuter;
+    var planOuterScan = mergeOrdered ? estScanRaw.orderedScanId : estScanPick.best.id;
+    var planOuterScanEstCost = mergeOrdered ? estScanRaw.orderedScanCost : estScanPick.best.cost;
 
     return {
       winnerScan: estScanPick.best.id,
       winnerScanEstCost: round1(estScanPick.best.cost),
+      planOuterScan: planOuterScan,
+      planOuterScanEstCost: round1(planOuterScanEstCost),
       winnerJoin: estJoinPick.best.id,
       winnerJoinLabel: estJoinPick.best.label,
       winnerJoinEstCost: round1(estJoinPick.best.cost),
@@ -293,8 +318,11 @@
       penaltyRatio: penaltyRatio,
       estOuterRows: estOuterRows,
       actOuterRows: actOuterRows,
+      estJoinedRows: estJoinPick.joinedRows,
       actJoinedRows: actOptimalJoin.joinedRows,
+      innerRowsPerLoop: estJoinPick.fanoutPerOrder,
       innerLoops: innerLoops,
+      hashBuildSide: estJoinPick.hashBuildSide,
       hashBatches: actJoinFromChosenScan.hashBatches,
       spillPages: actJoinFromChosenScan.spillPages,
       bitmapLossy: actScanRaw.bitmapLossy,
@@ -322,14 +350,14 @@
 
     /* 左側：傳統 OFFSET 或 Deferred Join */
     var idxLeafPagesOffset = Math.max(1, Math.ceil(scanRowsOffset / 280));
-    var heapFetchOffset = isDeferred ? pageSize : Math.ceil(scanRowsOffset * 0.75);
+    var heapFetchOffset = isDeferred ? pageSize : scanRowsOffset;
     var leftPages = treeDepth + idxLeafPagesOffset + heapFetchOffset;
     var leftDbExecMs = leftPages * 0.018 + scanRowsOffset * 0.00045;
 
     /* 右側：Keyset / Cursor 分頁 */
     var idxLeafPagesKeyset = Math.max(1, Math.ceil(pageSize / 280));
     var rightPages = treeDepth + idxLeafPagesKeyset + pageSize;
-    var rightDbExecMs = rightPages * 0.018 + pageSize * 0.0005;
+    var rightDbExecMs = rightPages * 0.018 + pageSize * 0.00045;
 
     /* 子表關聯往返（N+1 vs WHERE IN 批次） */
     var sqlRoundTrips = isNPlus1 ? (1 + pageSize) : 2;
@@ -519,25 +547,40 @@
     var joinStartup = res.winnerJoin === "Nested Loop" ? "0.85" : fmtInt(res.winnerJoinEstCost * 0.42);
     var lines = [];
     lines.push(res.winnerJoinLabel + "  (cost=" + joinStartup + ".." + fmtInt(res.winnerJoinEstCost) +
-      " rows=" + res.estOuterRows * 4 + ") (actual rows=" + res.actJoinedRows + " loops=1)");
+      " rows=" + res.estJoinedRows + ") (actual rows=" + res.actJoinedRows + " loops=1)");
+
+    /* 外層 orders 掃描節點（含 Bitmap 的 Recheck 行），依縮排插到樹中正確位置 */
+    function pushOuterScan(indent) {
+      lines.push(indent + "-> " + res.planOuterScan + " on orders o  (cost=0.00.." + fmtInt(res.planOuterScanEstCost) +
+        " rows=" + res.estOuterRows + ") (actual rows=" + res.actOuterRows + " loops=1)");
+      if (res.planOuterScan === "Bitmap Heap Scan") {
+        lines.push(indent + "     Recheck Cond: (created_at >= ...)  |  Heap Blocks: " +
+          (res.bitmapLossy ? "exact+lossy (exceeded work_mem)" : "exact"));
+      }
+    }
+
     if (res.winnerJoin === "Hash Join") {
-      lines.push("  Hash Cond: (i.order_id = o.id)  |  Batches: " + res.hashBatches +
-        (res.spillPages > 0 ? ("  Temp Written: " + fmtInt(res.spillPages) + " pages") : "  (in-memory)"));
+      lines.push("  Hash Cond: (i.order_id = o.id)");
+      var hashLine = "  -> Hash  (Batches: " + res.hashBatches +
+        (res.spillPages > 0 ? ("  Temp Written: " + fmtInt(res.spillPages) + " pages)") : "  in-memory)");
+      /* PG 慣例：第一個子節點是 Probe 側，第二個子節點 Hash 底下是 Build 側（較小的一邊） */
+      if (res.hashBuildSide === "outer") {
+        lines.push("  -> Seq Scan on order_items i");
+        lines.push(hashLine);
+        pushOuterScan("       ");
+      } else {
+        pushOuterScan("  ");
+        lines.push(hashLine);
+        lines.push("       -> Seq Scan on order_items i");
+      }
     } else if (res.winnerJoin === "Merge Join") {
       lines.push("  Merge Cond: (o.id = i.order_id)");
-    }
-    lines.push("  -> " + res.winnerScan + " on orders o  (cost=0.00.." + fmtInt(res.winnerScanEstCost) +
-      " rows=" + res.estOuterRows + ") (actual rows=" + res.actOuterRows + " loops=1)");
-    if (res.winnerScan === "Bitmap Heap Scan") {
-      lines.push("       Recheck Cond: (created_at >= ...)  |  Heap Blocks: " +
-        (res.bitmapLossy ? "exact+lossy (exceeded work_mem)" : "exact"));
-    }
-    if (res.winnerJoin === "Nested Loop") {
-      lines.push("  -> Index/Table Scan on order_items i  (actual rows=4 loops=" + res.innerLoops + ")");
-    } else if (res.winnerJoin === "Hash Join") {
-      lines.push("  -> Hash  (Buckets / Batches=" + res.hashBatches + ")  -> Seq Scan on order_items i");
-    } else {
+      pushOuterScan("  ");
       lines.push("  -> Ordered/Sorted Stream on order_items i  (loops=1)");
+    } else {
+      pushOuterScan("  ");
+      lines.push("  -> Index/Table Scan on order_items i  (rows=" + res.innerRowsPerLoop +
+        ") (actual rows=" + res.innerRowsPerLoop + " loops=" + res.innerLoops + ")");
     }
     return lines.join("\n");
   }
@@ -572,7 +615,7 @@
     }
 
     elPlScanNote.textContent = "主表共 " + fmtInt(res.heapPages) + " 頁";
-    elPlJoinNote.textContent = "預計產出約 " + fmtInt(res.actJoinedRows) + " 列";
+    elPlJoinNote.textContent = "預計產出約 " + fmtInt(res.estJoinedRows) + " 列";
 
     renderBarList(elPlScanBars, res.scans, "id");
     renderBarList(elPlJoinBars, res.joins, "label");
@@ -580,6 +623,9 @@
 
     var msg = "<b>決策解讀：</b>Planner 估計外層留下 <b>" + fmtInt(res.estOuterRows) + "</b> 列，單表選定 <b>" +
       res.winnerScan + "</b>，雙表選定 <b>" + res.winnerJoinLabel + "</b>（估計總成本 " + fmtInt(res.winnerJoinEstCost) + "）。";
+    if (res.planOuterScan !== res.winnerScan) {
+      msg += " Merge Join 免 Sort 需要有序輸入，執行樹的外層改由保序的 <b>" + res.planOuterScan + "</b> 供應。";
+    }
     if (res.penaltyRatio > 1.15) {
       msg += " 因統計偏差，真實外層有 <b>" + fmtInt(res.actOuterRows) + "</b> 列，真實執行成本高達 <b>" +
         fmtInt(res.chosenTrueCost) + "</b>，比正確計畫 <b>" + res.optimalTrueJoin + "</b>（" + fmtInt(res.optimalTrueCost) + "）貴了 <b>" + res.penaltyRatio + " 倍</b>！";
@@ -643,7 +689,7 @@
     var summary = "<b>並排結論：</b>翻到第 <b>" + fmtInt(pgState.pageNum) + "</b> 頁時，左側必須先掃過並丟棄 <b>" +
       fmtInt(res.discardedLeft) + "</b> 列（共讀 <b>" + fmtInt(res.leftTotalPages) + "</b> 頁，耗時 <b>" + res.leftLatencyMs +
       " ms</b>）；右側 Keyset 游標只讀 <b>" + fmtInt(res.rightTotalPages) + "</b> 頁（耗時 <b>" + res.rightLatencyMs +
-      " ms</b>），快了 <b>" + res.speedupFactor + " 倍</b>。";
+      " ms</b>）" + (res.speedupFactor >= 1.1 ? "，快了 <b>" + res.speedupFactor + " 倍</b>。" : "，兩者相當。");
     if (isN1) {
       summary += " 注意目前開啟了 <b>ORM Lazy N+1</b>，光 " + res.sqlRoundTrips + " 趟網路往返就白白墊高了 <b>" + res.netOverheadMs + " ms</b> 延遲！";
     }

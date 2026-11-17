@@ -1372,11 +1372,11 @@
   <p>當應用程式送出一條 SQL，資料庫並不會直接打開磁碟找資料，而是依序走過四個階段。理解這個管線，才能區分「語法改寫能救的事」與「必須修統計資訊或索引才能救的事」：</p>
 
   <div class="qp-row">
-    <div class="qp-node"><div class="nn">Parser &amp; Rewriter</div><div class="ns">語法樹、展開 View、常數折疊與謂詞下推</div></div>
+    <div class="qp-node"><div class="nn">Parser &amp; Rewriter</div><div class="ns">語法樹、語意分析、展開 View 與規則</div></div>
     <span class="qp-arrow">▸</span>
     <div class="qp-node accent"><div class="nn">Catalog 統計資訊</div><div class="ns">總頁數、NDV、MCV 與等頻直方圖</div></div>
     <span class="qp-arrow">▸</span>
-    <div class="qp-node warn"><div class="nn">Planner / CBO</div><div class="ns">枚舉掃描路徑與 Join 順序，挑最低成本樹</div></div>
+    <div class="qp-node warn"><div class="nn">Planner / CBO</div><div class="ns">常數折疊、謂詞下推，枚舉掃描路徑與 Join 順序，挑最低成本樹</div></div>
     <span class="qp-arrow">▸</span>
     <div class="qp-node ok"><div class="nn">Executor</div><div class="ns">火山模型拉取 tuple，管理記憶體與溢寫</div></div>
   </div>
@@ -1454,11 +1454,11 @@
 
   <div class="qp-sub">為什麼 Bitmap Scan 能組合兩個獨立的單欄索引？</div>
   <p>假設查詢寫了 <code>WHERE region = 'APAC' AND tier = 'PRO'</code>，表上只有 <code>idx_region</code> 與 <code>idx_tier</code> 兩個獨立索引，沒有複合索引。一般 <code>Index Scan</code> 一次只能沿一棵樹走；<code>Bitmap Scan</code> 則可以各自掃出兩份 TID 點陣圖，在記憶體裡做位元級的 <code>BitmapAnd</code>（若是 <code>OR</code> 條件就是 <code>BitmapOr</code>），只對交集留下的頁號去讀主表。</p>
-  <p>但點陣圖有記憶體上限：它受限於連線層級的 <code>work_mem</code>（PostgreSQL 預設僅 <code>4MB</code>）。當命中筆數太多、精確記錄每一列位址的點陣圖塞不進 <code>work_mem</code> 時，它會自動退化成<strong>Lossy（失真）模式</strong>——只記「哪一個 8 KiB 資料頁有命中」，不記頁內第幾列。進到 <code>Bitmap Heap Scan</code> 時就必須把整個標記頁的每一列都撈出來重跑一次 <code>Recheck Cond</code>。如果你在 <code>EXPLAIN ANALYZE</code> 看到 <code>Heap Blocks: exact=120 lossy=48000</code>，代表 <code>work_mem</code> 不夠裝點陣圖，大量無關列被拖進來重驗。</p>
+  <p>但點陣圖有記憶體上限：它受限於 <code>work_mem</code>（每個 Sort／Hash／Bitmap 算子各自一份上限，PostgreSQL 預設僅 <code>4MB</code>）。當命中筆數太多、精確記錄每一列位址的點陣圖塞不進 <code>work_mem</code> 時，它會自動退化成<strong>Lossy（失真）模式</strong>——只記「哪一個 8 KiB 資料頁有命中」，不記頁內第幾列。進到 <code>Bitmap Heap Scan</code> 時就必須把整個標記頁的每一列都撈出來重跑一次 <code>Recheck Cond</code>。如果你在 <code>EXPLAIN ANALYZE</code> 看到 <code>Heap Blocks: exact=120 lossy=48000</code>，代表 <code>work_mem</code> 不夠裝點陣圖，大量無關列被拖進來重驗。</p>
 
   <div class="callout warn">
-    <div class="c-title"><span class="ic">陷阱</span>實體聚簇相關係數（Correlation）會讓同一條查詢成本差十倍</div>
-    <p>同樣命中 10,000 列，若條件是自增時間欄 <code>created_at</code>，這 10,000 列緊密擠在相鄰的 150 個資料頁裡（<code>pg_stats.correlation ≈ 0.99</code>），<code>Index Scan</code> 回表幾乎等同循序讀；若條件是隨機的 <code>user_id</code>（<code>correlation ≈ 0.02</code>），這 10,000 列散在 9,500 個不同頁，隨機讀成本暴增數十倍。優化器在計算 <code>Index Scan</code> 成本時，會依 correlation 在 <code>seq_page_cost</code> 與 <code>random_page_cost</code> 之間插值——這就是為什麼欄位命中率一樣，一個走 <code>Index Scan</code>、另一個卻切去 <code>Bitmap Heap Scan</code> 或 <code>Seq Scan</code>。</p>
+    <div class="c-title"><span class="ic">陷阱</span>實體聚簇相關係數（Correlation）會讓同一條查詢成本差上百倍</div>
+    <p>同樣命中 10,000 列，若條件是自增時間欄 <code>created_at</code>，這 10,000 列緊密擠在相鄰的 150 個資料頁裡（<code>pg_stats.correlation ≈ 0.99</code>），<code>Index Scan</code> 回表幾乎等同循序讀；若條件是隨機的 <code>user_id</code>（<code>correlation ≈ 0.02</code>），這 10,000 列散在 9,500 個不同頁，隨機讀成本暴增兩百多倍。優化器在計算 <code>Index Scan</code> 成本時，會依 correlation 在 <code>seq_page_cost</code> 與 <code>random_page_cost</code> 之間插值——這就是為什麼欄位命中率一樣，一個走 <code>Index Scan</code>、另一個卻切去 <code>Bitmap Heap Scan</code> 或 <code>Seq Scan</code>。</p>
   </div>
 
   <div class="oneliner">
@@ -1581,7 +1581,7 @@
     <div class="qp-pane ok">
       <div class="pt">怎麼修多欄位與表達式失真？</div>
       <div class="ps">Extended Statistics &amp; Expression Index</div>
-      <p>PostgreSQL 10+ 提供 <code>CREATE STATISTICS s1 (dependencies, ndistinct, mcv) ON country, currency FROM orders;</code>，MySQL 8.0 也支援欄位直方圖與複合索引基數統計，讓優化器知道欄位間的函數依賴與聯合分布。</p>
+      <p>PostgreSQL 提供 <code>CREATE STATISTICS s1 (dependencies, ndistinct, mcv) ON country, currency FROM orders;</code>（<code>ndistinct</code>、<code>dependencies</code> 自 PG 10 起，<code>mcv</code> 自 PG 12 起），讓優化器知道欄位間的函數依賴與聯合分布；MySQL 8.0 則只有單欄直方圖，複合索引只提供各前綴組合的相異值數（NDV），無法描述跨欄位的聯合分布。</p>
       <p>若是 <code>WHERE lower(email) = ?</code>，一般欄位統計完全不認得函式結果，優化器只能盲猜固定常數（如 <code>0.5%</code>）；建立表達式索引後再跑 <code>ANALYZE</code>，資料庫就會替該表達式單獨收集 MCV 與直方圖。</p>
     </div>
   </div>
@@ -1589,7 +1589,7 @@
 
   <div class="callout warn">
     <div class="c-title"><span class="ic">陷阱</span>綁定參數（Prepared Statement）看不到常數值時怎麼辦？</div>
-    <p>當 ORM 使用 <code>WHERE merchant_id = $1</code> 預編譯語句時，通用計畫（Generic Plan）在規劃當下不知道 <code>$1</code> 是佔全表 40% 的超大商戶，還是只有 3 筆訂單的小商戶，只能拿平均頻率去估——結果大商戶被塞進 Index Scan 跑死，或小商戶被迫跑全表掃描。PostgreSQL 12+ 採混合策略：前 5 次執行根據實際傳入參數量身打造 <strong>Custom Plan</strong>，第 6 次起比較通用計畫成本是否明顯較差，只有不吃虧時才切去快取的 Generic Plan（也可用 <code>plan_cache_mode</code> 強制指定）。</p>
+    <p>當 ORM 使用 <code>WHERE merchant_id = $1</code> 預編譯語句時，通用計畫（Generic Plan）在規劃當下不知道 <code>$1</code> 是佔全表 40% 的超大商戶，還是只有 3 筆訂單的小商戶，只能拿平均頻率去估——結果大商戶被塞進 Index Scan 跑死，或小商戶被迫跑全表掃描。PostgreSQL（自 9.2 起）採混合策略：前 5 次執行根據實際傳入參數量身打造 <strong>Custom Plan</strong>，第 6 次起比較通用計畫成本是否明顯較差，只有不吃虧時才切去快取的 Generic Plan（PG 12 起另可用 <code>plan_cache_mode</code> 強制指定）。</p>
   </div>
 
   <div class="oneliner">
@@ -1777,13 +1777,13 @@ sequenceDiagram
       <div class="status-line" id="pl-status">載入中…</div>
     </div>
   </div>
-  <p class="cap">橫條長度代表各候選算子在 Planner 眼中的估計 cost units。試著把選擇性從 0.2% 慢慢拉到 35%，觀察單表如何走過 Index Scan ▸ Bitmap Heap Scan ▸ Seq Scan 三段切換，以及 Join 如何從 Nested Loop 翻轉成 Hash Join。</p>
+  <p class="cap">橫條長度代表各候選算子在 Planner 眼中的估計 cost units。試著在預設 correlation 0.15 下把選擇性從 0.2% 慢慢拉到 40%，觀察 Join 在 3.7% 從 Nested Loop 翻轉成 Hash Join、單表在 35.7% 從 Bitmap Heap Scan 切到 Seq Scan；低 correlation 時 Index Scan 全程輸給 Bitmap Heap Scan，要把 correlation 拉高才看得到它勝出。</p>
 
   <p>建議動手驗證這四個面試經典轉折點：</p>
   <ol>
-    <li><strong>選擇性三段跳</strong>：保持預設（correlation 0.15、一般索引），把「WHERE 實際選擇性」設在 <code>0.2%</code> 時 <code>Index Scan + Nested Loop</code> 大勝；拉到 <code>5%</code> 左右，隨機回表太貴，單表切為 <code>Bitmap Heap Scan</code>、Join 切為 <code>Hash Join</code>；繼續拉過 <code>25%</code>，直接變成 <code>Seq Scan + Hash Join</code>。</li>
-    <li><strong>聚簇係數救回 Index Scan</strong>：在選擇性 <code>5%</code> 時原本走 Bitmap Scan；把「實體聚簇 correlation」拉到 <code>0.95</code>（代表資料幾乎照索引順序存放），<code>Index Scan</code> 回表變成近似循序讀，立刻重新奪回冠軍。</li>
-    <li><strong>work_mem 不足引發 Hash Spill</strong>：把內層表拉到 <code>1,600,000</code> 列、<code>work_mem</code> 壓低到 <code>4 MB</code>，觀察 Hash Join 橫條變成橘色並顯示 <code>Batches &gt; 1</code>；若切到「雙邊已排序索引」，免排序的 <code>Merge Join</code> 完全不吃 Hash 記憶體，反超勝出。</li>
+    <li><strong>選擇性三段跳</strong>：保持預設（correlation 0.15、一般索引），把「WHERE 實際選擇性」設在 <code>0.2%</code> 時 <code>Bitmap Heap Scan + Nested Loop</code> 勝出——命中列散落各頁，Bitmap 依頁號每頁只讀一次（估計 982），比逐筆隨機回表的 <code>Index Scan</code>（1,453）便宜；拉到 <code>3.7%</code>，外層列數多到逐圈下探內層太貴，Join 切為 <code>Hash Join</code>；繼續拉到 <code>35.7%</code>，Bitmap 幾乎要讀遍整張表還得另付索引與 Recheck 成本（5,002），直接變成 <code>Seq Scan + Hash Join</code>（5,000）。</li>
+    <li><strong>聚簇係數救回 Index Scan</strong>：在選擇性 <code>5%</code> 時原本走 Bitmap Scan；把「實體聚簇 correlation」拉到 <code>1.00</code>（代表資料完全照索引順序存放），<code>Index Scan</code> 回表變成近似循序讀，成本從 24,641 降到 343，立刻奪回冠軍。</li>
+    <li><strong>work_mem 不足引發 Hash Spill</strong>：從預設把選擇性拉到 <code>12%</code>（外層 24,000 列）、<code>work_mem</code> 壓低到 <code>4 MB</code>；Hash 表建在過濾後較小的 orders 一側，24,000 列已塞不進 4 MB，勝出的 Join 變成 <code>Hash Join (Batches=2)</code>、Join 指標框轉為橘色。此時切到「雙邊已排序索引」，Hash Join 橫條轉橘落選，免排序的 <code>Merge Join</code> 完全不吃 Hash 記憶體，以 34,810 對 39,606 反超勝出。</li>
     <li><strong>統計過期低估災難</strong>：把選擇性設在 <code>12%</code>（實際 24,000 列），正常該跑 <code>Hash Join</code>；接著把「統計估計偏差」往左拉到 <code>0.02x（低估 50 倍）</code>，Planner 以為外層只有幾百列而誤選 <code>Nested Loop</code>，右上角會直接算出真實執行成本比最佳計畫暴增數倍。</li>
   </ol>
 
@@ -1998,7 +1998,7 @@ sequenceDiagram
           <td><strong>⑤ 最後手段：Hint</strong></td>
           <td>跨複雜 CTE / 特殊邊界分布，優化器受限模型結構始終選錯</td>
           <td>CBO 代數模型盲區（如複雜子查詢展開或特定版本限制）</td>
-          <td>MySQL 8.0 <code>/*+ HASH_JOIN(t1, t2) */</code> 或 PG 擴充套件 <code>pg_hint_plan</code>；<strong>必須寫註解壓單號並排程追蹤</strong>，避免日後資料長大反而鎖死爛計畫</td>
+          <td>MySQL 8.0.20+ 以 <code>/*+ BNL(t1, t2) */</code>／<code>NO_BNL</code> 開關 Hash Join（<code>HASH_JOIN</code> 提示僅 8.0.18 有效），或 PG 擴充套件 <code>pg_hint_plan</code>；<strong>必須寫註解壓單號並排程追蹤</strong>，避免日後資料長大反而鎖死爛計畫</td>
         </tr>
       </tbody>
     </table>
@@ -2042,7 +2042,7 @@ sequenceDiagram
         </tr>
         <tr>
           <td><strong>昨天很快的 SQL 今天沒改版卻突然超時，可能原因？</strong></td>
-          <td>典型「計畫突變（Plan Flip）」：① 大批寫入/刪除後尚未 <code>ANALYZE</code>，統計過期；② 查詢時間窗跨出直方圖右邊界被估成 1 列，觸發災難性 Nested Loop；③ 綁定參數快取到為小客戶生成的 Generic/Custom Plan 卻套在大租戶（Data Skew）上；④ 資料量跨過 <code>work_mem</code> 臨界點開始磁碟 Spill。</td>
+          <td>典型「計畫突變（Plan Flip）」：① 大批寫入/刪除後尚未 <code>ANALYZE</code>，統計過期；② 查詢時間窗跨出直方圖右邊界被估成 1 列，觸發災難性 Nested Loop；③ 預編譯語句前 5 次都是小客戶，其 Custom Plan 成本讓 PG 判定 Generic Plan 不吃虧而改用快取的通用計畫，之後原封不動套在大租戶（Data Skew）上；④ 資料量跨過 <code>work_mem</code> 臨界點開始磁碟 Spill。</td>
         </tr>
         <tr>
           <td><strong>百萬筆列表翻到第 5,000 頁很慢，怎麼設計？</strong></td>
@@ -2260,6 +2260,7 @@ sequenceDiagram
   var CPU_OPERATOR_COST = 0.0025;
   var TUPLES_PER_HEAP_PAGE = 80;
   var TUPLES_PER_IDX_PAGE = 320;
+  var ALL_VISIBLE_FRAC = 0.92;
   var EST_FACTORS = [0.02, 0.1, 1.0, 5.0, 20.0];
 
   function round1(x) {
@@ -2298,6 +2299,7 @@ sequenceDiagram
 
     /* 2. Index Scan：依 correlation 在隨機讀與循序讀之間平方插值 */
     var indexCost = null;
+    var heapIo = 0;
     var idxLeafRead = Math.max(1, Math.ceil(idxPages * selFrac));
     var idxCpu = matchRows * (CPU_INDEX_TUPLE_COST + CPU_TUPLE_COST) + treeH * 0.05;
     if (outerIdx !== "none") {
@@ -2306,16 +2308,16 @@ sequenceDiagram
       var c2 = corrFrac * corrFrac;
       var ioMax = randFetchPages * RANDOM_PAGE_COST;
       var ioMin = seqFetchPages * SEQ_PAGE_COST + Math.max(0, (seqFetchPages - 1)) * 0.15;
-      var heapIo = ioMax - c2 * (ioMax - ioMin);
+      heapIo = ioMax - c2 * (ioMax - ioMin);
       var idxTreeIo = treeH * 1.2 + idxLeafRead * 1.4;
       indexCost = idxTreeIo + heapIo + idxCpu;
     }
 
-    /* 3. Index Only Scan：僅覆蓋索引可用，假設 92% 頁已在 Visibility Map 標為 all-visible */
+    /* 3. Index Only Scan：僅覆蓋索引可用。仿 PG 把回表 I/O 乘上 (1 - allvisfrac)：
+          假設 92% 頁已在 Visibility Map 標為 all-visible，只剩 8% 需要回表 */
     var indexOnlyCost = null;
     if (outerIdx === "cov") {
-      var vmMissPages = uniquePagesTouched(heapPages, Math.round(matchRows * 0.08));
-      var vmHeapIo = vmMissPages * (SEQ_PAGE_COST * 0.4 + RANDOM_PAGE_COST * 0.6 * (1 - corrFrac * 0.7));
+      var vmHeapIo = heapIo * (1 - ALL_VISIBLE_FRAC);
       indexOnlyCost = treeH * 1.1 + idxLeafRead * 1.25 + matchRows * CPU_INDEX_TUPLE_COST + vmHeapIo;
     }
 
@@ -2335,8 +2337,21 @@ sequenceDiagram
       /* 密度越高越接近循序 I/O，密度低偏隨機但有預讀攤提 */
       var perPageCost = RANDOM_PAGE_COST - (RANDOM_PAGE_COST - SEQ_PAGE_COST) * Math.sqrt(Math.min(1, density));
       var recheckCpu = bitmapLossy ? (targetPages * TUPLES_PER_HEAP_PAGE * CPU_OPERATOR_COST * 1.6) : 0;
-      var bmBuild = treeH * 1.1 + idxLeafRead * 1.2 + matchRows * CPU_INDEX_TUPLE_COST + targetPages * 0.04;
-      bitmapCost = bmBuild + targetPages * perPageCost + matchRows * CPU_TUPLE_COST + recheckCpu;
+      /* 索引端仿 genericcostestimate：每個葉頁計 random_page_cost，每筆 index tuple 計 cpu_index_tuple_cost + 條件的 cpu_operator_cost */
+      var bmBuild = treeH * 1.1 + idxLeafRead * RANDOM_PAGE_COST + matchRows * (CPU_INDEX_TUPLE_COST + CPU_OPERATOR_COST) + targetPages * 0.04;
+      /* 回表每列計 cpu_tuple_cost + Recheck 條件的 cpu_operator_cost（同 cost_bitmap_heap_scan） */
+      bitmapCost = bmBuild + targetPages * perPageCost + matchRows * (CPU_TUPLE_COST + CPU_OPERATOR_COST) + recheckCpu;
+    }
+
+    /* 保序掃描：Merge Join 免 Sort 時外層只能用依索引鍵有序輸出的 Index Scan / Index Only Scan */
+    var orderedScanId = null;
+    var orderedScanCost = null;
+    if (indexOnlyCost !== null && indexOnlyCost <= indexCost) {
+      orderedScanId = "Index Only Scan";
+      orderedScanCost = indexOnlyCost;
+    } else if (indexCost !== null) {
+      orderedScanId = "Index Scan";
+      orderedScanCost = indexCost;
     }
 
     return {
@@ -2346,7 +2361,9 @@ sequenceDiagram
       indexCost: indexCost,
       indexOnlyCost: indexOnlyCost,
       bitmapCost: bitmapCost,
-      bitmapLossy: bitmapLossy
+      bitmapLossy: bitmapLossy,
+      orderedScanId: orderedScanId,
+      orderedScanCost: orderedScanCost
     };
   }
 
@@ -2366,7 +2383,7 @@ sequenceDiagram
     return { best: best, list: list };
   }
 
-  function calcJoinCosts(scanWinCost, outerMatchRows, outerTotalRows, innerRows, workMemMb, outerIdx, innerIdx) {
+  function calcJoinCosts(scanWinCost, orderedScanCost, outerMatchRows, outerTotalRows, innerRows, workMemMb, outerIdx, innerIdx) {
     var innerHeapPages = Math.max(4, Math.ceil(innerRows / TUPLES_PER_HEAP_PAGE));
     var innerIdxH = calcBtreeHeight(innerRows);
     var fanoutPerOrder = Math.max(1, innerRows / Math.max(1, outerTotalRows));
@@ -2415,17 +2432,17 @@ sequenceDiagram
     var mergeCost;
     var sortSpill = false;
     if (bothSorted) {
-      /* 雙邊直接沿 B+Tree 有序輸出歸併，省掉 Sort，只付內層有序索引掃描成本 */
-      var outerOrderedScan = Math.max(scanWinCost, outerMatchRows * 0.55 + 6);
+      /* 雙邊直接沿 B+Tree 有序輸出歸併，省掉 Sort；外層必須改走保序的 Index Scan / Index Only Scan（Bitmap 輸出無序） */
+      var outerOrderedScan = orderedScanCost;
       var innerOrderedScan = Math.max(8, Math.ceil(innerRows / TUPLES_PER_IDX_PAGE) * 1.15 + innerRows * CPU_INDEX_TUPLE_COST);
       mergeCost = outerOrderedScan + innerOrderedScan + (outerMatchRows + innerRows) * CPU_OPERATOR_COST + joinedRows * CPU_TUPLE_COST;
     } else {
       var sortOuterBytes = outerMatchRows * 160;
-      var sortInnerBytes = (innerIdx === "idx" ? 0 : innerRows * 160);
+      var sortInnerBytes = (innerIdx !== "none" ? 0 : innerRows * 160);
       sortSpill = (sortOuterBytes > memBytes) || (sortInnerBytes > memBytes);
       var outerSortCost = outerMatchRows > 1 ? outerMatchRows * (Math.log(outerMatchRows) / Math.LN2) * CPU_OPERATOR_COST * 2 : 0;
       var innerStreamCost;
-      if (innerIdx === "idx") {
+      if (innerIdx !== "none") {
         /* 內層有單邊索引可有序讀取，但全索引回表有隨機成本 */
         innerStreamCost = innerHeapPages * 2.1 + innerRows * (CPU_INDEX_TUPLE_COST + CPU_TUPLE_COST);
       } else {
@@ -2450,6 +2467,8 @@ sequenceDiagram
       candidates: candidates,
       joinedRows: joinedRows,
       hashBatches: batches,
+      hashBuildSide: outerMatchRows <= innerRows ? "outer" : "inner",
+      mergeOrderedOuter: bothSorted,
       spillPages: spillPages,
       fanoutPerOrder: round1(fanoutPerOrder)
     };
@@ -2480,7 +2499,7 @@ sequenceDiagram
     /* Planner 根據估計選擇性做決策 */
     var estScanRaw = calcScanCosts(outerRows, estSel, corrFrac, workMemMb, outerIdx);
     var estScanPick = pickMinScan(estScanRaw);
-    var estJoinPick = calcJoinCosts(estScanPick.best.cost, estScanRaw.matchRows, outerRows, innerRows, workMemMb, outerIdx, innerIdx);
+    var estJoinPick = calcJoinCosts(estScanPick.best.cost, estScanRaw.orderedScanCost, estScanRaw.matchRows, outerRows, innerRows, workMemMb, outerIdx, innerIdx);
 
     /* 真實流量下的各路徑實際成本（用來算統計偏差造成的決策損失） */
     var actScanRaw = calcScanCosts(outerRows, actualSel, corrFrac, workMemMb, outerIdx);
@@ -2490,8 +2509,8 @@ sequenceDiagram
     if (estScanPick.best.id === "Index Only Scan" && actScanRaw.indexOnlyCost !== null) chosenScanActCost = actScanRaw.indexOnlyCost;
     if (estScanPick.best.id === "Bitmap Heap Scan" && actScanRaw.bitmapCost !== null) chosenScanActCost = actScanRaw.bitmapCost;
 
-    var actJoinFromChosenScan = calcJoinCosts(chosenScanActCost, actScanRaw.matchRows, outerRows, innerRows, workMemMb, outerIdx, innerIdx);
-    var actOptimalJoin = calcJoinCosts(actScanPick.best.cost, actScanRaw.matchRows, outerRows, innerRows, workMemMb, outerIdx, innerIdx);
+    var actJoinFromChosenScan = calcJoinCosts(chosenScanActCost, actScanRaw.orderedScanCost, actScanRaw.matchRows, outerRows, innerRows, workMemMb, outerIdx, innerIdx);
+    var actOptimalJoin = calcJoinCosts(actScanPick.best.cost, actScanRaw.orderedScanCost, actScanRaw.matchRows, outerRows, innerRows, workMemMb, outerIdx, innerIdx);
 
     var chosenJoinActCost = actJoinFromChosenScan.candidates[0].cost;
     for (var i = 0; i < actJoinFromChosenScan.candidates.length; i += 1) {
@@ -2528,10 +2547,16 @@ sequenceDiagram
     var innerLoops = estJoinPick.best.id === "Nested Loop" ? actScanRaw.matchRows : 1;
     var estOuterRows = estScanRaw.matchRows;
     var actOuterRows = actScanRaw.matchRows;
+    /* 執行樹裡實際接在 Join 下的外層掃描：免 Sort 的 Merge Join 只能用保序掃描 */
+    var mergeOrdered = estJoinPick.best.id === "Merge Join" && estJoinPick.mergeOrderedOuter;
+    var planOuterScan = mergeOrdered ? estScanRaw.orderedScanId : estScanPick.best.id;
+    var planOuterScanEstCost = mergeOrdered ? estScanRaw.orderedScanCost : estScanPick.best.cost;
 
     return {
       winnerScan: estScanPick.best.id,
       winnerScanEstCost: round1(estScanPick.best.cost),
+      planOuterScan: planOuterScan,
+      planOuterScanEstCost: round1(planOuterScanEstCost),
       winnerJoin: estJoinPick.best.id,
       winnerJoinLabel: estJoinPick.best.label,
       winnerJoinEstCost: round1(estJoinPick.best.cost),
@@ -2541,8 +2566,11 @@ sequenceDiagram
       penaltyRatio: penaltyRatio,
       estOuterRows: estOuterRows,
       actOuterRows: actOuterRows,
+      estJoinedRows: estJoinPick.joinedRows,
       actJoinedRows: actOptimalJoin.joinedRows,
+      innerRowsPerLoop: estJoinPick.fanoutPerOrder,
       innerLoops: innerLoops,
+      hashBuildSide: estJoinPick.hashBuildSide,
       hashBatches: actJoinFromChosenScan.hashBatches,
       spillPages: actJoinFromChosenScan.spillPages,
       bitmapLossy: actScanRaw.bitmapLossy,
@@ -2570,14 +2598,14 @@ sequenceDiagram
 
     /* 左側：傳統 OFFSET 或 Deferred Join */
     var idxLeafPagesOffset = Math.max(1, Math.ceil(scanRowsOffset / 280));
-    var heapFetchOffset = isDeferred ? pageSize : Math.ceil(scanRowsOffset * 0.75);
+    var heapFetchOffset = isDeferred ? pageSize : scanRowsOffset;
     var leftPages = treeDepth + idxLeafPagesOffset + heapFetchOffset;
     var leftDbExecMs = leftPages * 0.018 + scanRowsOffset * 0.00045;
 
     /* 右側：Keyset / Cursor 分頁 */
     var idxLeafPagesKeyset = Math.max(1, Math.ceil(pageSize / 280));
     var rightPages = treeDepth + idxLeafPagesKeyset + pageSize;
-    var rightDbExecMs = rightPages * 0.018 + pageSize * 0.0005;
+    var rightDbExecMs = rightPages * 0.018 + pageSize * 0.00045;
 
     /* 子表關聯往返（N+1 vs WHERE IN 批次） */
     var sqlRoundTrips = isNPlus1 ? (1 + pageSize) : 2;
@@ -2767,25 +2795,40 @@ sequenceDiagram
     var joinStartup = res.winnerJoin === "Nested Loop" ? "0.85" : fmtInt(res.winnerJoinEstCost * 0.42);
     var lines = [];
     lines.push(res.winnerJoinLabel + "  (cost=" + joinStartup + ".." + fmtInt(res.winnerJoinEstCost) +
-      " rows=" + res.estOuterRows * 4 + ") (actual rows=" + res.actJoinedRows + " loops=1)");
+      " rows=" + res.estJoinedRows + ") (actual rows=" + res.actJoinedRows + " loops=1)");
+
+    /* 外層 orders 掃描節點（含 Bitmap 的 Recheck 行），依縮排插到樹中正確位置 */
+    function pushOuterScan(indent) {
+      lines.push(indent + "-> " + res.planOuterScan + " on orders o  (cost=0.00.." + fmtInt(res.planOuterScanEstCost) +
+        " rows=" + res.estOuterRows + ") (actual rows=" + res.actOuterRows + " loops=1)");
+      if (res.planOuterScan === "Bitmap Heap Scan") {
+        lines.push(indent + "     Recheck Cond: (created_at >= ...)  |  Heap Blocks: " +
+          (res.bitmapLossy ? "exact+lossy (exceeded work_mem)" : "exact"));
+      }
+    }
+
     if (res.winnerJoin === "Hash Join") {
-      lines.push("  Hash Cond: (i.order_id = o.id)  |  Batches: " + res.hashBatches +
-        (res.spillPages > 0 ? ("  Temp Written: " + fmtInt(res.spillPages) + " pages") : "  (in-memory)"));
+      lines.push("  Hash Cond: (i.order_id = o.id)");
+      var hashLine = "  -> Hash  (Batches: " + res.hashBatches +
+        (res.spillPages > 0 ? ("  Temp Written: " + fmtInt(res.spillPages) + " pages)") : "  in-memory)");
+      /* PG 慣例：第一個子節點是 Probe 側，第二個子節點 Hash 底下是 Build 側（較小的一邊） */
+      if (res.hashBuildSide === "outer") {
+        lines.push("  -> Seq Scan on order_items i");
+        lines.push(hashLine);
+        pushOuterScan("       ");
+      } else {
+        pushOuterScan("  ");
+        lines.push(hashLine);
+        lines.push("       -> Seq Scan on order_items i");
+      }
     } else if (res.winnerJoin === "Merge Join") {
       lines.push("  Merge Cond: (o.id = i.order_id)");
-    }
-    lines.push("  -> " + res.winnerScan + " on orders o  (cost=0.00.." + fmtInt(res.winnerScanEstCost) +
-      " rows=" + res.estOuterRows + ") (actual rows=" + res.actOuterRows + " loops=1)");
-    if (res.winnerScan === "Bitmap Heap Scan") {
-      lines.push("       Recheck Cond: (created_at >= ...)  |  Heap Blocks: " +
-        (res.bitmapLossy ? "exact+lossy (exceeded work_mem)" : "exact"));
-    }
-    if (res.winnerJoin === "Nested Loop") {
-      lines.push("  -> Index/Table Scan on order_items i  (actual rows=4 loops=" + res.innerLoops + ")");
-    } else if (res.winnerJoin === "Hash Join") {
-      lines.push("  -> Hash  (Buckets / Batches=" + res.hashBatches + ")  -> Seq Scan on order_items i");
-    } else {
+      pushOuterScan("  ");
       lines.push("  -> Ordered/Sorted Stream on order_items i  (loops=1)");
+    } else {
+      pushOuterScan("  ");
+      lines.push("  -> Index/Table Scan on order_items i  (rows=" + res.innerRowsPerLoop +
+        ") (actual rows=" + res.innerRowsPerLoop + " loops=" + res.innerLoops + ")");
     }
     return lines.join("\n");
   }
@@ -2820,7 +2863,7 @@ sequenceDiagram
     }
 
     elPlScanNote.textContent = "主表共 " + fmtInt(res.heapPages) + " 頁";
-    elPlJoinNote.textContent = "預計產出約 " + fmtInt(res.actJoinedRows) + " 列";
+    elPlJoinNote.textContent = "預計產出約 " + fmtInt(res.estJoinedRows) + " 列";
 
     renderBarList(elPlScanBars, res.scans, "id");
     renderBarList(elPlJoinBars, res.joins, "label");
@@ -2828,6 +2871,9 @@ sequenceDiagram
 
     var msg = "<b>決策解讀：</b>Planner 估計外層留下 <b>" + fmtInt(res.estOuterRows) + "</b> 列，單表選定 <b>" +
       res.winnerScan + "</b>，雙表選定 <b>" + res.winnerJoinLabel + "</b>（估計總成本 " + fmtInt(res.winnerJoinEstCost) + "）。";
+    if (res.planOuterScan !== res.winnerScan) {
+      msg += " Merge Join 免 Sort 需要有序輸入，執行樹的外層改由保序的 <b>" + res.planOuterScan + "</b> 供應。";
+    }
     if (res.penaltyRatio > 1.15) {
       msg += " 因統計偏差，真實外層有 <b>" + fmtInt(res.actOuterRows) + "</b> 列，真實執行成本高達 <b>" +
         fmtInt(res.chosenTrueCost) + "</b>，比正確計畫 <b>" + res.optimalTrueJoin + "</b>（" + fmtInt(res.optimalTrueCost) + "）貴了 <b>" + res.penaltyRatio + " 倍</b>！";
@@ -2891,7 +2937,7 @@ sequenceDiagram
     var summary = "<b>並排結論：</b>翻到第 <b>" + fmtInt(pgState.pageNum) + "</b> 頁時，左側必須先掃過並丟棄 <b>" +
       fmtInt(res.discardedLeft) + "</b> 列（共讀 <b>" + fmtInt(res.leftTotalPages) + "</b> 頁，耗時 <b>" + res.leftLatencyMs +
       " ms</b>）；右側 Keyset 游標只讀 <b>" + fmtInt(res.rightTotalPages) + "</b> 頁（耗時 <b>" + res.rightLatencyMs +
-      " ms</b>），快了 <b>" + res.speedupFactor + " 倍</b>。";
+      " ms</b>）" + (res.speedupFactor >= 1.1 ? "，快了 <b>" + res.speedupFactor + " 倍</b>。" : "，兩者相當。");
     if (isN1) {
       summary += " 注意目前開啟了 <b>ORM Lazy N+1</b>，光 " + res.sqlRoundTrips + " 趟網路往返就白白墊高了 <b>" + res.netOverheadMs + " ms</b> 延遲！";
     }
