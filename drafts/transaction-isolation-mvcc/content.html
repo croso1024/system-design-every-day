@@ -1,0 +1,880 @@
+<!-- demo-archetype: C｜並排對照（主，第 6 節）＋B｜參數掃描（次，第 7 節） —
+     主 demo 讓讀者挑選或自組兩筆交易 T1／T2 的語句交錯順序（支援上下移動語句與切換結尾提交或回滾），
+     同時餵進左右兩個可獨立選擇引擎與隔離級別的執行面板，由 computeSchedule() 依 MVCC 快照可見性規則、
+     First-Committer-Wins、InnoDB Current Read 與 SSI rw-antidependency 迴圈偵測，逐步算出每次讀取命中的版本號與異常判定。
+     選 C 是因為同一組交錯排程在不同隔離級別與引擎下會產生截然不同的可見性與異常，並排對照最能看清分歧落在哪一步。
+     次 demo 讓讀者調整寫入 TPS、最老未提交交易秒數、熱列集中度與引擎，由 computeBloat() 即時算出凍結死版本數、
+     表空間膨脹倍率、熱點列版本鏈平均遍歷深度與點查延遲放大倍率。最近 3 篇未撞形。 -->
+<style>
+  /* 本篇專屬：mv-*（圖表與排版）、mc-*（第 6 節交錯對照儀）、mb-*（第 7 節長交易膨脹模擬） */
+  .mv-sub {
+    font-weight: 700; font-size: 15px; margin: 24px 0 8px;
+    padding-left: 10px; border-left: 3px solid var(--accent); color: var(--text);
+  }
+
+  /* 圖表 1：盒 + 箭頭（隔離強度光譜，節點 <= 6） */
+  .mv-row {
+    display: flex; flex-wrap: wrap; gap: 10px;
+    align-items: stretch; justify-content: center;
+    margin: 14px 0 0;
+  }
+  .mv-node {
+    border: 1px solid var(--border-strong); border-radius: 8px;
+    background: #fff; padding: 10px 12px;
+    min-width: 118px; max-width: 170px; text-align: center;
+  }
+  .mv-node .nn { font-family: var(--mono); font-size: 12px; font-weight: 700; color: var(--text); }
+  .mv-node .ns { font-size: 11px; color: var(--text-2); margin-top: 3px; line-height: 1.45; }
+  .mv-node.accent { border-top: 3px solid var(--accent); }
+  .mv-node.ok     { border-top: 3px solid var(--ok); }
+  .mv-node.warn   { border-top: 3px solid var(--warn); }
+  .mv-arrow {
+    display: flex; align-items: center;
+    font-family: var(--mono); font-size: 13px; color: var(--text-3);
+    white-space: nowrap;
+  }
+
+  /* 圖表 2：時序 Swimlane（Write Skew 時間軸，純 CSS grid 不折行） */
+  .mv-lane {
+    display: grid; grid-template-columns: 52px repeat(3, 1fr); gap: 1px;
+    background: var(--border); border: 1px solid var(--border);
+    border-radius: 8px; overflow: hidden; margin: 14px 0 0;
+  }
+  .mv-lane > div { background: #fff; padding: 8px 10px; font-size: 12px; line-height: 1.5; }
+  .mv-lane .lh {
+    background: var(--bg-soft); font-family: var(--mono); font-size: 11px;
+    font-weight: 700; color: var(--text-2);
+  }
+  .mv-lane .lt { background: var(--bg-soft); font-family: var(--mono); font-size: 11px; color: var(--text-3); }
+  .mv-lane .lc.act { background: var(--accent-soft); }
+  .mv-lane .lc.ok  { background: var(--ok-soft); }
+  .mv-lane .lc.bad { background: var(--bad-soft); }
+  @media (max-width: 720px) { .mv-lane { grid-template-columns: 44px repeat(3, minmax(0, 1fr)); font-size: 11px; } }
+
+  /* 圖表 3：並排雙欄（PG Heap vs InnoDB Undo 結構對照） */
+  .mv-split { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin: 14px 0 0; }
+  @media (max-width: 660px) { .mv-split { grid-template-columns: 1fr; } }
+  .mv-pane {
+    border: 1px solid var(--border); border-radius: var(--radius-sm);
+    background: #fff; padding: 13px 14px; border-top: 3px solid var(--border-strong);
+  }
+  .mv-pane.a { border-top-color: var(--accent); }
+  .mv-pane.o { border-top-color: var(--ok); }
+  .mv-pane .pt { font-weight: 700; font-size: 14px; color: var(--text); }
+  .mv-pane .ps { font-family: var(--mono); font-size: 11px; color: var(--text-3); margin-bottom: 10px; }
+  .mv-box {
+    font-family: var(--mono); font-size: 12px; color: var(--text);
+    border: 1px solid var(--border-strong); border-radius: 6px;
+    padding: 8px 10px; background: #fff; text-align: center; line-height: 1.5;
+  }
+  .mv-box.soft { background: var(--bg-soft); }
+  .mv-down {
+    font-family: var(--mono); font-size: 11.5px; color: var(--text-3);
+    text-align: center; padding: 5px 0;
+  }
+  .mv-note { font-size: 12.5px; color: var(--text-2); margin: 10px 0 0; line-height: 1.6; }
+
+  /* ---------- 第 6 節主 Demo：雙交易交錯排程對照儀 (Archetype C) ---------- */
+  .mc-top {
+    display: flex; flex-direction: column; gap: 10px; margin-bottom: 12px;
+  }
+  .mc-preset-line {
+    display: flex; flex-wrap: wrap; align-items: center; gap: 8px 10px;
+  }
+  .mc-preset-line .seg { flex-wrap: wrap; border-radius: 8px; }
+  .mc-preset-line .seg button { padding: 5px 11px; font-size: 12px; }
+  .mc-k { font-family: var(--mono); font-size: 11.5px; font-weight: 700; color: var(--text-2); }
+  .mc-act-line {
+    display: flex; flex-wrap: wrap; align-items: center; gap: 10px;
+  }
+  .mc-t2end {
+    display: inline-flex; align-items: center; gap: 7px;
+    font-size: 12.5px; color: var(--text-2);
+  }
+  .mc-t2end select, .mc-col-hd select {
+    font: inherit; font-size: 12.5px; color: var(--text);
+    border: 1px solid var(--border-strong); border-radius: 6px;
+    padding: 5px 8px; background: #fff;
+  }
+
+  .mc-sched-box {
+    border: 1px solid var(--border); border-radius: var(--radius-sm);
+    background: var(--bg-soft); padding: 10px 12px; margin-bottom: 14px;
+  }
+  .mc-sched-hd {
+    display: flex; flex-wrap: wrap; justify-content: space-between; gap: 6px;
+    font-size: 12px; color: var(--text-2); margin-bottom: 8px;
+  }
+  .mc-init-tag {
+    font-family: var(--mono); font-size: 11.5px; color: var(--accent); font-weight: 600;
+  }
+  .mc-sched-list {
+    display: grid; gap: 5px;
+  }
+  .mc-op-item {
+    display: grid; grid-template-columns: 34px 44px 1fr auto; gap: 8px; align-items: center;
+    background: #fff; border: 1px solid var(--border); border-radius: 6px;
+    padding: 5px 8px; font-size: 12.5px;
+  }
+  .mc-op-idx { font-family: var(--mono); font-size: 11px; color: var(--text-3); }
+  .mc-tx-pill {
+    font-family: var(--mono); font-size: 11px; font-weight: 700; text-align: center;
+    border-radius: 4px; padding: 2px 6px;
+  }
+  .mc-tx-pill.t1 { background: var(--accent-soft); color: var(--accent); border: 1px solid var(--accent-line); }
+  .mc-tx-pill.t2 { background: var(--warn-soft); color: var(--warn); border: 1px solid var(--warn); }
+  .mc-op-sql { font-family: var(--mono); font-size: 12px; color: var(--text); overflow-wrap: anywhere; }
+  .mc-mv-btns { display: inline-flex; gap: 4px; }
+  .mc-mv-btn {
+    font-family: var(--mono); font-size: 11px; line-height: 1;
+    border: 1px solid var(--border-strong); border-radius: 5px;
+    padding: 4px 7px; background: #fff; color: var(--text-2);
+  }
+  .mc-mv-btn:hover:not(:disabled) { background: var(--bg-soft); color: var(--text); }
+  .mc-mv-btn:disabled { opacity: .32; cursor: not-allowed; }
+
+  .mc-compare {
+    display: grid; grid-template-columns: 1fr 1fr; gap: 12px; align-items: start;
+  }
+  @media (max-width: 720px) { .mc-compare { grid-template-columns: 1fr; } }
+  .mc-col {
+    border: 1px solid var(--border-strong); border-radius: var(--radius-sm);
+    background: #fff; padding: 11px 12px; display: grid; gap: 9px;
+  }
+  .mc-col-hd {
+    display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px;
+    padding-bottom: 8px; border-bottom: 1px solid var(--border);
+  }
+  .mc-col-hd select { flex: 1 1 180px; }
+  .mc-side-tag {
+    font-family: var(--mono); font-size: 11px; font-weight: 700;
+    padding: 2px 7px; border-radius: 4px;
+    background: var(--accent-soft); color: var(--accent);
+  }
+  .mc-side-tag.alt { background: var(--ok-soft); color: var(--ok); }
+
+  .mc-badge {
+    border-radius: 6px; padding: 8px 10px; font-size: 12.5px; line-height: 1.5;
+    border: 1px solid var(--border);
+  }
+  .mc-badge.ok  { background: var(--ok-soft); border-color: var(--ok); color: var(--text); }
+  .mc-badge.bad { background: var(--bad-soft); border-color: var(--bad); color: var(--text); }
+  .mc-badge b   { font-family: var(--mono); font-size: 12px; }
+
+  .mc-rows { display: grid; gap: 6px; }
+  .mc-row-item {
+    border: 1px solid var(--border); border-left: 3px solid var(--border-strong);
+    border-radius: 6px; padding: 6px 9px; font-size: 12px; line-height: 1.5; background: #fff;
+  }
+  .mc-row-item.ns-idle { border-left-color: var(--border-strong); background: #fff; }
+  .mc-row-item.ns-wait { border-left-color: var(--accent); background: var(--accent-soft); }
+  .mc-row-item.ns-ok   { border-left-color: var(--ok); background: var(--ok-soft); }
+  .mc-row-item.ns-bad  { border-left-color: var(--bad); background: var(--bad-soft); }
+  .mc-row-top {
+    display: flex; justify-content: space-between; gap: 6px;
+    font-family: var(--mono); font-size: 11px; color: var(--text-2); margin-bottom: 2px;
+  }
+  .mc-row-top b { color: var(--text); }
+  .mc-row-note { color: var(--text); font-size: 12px; }
+
+  .mc-final {
+    font-family: var(--mono); font-size: 11.5px; color: var(--text-2);
+    background: var(--bg-soft); border: 1px solid var(--border);
+    border-radius: 6px; padding: 7px 9px; line-height: 1.55;
+  }
+
+  /* ---------- 第 7 節次 Demo：長交易凍結水位與膨脹模擬 (Archetype B) ---------- */
+  .mb-grid {
+    display: grid; grid-template-columns: 272px 1fr; gap: 16px; align-items: start;
+  }
+  @media (max-width: 740px) { .mb-grid { grid-template-columns: 1fr; } }
+  .mb-ctl {
+    border: 1px solid var(--border); border-radius: var(--radius-sm);
+    background: var(--bg-soft); padding: 12px 13px; display: grid; gap: 11px;
+  }
+  .mb-seg-wrap { display: grid; gap: 5px; }
+  .mb-seg-wrap .seg { display: flex; border-radius: 8px; }
+  .mb-seg-wrap .seg button { flex: 1 1 50%; padding: 5px 8px; font-size: 11.5px; }
+  .mb-gl { font-family: var(--mono); font-size: 11.5px; color: var(--text-2); font-weight: 700; }
+  .mb-fld { display: grid; gap: 4px; }
+  .mb-lbl {
+    display: flex; justify-content: space-between; align-items: baseline; gap: 6px;
+    font-size: 12px; color: var(--text-2);
+  }
+  .mb-lbl b { font-family: var(--mono); font-size: 12px; color: var(--accent); flex: 0 0 auto; }
+  .mb-fld input[type="range"] { width: 100%; accent-color: var(--accent); cursor: pointer; }
+
+  .mb-main { display: grid; gap: 12px; min-width: 0; }
+  .mb-cards { display: grid; grid-template-columns: 1fr 1fr; gap: 9px; }
+  @media (max-width: 520px) { .mb-cards { grid-template-columns: 1fr; } }
+  .mb-card {
+    border: 1px solid var(--border); border-left: 3px solid var(--border-strong);
+    border-radius: var(--radius-sm); background: #fff; padding: 9px 11px;
+  }
+  .mb-card .k { display: block; font-size: 11.5px; color: var(--text-2); }
+  .mb-card b  { display: block; font-family: var(--mono); font-size: 18px; color: var(--text); margin: 2px 0; }
+  .mb-card .s { display: block; font-family: var(--mono); font-size: 11px; color: var(--text-3); line-height: 1.45; }
+  .mb-card.acc  { border-left-color: var(--accent); }
+  .mb-card.ok   { border-left-color: var(--ok); }
+  .mb-card.ok b { color: var(--ok); }
+  .mb-card.warn { border-left-color: var(--warn); }
+  .mb-card.warn b { color: var(--warn); }
+  .mb-card.bad  { border-left-color: var(--bad); }
+  .mb-card.bad b { color: var(--bad); }
+
+  .mb-viz {
+    border: 1px solid var(--border); border-radius: var(--radius-sm);
+    background: #fff; padding: 10px 12px;
+  }
+  .mb-viz-title {
+    font-family: var(--mono); font-size: 11.5px; color: var(--text-2); margin-bottom: 6px;
+  }
+</style>
+
+<header class="hero">
+  <div class="eyebrow">系統設計 · 田野手冊</div>
+  <h1>交易隔離級別與 MVCC (Isolation Levels &amp; MVCC)</h1>
+  <p class="lede">當兩筆交易同時讀寫同一批資料列，「各自究竟看得到什麼」決定了系統會不會算錯帳、超賣名額或讀到幽靈紀錄。資料庫並非只有「全部排隊串行」與「完全裸奔」兩個極端：MVCC 用版本鏈與快照讓讀寫互不阻塞，而四個隔離級別則是一張明確的防護邊界表。本篇以兩筆交易的交錯執行為主軸，拆解五種經典並發異常、PostgreSQL 與 InnoDB 截然不同的版本鏈與 Repeatable Read 行為，以及無鎖達成可串行化的 SSI。</p>
+  <div class="meta">
+    <span class="tag">ACID Isolation</span>
+    <span class="tag">MVCC</span>
+    <span class="tag">Snapshot Isolation</span>
+    <span class="tag">PostgreSQL</span>
+    <span class="tag">InnoDB</span>
+    <span class="tag">SSI</span>
+  </div>
+</header>
+
+<section id="s1">
+  <div class="sec-head">
+    <span class="sec-num">01</span>
+    <h2>總覽：當兩筆交易交錯執行時各自看到什麼</h2>
+  </div>
+  <p class="sec-sub">ACID 裡的 Isolation 解決什麼問題、為什麼不能全靠大鎖，以及本篇在單機與分散式版圖中的邊界。</p>
+  <p>在單執行緒的世界裡，每筆交易（Transaction）從頭跑到尾才換下一筆，系統永遠維持乾淨的不變量（Invariant）。但真實的線上資料庫必須同時服務數百條連線：只要兩筆交易的讀寫語句在時間軸上<strong>交錯（Interleave）</strong>，一筆交易就可能讀到另一筆尚未提交的半成品、兩次讀取拿到不同數字，甚至兩筆各自合法的交易合起來把業務規則撞破。</p>
+
+  <p>ACID 當中的 <strong>Isolation（隔離性）</strong>，字面承諾是「讓並發執行的多筆交易，看起來就像一筆接一筆串行執行一樣」。問題在於代價：如果真的用讀寫大鎖把所有交易排成單行道，吞吐量會在高並發讀取下瞬間崩盤。因此現代關聯式資料庫幾乎一致走向兩層分工——底層用 <strong>MVCC（Multi-Version Concurrency Control，多版本並發控制）</strong>保留資料列的歷史版本，達成<strong>讀不擋寫、寫不擋讀</strong>；上層則提供<strong>四個隔離級別（Isolation Levels）</strong>，讓工程師在「擋掉多少種並發異常」與「付出多少延遲或重試成本」之間精準取捨。</p>
+
+  <div class="mv-row">
+    <div class="mv-node">
+      <div class="nn">Read Uncommitted</div>
+      <div class="ns">連未提交髒資料都可見</div>
+    </div>
+    <span class="mv-arrow">&#9656;</span>
+    <div class="mv-node accent">
+      <div class="nn">Read Committed</div>
+      <div class="ns">每條語句各拍一張快照</div>
+    </div>
+    <span class="mv-arrow">&#9656;</span>
+    <div class="mv-node ok">
+      <div class="nn">Repeatable Read / SI</div>
+      <div class="ns">交易起點固定單一快照</div>
+    </div>
+    <span class="mv-arrow">&#9656;</span>
+    <div class="mv-node warn">
+      <div class="nn">Serializable (2PL / SSI)</div>
+      <div class="ns">消滅一切非串行交錯異常</div>
+    </div>
+  </div>
+  <p class="cap">隔離強度光譜：由左至右能擋下的並發異常越來越多，但鎖競爭（2PL）或衝突中止重試（SSI）的代價也隨之上升；PostgreSQL 預設落在 Read Committed，MySQL InnoDB 預設落在 Repeatable Read。</p>
+
+  <div class="callout accent">
+    <div class="c-title"><span class="ic">邊界</span>單機隔離 vs 鎖機制 vs 分散式交易 vs 複寫一致性</div>
+    <p>
+      面試談到一致性與隔離時，四個概念極易混為一談，本篇聚焦在<strong>單機儲存引擎內部的隔離級別與 MVCC 可見性</strong>：
+      <br>• <strong>鎖的粒度與死鎖偵測</strong>（Row Lock、意向鎖、Gap Lock 細節與 Wait-for Graph）由「資料庫鎖與死鎖（Database Locking &amp; Deadlock）」專門拆解。
+      <br>• <strong>跨節點／跨微服務的原子提交</strong>（2PC、TCC、Saga 與 Outbox）見「分散式交易手冊」。
+      <br>• <strong>多副本複寫延遲下的一致性模型</strong>（Linearizability、Read-your-writes、Monotonic Reads）則屬於「進階複寫與一致性模型手冊」的範疇——別把單機 ACID 的 Serializable 跟分散式 CAP 的 Linearizability 畫上等號。
+    </p>
+  </div>
+
+  <div class="oneliner">
+    <b>一句話答法</b>Isolation 定義「並發交錯時一筆交易能看見別人多少中間結果」，MVCC 則以多版本快照取代讀取鎖，讓絕大多數唯讀查詢不必等寫入放鎖就能拿到一致視圖。
+  </div>
+</section>
+
+<section id="s2">
+  <div class="sec-head">
+    <span class="sec-num">02</span>
+    <h2>五種並發異常：從髒讀到寫偏斜</h2>
+  </div>
+  <p class="sec-sub">Dirty Read、Non-repeatable Read、Phantom、Lost Update 與 Write Skew 的精確交錯條件與帳務災難。</p>
+  <p>要選對隔離級別，不能死背名詞，必須先看清「如果不攔截，兩筆交易交錯會出什麼具體事故」。SQL-92 標準最初只定義了前三種讀取異常，但實務上真正造成扣款歸零、超賣與排班開天窗的，往往是標準漏寫的後兩種寫入異常——<strong>Lost Update</strong> 與 <strong>Write Skew</strong>。</p>
+
+  <div class="mv-sub">1. Dirty Read（髒讀）：讀到別人尚未提交、甚至隨後回滾的修改</div>
+  <p>交易 <var>T1</var> 把帳戶餘額從 100 改成 200（尚未 <code>COMMIT</code>），交易 <var>T2</var> 此刻進來讀到 200 並據此發貨，結果下一秒 <var>T1</var> 因檢查失敗執行 <code>ROLLBACK</code>，餘額退回 100——<var>T2</var> 依據一筆「從未正式存在過」的幽靈金額做出了不可逆的外部動作。除此之外，就算 <var>T1</var> 最終會提交，若它在轉帳途中先扣 A 帳戶還沒加 B 帳戶，<var>T2</var> 在中間讀總帳也會看到憑空蒸發的金額（即窺見交易內部的半成品狀態）。</p>
+
+  <div class="mv-sub">2. Non-repeatable Read（不可重複讀 / Fuzzy Read）：同一筆交易讀同一列兩次，值變了</div>
+  <p>交易 <var>T1</var> 先讀帳戶 <var>x</var> 拿到 100；此時 <var>T2</var> 把 <var>x</var> 改成 200 並<strong>正式提交</strong>；<var>T1</var> 稍後再讀一次 <var>x</var> 卻拿到 200。<var>T2</var> 已經提交，所以這不是髒讀；但如果 <var>T1</var> 是一支「先算明細、再算總和對帳」的財務報表查詢，前後兩條 <code>SELECT</code> 看到不同時間點的帳面，報表在單一交易內就自相矛盾。</p>
+
+  <div class="mv-sub">3. Phantom Read（幻讀）：同一條件範圍查詢兩次，符合條件的「列集合」變了</div>
+  <p>不可重複讀針對的是<strong>既有單一列被修改</strong>，幻讀針對的則是<strong>範圍謂詞（Predicate）下冒出新插入或消失的列</strong>。例如 <var>T1</var> 執行 <code>SELECT COUNT(*) FROM shifts WHERE on_call = true</code> 得到 1，接著 <var>T2</var> <code>INSERT</code> 一筆新的值班紀錄並提交，<var>T1</var> 在同一筆交易裡再次掃描同一條件時發現變成 2 列。傳統行級鎖鎖得住「已經存在的列」，卻鎖不住「還沒被寫進索引縫隙裡的新列」，這正是幻讀在實作上比不可重複讀更難纏的原因。</p>
+
+  <div class="mv-sub">4. Lost Update（遺失更新）：兩筆 Read-Modify-Write 互相覆蓋</div>
+  <p>當應用程式寫出「先 <code>SELECT</code> 讀出舊值、在記憶體算新值、再 <code>UPDATE SET val = 新值</code>」的三步模式時，兩筆交易同時讀到 <code>balance = 100</code>，各自加 50 寫回 150，先提交那筆的 +50 就被後提交那筆無聲無息地蓋掉了。</p>
+
+  <div class="mv-sub">5. Write Skew（寫偏斜）：讀重疊集合、寫不相交的列，合起來打破跨列不變量</div>
+  <p>這是資深面試最愛考的陷阱，因為它<strong>連 Snapshot Isolation 都擋不住</strong>。經典案例是醫院急診室規定「至少要有 1 位醫師保持值班（<code>on_call = true</code>）」：目前 Alice 與 Bob 兩位醫師都在值班，兩人恰巧在同一毫秒點下「請假下班」。兩筆交易各自先檢查目前有幾人值班、看到 2 人（大於 1，合法），接著<strong>各自更新自己的那一列</strong>為 <code>false</code> 並雙雙提交——沒有任何一列被兩個人同時改到，因此不會觸發列級寫寫衝突，但提交後值班人數變成 0，業務不變量徹底破裂。</p>
+
+  <div class="mv-lane">
+    <div class="lh">時間步</div><div class="lh">T1（Alice 請假）</div><div class="lh">T2（Bob 請假）</div><div class="lh">資料庫狀態 / 不變量 (on_call &ge; 1)</div>
+    <div class="lt">t1</div>
+    <div class="lc act">BEGIN; SELECT count(*) WHERE on_call=true &rarr; 2</div><div class="lc">—</div><div class="lc">Alice=true, Bob=true（合計 2 人）</div>
+    <div class="lt">t2</div>
+    <div class="lc">—</div><div class="lc act">BEGIN; SELECT count(*) WHERE on_call=true &rarr; 2</div><div class="lc">T2 快照也看到 2 人 &ge; 1，判定可請假</div>
+    <div class="lt">t3</div>
+    <div class="lc">UPDATE doctors SET on_call=false WHERE name='Alice'</div><div class="lc">—</div><div class="lc">鎖住 Alice 列；Bob 列未受影響</div>
+    <div class="lt">t4</div>
+    <div class="lc">—</div><div class="lc">UPDATE doctors SET on_call=false WHERE name='Bob'</div><div class="lc">鎖住 Bob 列；寫集合與 T1 完全不相交</div>
+    <div class="lt">t5</div>
+    <div class="lc">COMMIT</div><div class="lc">COMMIT</div><div class="lc bad">Alice=false, Bob=false（0 人值班，Write Skew！）</div>
+  </div>
+  <p class="cap">Write Skew 時間軸：關鍵在 t3 與 t4 更新的是不同列（Alice vs Bob），列鎖與 First-Committer-Wins 都偵測不到衝突，卻因為兩人的「前提讀取集合」重疊而共同違反跨列約束。</p>
+
+  <div class="callout warn">
+    <div class="c-title"><span class="ic">陷阱</span>Lost Update 與 Write Skew 差在哪裡？</div>
+    <p>兩者都是「先讀後寫」引發的異常，區別在於<strong>寫入目標是否重疊</strong>：Lost Update 是兩筆交易讀同一列、最後也<strong>覆寫同一列</strong>（可視為 Write Skew 在單一列上的退化特例）；Write Skew 則是兩筆交易讀取同一批列做決策，最後卻<strong>各自修改不同的列</strong>（甚至各自 <code>INSERT</code> 一筆新列，稱為 Phantom Write Skew，例如同一會議室同一時段被兩組人同時預約成功）。</p>
+  </div>
+
+  <div class="oneliner">
+    <b>一句話答法</b>前三種異常（Dirty、Non-repeatable、Phantom）談的是「讀取視圖被別人干擾」，後兩種（Lost Update、Write Skew）談的是「基於快照讀取做決策後寫回，把單列更新蓋掉或把跨列不變量撞破」。
+  </div>
+</section>
+
+<section id="s3">
+  <div class="sec-head">
+    <span class="sec-num">03</span>
+    <h2>四個隔離級別與 Snapshot Isolation 的真實面貌</h2>
+  </div>
+  <p class="sec-sub">SQL-92 標準的歷史包袱、五大異常防護矩陣，以及為什麼主流引擎的 Repeatable Read 其實是 Snapshot Isolation。</p>
+  <p>1992 年制定的 ANSI SQL-92 標準做了一個影響深遠、卻也留下無數混淆的設計：它用「<strong>不允許出現哪幾種異常</strong>（Dirty Read、Non-repeatable Read、Phantom）」來反推四個隔離級別。當時主流商業資料庫全部基於<strong>兩階段鎖（2PL，讀鎖加寫鎖）</strong>實作，壓根沒有預料到後來 Berenson 等人在 1995 年論文《A Critique of ANSI SQL Isolation Levels》點出的 <strong>Snapshot Isolation（SI，快照隔離）</strong>會接管世界。</p>
+
+  <p>今天你在工程現場打開 PostgreSQL 或 MySQL InnoDB，嘴上喊的雖然同樣是 SQL 標準那四個名字，骨子裡的防護邊界卻已經因為 MVCC 的設計抉擇而分道揚鑣：</p>
+
+  <ul>
+    <li><strong>Read Uncommitted（RU）</strong>：標準允許髒讀。MySQL InnoDB 真實支援此級別（掃描時直接讀最新列版本，不建 Read View）；而 <strong>PostgreSQL 直接把 Read Uncommitted 映射為 Read Committed</strong>，在 PG 中永遠不可能發生髒讀。</li>
+    <li><strong>Read Committed（RC）</strong>：保證只讀已提交資料，消除髒讀（與髒寫）。在 MVCC 下，<strong>每一條 SQL 語句開始執行時都會重新拍一張最新快照</strong>，因此同一筆交易前後兩條 <code>SELECT</code> 會看見中間別人剛提交的修改（允許 Non-repeatable Read 與 Phantom）。這是 PostgreSQL、Oracle 與 SQL Server 的預設級別。</li>
+    <li><strong>Repeatable Read（RR）與 Snapshot Isolation（SI）</strong>：在交易第一次讀取時拍下一張固定快照並沿用到交易結束。但這裡藏著最大的引擎分歧——<strong>PostgreSQL 的 <code>REPEATABLE READ</code> 實質上就是完整的 Snapshot Isolation</strong>：不僅單純快照讀連 Phantom 都看不到，寫入同一列時更內建 <strong>First-Committer-Wins</strong> 自動中止後寫者，直接擋掉單列 Lost Update；反觀 <strong>MySQL InnoDB 的 <code>REPEATABLE READ</code> 則是「快照讀（MVCC）＋當前讀（Current Read + Next-Key Lock）」的雙軌混合體</strong>，若開發者只做普通 <code>SELECT</code> 再 <code>UPDATE</code>，InnoDB 不會自動報錯中止，Lost Update 照樣發生！</li>
+    <li><strong>Serializable</strong>：最強保證，要求並發結果等價於某種真實串行順序，連 Write Skew 也必須攔下。傳統引擎（如 MySQL InnoDB）靠自動把普通讀取升級為共享 Next-Key Lock（退回嚴格 2PL，讀寫互擋）；PostgreSQL（9.1+）則用無鎖的 <strong>SSI（Serializable Snapshot Isolation）</strong>達成。</li>
+  </ul>
+
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>隔離級別 / 引擎實作</th>
+          <th>Dirty Read</th>
+          <th>Non-repeatable Read</th>
+          <th>Phantom Read</th>
+          <th>Lost Update（先讀後寫同列）</th>
+          <th>Write Skew（跨列不變量）</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><strong>Read Uncommitted</strong>（SQL 標準 / InnoDB）</td>
+          <td>可能發生</td>
+          <td>可能發生</td>
+          <td>可能發生</td>
+          <td>可能發生</td>
+          <td>可能發生</td>
+        </tr>
+        <tr>
+          <td><strong>Read Committed</strong>（PG / InnoDB）</td>
+          <td class="hl">已阻擋</td>
+          <td>可能發生</td>
+          <td>可能發生</td>
+          <td>可能發生（需靠原子寫或 <code>FOR UPDATE</code>）</td>
+          <td>可能發生</td>
+        </tr>
+        <tr>
+          <td><strong>Repeatable Read</strong>（SQL-92 最低要求）</td>
+          <td class="hl">已阻擋</td>
+          <td class="hl">已阻擋</td>
+          <td>標準允許發生</td>
+          <td>標準未定義</td>
+          <td>可能發生</td>
+        </tr>
+        <tr>
+          <td><strong>MySQL InnoDB RR</strong>（預設，MVCC + Next-Key Lock）</td>
+          <td class="hl">已阻擋</td>
+          <td class="hl">純快照讀已阻擋（混用當前讀見第 5 節）</td>
+          <td class="hl">快照讀靠 MVCC、當前讀靠 Next-Key Lock 阻擋</td>
+          <td><strong>可能發生！</strong>（無 First-Committer-Wins）</td>
+          <td>可能發生</td>
+        </tr>
+        <tr>
+          <td><strong>PostgreSQL RR</strong>（實為 Snapshot Isolation）</td>
+          <td class="hl">已阻擋</td>
+          <td class="hl">已阻擋</td>
+          <td class="hl">已阻擋（全程固定同一快照）</td>
+          <td class="hl"><strong>已阻擋</strong>（First-Committer-Wins 拋 40001）</td>
+          <td><strong>可能發生！</strong>（SI 唯一破口）</td>
+        </tr>
+        <tr>
+          <td><strong>Serializable</strong>（InnoDB 2PL / PG SSI）</td>
+          <td class="hl">已阻擋</td>
+          <td class="hl">已阻擋</td>
+          <td class="hl">已阻擋</td>
+          <td class="hl">已阻擋</td>
+          <td class="hl"><strong>已阻擋</strong></td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="cap">五大異常 × 主流引擎真實行為矩陣：面試最常失分的是把「SQL-92 紙上標準」、「PostgreSQL 的 SI」與「InnoDB 的 RR」混為同一張表。</p>
+
+  <div class="callout accent">
+    <div class="c-title"><span class="ic">關鍵</span>在 RC 底下怎麼安全防範 Lost Update？</div>
+    <p>既然多數團隊在線上使用預設的 Read Committed，遇到扣庫存、加點數怎麼辦？有三條正途：(1) <strong>改寫成原子單語句</strong> <code>UPDATE accounts SET balance = balance - 50 WHERE id = 1 AND balance &gt;= 50</code>，讓引擎在當前最新已提交列上原子取值並上行鎖；(2) <strong>顯式悲觀鎖</strong> <code>SELECT ... FOR UPDATE</code> 先鎖住目標列再算；(3) <strong>應用層樂觀鎖（CAS）</strong> <code>UPDATE ... SET val = ?, version = version + 1 WHERE id = 1 AND version = 舊版本</code>，檢查受影響列數為 0 就重試。</p>
+  </div>
+
+  <div class="oneliner">
+    <b>一句話答法</b>SQL-92 的四級分類漏掉了 Snapshot Isolation：PostgreSQL 的 RR 實作的是帶 First-Committer-Wins 的純 SI（擋掉 Phantom 與 Lost Update，只剩 Write Skew），而 InnoDB 的 RR 對普通讀不驗寫衝突，仍可能發生 Lost Update。
+  </div>
+</section>
+
+<section id="s4">
+  <div class="sec-head">
+    <span class="sec-num">04</span>
+    <h2>MVCC 核心機制：版本鏈與快照可見性</h2>
+  </div>
+  <p class="sec-sub">「讀不擋寫、寫不擋讀」怎麼靠一套四元組快照與一條可見性公式算出來。</p>
+  <p>在沒有 MVCC 的年代，如果交易 <var>T1</var> 正在修改某一列，尚未提交前該列掛著排他鎖（X Lock），任何想讀這一列的交易 <var>T2</var> 都只能排隊乾等；反過來，長報表查詢掛著共享鎖（S Lock）不放，線上寫入就全面卡死。<strong>MVCC（多版本並發控制）</strong>的核心洞察極其優雅：<strong>每次寫入不要直接毀掉舊資料，而是產生一個帶交易編號（Transaction ID）的新版本，串成一條版本鏈（Version Chain）</strong>。寫入者照樣寫它的新版本，讀取者則拿著手上的「快照（Snapshot / Read View）」沿著版本鏈挑選對自己可見的那一版。</p>
+
+  <div class="mv-sub">快照（Snapshot / Read View）裡到底裝了什麼？</div>
+  <p>無論是 PostgreSQL 的 <code>SnapshotData</code> 還是 InnoDB 的 <code>ReadView</code>，一張快照本質上都由<strong>拍照當下活躍交易集合的四個邊界值</strong>組成（兩者欄位命名略有方向顛倒，這裡以通用語意搭配雙引擎術語說明，對照見第 5 節）：</p>
+
+  <ul>
+    <li><var>creator_trx_id</var>：拍下這張快照的交易自己的 ID（自己寫的未提交變更，自己當然要看得到，保證交易內的 Read-your-own-writes）。</li>
+    <li><var>m_ids</var>（PG 稱 <code>xip[]</code>）：<strong>拍照那一瞬間仍在執行中、尚未提交的所有活躍讀寫交易 ID 清單</strong>。</li>
+    <li><var>low_limit_id</var>（InnoDB 的 <code>m_up_limit_id</code> / PG 的 <code>xmin</code>）：<var>m_ids</var> 裡的最小值——凡是交易 ID <strong>嚴格小於</strong>這個下界的版本，在拍照前肯定早已提交完畢，一律可見。</li>
+    <li><var>high_limit_id</var>（InnoDB 的 <code>m_low_limit_id</code> / PG 的 <code>xmax</code>）：系統即將發出的<strong>下一個交易 ID</strong>——凡是交易 ID <strong>大於等於</strong>這個上界的版本，都是拍照之後才剛啟動的新交易（就算它手腳很快在下一毫秒已經提交），對這張歷史快照而言也一律不可見。</li>
+  </ul>
+
+  <div class="formula">visible(trx) &hArr; trx = creator &or; ( trx &lt; low_limit ) &or; ( low_limit &le; trx &lt; high_limit &and; trx &notin; m_ids &and; committed(trx) )</div>
+
+  <p>當查詢掃到某一列，發現表頭最新版本是由交易 <var>trx</var> 寫入但通不過上述公式時，引擎不會阻塞等鎖，而是<strong>順著版本指標往舊版本走一步</strong>，重新套用同一條公式，直到找到第一個可見版本（若走到鏈尾仍無可見版本，代表該列在快照當下尚未誕生，直接略過）。</p>
+
+  <pre class="mermaid">
+flowchart LR
+    H["表頭版本<br/>trx=108 進行中"] -->|"不可見, 追舊版"| V2["歷史版本 v2<br/>trx=104 已提交"]
+    V2 -->|"在 m_ids 內, 再追"| V1["歷史版本 v1<br/>trx=98 已提交"]
+    V1 -->|"98 < low_limit"| OUT["回傳 v1<br/>零鎖等待"]
+  </pre>
+  <p class="cap">MVCC 版本鏈遍歷：即使 trx=104 目前已經提交，只要拍照瞬間它還在活躍清單 m_ids 裡，舊快照就會跳過它繼續往回找 trx=98。</p>
+
+  <div class="mv-sub">Read Committed 與 Repeatable Read 在 MVCC 下只差「何時按快門」</div>
+  <p>理解了這套公式，RC 與 RR（純快照讀）的實作差異其實只是一行呼叫時機的差別：</p>
+  <ul>
+    <li><strong>Read Committed</strong>：<strong>每次執行單條 <code>SELECT</code> 語句前</strong>重新建立一張新的 <code>ReadView</code>。中間別人只要 <code>COMMIT</code>，移出了活躍清單 <var>m_ids</var>，下一條 <code>SELECT</code> 的新快照就會立刻看見它。</li>
+    <li><strong>Repeatable Read</strong>：<strong>只在交易內第一條讀取語句執行時</strong>建立唯一一張 <code>ReadView</code>（PG 若下 <code>BEGIN ISOLATION LEVEL REPEATABLE READ</code>，同樣在交易第一條一般查詢語句時凍結快照），之後整筆交易不管再讀幾百次都重用同一張 <var>m_ids</var>。</li>
+  </ul>
+
+  <div class="callout warn">
+    <div class="c-title"><span class="ic">陷阱</span><code>BEGIN</code> 按下去的那一刻，快照還沒拍！</div>
+    <p>很多工程師以為只要執行了 <code>BEGIN;</code>，Repeatable Read 的時間點就凍結了。事實上在 PostgreSQL 與 MySQL InnoDB 中，單純的 <code>BEGIN</code> 為了節省開銷都是<strong>延遲啟動</strong>：直到你發出交易內的<strong>第一條查詢語句（<code>SELECT</code> 等）</strong>那一刻，快照才真正拍下！在 MySQL 若想在交易起點立刻鎖定快照，必須顯式寫 <code>START TRANSACTION WITH CONSISTENT SNAPSHOT;</code>。</p>
+  </div>
+
+  <div class="oneliner">
+    <b>一句話答法</b>MVCC 的核心是「多版本鏈 ＋ 活躍交易快照（Read View）」：寫入只追加版本，讀取靠比對版本 trx_id 與快照上下界及活躍清單決定可見性，而 RC 與 RR 的本質差別只在「每條語句重拍快照」還是「整筆交易共用首張快照」。
+  </div>
+</section>
+
+<section id="s5">
+  <div class="sec-head">
+    <span class="sec-num">05</span>
+    <h2>引擎實作對決：PostgreSQL vs MySQL InnoDB</h2>
+  </div>
+  <p class="sec-sub">Append-only Heap Tuple 對決就地更新加 Undo Log，以及同叫 Repeatable Read 為何行為大不相同。</p>
+  <p>同樣都叫 MVCC，PostgreSQL 與 MySQL InnoDB 在底層儲存佈局上卻做出了<strong>截然相反的架構折衷</strong>——正如「資料庫索引原理」篇比較過的 Heap Table 與 Clustered Index 差異，這個物理結構的分歧一路延伸到歷史版本存在哪裡、<code>ROLLBACK</code> 要花多久，以及同名的 <code>REPEATABLE READ</code> 在面對並發寫入時會不會出現驚悚的行為差異。</p>
+
+  <div class="mv-split">
+    <div class="mv-pane a">
+      <div class="pt">PostgreSQL：Append-only 多版本同住 Heap</div>
+      <div class="ps">xmin / xmax / ctid 鏈（舊指新）</div>
+      <div class="mv-box soft">索引指到舊 Tuple TID (0,1)<br><code>xmin=98, xmax=108</code>（被更新標記刪除）</div>
+      <div class="mv-down">&darr; <code>ctid</code> 往後指（若同頁無索引變動可走 HOT 鏈）</div>
+      <div class="mv-box">同頁或新頁的新 Tuple TID (0,2)<br><code>xmin=108, xmax=0</code>（當前最新版）</div>
+      <p class="mv-note"><strong>優點</strong>：<code>ROLLBACK</code> 近乎 <var>O(1)</var> 瞬間完成（只改 <code>pg_xact</code> 交易狀態位元，不必搬資料）；歷史版本就在資料頁上，不需額外拼裝。<br><strong>代價</strong>：每次 <code>UPDATE</code> 都等同 <code>DELETE + INSERT</code>，若跨頁或改到索引欄位會引發<strong>索引寫入放大</strong>，且主資料表會持續累積 Dead Tuple，極度依賴背景 <code>autovacuum</code>。</p>
+    </div>
+    <div class="mv-pane o">
+      <div class="pt">MySQL InnoDB：聚簇索引就地覆寫 + Undo Log</div>
+      <div class="ps">DB_TRX_ID / DB_ROLL_PTR 鏈（新指舊）</div>
+      <div class="mv-box">B+Tree 葉頁唯一最新列<br><code>DB_TRX_ID=108, DB_ROLL_PTR &rarr;</code></div>
+      <div class="mv-down">&darr; 回滾指標指向獨立的 Undo Tablespace</div>
+      <div class="mv-box soft">Undo Log 差異紀錄<br><code>trx=98</code> 的舊欄位值與上一跳 <code>roll_ptr</code></div>
+      <p class="mv-note"><strong>優點</strong>：主表葉節點永遠只放<strong>最新一版</strong>，99% 讀最新資料的 OLTP 查詢直接命中、主表緊湊不易膨脹，且未改到二級索引鍵值時不必動二級索引。<br><strong>代價</strong>：長交易回滾時必須逐筆倒帶套用 Undo Log（大批量 <code>UPDATE</code> 後 <code>ROLLBACK</code> 極慢）；舊快照讀取時得順著 Undo 鏈逐層重建舊列。</p>
+    </div>
+  </div>
+  <p class="cap">PostgreSQL 與 InnoDB 的版本鏈方向相反：PG 在 Heap 追加新 Tuple 並由舊指新（HOT 優化可省下同頁索引更新）；InnoDB 在原地改寫最新列並用 DB_ROLL_PTR 指往 Undo Log 裡的舊紀錄。</p>
+
+  <div class="mv-sub">靈魂拷問：兩家的 Repeatable Read 到底差在哪裡？</div>
+  <p>如果面試官問「同樣設成 <code>REPEATABLE READ</code>，PostgreSQL 與 MySQL InnoDB 的行為一樣嗎？」，回答「一樣，都防不可重複讀」只拿到及格邊緣；真正拉開差距的是<strong>寫入觸發點</strong>上的兩大差異：</p>
+
+  <ol>
+    <li><strong>PostgreSQL RR 是嚴格的單一快照 + First-Committer-Wins</strong>：在 PG 的 RR 下，當交易 <var>T1</var> 執行 <code>UPDATE</code> 或 <code>SELECT FOR UPDATE</code> 撞上一列在 <var>T1</var> 快照拍下之後已經被 <var>T2</var> 修改並提交的列時，PG <strong>絕不允許 <var>T1</var> 靜默覆蓋它</strong>，而是等 <var>T2</var> 提交後立刻對 <var>T1</var> 拋出 <code>ERROR: could not serialize access due to concurrent update (SQLSTATE 40001)</code>。因此 PG 的 RR 天生免疫單列 Lost Update。</li>
+    <li><strong>InnoDB RR 區分「快照讀（Snapshot Read）」與「當前讀（Current Read）」</strong>：普通 <code>SELECT</code> 走 MVCC Read View（快照讀）；但只要你發出 <code>UPDATE</code>、<code>DELETE</code>、<code>SELECT ... FOR UPDATE</code> 或 <code>LOCK IN SHARE MODE</code>，InnoDB 一律切換成<strong>當前讀——無視你手上的舊快照，直接去讀 B+Tree 上最新已提交的那一版並加鎖（Record Lock + Gap Lock = Next-Key Lock）</strong>！這會導致兩個震撼現象：
+      <ul>
+        <li><strong>無聲覆寫（Lost Update）</strong>：<var>T1</var> 先快照讀拿到舊值 100，中間 <var>T2</var> 改成 200 並提交，<var>T1</var> 接著 <code>UPDATE SET val = 150</code>——InnoDB 會在當前讀拿到 200 的那列上直接改寫成 150 並成功提交，完全不報錯。</li>
+        <li><strong>半途冒出的幻影列（Read-Write Phantom）</strong>：<var>T1</var> 先 <code>SELECT</code> 查範圍沒看到 <code>id=5</code>；<var>T2</var> 插入 <code>id=5</code> 並提交；若 <var>T1</var> 此時冒失地下了一句範圍 <code>UPDATE tbl SET tag='x' WHERE id BETWEEN 1 AND 10</code>，這條當前讀會把 <var>T2</var> 剛插進來的 <code>id=5</code> 一起改掉，並把它的 <code>DB_TRX_ID</code> 換成 <var>T1</var> 自己！下一秒 <var>T1</var> 再跑一次普通 <code>SELECT</code>，因為 <code>trx = creator_trx_id</code>，原本看不見的 <code>id=5</code> 突然大搖大擺出現在結果集裡！</li>
+      </ul>
+    </li>
+  </ol>
+
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>比較維度</th>
+          <th>PostgreSQL</th>
+          <th>MySQL InnoDB</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><strong>預設隔離級別</strong></td>
+          <td><code>READ COMMITTED</code></td>
+          <td><code>REPEATABLE READ</code></td>
+        </tr>
+        <tr>
+          <td><strong>歷史版本存放位置</strong></td>
+          <td>與新版本混放於同一張 Heap Table（多 Tuple）</td>
+          <td>分離存放於 Undo Log Tablespace</td>
+        </tr>
+        <tr>
+          <td><strong>版本指標方向</strong></td>
+          <td>舊 Tuple <code>ctid</code> &rarr; 新 Tuple（搭配 Hint Bits 加速狀態查詢）</td>
+          <td>最新列 <code>DB_ROLL_PTR</code> &rarr; 舊 Undo Record</td>
+        </tr>
+        <tr>
+          <td><strong>大交易 <code>ROLLBACK</code> 成本</strong></td>
+          <td class="hl">極低（僅標記 <code>pg_xact</code> 為 Aborted，遺骸留給 VACUUM）</td>
+          <td>高（需同步執行 Undo 回寫還原 B+Tree 頁）</td>
+        </tr>
+        <tr>
+          <td><strong>RR 下的並發同列 <code>UPDATE</code></strong></td>
+          <td class="hl">First-Committer-Wins：偵測到快照後異動即拋 <code>40001</code> 中止</td>
+          <td>轉為 Current Read：在最新已提交版上加鎖覆寫，不報錯</td>
+        </tr>
+        <tr>
+          <td><strong>RR 下防 Phantom 的手段</strong></td>
+          <td>純快照隔離（全程只看首張快照，寫入仍可能撞 Write Skew）</td>
+          <td>快照讀靠 Read View；當前讀靠 <strong>Next-Key Lock（Record + Gap）</strong>鎖住索引間隙</td>
+        </tr>
+        <tr>
+          <td><strong>Serializable 實作機制</strong></td>
+          <td class="hl"><strong>SSI</strong>（無阻塞快照讀 + SIREAD 謂詞鎖追蹤 rw 依賴環）</td>
+          <td><strong>2PL</strong>（將所有普通 <code>SELECT</code> 自動轉為 <code>LOCK IN SHARE MODE</code>）</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="cap">PostgreSQL 與 InnoDB 的 MVCC 全方位對照：這張表涵蓋了儲存引擎面試 90% 的追問分支。</p>
+
+  <div class="oneliner">
+    <b>一句話答法</b>PG 把多版本追加在 Heap 裡（回滾快、靠 VACUUM 掃屍體），其 RR 是具備 First-Committer-Wins 的純 Snapshot Isolation；InnoDB 把舊版退進 Undo Log（主表緊湊、回滾慢），其 RR 混用快照讀與加 Next-Key Lock 的當前讀，因此不主動攔截 Lost Update。
+  </div>
+</section>
+
+<section id="s6">
+  <div class="sec-head">
+    <span class="sec-num">06</span>
+    <h2>互動實驗室：雙交易交錯排程對照儀</h2>
+  </div>
+  <p class="sec-sub">自由重排 T1 與 T2 的語句執行順序，並排比對不同隔離級別與引擎在每一步看到的版本與異常判定。</p>
+  <p>光背表格很容易在變形題面前卡殼。下面的並排模擬器讓你直接操作<strong>兩筆交易 <var>T1</var> 與 <var>T2</var> 的語句交錯排程（Schedule）</strong>：你可以切換五種經典異常預設場景、點選每一步的 <code>&uarr;</code> / <code>&darr;</code> 改變語句誰先誰後（保持單一交易內部的先後順序不反轉）、將 <var>T2</var> 的結尾從 <code>COMMIT</code> 改為 <code>ROLLBACK</code>，並自由指定左右兩個對照面板各自的<strong>引擎與隔離級別</strong>。模擬器會針對同一份排程同時跑兩套 MVCC 規則，算出每次讀取命中的版本號、快照活躍清單、行鎖或衝突中止，以及最終是否觸發異常。</p>
+
+  <div class="demo" id="demo-mvcc-cmp">
+    <div class="demo-bar">
+      <span class="label">互動 · 雙交易交錯排程對照儀</span>
+      <span class="label" style="text-transform:none;font-family:var(--sans);font-size:12px;color:var(--text-2)">重排 T1 / T2 語句順序或切換左右隔離級別，即時比對可見版本與異常判定</span>
+    </div>
+    <div class="demo-body">
+      <div class="mc-top">
+        <div class="mc-preset-line">
+          <span class="mc-k">預設交錯場景</span>
+          <div class="seg" id="mc-workload-seg" role="group" aria-label="交錯場景選擇">
+            <button type="button" data-wl="nonrepeat" aria-pressed="true">不可重複讀</button>
+            <button type="button" data-wl="dirty" aria-pressed="false">髒讀回滾</button>
+            <button type="button" data-wl="phantom" aria-pressed="false">範圍幻讀</button>
+            <button type="button" data-wl="lostupd" aria-pressed="false">遺失更新</button>
+            <button type="button" data-wl="writeskew" aria-pressed="false">寫偏斜值班</button>
+          </div>
+        </div>
+        <div class="mc-act-line">
+          <label class="mc-t2end">
+            <span>T2 結尾動作</span>
+            <select id="mc-t2-end">
+              <option value="commit" selected>COMMIT（正式提交）</option>
+              <option value="rollback">ROLLBACK（中途回滾）</option>
+            </select>
+          </label>
+          <button type="button" class="btn" id="mc-swap-first">對調首次讀寫交錯</button>
+          <button type="button" class="btn" id="mc-reset">重置排程</button>
+        </div>
+      </div>
+
+      <div class="mc-sched-box">
+        <div class="mc-sched-hd">
+          <span>全域交錯時間軸（點擊 &uarr; / &darr; 調整跨交易語句先後；同交易內部順序自動維持合法）</span>
+          <span class="mc-init-tag" id="mc-init-desc">初始資料：account A = 100 (trx=90)</span>
+        </div>
+        <div class="mc-sched-list" id="mc-sched-list"></div>
+      </div>
+
+      <div class="mc-compare">
+        <div class="mc-col" id="mc-col-left">
+          <div class="mc-col-hd">
+            <span class="mc-side-tag">面板 A</span>
+            <select id="mc-mode-left" aria-label="面板 A 隔離級別">
+              <option value="ino_ru">InnoDB · Read Uncommitted</option>
+              <option value="pg_rc" selected>PostgreSQL · Read Committed</option>
+              <option value="pg_rr">PostgreSQL · Repeatable Read (SI)</option>
+              <option value="ino_rr">MySQL InnoDB · Repeatable Read</option>
+              <option value="pg_ssi">PostgreSQL · Serializable (SSI)</option>
+            </select>
+          </div>
+          <div class="mc-badge" id="mc-badge-left"></div>
+          <div class="mc-rows" id="mc-rows-left"></div>
+          <div class="mc-final" id="mc-final-left"></div>
+        </div>
+
+        <div class="mc-col" id="mc-col-right">
+          <div class="mc-col-hd">
+            <span class="mc-side-tag alt">面板 B</span>
+            <select id="mc-mode-right" aria-label="面板 B 隔離級別">
+              <option value="ino_ru">InnoDB · Read Uncommitted</option>
+              <option value="pg_rc">PostgreSQL · Read Committed</option>
+              <option value="pg_rr" selected>PostgreSQL · Repeatable Read (SI)</option>
+              <option value="ino_rr">MySQL InnoDB · Repeatable Read</option>
+              <option value="pg_ssi">PostgreSQL · Serializable (SSI)</option>
+            </select>
+          </div>
+          <div class="mc-badge" id="mc-badge-right"></div>
+          <div class="mc-rows" id="mc-rows-right"></div>
+          <div class="mc-final" id="mc-final-right"></div>
+        </div>
+      </div>
+
+      <div class="legend">
+        <span><i class="dot ns-idle"></i>讀取命中歷史快照</span>
+        <span><i class="dot ns-wait"></i>建立新快照 / 當前讀更新</span>
+        <span><i class="dot ns-ok"></i>成功提交 / 防護機制攔下衝突</span>
+        <span><i class="dot ns-bad"></i>發生並發異常（髒讀 / 前後矛盾 / 遺失更新 / 寫偏斜）</span>
+      </div>
+      <div class="status-line" id="mc-status"></div>
+    </div>
+  </div>
+
+  <div class="callout accent">
+    <div class="c-title"><span class="ic">觀察</span>建議你在模擬器裡親手驗證的三個瞬間</div>
+    <p>
+      1. 切到<strong>「遺失更新」</strong>，預設面板 A 為 <code>MySQL InnoDB · Repeatable Read</code>、面板 B 為 <code>PostgreSQL · Repeatable Read (SI)</code>：你會親眼看到 InnoDB RR 讓兩筆 +50 都提交卻只剩 150（遺失一筆 +50），而 PG RR 在後寫者更新時直接觸發 First-Committer-Wins 拋出 <code>40001</code> 擋下災難。<br>
+      2. 切到<strong>「寫偏斜值班」</strong>，對比 <code>PostgreSQL · Repeatable Read (SI)</code> 與 <code>PostgreSQL · Serializable (SSI)</code>：兩筆交易寫的是 Alice 與 Bob 兩列互不相交，PG RR 放行導致值班人數歸零，唯有 SSI 偵測到雙向 <code>rw-antidependency</code> 將後提交者中止。<br>
+      3. 在<strong>「不可重複讀」</strong>場景把 T2 的 <code>COMMIT</code> 用 <code>&darr;</code> 移到 T1 第二次 <code>SELECT</code> 之後：連 Read Committed 也不再出現不可重複讀——證明異常只發生在特定的交錯視窗內。
+    </p>
+  </div>
+</section>
+
+<section id="s7">
+  <div class="sec-head">
+    <span class="sec-num">07</span>
+    <h2>版本清理與長交易代價：VACUUM、Purge 與膨脹</h2>
+  </div>
+  <p class="sec-sub">為什麼一筆忘記提交的閒置交易會拖垮整座資料庫？長交易凍結水位的定量模擬。</p>
+  <p>MVCC「保留舊版本、讀寫不互擋」並不是免費午餐。每當一列被 <code>UPDATE</code> 或 <code>DELETE</code>，舊版本不能馬上從磁碟抹除——因為系統裡可能還有一筆 30 秒前啟動的舊快照正準備去讀它。只有當某個舊版本的銷毀交易 ID（如 PG 的 <code>xmax</code>）<strong>嚴格小於目前全庫所有活躍快照當中最老的那個下界（<code>OldestXmin</code> / InnoDB 最老 <code>ReadView</code>）</strong>時，背景清理執行緒（PostgreSQL 的 <strong>VACUUM / Autovacuum</strong>，以及 InnoDB 的 <strong>Purge Thread</strong>）才有資格把它回收。</p>
+
+  <p>這直接導出線上資料庫最常見的雪崩根因之一：<strong>長交易（Long-running Transaction）或 <code>idle in transaction</code></strong>。只要某個微服務開了 <code>BEGIN</code>、讀了一筆資料（或開著 RR 快照），接著去呼叫一個卡住的外部 HTTP API 甚至忘記 <code>COMMIT</code>，<code>OldestXmin</code> 就會像釘子一樣死死釘在原地：</p>
+  <ul>
+    <li><strong>在 PostgreSQL</strong>：該時間點之後全表（甚至全庫）產生的所有 Dead Tuple 都<strong>無法被 VACUUM 回收</strong>，資料頁與索引頁迅速發生<strong>表膨脹（Table &amp; Index Bloat）</strong>，原本存在記憶體 Buffer Pool 裡的熱表被稀疏的死屍撐大數倍，Sequential Scan 與 Index Scan 的 I/O 全面劣化；若放任不管超過約 20 億筆交易，還會撞上致命的 <strong>Transaction ID Wraparound（XID 回繞停機保護）</strong>。</li>
+    <li><strong>在 MySQL InnoDB</strong>：主表雖然就地更新，但 Purge Thread 無法清理 Undo Log，導致 <strong>History List Length（HLL）</strong>飆升至數百萬甚至數千萬；任何掃過熱點列的舊快照查詢都必須順著長達數千跳的 <code>DB_ROLL_PTR</code> 鏈逐層回推舊版，CPU 與隨機讀延遲瞬間炸裂。</li>
+  </ul>
+
+  <div class="demo" id="demo-mvcc-bloat">
+    <div class="demo-bar">
+      <span class="label">互動 · 長交易凍結水位與版本鏈膨脹模擬</span>
+      <span class="label" style="text-transform:none;font-family:var(--sans);font-size:12px;color:var(--text-2)">調整寫入 TPS 與最老未提交交易秒數，觀察無法回收的死版本與讀取鏈深度</span>
+    </div>
+    <div class="demo-body">
+      <div class="mb-grid">
+        <div class="mb-ctl">
+          <div class="mb-seg-wrap">
+            <span class="mb-gl">儲存引擎架構</span>
+            <div class="seg" id="mb-engine-seg" role="group" aria-label="儲存引擎切換">
+              <button type="button" data-eng="pg" aria-pressed="true">PostgreSQL (Heap)</button>
+              <button type="button" data-eng="inno" aria-pressed="false">InnoDB (Undo Log)</button>
+            </div>
+          </div>
+
+          <div class="mb-fld">
+            <label class="mb-lbl" for="mb-tps"><span>每秒寫入更新率 (Write TPS)</span><b id="mb-tps-val">1200 /s</b></label>
+            <input type="range" id="mb-tps" min="100" max="5000" step="100" value="1200">
+          </div>
+
+          <div class="mb-fld">
+            <label class="mb-lbl" for="mb-hold"><span>最老未關交易存活時間 (Oldest Snapshot)</span><b id="mb-hold-val">180 s</b></label>
+            <input type="range" id="mb-hold" min="0" max="900" step="15" value="180">
+          </div>
+
+          <div class="mb-fld">
+            <label class="mb-lbl" for="mb-hot"><span>熱點列集中度（前 1% 熱列佔比）</span><b id="mb-hot-val">60 %</b></label>
+            <input type="range" id="mb-hot" min="10" max="95" step="5" value="60">
+          </div>
+
+          <div class="mb-fld">
+            <label class="mb-lbl" for="mb-live"><span>基準活躍資料列數 (Live Rows)</span><b id="mb-live-val">100 k</b></label>
+            <input type="range" id="mb-live" min="20" max="500" step="20" value="100">
+          </div>
+
+          <button type="button" class="btn" id="mb-reset">重置參數</button>
+        </div>
+
+        <div class="mb-main">
+          <div class="mb-cards">
+            <div class="mb-card acc">
+              <span class="k" id="mb-k-dead">卡住無法回收的 Dead Tuples</span>
+              <b id="mb-v-dead">—</b>
+              <span class="s" id="mb-s-dead">—</span>
+            </div>
+            <div class="mb-card warn" id="mb-card-bloat">
+              <span class="k" id="mb-k-bloat">主表空間膨脹倍率 (Table Bloat)</span>
+              <b id="mb-v-bloat">—</b>
+              <span class="s" id="mb-s-bloat">—</span>
+            </div>
+            <div class="mb-card" id="mb-card-chain">
+              <span class="k">熱點列平均版本鏈遍歷深度</span>
+              <b id="mb-v-chain">—</b>
+              <span class="s" id="mb-s-chain">—</span>
+            </div>
+            <div class="mb-card" id="mb-card-lat">
+              <span class="k">熱點點查相對延遲懲罰</span>
+              <b id="mb-v-lat">—</b>
+              <span class="s" id="mb-s-lat">—</span>
+            </div>
+          </div>
+
+          <div class="mb-viz">
+            <div class="mb-viz-title" id="mb-viz-title">儲存頁活體列 vs 凍結死版本佔比</div>
+            <svg id="mb-svg" viewBox="0 0 520 138" style="width:100%;height:auto" role="img" aria-labelledby="mb-svg-title">
+              <title id="mb-svg-title">MVCC 活躍版本與凍結舊版本空間比例與版本鏈深度視覺化</title>
+            </svg>
+          </div>
+        </div>
+      </div>
+      <div class="status-line" id="mb-status"></div>
+    </div>
+  </div>
+
+  <div class="callout warn">
+    <div class="c-title"><span class="ic">防護</span>工程現場必配的三道護欄</div>
+    <p>
+      1. <strong>交易內嚴禁夾帶外部 RPC / HTTP 呼叫</strong>：先把外部 API 結果拿回來，再開短交易寫庫並立刻提交（需要跨服務最終一致時改走 Outbox Pattern，見「分散式交易手冊」）。<br>
+      2. <strong>強制設定閒置交易超時</strong>：PostgreSQL 務必設定 <code>idle_in_transaction_session_timeout = '15s'</code> 與合理的 <code>statement_timeout</code>，自動斬斷連線池裡忘了關交易的殭屍連線（連線池 Transaction Pooling 對未關交易的危害另見「資料庫連線池」篇）。<br>
+      3. <strong>監控凍結指標</strong>：PG 盯緊 <code>pg_stat_user_tables.n_dead_tup</code> 與 <code>age(datfrozenxid)</code>；MySQL InnoDB 盯緊 <code>SHOW ENGINE INNODB STATUS</code> 中的 <code>History list length</code>（常態應維持在數百至數千以內，破十萬即屬異常警訊）。
+    </p>
+  </div>
+
+  <div class="oneliner">
+    <b>一句話答法</b>MVCC 的舊版本只能清到「全庫最老活躍快照」之前；一筆忘記提交的長交易會釘死 OldestXmin，讓 PG 的 VACUUM 清不掉 Dead Tuple 引發表膨脹、讓 InnoDB 的 Purge 卡住引發 Undo History 暴漲與回推延遲。
+  </div>
+</section>
+
+<section id="s8">
+  <div class="sec-head">
+    <span class="sec-num">08</span>
+    <h2>邁向真正的可串行化：2PL 與 SSI，以及面試選型實戰</h2>
+  </div>
+  <p class="sec-sub">不靠悲觀鎖怎麼抓出 Write Skew？rw-antidependency 危險結構、隔離級別選型表與高頻面試追問。</p>
+  <p>既然 Snapshot Isolation 連 Phantom 都壓住了卻唯獨漏掉 <strong>Write Skew</strong>，當系統遇到金融帳務對沖、庫存配額上限、值班排班或會議室時段預約這類「不允許任何跨列不變量破口」的核心場景時，我們怎麼補上最後一塊拼圖，拿到真正的 <strong>Serializable（可串行化）</strong>？歷史上演化出兩條截然不同的技術路線：</p>
+
+  <ol>
+    <li><strong>悲觀路線——嚴格兩階段鎖（Strict 2PL，如 MySQL InnoDB Serializable）</strong>：只要切到 <code>SERIALIZABLE</code>，InnoDB 會把交易內所有不帶鎖的普通 <code>SELECT</code> 自動暗中改寫成 <code>SELECT ... LOCK IN SHARE MODE</code>（加共享 Next-Key Lock）。當 Alice 與 Bob 同時讀值班表時，兩人都掛上共享鎖；接著 Alice 想 <code>UPDATE</code> 自己的列升級為排他鎖時，必須等 Bob 放鎖，Bob 也想升級時直接撞出<strong>死鎖（Deadlock）</strong>，由死鎖偵測器挑一方回滾。缺點很痛：<strong>唯讀查詢又重新開始阻塞寫入</strong>，MVCC 最引以為傲的「讀不擋寫」優勢當場報銷。</li>
+    <li><strong>樂觀路線——可串行化快照隔離（SSI, Serializable Snapshot Isolation，如 PostgreSQL 9.1+ 與 CockroachDB 靈感來源）</strong>：由 Cahill 等人在 2008 年提出並獲 SIGMOD 最佳論文。SSI 完整保留了 MVCC <strong>讀不擋寫、寫不擋讀</strong>的非阻塞特性！它不在讀取時卡住別人，而是在記憶體裡掛上完全不阻塞的輕量級記號 <strong><code>SIREAD</code> Lock（謂詞鎖記號）</strong>，專門追蹤交易之間的 <strong><code>rw-antidependency</code>（讀寫反依賴：交易 A 讀到了舊版，而交易 B 隨後改寫了該範圍的新版，記作 <var>A</var> &mdash;rw&rarr; <var>B</var>）</strong>。</li>
+  </ol>
+
+  <p>SSI 的理論基石指出：在 Snapshot Isolation 底下，任何會打破可串行化的異常（包含所有變形的 Write Skew），在依賴圖上都<strong>必然會形成「連續兩條相鄰的 <code>rw-antidependency</code> 邊」（即危險結構 <var>T1</var> &mdash;rw&rarr; <var>T2</var> &mdash;rw&rarr; <var>T3</var>，在雙交易 Write Skew 中則是 <var>T1</var> 與 <var>T2</var> 互指成環 <var>T1</var> &harr;rw&harr; <var>T2</var>）</strong>。只要在提交時偵測到這個危險結構，引擎就主動讓後提交者以 <code>SQLSTATE 40001</code> 中止重試——沒有衝突時全程零鎖等待，有潛在危險時寧可偶爾誤殺（False Positive，例如粗粒度頁級 <code>SIREAD</code> 鎖合併時）也絕不漏放任何一筆髒帳。</p>
+
+  <pre class="mermaid">
+sequenceDiagram
+    participant T1 as T1 Alice
+    participant PG as PG SSI 引擎
+    participant T2 as T2 Bob
+    T1->>PG: SELECT on_call=true
+    Note over PG: 掛 T1 SIREAD 記號
+    T2->>PG: SELECT on_call=true
+    Note over PG: 掛 T2 SIREAD 記號
+    T1->>PG: UPDATE Alice=false
+    Note over PG: 記錄 T2 -rw-> T1
+    T2->>PG: UPDATE Bob=false
+    Note over PG: 記錄 T1 -rw-> T2 成環
+    T1->>PG: COMMIT
+    PG-->>T1: 提交成功
+    T2->>PG: COMMIT
+    PG-->>T2: ERROR 40001 中止重試
+  </pre>
+  <p class="cap">PostgreSQL SSI 攔截 Write Skew 全過程：全程沒有任何一條查詢被鎖卡住等待，直到最後 T2 提交瞬間因雙向 rw-antidependency 閉環而被精準退回。</p>
+
+  <div class="mv-sub">實務架構選型指南：我該開哪一級？</div>
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>業務場景</th>
+          <th>建議隔離級別與搭配手段</th>
+          <th>選型理由與應用端義務</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><strong>一般 CRUD、動態牆、商品目錄瀏覽</strong></td>
+          <td class="hl"><code>READ COMMITTED</code>（PG 預設）</td>
+          <td>每條語句看最新已提交狀態最符合直覺、鎖持有範圍最小、不易產生無謂的衝突中止與 Gap Lock 死鎖。</td>
+        </tr>
+        <tr>
+          <td><strong>單列扣餘額、扣庫存、領取限量券</strong></td>
+          <td><code>READ COMMITTED</code> + <strong>原子單語句 <code>UPDATE ... WHERE qty &gt;= 1</code></strong>（或 <code>FOR UPDATE</code>）</td>
+          <td>單列競爭不必拉高整庫隔離級別；原子條件更新由引擎當前讀加行鎖保護，吞吐最高且零 Lost Update。</td>
+        </tr>
+        <tr>
+          <td><strong>跨多張表的一致性對帳報表、邏輯備份（<code>pg_dump</code>）</strong></td>
+          <td class="hl"><code>REPEATABLE READ</code>（唯讀交易）</td>
+          <td>整筆長報表共用同一張時間點快照，各明細表加總與總帳表嚴格吻合，且完全不阻塞前景 OLTP 寫入（唯需控制執行時間避免釘住 VACUUM）。</td>
+        </tr>
+        <tr>
+          <td><strong>跨列業務不變量（排班下限、時段防撞單、多帳戶聯合風控額度）</strong></td>
+          <td class="hl"><strong>PostgreSQL <code>SERIALIZABLE</code> (SSI)</strong>，或在 RC/RR 下對「父資源列」顯式 <code>SELECT FOR UPDATE</code>（Materializing Conflicts）</td>
+          <td>若用 PG SSI，應用層<strong>必須實作捕獲 <code>40001</code> 自動重試整筆交易的迴圈</strong>；若用 InnoDB 或不想開全域 Serializable，則可鎖定共用父列（如鎖住該科室排班主表列）把跨列衝突強制收斂成單列鎖排隊。</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="cap">隔離級別實戰選型表：不要無腦全站開 Serializable，也不要在預設 RC 下裸寫「先 SELECT 算完再 UPDATE」。</p>
+
+  <div class="mv-sub">面試高頻追問 FAQ</div>
+
+  <details class="faq">
+    <summary><span><span class="q">Q1</span> MVCC 既然號稱「無鎖讀取」，那是不是代表資料庫再也不需要鎖了？</span><span class="chev">&#9656;</span></summary>
+    <div class="ans">
+      <p><strong>完全不是，MVCC 只免除了「純快照讀與寫入之間」的鎖衝突，寫入與寫入（Write-Write）之間依然百分之百依賴排他行鎖！</strong>當兩筆交易同時 <code>UPDATE</code> 同一列時，第二筆交易一樣會被行鎖卡住等待第一筆提交或回滾（RC 下等鎖釋放後重讀最新版再評估條件；PG RR/SSI 下若發現第一筆已提交則直接拋 <code>40001</code> 放棄）。此外，DDL 變更表結構時的 Metadata Lock / AccessExclusiveLock 也與 MVCC 並存。</p>
+    </div>
+  </details>
+
+  <details class="faq">
+    <summary><span><span class="q">Q2</span> 為什麼很多網路大廠會把 MySQL InnoDB 的預設級別從 Repeatable Read 調降成 Read Committed？</span><span class="chev">&#9656;</span></summary>
+    <div class="ans">
+      <p>主因是 <strong>Gap Lock 與 Next-Key Lock 在高並發下太容易引發死鎖與鎖範圍擴大</strong>。在 InnoDB 的 RR 下，為了防範當前讀的幻讀，凡是沒命中唯一索引等值條件的 <code>UPDATE</code> / <code>DELETE</code> / <code>FOR UPDATE</code> 都會鎖住索引間隙（甚至鎖到 <code>supremum</code> 無窮大間隙），導致兩個插入不同 ID 的交易互相卡死。降為 <code>READ COMMITTED</code>（搭配 <code>binlog_format = ROW</code>）後，InnoDB 幾乎不再對一般掃描加 Gap Lock，而且不符合 <code>WHERE</code> 條件的列在評估後能提前釋放半一致鎖（Semi-consistent Read），並發寫入吞吐與死鎖率都會大幅改善。</p>
+    </div>
+  </details>
+
+  <details class="faq">
+    <summary><span><span class="q">Q3</span> 開啟 PostgreSQL 的 <code>REPEATABLE READ</code> 或 <code>SERIALIZABLE</code> 後，應用程式碼最常漏寫哪一件事？</span><span class="chev">&#9656;</span></summary>
+    <div class="ans">
+      <p><strong>漏寫「交易級別的重試迴圈（Retry Loop on SQLSTATE 40001）」！</strong>在 Read Committed 下，兩筆交易撞同一列時引擎會幫你乖乖排隊等鎖，醒來繼續跑完；但在 PG 的 RR（First-Committer-Wins）與 Serializable（SSI）下，引擎偵測到衝突的唯一手段就是<strong>直接讓後提交的交易報錯回滾</strong>。如果後端框架只針對單條 SQL 重試（此時舊交易早已處於 aborted 狀態），或直接把 500 錯誤丟給使用者，線上只要一有微幅競爭就會出現大量失敗請求。正確做法是在最外層包一層帶指數退避與微幅抖動（見「逾時、重試與退避」篇）的整筆交易重跑機制。</p>
+    </div>
+  </details>
+
+  <div class="oneliner">
+    <b>一句話答法</b>要補齊 Snapshot Isolation 擋不住的 Write Skew，2PL 選擇把讀取退回共享鎖排隊，而 SSI 選擇用非阻塞的 SIREAD 記號攔截雙向 rw-antidependency 並交由應用端重試 40001——在讀多寫少的現代 OLTP 中，預設 RC 搭配單列原子寫、跨列關鍵路徑上 SSI 或父列顯式鎖，是最務實的黃金組合。
+  </div>
+</section>
