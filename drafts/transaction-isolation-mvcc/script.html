@@ -129,17 +129,33 @@
     return txName === "T1" ? "T2" : "T1";
   }
 
+  function txNameOf(trx) {
+    return trx === T1_TRX ? "T1" : (trx === T2_TRX ? "T2" : "trx" + trx);
+  }
+
   function buildSnapshot(txName, txStates, nextTrx) {
+    // 尚未送出任何語句的交易此刻還沒有交易 ID；真實引擎中它日後拿到的 ID 必定 >= high_limit。
+    // 模擬器的 101/102 是預先編號，所以另列 lateIds，可見性判斷時一律視為「快照之後才啟動」。
     var active = [];
-    if (txStates.T1.started && txStates.T1.status === "active") active.push(T1_TRX);
-    if (txStates.T2.started && txStates.T2.status === "active") active.push(T2_TRX);
+    var lateIds = [];
+    if (txStates.T1.status === "active") (txStates.T1.started ? active : lateIds).push(T1_TRX);
+    if (txStates.T2.status === "active") (txStates.T2.started ? active : lateIds).push(T2_TRX);
     var low = active.length ? Math.min.apply(null, active) : nextTrx;
     return {
       creator: txIdOf(txName),
       mIds: active.slice(),
+      lateIds: lateIds,
       lowLimit: low,
       highLimit: nextTrx
     };
+  }
+
+  function snapshotSees(trx, snap) {
+    if (trx === snap.creator) return true;
+    if (snap.lateIds.indexOf(trx) !== -1) return false;
+    if (trx < snap.lowLimit) return true;
+    if (trx >= snap.highLimit) return false;
+    return snap.mIds.indexOf(trx) === -1;
   }
 
   function isVersionVisible(ver, snap, modeKey, txStatusByTrx) {
@@ -150,9 +166,7 @@
     }
     if (ver.trx === snap.creator) return true;
     if (st !== "committed") return false;
-    if (ver.trx < snap.lowLimit) return true;
-    if (ver.trx >= snap.highLimit) return false;
-    return snap.mIds.indexOf(ver.trx) === -1;
+    return snapshotSees(ver.trx, snap);
   }
 
   function pickVisibleRow(chain, snap, modeKey, txStatusByTrx) {
@@ -206,15 +220,19 @@
     txStatusByTrx[T2_TRX] = "active";
 
     var txStates = {
-      T1: { started: false, status: "active", snap: null, reads: [], lastRmwVal: null, lastPredCount: null, sireadPred: false, sireadKeys: {}, wroteKeys: {} },
-      T2: { started: false, status: "active", snap: null, reads: [], lastRmwVal: null, lastPredCount: null, sireadPred: false, sireadKeys: {}, wroteKeys: {} }
+      T1: { started: false, status: "active", engineAbort: false, blockedOn: null, waitStepNo: 0, queue: [], snap: null, reads: [], lastRmwVal: null, lastPredCount: null, sireadPred: false, sireadKeys: {}, wroteKeys: {} },
+      T2: { started: false, status: "active", engineAbort: false, blockedOn: null, waitStepNo: 0, queue: [], snap: null, reads: [], lastRmwVal: null, lastPredCount: null, sireadPred: false, sireadKeys: {}, wroteKeys: {} }
     };
     var rwEdges = { T1_to_T2: false, T2_to_T1: false };
     var nextTrx = 103;
     var rowLocks = {};
     var steps = [];
+    var deferInfo = {};
+    var work = [];
     var dirtyReadHappened = false;
     var dirtyRollbackHappened = false;
+    var dirtyPair = null;
+    var dirtySourceTrx = {};
     var waitEvents = 0;
     var totalVersionHops = 0;
 
@@ -245,7 +263,66 @@
       return createdNew;
     }
 
-    for (var idx = 0; idx < order.length; idx += 1) {
+    // 步驟陣列維持「一個語句一列」：被鎖擋住的語句先放佔位列，等對方結束、真正執行後再覆寫成最終結果。
+    function setStep(idx, rec) {
+      var info = deferInfo[idx];
+      if (info && info.wakeStepNo) {
+        rec.note = info.label + " → t" + info.wakeStepNo + " " + info.wakeBy + " " + info.wakeHow +
+          (info.kind === "blocked" ? " 後喚醒：" : " 後才送出：") + rec.note;
+      }
+      steps[idx] = rec;
+    }
+
+    function blockOn(txName, holder, idx, label) {
+      var st = txStates[txName];
+      waitEvents += 1;
+      st.blockedOn = holder;
+      st.waitStepNo = idx + 1;
+      st.queue.push(idx);
+      deferInfo[idx] = { kind: "blocked", label: label };
+      steps[idx] = {
+        stepNo: idx + 1,
+        tx: txName,
+        sql: wl.ops[order[idx]].sql,
+        tone: "ns-wait",
+        seenVal: null,
+        seenTrx: null,
+        note: label + "，語句暫停直到 " + holder + " COMMIT / ROLLBACK。"
+      };
+    }
+
+    function finishTx(txName, status, idx, how) {
+      var st = txStates[txName];
+      var trx = txIdOf(txName);
+      st.status = status;
+      txStatusByTrx[trx] = status;
+      if (status === "committed") nextTrx += 1;
+      releaseLocks(txName);
+      if (status === "aborted" && dirtySourceTrx[trx]) dirtyRollbackHappened = true;
+      var waiterName = otherTxOf(txName);
+      var waiter = txStates[waiterName];
+      if (waiter.blockedOn !== txName) return "";
+      waiter.blockedOn = null;
+      waiter.queue.forEach(function (qIdx) {
+        deferInfo[qIdx].wakeStepNo = idx + 1;
+        deferInfo[qIdx].wakeBy = txName;
+        deferInfo[qIdx].wakeHow = how;
+      });
+      work = waiter.queue.concat(work);
+      waiter.queue = [];
+      return "｜釋放鎖，喚醒 " + waiterName + " 自 t" + waiter.waitStepNo + " 起等待的語句";
+    }
+
+    function noteDirty(readerTx, ver) {
+      dirtyReadHappened = true;
+      dirtySourceTrx[ver.trx] = true;
+      if (!dirtyPair) dirtyPair = { reader: readerTx, writer: txNameOf(ver.trx) };
+    }
+
+    for (var w = 0; w < order.length; w += 1) work.push(w);
+
+    while (work.length) {
+      var idx = work.shift();
       var opId = order[idx];
       var op = wl.ops[opId];
       var tx = op.tx;
@@ -253,9 +330,10 @@
       var peer = otherTxOf(tx);
       var peerTrx = txIdOf(peer);
       var tState = txStates[tx];
+      var woke = deferInfo[idx] && deferInfo[idx].kind === "blocked" && deferInfo[idx].wakeStepNo;
 
       if (tState.status !== "active") {
-        steps.push({
+        setStep(idx, {
           stepNo: idx + 1,
           tx: tx,
           sql: op.kind === "end" ? "ROLLBACK (已中止)" : op.sql,
@@ -264,6 +342,21 @@
           seenTrx: null,
           note: tx + " 先前已因並發衝突中止，此語句跳過不執行。"
         });
+        continue;
+      }
+
+      if (tState.blockedOn) {
+        tState.queue.push(idx);
+        deferInfo[idx] = { kind: "queued", label: tx + " 仍卡在 t" + tState.waitStepNo + " 的鎖等待，此語句尚未送出" };
+        steps[idx] = {
+          stepNo: idx + 1,
+          tx: tx,
+          sql: op.kind === "end" ? ((tx === "T2" && t2End === "rollback") ? op.sqlRollback : op.sqlCommit) : op.sql,
+          tone: "ns-wait",
+          seenVal: null,
+          seenTrx: null,
+          note: deferInfo[idx].label + "（待 " + tState.blockedOn + " 結束後才執行）。"
+        };
         continue;
       }
 
@@ -284,12 +377,15 @@
         }
 
         var isDirty = ver.trx !== selfTrx && txStatusByTrx[ver.trx] === "active";
-        if (isDirty) dirtyReadHappened = true;
+        if (isDirty) noteDirty(tx, ver);
 
+        var lateNote = tState.snap.lateIds.length
+          ? "（" + tState.snap.lateIds.map(txNameOf).join("、") + " 尚未開始，視同快照之後才啟動的交易）"
+          : "";
         var snapTag = meta.level === "RU"
           ? "無 ReadView 直接讀最新列"
-          : (freshSnap ? "拍快照 m_ids=[" + tState.snap.mIds.join(",") + "]" : "沿用首張快照");
-        steps.push({
+          : (freshSnap ? "拍快照 m_ids=[" + tState.snap.mIds.join(",") + "]" + lateNote : "沿用首張快照");
+        setStep(idx, {
           stepNo: idx + 1,
           tx: tx,
           sql: op.sql,
@@ -307,12 +403,13 @@
           var pPick = pickVisibleRow(chains[kName], tState.snap, modeKey, txStatusByTrx);
           if (pPick) {
             totalVersionHops += pPick.hops;
+            // 讀到對方未提交的版本就是 Dirty Read，不論它讓這列被計入還是被排除（例如 on_call 被改成 false）
+            if (pPick.version.trx !== selfTrx && txStatusByTrx[pPick.version.trx] === "active") {
+              noteDirty(tx, pPick.version);
+            }
             if (pPick.version.onCall === 1) {
               cnt += 1;
               visKeys.push(kName + "@trx" + pPick.version.trx);
-              if (pPick.version.trx !== selfTrx && txStatusByTrx[pPick.version.trx] === "active") {
-                dirtyReadHappened = true;
-              }
             }
           }
           var topV = chains[kName][chains[kName].length - 1];
@@ -323,7 +420,7 @@
         tState.reads.push({ key: "COUNT(on_call)", val: cnt, trx: selfTrx });
         tState.lastPredCount = cnt;
         tState.sireadPred = true;
-        steps.push({
+        setStep(idx, {
           stepNo: idx + 1,
           tx: tx,
           sql: op.sql,
@@ -335,38 +432,9 @@
       } else if (op.kind === "write_set" || op.kind === "write_rmw" || op.kind === "leave_if_safe") {
         ensureSnapshot(tx);
         var targetKey = op.key;
-        var lockHolder = rowLocks[targetKey];
-        var lockNote = "";
-        if (lockHolder && lockHolder !== tx && txStates[lockHolder].status === "active") {
-          waitEvents += 1;
-          lockNote = "（曾遭遇 " + lockHolder + " 行鎖等待）";
-        }
-
-        var wChain = chains[targetKey];
-        var latestCommitted = pickLatestCommittedRow(wChain, selfTrx, txStatusByTrx);
-        var conflictFcW = (meta.engine === "pg" && (meta.level === "RR" || meta.level === "SSI")) &&
-          latestCommitted && latestCommitted.trx !== selfTrx &&
-          tState.snap && latestCommitted.trx >= tState.snap.lowLimit &&
-          (latestCommitted.trx >= tState.snap.highLimit || tState.snap.mIds.indexOf(latestCommitted.trx) !== -1);
-
-        if (conflictFcW) {
-          tState.status = "aborted";
-          txStatusByTrx[selfTrx] = "aborted";
-          releaseLocks(tx);
-          steps.push({
-            stepNo: idx + 1,
-            tx: tx,
-            sql: op.sql,
-            tone: "ns-ok",
-            seenVal: null,
-            seenTrx: latestCommitted.trx,
-            note: "ERROR 40001 (First-Committer-Wins)：目標列已被 trx=" + latestCommitted.trx + " 在本快照之後修改提交，PG 主動中止 " + tx + " 擋下覆寫！"
-          });
-          continue;
-        }
 
         if (op.kind === "leave_if_safe" && tState.lastPredCount !== null && tState.lastPredCount < 2) {
-          steps.push({
+          setStep(idx, {
             stepNo: idx + 1,
             tx: tx,
             sql: op.sql,
@@ -374,6 +442,54 @@
             seenVal: tState.lastPredCount,
             seenTrx: null,
             note: "剛才讀到值班僅剩 " + tState.lastPredCount + " 人，應用層檢查不通過、放棄請假更新。"
+          });
+          continue;
+        }
+
+        var lockHolder = rowLocks[targetKey];
+        if (lockHolder && lockHolder !== tx && txStates[lockHolder].status === "active") {
+          blockOn(tx, lockHolder, idx, "等待 " + lockHolder + " 持有的 " + targetKey + " 行鎖（寫寫衝突）");
+          continue;
+        }
+
+        var wChain = chains[targetKey];
+        var latestCommitted = pickLatestCommittedRow(wChain, selfTrx, txStatusByTrx);
+        var conflictFcW = (meta.engine === "pg" && (meta.level === "RR" || meta.level === "SSI")) &&
+          latestCommitted && latestCommitted.trx !== selfTrx &&
+          tState.snap && !snapshotSees(latestCommitted.trx, tState.snap);
+
+        if (conflictFcW) {
+          tState.engineAbort = true;
+          var fcwWake = finishTx(tx, "aborted", idx, "被中止");
+          setStep(idx, {
+            stepNo: idx + 1,
+            tx: tx,
+            sql: op.sql,
+            tone: "ns-ok",
+            seenVal: null,
+            seenTrx: latestCommitted.trx,
+            abort: true,
+            note: "ERROR 40001 could not serialize access due to concurrent update（First-Committer-Wins）：目標列已被 trx=" + latestCommitted.trx + " 在本快照之後修改提交，PG 主動中止 " + tx + " 擋下覆寫！" + fcwWake
+          });
+          continue;
+        }
+
+        var peerReadTarget = txStates[peer].status !== "aborted" &&
+          (txStates[peer].sireadKeys[targetKey] || txStates[peer].sireadPred);
+        var selfOutEdge = tx === "T1" ? rwEdges.T1_to_T2 : rwEdges.T2_to_T1;
+        if (meta.level === "SSI" && peerReadTarget && selfOutEdge && txStates[peer].status === "committed") {
+          recordRw(peer, tx);
+          tState.engineAbort = true;
+          var ssiWriteWake = finishTx(tx, "aborted", idx, "被中止");
+          setStep(idx, {
+            stepNo: idx + 1,
+            tx: tx,
+            sql: op.sql,
+            tone: "ns-ok",
+            seenVal: null,
+            seenTrx: selfTrx,
+            abort: true,
+            note: "ERROR 40001（SSI）：這次寫入補上 " + peer + " -rw→ " + tx + "，與已提交的 " + peer + " 形成雙向 rw-antidependency 環，PG 當場中止 " + tx + "（不必等到 COMMIT）。" + ssiWriteWake
           });
           continue;
         }
@@ -392,32 +508,36 @@
         rowLocks[targetKey] = tx;
         tState.wroteKeys[targetKey] = true;
 
-        if (txStates[peer].sireadKeys[targetKey] || txStates[peer].sireadPred) {
+        if (peerReadTarget) {
           recordRw(peer, tx);
         }
 
         var curReadNote = (meta.engine === "inno" && meta.level === "RR" && latestCommitted && tState.snap && latestCommitted.trx !== INIT_TRX && latestCommitted.trx !== selfTrx)
           ? "｜InnoDB 切換 Current Read 在最新 trx=" + latestCommitted.trx + " 版上直接覆寫（不報錯）"
           : "";
+        var epqNote = (woke && meta.engine === "pg" && meta.level === "RC" && latestCommitted && latestCommitted.trx === peerTrx)
+          ? "｜PG RC 等鎖後以 EvalPlanQual 重讀最新已提交版 trx=" + latestCommitted.trx + "、重新檢查 WHERE 後照樣覆寫（不報錯）"
+          : "";
 
-        steps.push({
+        setStep(idx, {
           stepNo: idx + 1,
           tx: tx,
           sql: op.sql,
           tone: "ns-idle",
           seenVal: newVal,
           seenTrx: selfTrx,
-          note: "寫入新版本 " + targetKey + "=" + (op.kind === "leave_if_safe" ? "false" : newVal) + " (trx=" + selfTrx + ") 並持有行鎖" + lockNote + curReadNote
+          note: "寫入新版本 " + targetKey + "=" + (op.kind === "leave_if_safe" ? "false" : newVal) + " (trx=" + selfTrx + ") 並持有行鎖" + curReadNote + epqNote
         });
       } else if (op.kind === "insert_row") {
         ensureSnapshot(tx);
+        var gapHeld = meta.engine === "inno" && meta.level === "RR" && txStates[peer].started && txStates[peer].status === "active" && txStates[peer].wroteKeys.__predLock;
+        if (gapHeld) {
+          blockOn(tx, peer, idx, "INSERT 撞上 " + peer + " 範圍 UPDATE 持有的 Next-Key / Gap Lock，插入意向鎖等待");
+          continue;
+        }
         if (!chains[op.key]) {
           keyList.push(op.key);
           chains[op.key] = [];
-        }
-        var blockedByGap = meta.engine === "inno" && meta.level === "RR" && txStates[peer].started && txStates[peer].status === "active" && txStates[peer].wroteKeys.__predLock;
-        if (blockedByGap) {
-          waitEvents += 1;
         }
         chains[op.key].push({ trx: selfTrx, val: op.val, onCall: op.onCall, note: "insert" });
         rowLocks[op.key] = tx;
@@ -425,7 +545,7 @@
         if (txStates[peer].sireadPred) {
           recordRw(peer, tx);
         }
-        steps.push({
+        setStep(idx, {
           stepNo: idx + 1,
           tx: tx,
           sql: op.sql,
@@ -438,6 +558,23 @@
         ensureSnapshot(tx);
         var touched = [];
         if (meta.engine === "inno") {
+          // Current Read 掃到對方鎖住的列：RR 一律等鎖；RU/RC 走 semi-consistent read，
+          // 只有最新已提交版符合 WHERE 才等鎖（未提交的新插入列沒有已提交版，直接跳過）。
+          var touchBlockKey = null;
+          for (var bi = 0; bi < keyList.length; bi += 1) {
+            var bk = keyList[bi];
+            if (rowLocks[bk] !== peer || txStates[peer].status !== "active") continue;
+            var semiV = pickLatestCommittedRow(chains[bk], -1, txStatusByTrx);
+            if (meta.level === "RR" || (semiV && semiV.onCall === 1)) {
+              touchBlockKey = bk;
+              break;
+            }
+          }
+          if (touchBlockKey) {
+            var freshInsert = !pickLatestCommittedRow(chains[touchBlockKey], -1, txStatusByTrx);
+            blockOn(tx, peer, idx, "Current Read 掃到 " + peer + (freshInsert ? " 未提交 INSERT 的 " + touchBlockKey + "（隱式鎖）" : " 鎖住的 " + touchBlockKey) + "，等待鎖釋放");
+            continue;
+          }
           tState.wroteKeys.__predLock = true;
           for (var ti = 0; ti < keyList.length; ti += 1) {
             var tk = keyList[ti];
@@ -448,14 +585,15 @@
               touched.push(tk);
             }
           }
-          steps.push({
+          setStep(idx, {
             stepNo: idx + 1,
             tx: tx,
             sql: op.sql,
             tone: "ns-wait",
             seenVal: touched.length,
             seenTrx: selfTrx,
-            note: "InnoDB UPDATE 走 Current Read + Next-Key Lock：掃到最新已提交的 [" + touched.join(", ") + "] 並把 DB_TRX_ID 改寫成自己的 " + selfTrx + "！"
+            note: "InnoDB UPDATE 走 Current Read" + (meta.level === "RR" ? " + Next-Key Lock" : "（" + meta.level + " 只鎖命中的記錄、不鎖間隙）") +
+              "：掃到最新已提交的 [" + touched.join(", ") + "] 並把 DB_TRX_ID 改寫成自己的 " + selfTrx + "！"
           });
         } else {
           var conflictTouch = false;
@@ -480,20 +618,20 @@
             }
           }
           if (conflictTouch) {
-            tState.status = "aborted";
-            txStatusByTrx[selfTrx] = "aborted";
-            releaseLocks(tx);
-            steps.push({
+            tState.engineAbort = true;
+            var touchWake = finishTx(tx, "aborted", idx, "被中止");
+            setStep(idx, {
               stepNo: idx + 1,
               tx: tx,
               sql: op.sql,
               tone: "ns-ok",
               seenVal: 0,
               seenTrx: null,
-              note: "PG 偵測到並行更新衝突拋出 40001，中止交易。"
+              abort: true,
+              note: "PG 偵測到並行更新衝突拋出 40001，中止交易。" + touchWake
             });
           } else {
-            steps.push({
+            setStep(idx, {
               stepNo: idx + 1,
               tx: tx,
               sql: op.sql,
@@ -507,48 +645,42 @@
       } else if (op.kind === "end") {
         var action = (tx === "T2" && t2End === "rollback") ? "rollback" : "commit";
         if (action === "rollback") {
-          tState.status = "aborted";
-          txStatusByTrx[selfTrx] = "aborted";
-          releaseLocks(tx);
-          if (dirtyReadHappened && tx === "T2") dirtyRollbackHappened = true;
-          steps.push({
+          var rbWake = finishTx(tx, "aborted", idx, "ROLLBACK");
+          setStep(idx, {
             stepNo: idx + 1,
             tx: tx,
             sql: op.sqlRollback,
             tone: "ns-idle",
             seenVal: null,
             seenTrx: selfTrx,
-            note: tx + " 執行 ROLLBACK：trx=" + selfTrx + " 寫入的所有版本標記為無效作廢。"
+            note: tx + " 執行 ROLLBACK：trx=" + selfTrx + " 寫入的所有版本標記為無效作廢。" + rbWake
           });
         } else {
           var ssiConflict = meta.level === "SSI" && rwEdges.T1_to_T2 && rwEdges.T2_to_T1 &&
             (txStates[peer].status === "committed");
           if (ssiConflict) {
-            tState.status = "aborted";
-            txStatusByTrx[selfTrx] = "aborted";
-            releaseLocks(tx);
-            steps.push({
+            tState.engineAbort = true;
+            var ssiEndWake = finishTx(tx, "aborted", idx, "被中止");
+            setStep(idx, {
               stepNo: idx + 1,
               tx: tx,
               sql: op.sqlCommit,
               tone: "ns-ok",
               seenVal: null,
               seenTrx: selfTrx,
-              note: "ERROR 40001 (SSI 偵測雙向 rw-antidependency 環 T1 ↔rw↔ T2)：PostgreSQL 拒絕提交 " + tx + "，成功攔截 Write Skew！"
+              abort: true,
+              note: "ERROR 40001 (SSI 偵測雙向 rw-antidependency 環 T1 ↔rw↔ T2)：PostgreSQL 拒絕提交 " + tx + "，成功攔截 Write Skew！" + ssiEndWake
             });
           } else {
-            tState.status = "committed";
-            txStatusByTrx[selfTrx] = "committed";
-            nextTrx += 1;
-            releaseLocks(tx);
-            steps.push({
+            var commitWake = finishTx(tx, "committed", idx, "COMMIT");
+            setStep(idx, {
               stepNo: idx + 1,
               tx: tx,
               sql: op.sqlCommit,
               tone: "ns-ok",
               seenVal: null,
               seenTrx: selfTrx,
-              note: tx + " 正式 COMMIT 成功（trx=" + selfTrx + " 對後續新快照生效）。"
+              note: tx + " 正式 COMMIT 成功（trx=" + selfTrx + " 對後續新快照生效）。" + commitWake
             });
           }
         }
@@ -572,13 +704,14 @@
     var isSafe = true;
 
     var t1Reads = txStates.T1.reads;
+    var engineAborted = txStates.T1.engineAbort || txStates.T2.engineAbort;
     if (dirtyReadHappened) {
       anomaly = dirtyRollbackHappened ? "dirty_rollback" : "dirty_read";
       anomalyTitle = dirtyRollbackHappened
-        ? "發生 Dirty Read（讀到隨後 ROLLBACK 的幽靈金額！）"
-        : "發生 Dirty Read（讀到 T2 尚未 COMMIT 的中間值）";
+        ? "發生 Dirty Read（讀到隨後 ROLLBACK 的幽靈資料！）"
+        : "發生 Dirty Read（" + dirtyPair.reader + " 讀到 " + dirtyPair.writer + " 尚未 COMMIT 的中間值）";
       isSafe = false;
-    } else if (wlKey === "nonrepeat" && txStates.T1.status === "committed" && t1Reads.length >= 2 && t1Reads[0].val !== t1Reads[1].val) {
+    } else if ((wlKey === "nonrepeat" || wlKey === "dirty") && txStates.T1.status === "committed" && t1Reads.length >= 2 && t1Reads[0].val !== t1Reads[1].val) {
       anomaly = "non_repeatable_read";
       anomalyTitle = "發生 Non-repeatable Read（T1 兩次讀 A 得到 " + t1Reads[0].val + " → " + t1Reads[1].val + "）";
       isSafe = false;
@@ -595,7 +728,7 @@
         anomaly = "lost_update";
         anomalyTitle = "發生 Lost Update（兩筆 +50 都顯示成功提交，但終值僅 " + finalBal + "，憑空蒸發 50！）";
         isSafe = false;
-      } else if (txStates.T1.status === "aborted" || txStates.T2.status === "aborted") {
+      } else if (engineAborted) {
         anomaly = "prevented_abort";
         anomalyTitle = "防護生效：引擎以 40001 中止衝突寫入（終值 " + finalBal + "，應用端重試即可達 200）";
         isSafe = true;
@@ -605,7 +738,7 @@
         anomaly = "write_skew";
         anomalyTitle = "發生 Write Skew（兩人寫不同列雙雙提交，值班人數跌破下限變 0 人！）";
         isSafe = false;
-      } else if (txStates.T1.status === "aborted" || txStates.T2.status === "aborted") {
+      } else if (engineAborted) {
         anomaly = "prevented_ssi";
         anomalyTitle = "SSI 防護生效：偵測 rw 依賴環中止後提交者，保住 " + onCallTotal + " 人值班";
         isSafe = true;
@@ -660,10 +793,13 @@
     var left = simulatePanel(wlKey, wl, order, t2End, p.leftMode || "pg_rc");
     var right = simulatePanel(wlKey, wl, order, t2End, p.rightMode || "pg_rr");
 
+    // 只比可見結果（讀到的值與版本、是否被引擎中止），不比說明文字
     var diffStep = -1;
     for (var s = 0; s < left.steps.length; s += 1) {
-      if (!right.steps[s]) break;
-      if (left.steps[s].seenVal !== right.steps[s].seenVal || left.steps[s].note !== right.steps[s].note) {
+      var ls = left.steps[s];
+      var rs = right.steps[s];
+      if (!rs) break;
+      if (ls.seenVal !== rs.seenVal || ls.seenTrx !== rs.seenTrx || !!ls.abort !== !!rs.abort) {
         diffStep = s + 1;
         break;
       }
@@ -693,9 +829,11 @@
     var rawDeadVersions = Math.round(tps * effectiveWindowSec);
     var hotRowCount = Math.max(100, Math.round(liveRows * 0.01));
 
-    var hotUpdates = rawDeadVersions * hotRatio;
-    var hotPrunedFactor = eng === "pg" ? (hold === 0 ? 0.15 : 0.88) : 1.0;
-    var retainedVersions = Math.round(rawDeadVersions * (eng === "pg" ? hotPrunedFactor : 1.0));
+    // 無長交易時 PG 的 HOT pruning / autovacuum 能即時回收大部分死版本；
+    // 一旦 horizon 被釘住，比 OldestXmin 新的死版本 pruning 也不能動，回收係數回到 1.0。
+    var hotPrunedFactor = (eng === "pg" && hold === 0) ? 0.15 : 1.0;
+    var retainedVersions = Math.round(rawDeadVersions * hotPrunedFactor);
+    var hotRetained = retainedVersions * hotRatio;
 
     var heapDeadTuples = eng === "pg" ? retainedVersions : Math.round(retainedVersions * 0.06);
     var undoHistoryLen = eng === "inno" ? retainedVersions : 0;
@@ -703,7 +841,7 @@
     var bloatRatio = (liveRows + heapDeadTuples) / liveRows;
     var bloatRounded = Math.round(bloatRatio * 100) / 100;
 
-    var avgHotChainDepth = Math.max(1, Math.round((hotUpdates / hotRowCount) * 10) / 10);
+    var avgHotChainDepth = Math.max(1, Math.round((hotRetained / hotRowCount) * 10) / 10);
     var hopCostFactor = eng === "inno" ? 0.14 : 0.09;
     var readPenaltyMult = Math.round((1 + (avgHotChainDepth - 1) * hopCostFactor + (bloatRatio - 1) * 0.45) * 100) / 100;
 
@@ -770,6 +908,7 @@
   var mbVChain = document.getElementById("mb-v-chain");
   var mbSChain = document.getElementById("mb-s-chain");
   var mbCardLat = document.getElementById("mb-card-lat");
+  var mbKLat = document.getElementById("mb-k-lat");
   var mbVLat = document.getElementById("mb-v-lat");
   var mbSLat = document.getElementById("mb-s-lat");
   var mbVizTitle = document.getElementById("mb-viz-title");
@@ -918,12 +1057,18 @@
       mbVizTitle.textContent = "MySQL InnoDB 儲存佔比：聚簇主表活體列 vs 凍結 Undo Log 紀錄";
     }
 
-    mbCardBloat.className = "mb-card " + (out.bloatRatio > 2.5 ? "bad" : (out.bloatRatio > 1.4 ? "warn" : "ok"));
-    mbCardChain.className = "mb-card " + (out.avgHotChainDepth > 60 ? "bad" : (out.avgHotChainDepth > 18 ? "warn" : "ok"));
-    mbCardLat.className = "mb-card " + (out.readPenaltyMult > 4.0 ? "bad" : (out.readPenaltyMult > 1.8 ? "warn" : "ok"));
+    var bloatLevel = out.bloatRatio > 2.5 ? "bad" : (out.bloatRatio > 1.4 ? "warn" : "ok");
+    var chainLevel = out.avgHotChainDepth > 60 ? "bad" : (out.avgHotChainDepth > 18 ? "warn" : "ok");
+    var latLevel = out.readPenaltyMult > 4.0 ? "bad" : (out.readPenaltyMult > 1.8 ? "warn" : "ok");
+    mbCardBloat.className = "mb-card " + bloatLevel;
+    mbCardChain.className = "mb-card " + chainLevel;
+    mbCardLat.className = "mb-card " + latLevel;
 
     mbVChain.textContent = out.avgHotChainDepth.toFixed(1) + " 跳";
     mbSChain.textContent = "前 1% 熱列（約 " + fmtNum(out.hotRowCount) + " 列）平均累積鏈長";
+    // InnoDB 新快照直接讀聚簇索引上的最新版，只有舊快照才需沿 Undo 鏈回推；PG 的新快照則得走過 HOT 鏈上卡住的死 Tuple。
+    var latLabel = bloatState.engine === "inno" ? "舊快照回推成本放大" : "點查延遲放大";
+    if (mbKLat) mbKLat.textContent = bloatState.engine === "inno" ? "舊快照讀取熱點列的回推成本" : "熱點點查相對延遲懲罰";
     mbVLat.textContent = out.readPenaltyMult.toFixed(2) + "x";
     mbSLat.textContent = bloatState.engine === "inno" ? "舊快照需逐跳逆推 Undo 重建舊列" : "掃描需跨過大量 Dead Tuple 與 Hint 檢查";
 
@@ -953,9 +1098,14 @@
       '<text x="20" y="74" font-family="JetBrains Mono, monospace" font-size="11" fill="#6b7078">熱點列版本鏈抽樣（平均 ' + out.avgHotChainDepth.toFixed(1) + ' 跳）：</text>' +
       chainNodesSvg;
 
-    mbStatus.innerHTML = bloatState.holdSec === 0
-      ? "<b>健康水位</b>：無長交易釘住快照，背景 " + (bloatState.engine === "pg" ? "autovacuum / HOT pruning" : "InnoDB Purge Thread") + " 可在數秒內即時回收舊版本。"
-      : "<b>凍結診斷</b>：一筆存活 <b>" + bloatState.holdSec + " 秒</b>的未關交易在 <b>" + bloatState.writeTps + " TPS</b> 下累積了 <b>" + fmtNum(out.retainedVersions) + "</b> 筆不可回收舊版本，熱點列版本鏈深達 <b>" + out.avgHotChainDepth.toFixed(1) + " 跳</b>（點查延遲放大 <b>" + out.readPenaltyMult.toFixed(2) + "x</b>）。";
+    var cardsCalm = bloatLevel === "ok" && chainLevel === "ok" && latLevel === "ok";
+    if (bloatState.holdSec === 0 && cardsCalm) {
+      mbStatus.innerHTML = "<b>健康水位</b>：無長交易釘住快照，背景 " + (bloatState.engine === "pg" ? "autovacuum / HOT pruning" : "InnoDB Purge Thread") + " 可在數秒內即時回收舊版本。";
+    } else if (bloatState.holdSec === 0) {
+      mbStatus.innerHTML = "<b>熱點壓力</b>：沒有長交易釘住快照，但 <b>" + bloatState.writeTps + " TPS</b> 有 " + bloatState.hotPct + "% 集中在約 " + fmtNum(out.hotRowCount) + " 列熱點上，背景回收來不及的短短數秒內，熱點列版本鏈就累積到 <b>" + out.avgHotChainDepth.toFixed(1) + " 跳</b>（" + latLabel + " <b>" + out.readPenaltyMult.toFixed(2) + "x</b>）。";
+    } else {
+      mbStatus.innerHTML = "<b>凍結診斷</b>：一筆存活 <b>" + bloatState.holdSec + " 秒</b>的未關交易在 <b>" + bloatState.writeTps + " TPS</b> 下累積了 <b>" + fmtNum(out.retainedVersions) + "</b> 筆不可回收舊版本，熱點列版本鏈深達 <b>" + out.avgHotChainDepth.toFixed(1) + " 跳</b>（" + latLabel + " <b>" + out.readPenaltyMult.toFixed(2) + "x</b>）。";
+    }
   }
 
   /* (5) 事件綁定 */

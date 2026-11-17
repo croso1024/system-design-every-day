@@ -347,7 +347,7 @@
     <h2>四個隔離級別與 Snapshot Isolation 的真實面貌</h2>
   </div>
   <p class="sec-sub">SQL-92 標準的歷史包袱、五大異常防護矩陣，以及為什麼主流引擎的 Repeatable Read 其實是 Snapshot Isolation。</p>
-  <p>1992 年制定的 ANSI SQL-92 標準做了一個影響深遠、卻也留下無數混淆的設計：它用「<strong>不允許出現哪幾種異常</strong>（Dirty Read、Non-repeatable Read、Phantom）」來反推四個隔離級別。當時主流商業資料庫全部基於<strong>兩階段鎖（2PL，讀鎖加寫鎖）</strong>實作，壓根沒有預料到後來 Berenson 等人在 1995 年論文《A Critique of ANSI SQL Isolation Levels》點出的 <strong>Snapshot Isolation（SI，快照隔離）</strong>會接管世界。</p>
+  <p>1992 年制定的 ANSI SQL-92 標準做了一個影響深遠、卻也留下無數混淆的設計：它用「<strong>不允許出現哪幾種異常</strong>（Dirty Read、Non-repeatable Read、Phantom）」來反推四個隔離級別。當時主流商業資料庫多數基於<strong>兩階段鎖（2PL，讀鎖加寫鎖）</strong>實作，壓根沒有預料到後來 Berenson 等人在 1995 年論文《A Critique of ANSI SQL Isolation Levels》點出的 <strong>Snapshot Isolation（SI，快照隔離）</strong>會接管世界。</p>
 
   <p>今天你在工程現場打開 PostgreSQL 或 MySQL InnoDB，嘴上喊的雖然同樣是 SQL 標準那四個名字，骨子裡的防護邊界卻已經因為 MVCC 的設計抉擇而分道揚鑣：</p>
 
@@ -399,7 +399,7 @@
           <td><strong>MySQL InnoDB RR</strong>（預設，MVCC + Next-Key Lock）</td>
           <td class="hl">已阻擋</td>
           <td class="hl">純快照讀已阻擋（混用當前讀見第 5 節）</td>
-          <td class="hl">快照讀靠 MVCC、當前讀靠 Next-Key Lock 阻擋</td>
+          <td>純快照讀已阻擋（混用當前讀會出現 Read-Write Phantom，見第 5 節）</td>
           <td><strong>可能發生！</strong>（無 First-Committer-Wins）</td>
           <td>可能發生</td>
         </tr>
@@ -448,11 +448,11 @@
   <ul>
     <li><var>creator_trx_id</var>：拍下這張快照的交易自己的 ID（自己寫的未提交變更，自己當然要看得到，保證交易內的 Read-your-own-writes）。</li>
     <li><var>m_ids</var>（PG 稱 <code>xip[]</code>）：<strong>拍照那一瞬間仍在執行中、尚未提交的所有活躍讀寫交易 ID 清單</strong>。</li>
-    <li><var>low_limit_id</var>（InnoDB 的 <code>m_up_limit_id</code> / PG 的 <code>xmin</code>）：<var>m_ids</var> 裡的最小值——凡是交易 ID <strong>嚴格小於</strong>這個下界的版本，在拍照前肯定早已提交完畢，一律可見。</li>
+    <li><var>low_limit_id</var>（InnoDB 的 <code>m_up_limit_id</code> / PG 的 <code>xmin</code>）：<var>m_ids</var> 裡的最小值——凡是交易 ID <strong>嚴格小於</strong>這個下界的版本，在拍照前肯定早已結束，<strong>只要是已提交</strong>就一律可見（PG 中比 <code>xmin</code> 小的交易也可能已回滾，仍得查 <code>pg_xact</code>；InnoDB 回滾時會用 Undo 把列實際還原，版本鏈上不會留下已回滾的版本）。</li>
     <li><var>high_limit_id</var>（InnoDB 的 <code>m_low_limit_id</code> / PG 的 <code>xmax</code>）：系統即將發出的<strong>下一個交易 ID</strong>——凡是交易 ID <strong>大於等於</strong>這個上界的版本，都是拍照之後才剛啟動的新交易（就算它手腳很快在下一毫秒已經提交），對這張歷史快照而言也一律不可見。</li>
   </ul>
 
-  <div class="formula">visible(trx) &hArr; trx = creator &or; ( trx &lt; low_limit ) &or; ( low_limit &le; trx &lt; high_limit &and; trx &notin; m_ids &and; committed(trx) )</div>
+  <div class="formula">visible(trx) &hArr; trx = creator &or; ( trx &lt; low_limit &and; committed(trx) ) &or; ( low_limit &le; trx &lt; high_limit &and; trx &notin; m_ids &and; committed(trx) )</div>
 
   <p>當查詢掃到某一列，發現表頭最新版本是由交易 <var>trx</var> 寫入但通不過上述公式時，引擎不會阻塞等鎖，而是<strong>順著版本指標往舊版本走一步</strong>，重新套用同一條公式，直到找到第一個可見版本（若走到鏈尾仍無可見版本，代表該列在快照當下尚未誕生，直接略過）。</p>
 
@@ -685,7 +685,7 @@ flowchart LR
   <p class="sec-sub">為什麼一筆忘記提交的閒置交易會拖垮整座資料庫？長交易凍結水位的定量模擬。</p>
   <p>MVCC「保留舊版本、讀寫不互擋」並不是免費午餐。每當一列被 <code>UPDATE</code> 或 <code>DELETE</code>，舊版本不能馬上從磁碟抹除——因為系統裡可能還有一筆 30 秒前啟動的舊快照正準備去讀它。只有當某個舊版本的銷毀交易 ID（如 PG 的 <code>xmax</code>）<strong>嚴格小於目前全庫所有活躍快照當中最老的那個下界（<code>OldestXmin</code> / InnoDB 最老 <code>ReadView</code>）</strong>時，背景清理執行緒（PostgreSQL 的 <strong>VACUUM / Autovacuum</strong>，以及 InnoDB 的 <strong>Purge Thread</strong>）才有資格把它回收。</p>
 
-  <p>這直接導出線上資料庫最常見的雪崩根因之一：<strong>長交易（Long-running Transaction）或 <code>idle in transaction</code></strong>。只要某個微服務開了 <code>BEGIN</code>、讀了一筆資料（或開著 RR 快照），接著去呼叫一個卡住的外部 HTTP API 甚至忘記 <code>COMMIT</code>，<code>OldestXmin</code> 就會像釘子一樣死死釘在原地：</p>
+  <p>這直接導出線上資料庫最常見的雪崩根因之一：<strong>長交易（Long-running Transaction）或 <code>idle in transaction</code></strong>。只要某個微服務開了 <code>BEGIN</code> 後，在 PostgreSQL 寫過一筆資料（已分配交易 ID，即使在預設 RC 下也算），或在 Repeatable Read / Serializable 下讀過一筆資料（交易快照已拍下並一路沿用；InnoDB 預設 RR 的普通 <code>SELECT</code> 就會建立 Read View），接著去呼叫一個卡住的外部 HTTP API 甚至忘記 <code>COMMIT</code>，<code>OldestXmin</code> 就會像釘子一樣死死釘在原地：</p>
   <ul>
     <li><strong>在 PostgreSQL</strong>：該時間點之後全表（甚至全庫）產生的所有 Dead Tuple 都<strong>無法被 VACUUM 回收</strong>，資料頁與索引頁迅速發生<strong>表膨脹（Table &amp; Index Bloat）</strong>，原本存在記憶體 Buffer Pool 裡的熱表被稀疏的死屍撐大數倍，Sequential Scan 與 Index Scan 的 I/O 全面劣化；若放任不管超過約 20 億筆交易，還會撞上致命的 <strong>Transaction ID Wraparound（XID 回繞停機保護）</strong>。</li>
     <li><strong>在 MySQL InnoDB</strong>：主表雖然就地更新，但 Purge Thread 無法清理 Undo Log，導致 <strong>History List Length（HLL）</strong>飆升至數百萬甚至數千萬；任何掃過熱點列的舊快照查詢都必須順著長達數千跳的 <code>DB_ROLL_PTR</code> 鏈逐層回推舊版，CPU 與隨機讀延遲瞬間炸裂。</li>
@@ -748,7 +748,7 @@ flowchart LR
               <span class="s" id="mb-s-chain">—</span>
             </div>
             <div class="mb-card" id="mb-card-lat">
-              <span class="k">熱點點查相對延遲懲罰</span>
+              <span class="k" id="mb-k-lat">熱點點查相對延遲懲罰</span>
               <b id="mb-v-lat">—</b>
               <span class="s" id="mb-s-lat">—</span>
             </div>
@@ -793,7 +793,7 @@ flowchart LR
     <li><strong>樂觀路線——可串行化快照隔離（SSI, Serializable Snapshot Isolation，如 PostgreSQL 9.1+ 與 CockroachDB 靈感來源）</strong>：由 Cahill 等人在 2008 年提出並獲 SIGMOD 最佳論文。SSI 完整保留了 MVCC <strong>讀不擋寫、寫不擋讀</strong>的非阻塞特性！它不在讀取時卡住別人，而是在記憶體裡掛上完全不阻塞的輕量級記號 <strong><code>SIREAD</code> Lock（謂詞鎖記號）</strong>，專門追蹤交易之間的 <strong><code>rw-antidependency</code>（讀寫反依賴：交易 A 讀到了舊版，而交易 B 隨後改寫了該範圍的新版，記作 <var>A</var> &mdash;rw&rarr; <var>B</var>）</strong>。</li>
   </ol>
 
-  <p>SSI 的理論基石指出：在 Snapshot Isolation 底下，任何會打破可串行化的異常（包含所有變形的 Write Skew），在依賴圖上都<strong>必然會形成「連續兩條相鄰的 <code>rw-antidependency</code> 邊」（即危險結構 <var>T1</var> &mdash;rw&rarr; <var>T2</var> &mdash;rw&rarr; <var>T3</var>，在雙交易 Write Skew 中則是 <var>T1</var> 與 <var>T2</var> 互指成環 <var>T1</var> &harr;rw&harr; <var>T2</var>）</strong>。只要在提交時偵測到這個危險結構，引擎就主動讓後提交者以 <code>SQLSTATE 40001</code> 中止重試——沒有衝突時全程零鎖等待，有潛在危險時寧可偶爾誤殺（False Positive，例如粗粒度頁級 <code>SIREAD</code> 鎖合併時）也絕不漏放任何一筆髒帳。</p>
+  <p>SSI 的理論基石指出：在 Snapshot Isolation 底下，任何會打破可串行化的異常（包含所有變形的 Write Skew），在依賴圖上都<strong>必然會形成「連續兩條相鄰的 <code>rw-antidependency</code> 邊」（即危險結構 <var>T1</var> &mdash;rw&rarr; <var>T2</var> &mdash;rw&rarr; <var>T3</var>，在雙交易 Write Skew 中則是 <var>T1</var> 與 <var>T2</var> 互指成環 <var>T1</var> &harr;rw&harr; <var>T2</var>）</strong>。只要在讀寫或提交時偵測到這個危險結構，引擎就主動讓後提交者以 <code>SQLSTATE 40001</code> 中止重試——沒有衝突時全程零鎖等待，有潛在危險時寧可偶爾誤殺（False Positive，例如粗粒度頁級 <code>SIREAD</code> 鎖合併時）也絕不漏放任何一筆髒帳。</p>
 
   <pre class="mermaid">
 sequenceDiagram
@@ -863,7 +863,7 @@ sequenceDiagram
   <details class="faq">
     <summary><span><span class="q">Q2</span> 為什麼很多網路大廠會把 MySQL InnoDB 的預設級別從 Repeatable Read 調降成 Read Committed？</span><span class="chev">&#9656;</span></summary>
     <div class="ans">
-      <p>主因是 <strong>Gap Lock 與 Next-Key Lock 在高並發下太容易引發死鎖與鎖範圍擴大</strong>。在 InnoDB 的 RR 下，為了防範當前讀的幻讀，凡是沒命中唯一索引等值條件的 <code>UPDATE</code> / <code>DELETE</code> / <code>FOR UPDATE</code> 都會鎖住索引間隙（甚至鎖到 <code>supremum</code> 無窮大間隙），導致兩個插入不同 ID 的交易互相卡死。降為 <code>READ COMMITTED</code>（搭配 <code>binlog_format = ROW</code>）後，InnoDB 幾乎不再對一般掃描加 Gap Lock，而且不符合 <code>WHERE</code> 條件的列在評估後能提前釋放半一致鎖（Semi-consistent Read），並發寫入吞吐與死鎖率都會大幅改善。</p>
+      <p>主因是 <strong>Gap Lock 與 Next-Key Lock 在高並發下太容易引發死鎖與鎖範圍擴大</strong>。在 InnoDB 的 RR 下，為了防範當前讀的幻讀，凡是沒命中唯一索引等值條件的 <code>UPDATE</code> / <code>DELETE</code> / <code>FOR UPDATE</code> 都會鎖住索引間隙（甚至鎖到 <code>supremum</code> 無窮大間隙），導致兩個插入不同 ID 的交易互相卡死。降為 <code>READ COMMITTED</code>（搭配 <code>binlog_format = ROW</code>）後，InnoDB 幾乎不再對一般掃描加 Gap Lock，而且不符合 <code>WHERE</code> 條件的列在評估後會立即釋放行鎖；遇到已被別人鎖住的列時，還會先讀它的最新已提交版本判斷是否符合 <code>WHERE</code>（Semi-consistent Read），不符合就直接跳過、不必等鎖，並發寫入吞吐與死鎖率都會大幅改善。</p>
     </div>
   </details>
 
