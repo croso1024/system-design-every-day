@@ -1,0 +1,1115 @@
+<script>
+(function () {
+  "use strict";
+
+  /* (1) 常數與參數表 */
+  var INDEX_KEYS = [10, 20, 30, 40];
+  var GAP_DEFS = [
+    { id: "G0", label: "(-∞, 10)", lo: -Infinity, hi: 10 },
+    { id: "G1", label: "(10, 20)", lo: 10, hi: 20 },
+    { id: "G2", label: "(20, 30)", lo: 20, hi: 30 },
+    { id: "G3", label: "(30, 40)", lo: 30, hi: 40 },
+    { id: "G4", label: "(40, +∞)", lo: 40, hi: Infinity }
+  ];
+  var INSERT_PROBES = [5, 15, 20, 25, 35, 45];
+  var T3_FIXED_UNDO = 6;
+  var RES_META = {
+    R1: { id: "R1", title: "R1 · 帳戶 #101" },
+    R2: { id: "R2", title: "R2 · 帳戶 #202" },
+    R3: { id: "R3", title: "R3 · 帳戶 #303" }
+  };
+
+  /* (2) compute* 純函式與輔助純邏輯（不碰 DOM、不依賴宿主物件） */
+  function gapIndexForValue(val) {
+    if (val < 10) return 0;
+    if (val < 20) return 1;
+    if (val < 30) return 2;
+    if (val < 40) return 3;
+    return 4;
+  }
+
+  // @probe fn       computeIndexLocks
+  // @probe baseline {"indexKind":"secondary","isolation":"rr","qLo":20,"qHi":20}
+  // @probe sweep    {"indexKind":["unique","secondary","noindex"],"isolation":["rr","rc"],"qLo":[10,35],"qHi":[15,45]}
+  function computeIndexLocks(p) {
+    var kind = (p && p.indexKind) ? String(p.indexKind) : "secondary";
+    var iso = (p && p.isolation) ? String(p.isolation) : "rr";
+    var rawLo = Number(p && p.qLo);
+    var rawHi = Number(p && p.qHi);
+    if (!Number.isFinite(rawLo)) rawLo = 20;
+    if (!Number.isFinite(rawHi)) rawHi = 20;
+    var lo = Math.min(rawLo, rawHi);
+    var hi = Math.max(rawLo, rawHi);
+    var isPoint = (lo === hi);
+
+    var recLocked = [false, false, false, false];
+    var gapLocked = [false, false, false, false, false];
+    var supremumLocked = false;
+    var unitMode = "";
+    var explain = "";
+
+    if (kind === "noindex") {
+      if (iso === "rr") {
+        recLocked = [true, true, true, true];
+        gapLocked = [true, true, true, true, true];
+        supremumLocked = true;
+        unitMode = "全表 Clustered 掃描（全 Record + 全 Gap）";
+        explain = "無可用索引且處於 Repeatable Read：InnoDB 掃過主鍵樹全部 4 筆紀錄與 5 段區間（含 supremum）並全數上鎖，整張表形同凍結。";
+      } else {
+        for (var i0 = 0; i0 < INDEX_KEYS.length; i0 += 1) {
+          if (INDEX_KEYS[i0] >= lo && INDEX_KEYS[i0] <= hi) recLocked[i0] = true;
+        }
+        unitMode = "全掃描後釋放未命中列（RC 無 Gap）";
+        explain = "無索引但處於 Read Committed：InnoDB 雖掃過全表，但會釋放不符 WHERE 條件的紀錄鎖且不掛 Gap Lock，僅保留命中列的 Record Lock。";
+      }
+    } else if (iso === "rc") {
+      for (var i1 = 0; i1 < INDEX_KEYS.length; i1 += 1) {
+        if (INDEX_KEYS[i1] >= lo && INDEX_KEYS[i1] <= hi) recLocked[i1] = true;
+      }
+      unitMode = "純 Record Lock（RC 停用掃描 Gap）";
+      explain = "Read Committed 關閉了查詢掃描的 Gap Lock：只對實際命中的索引項（及對應主鍵）加排他 Record Lock，區間縫隙開放並發 INSERT。";
+    } else if (kind === "unique") {
+      if (isPoint) {
+        var hitIdx = INDEX_KEYS.indexOf(lo);
+        if (hitIdx !== -1) {
+          recLocked[hitIdx] = true;
+          unitMode = "退化為純 Record Lock [" + lo + "]";
+          explain = "唯一索引 ＋ 等值命中 " + lo + "：因為唯一約束保證不可能插入第二筆 " + lo + "，Next-Key Lock 退化為單點 Record Lock，0 段縫隙被鎖。";
+        } else {
+          var gIdx = gapIndexForValue(lo);
+          gapLocked[gIdx] = true;
+          if (gIdx === 4) supremumLocked = true;
+          unitMode = "退化為純 Gap Lock " + GAP_DEFS[gIdx].label;
+          explain = "唯一索引 ＋ 等值未命中 " + lo + "：定位到第一筆大於 " + lo + " 的邊界後退化為純 Gap Lock " + GAP_DEFS[gIdx].label + "，阻止他人插入 " + lo + "。";
+        }
+      } else {
+        for (var iu = 0; iu < INDEX_KEYS.length; iu += 1) {
+          var ku = INDEX_KEYS[iu];
+          if (ku >= lo && ku <= hi) recLocked[iu] = true;
+        }
+        var startGapU = gapIndexForValue(lo);
+        if (INDEX_KEYS.indexOf(lo) !== -1) {
+          startGapU = INDEX_KEYS.indexOf(lo) + 1;
+        }
+        var endGapU = gapIndexForValue(hi);
+        if (INDEX_KEYS.indexOf(hi) !== -1) {
+          endGapU = INDEX_KEYS.indexOf(hi) - 1;
+        }
+        for (var gu = startGapU; gu <= endGapU; gu += 1) {
+          if (gu >= 0 && gu < GAP_DEFS.length) gapLocked[gu] = true;
+        }
+        if (hi > 40) supremumLocked = true;
+        unitMode = "唯一範圍鎖 [" + lo + ", " + hi + "]";
+        explain = "唯一索引範圍掃描：命中界內的紀錄與開區間全數加鎖；若上下界剛好踩中既有唯一鍵，MySQL 8.0 可省去界外多餘縫隙鎖。";
+      }
+    } else {
+      if (isPoint) {
+        var sHit = INDEX_KEYS.indexOf(lo);
+        if (sHit !== -1) {
+          recLocked[sHit] = true;
+          gapLocked[sHit] = true;
+          gapLocked[sHit + 1] = true;
+          unitMode = "Next-Key + 尾端 Gap " + GAP_DEFS[sHit + 1].label;
+          explain = "非唯一二級索引等值命中 " + lo + "：允許重複鍵意味新插入的 " + lo + " 可能落在前後任一側，故鎖住 Next-Key 與右側尾端 Gap " + GAP_DEFS[sHit + 1].label + "，並回表鎖主鍵。";
+        } else {
+          var sgIdx = gapIndexForValue(lo);
+          gapLocked[sgIdx] = true;
+          if (sgIdx === 4) supremumLocked = true;
+          unitMode = "純 Gap Lock " + GAP_DEFS[sgIdx].label;
+          explain = "非唯一二級索引等值未命中 " + lo + "：鎖住所在縫隙 " + GAP_DEFS[sgIdx].label + "，防止其他交易在此期間插入 " + lo + "。";
+        }
+      } else {
+        var firstGap = gapIndexForValue(lo);
+        if (INDEX_KEYS.indexOf(lo) !== -1) firstGap = INDEX_KEYS.indexOf(lo);
+        var lastGap = gapIndexForValue(hi);
+        if (INDEX_KEYS.indexOf(hi) !== -1) lastGap = INDEX_KEYS.indexOf(hi) + 1;
+        for (var is = 0; is < INDEX_KEYS.length; is += 1) {
+          if (INDEX_KEYS[is] >= lo && INDEX_KEYS[is] <= hi) recLocked[is] = true;
+        }
+        for (var gs = firstGap; gs <= lastGap; gs += 1) {
+          if (gs >= 0 && gs < GAP_DEFS.length) gapLocked[gs] = true;
+        }
+        if (hi >= 40) supremumLocked = true;
+        unitMode = "Next-Key 連續區間掃描";
+        explain = "非唯一索引範圍掃描：沿索引鏈對範圍內每筆紀錄掛 Next-Key Lock，並一路延伸到第一筆大於 " + hi + " 的紀錄前封住尾端縫隙。";
+      }
+    }
+
+    var lockedRecordCount = 0;
+    var records = [];
+    for (var r = 0; r < INDEX_KEYS.length; r += 1) {
+      if (recLocked[r]) lockedRecordCount += 1;
+      records.push({
+        key: INDEX_KEYS[r],
+        locked: recLocked[r],
+        pkHop: kind === "secondary" && recLocked[r]
+      });
+    }
+    var pkLockCount = kind === "secondary" ? lockedRecordCount : 0;
+
+    var lockedGapCount = 0;
+    var gaps = [];
+    for (var g = 0; g < GAP_DEFS.length; g += 1) {
+      if (gapLocked[g]) lockedGapCount += 1;
+      gaps.push({
+        id: GAP_DEFS[g].id,
+        label: GAP_DEFS[g].label,
+        locked: gapLocked[g]
+      });
+    }
+
+    var blockedInsertCount = 0;
+    var insertTests = [];
+    for (var pIdx = 0; pIdx < INSERT_PROBES.length; pIdx += 1) {
+      var val = INSERT_PROBES[pIdx];
+      var exactPos = INDEX_KEYS.indexOf(val);
+      var blocked = false;
+      var why = "開放插入";
+      if (exactPos !== -1) {
+        if (kind === "unique") {
+          blocked = recLocked[exactPos] || gapLocked[exactPos];
+          why = blocked ? "唯一鍵重複合併檢查撞鎖" : "唯一鍵衝突立即報錯（未撞鎖）";
+        } else {
+          blocked = gapLocked[exactPos] || gapLocked[exactPos + 1];
+          why = blocked ? "重複鍵落點被前後 Gap 攔截" : "RC 無 Gap 可插入同值新列";
+        }
+      } else {
+        var targetGap = gapIndexForValue(val);
+        blocked = gapLocked[targetGap];
+        why = blocked ? ("卡在 " + GAP_DEFS[targetGap].label + " Gap Lock") : "區間未鎖可通過";
+      }
+      if (blocked) blockedInsertCount += 1;
+      insertTests.push({
+        op: "INSERT " + val,
+        blocked: blocked,
+        reason: why
+      });
+    }
+
+    var updateTests = [];
+    for (var uIdx = 0; uIdx < INDEX_KEYS.length; uIdx += 1) {
+      var uKey = INDEX_KEYS[uIdx];
+      updateTests.push({
+        op: "UPDATE " + uKey,
+        blocked: recLocked[uIdx],
+        reason: recLocked[uIdx] ? "Record X 鎖互斥等待" : "紀錄未鎖可更新"
+      });
+    }
+
+    var insertBlockPct = Math.round((blockedInsertCount / INSERT_PROBES.length) * 100);
+    var whereClause = isPoint ? ("slot_id = " + lo) : ("slot_id BETWEEN " + lo + " AND " + hi);
+
+    return {
+      sqlPreview: "SELECT * FROM bookings WHERE " + whereClause + " FOR UPDATE;",
+      unitMode: unitMode,
+      records: records,
+      gaps: gaps,
+      supremumLocked: supremumLocked,
+      lockedRecordCount: lockedRecordCount,
+      pkLockCount: pkLockCount,
+      lockedGapCount: lockedGapCount,
+      blockedInsertCount: blockedInsertCount,
+      insertBlockPct: insertBlockPct,
+      insertTests: insertTests,
+      updateTests: updateTests,
+      explain: explain
+    };
+  }
+
+  function buildSchedule(mode, count) {
+    if (mode === "upgrade") {
+      if (count === 3) {
+        return [
+          { kind: "lock", tx: "T1", res: "R1", mode: "S", label: "T1 讀鎖 R1(S)" },
+          { kind: "lock", tx: "T2", res: "R1", mode: "S", label: "T2 讀鎖 R1(S)" },
+          { kind: "lock", tx: "T3", res: "R1", mode: "S", label: "T3 讀鎖 R1(S)" },
+          { kind: "lock", tx: "T1", res: "R1", mode: "X", label: "T1 升級 R1(X)" },
+          { kind: "lock", tx: "T2", res: "R1", mode: "X", label: "T2 升級 R1(X)" },
+          { kind: "resolve", label: "自動回滾犧牲者" },
+          { kind: "commit_one", tx: "T3", label: "T3 提交放掉 R1(S)" },
+          { kind: "commit_all", label: "倖存交易升級並提交" }
+        ];
+      }
+      return [
+        { kind: "lock", tx: "T1", res: "R1", mode: "S", label: "T1 讀鎖 R1(S)" },
+        { kind: "lock", tx: "T2", res: "R1", mode: "S", label: "T2 讀鎖 R1(S)" },
+        { kind: "lock", tx: "T1", res: "R1", mode: "X", label: "T1 升級 R1(X)" },
+        { kind: "lock", tx: "T2", res: "R1", mode: "X", label: "T2 升級 R1(X)" },
+        { kind: "resolve", label: "自動回滾犧牲者" },
+        { kind: "commit_all", label: "倖存交易升級並提交" }
+      ];
+    }
+
+    if (mode === "canonical") {
+      if (count === 3) {
+        return [
+          { kind: "lock", tx: "T1", res: "R1", mode: "X", label: "T1 鎖 R1(X)" },
+          { kind: "lock", tx: "T2", res: "R1", mode: "X", label: "T2 等 R1(X)" },
+          { kind: "lock", tx: "T3", res: "R2", mode: "X", label: "T3 鎖 R2(X)" },
+          { kind: "lock", tx: "T1", res: "R2", mode: "X", label: "T1 等 R2(X)" },
+          { kind: "lock", tx: "T3", res: "R3", mode: "X", label: "T3 續鎖 R3(X)" },
+          { kind: "commit_one", tx: "T3", label: "T3 COMMIT 放鎖" },
+          { kind: "commit_one", tx: "T1", label: "T1 獲鎖並 COMMIT" },
+          { kind: "commit_all", label: "T2 依序獲鎖 COMMIT" }
+        ];
+      }
+      return [
+        { kind: "lock", tx: "T1", res: "R1", mode: "X", label: "T1 鎖 R1(X)" },
+        { kind: "lock", tx: "T2", res: "R1", mode: "X", label: "T2 等 R1(X)" },
+        { kind: "lock", tx: "T1", res: "R2", mode: "X", label: "T1 鎖 R2(X)" },
+        { kind: "commit_one", tx: "T1", label: "T1 COMMIT 放鎖" },
+        { kind: "lock", tx: "T2", res: "R2", mode: "X", label: "T2 鎖 R2(X)" },
+        { kind: "commit_all", label: "T2 順利 COMMIT" }
+      ];
+    }
+
+    if (count === 3) {
+      return [
+        { kind: "lock", tx: "T1", res: "R1", mode: "X", label: "T1 鎖 R1(X)" },
+        { kind: "lock", tx: "T2", res: "R2", mode: "X", label: "T2 鎖 R2(X)" },
+        { kind: "lock", tx: "T3", res: "R3", mode: "X", label: "T3 鎖 R3(X)" },
+        { kind: "lock", tx: "T1", res: "R2", mode: "X", label: "T1 請求 R2(X)" },
+        { kind: "lock", tx: "T2", res: "R3", mode: "X", label: "T2 請求 R3(X)" },
+        { kind: "lock", tx: "T3", res: "R1", mode: "X", label: "T3 請求 R1(X)" },
+        { kind: "resolve", label: "自動回滾最小 Undo 者" },
+        { kind: "commit_all", label: "其餘交易依序獲鎖提交" }
+      ];
+    }
+    return [
+      { kind: "lock", tx: "T1", res: "R1", mode: "X", label: "T1 鎖 R1(X)" },
+      { kind: "lock", tx: "T2", res: "R2", mode: "X", label: "T2 鎖 R2(X)" },
+      { kind: "lock", tx: "T1", res: "R2", mode: "X", label: "T1 請求 R2(X)" },
+      { kind: "lock", tx: "T2", res: "R1", mode: "X", label: "T2 請求 R1(X)" },
+      { kind: "resolve", label: "自動回滾最小 Undo 者" },
+      { kind: "commit_all", label: "倖存交易獲鎖並提交" }
+    ];
+  }
+
+  function findBlockers(holders, reqTx, reqMode) {
+    var blockers = [];
+    for (var i = 0; i < holders.length; i += 1) {
+      var h = holders[i];
+      if (h.tx === reqTx) continue;
+      if (reqMode === "X" || h.mode === "X") {
+        blockers.push(h.tx);
+      }
+    }
+    return blockers;
+  }
+
+  function grantOrUpgrade(holders, tx, mode) {
+    for (var i = 0; i < holders.length; i += 1) {
+      if (holders[i].tx === tx) {
+        if (mode === "X") holders[i].mode = "X";
+        return;
+      }
+    }
+    holders.push({ tx: tx, mode: mode });
+  }
+
+  function wakeCompatibleWaiters(lockTable, resIds, txMap) {
+    var changed = true;
+    while (changed) {
+      changed = false;
+      for (var r = 0; r < resIds.length; r += 1) {
+        var rid = resIds[r];
+        var entry = lockTable[rid];
+        var nextQueue = [];
+        for (var q = 0; q < entry.waitQueue.length; q += 1) {
+          var w = entry.waitQueue[q];
+          var blockers = findBlockers(entry.holders, w.tx, w.mode);
+          if (blockers.length === 0 && nextQueue.length === 0) {
+            grantOrUpgrade(entry.holders, w.tx, w.mode);
+            if (txMap[w.tx].status === "waiting") txMap[w.tx].status = "active";
+            changed = true;
+          } else {
+            nextQueue.push(w);
+          }
+        }
+        entry.waitQueue = nextQueue;
+      }
+    }
+  }
+
+  function releaseAllLocksOf(lockTable, resIds, txId) {
+    for (var r = 0; r < resIds.length; r += 1) {
+      var entry = lockTable[resIds[r]];
+      entry.holders = entry.holders.filter(function (h) { return h.tx !== txId; });
+      entry.waitQueue = entry.waitQueue.filter(function (w) { return w.tx !== txId; });
+    }
+  }
+
+  function collectWaitEdges(lockTable, resIds) {
+    var edges = [];
+    for (var r = 0; r < resIds.length; r += 1) {
+      var rid = resIds[r];
+      var entry = lockTable[rid];
+      for (var q = 0; q < entry.waitQueue.length; q += 1) {
+        var w = entry.waitQueue[q];
+        var blockers = findBlockers(entry.holders, w.tx, w.mode);
+        for (var b = 0; b < blockers.length; b += 1) {
+          edges.push({
+            from: w.tx,
+            to: blockers[b],
+            res: rid,
+            wantMode: w.mode
+          });
+        }
+      }
+    }
+    return edges;
+  }
+
+  function detectCycleDFS(txIds, edges) {
+    var adj = {};
+    for (var i = 0; i < txIds.length; i += 1) adj[txIds[i]] = [];
+    for (var e = 0; e < edges.length; e += 1) {
+      if (adj[edges[e].from]) adj[edges[e].from].push(edges[e].to);
+    }
+    var color = {};
+    var stack = [];
+    var foundCycle = null;
+
+    function dfs(u) {
+      color[u] = 1;
+      stack.push(u);
+      var nexts = adj[u] || [];
+      for (var k = 0; k < nexts.length; k += 1) {
+        var v = nexts[k];
+        if (!color[v]) {
+          if (dfs(v)) return true;
+        } else if (color[v] === 1) {
+          var startIdx = stack.indexOf(v);
+          foundCycle = stack.slice(startIdx);
+          return true;
+        }
+      }
+      stack.pop();
+      color[u] = 2;
+      return false;
+    }
+
+    for (var t = 0; t < txIds.length; t += 1) {
+      var id = txIds[t];
+      if (!color[id] && dfs(id)) break;
+    }
+    return foundCycle || [];
+  }
+
+  function selectCheapestVictim(cycleMembers, txMap) {
+    if (!cycleMembers.length) return null;
+    var best = cycleMembers[0];
+    for (var i = 1; i < cycleMembers.length; i += 1) {
+      var cand = cycleMembers[i];
+      var candUndo = txMap[cand].undoRows;
+      var bestUndo = txMap[best].undoRows;
+      if (candUndo < bestUndo || (candUndo === bestUndo && cand > best)) {
+        best = cand;
+      }
+    }
+    return best;
+  }
+
+  // @probe fn       computeDeadlockSim
+  // @probe baseline {"orderMode":"interleaved","txCount":2,"t1Undo":12,"t2Undo":3,"step":4}
+  // @probe sweep    {"orderMode":["interleaved","canonical","upgrade"],"txCount":[2,3],"t1Undo":[1,20],"t2Undo":[1,20],"step":[0,6]}
+  function computeDeadlockSim(p) {
+    var mode = (p && p.orderMode) ? String(p.orderMode) : "interleaved";
+    var count = Number(p && p.txCount) === 3 ? 3 : 2;
+    var u1 = Math.max(1, Math.min(20, Math.round(Number(p && p.t1Undo) || 12)));
+    var u2 = Math.max(1, Math.min(20, Math.round(Number(p && p.t2Undo) || 3)));
+
+    var txIds = count === 3 ? ["T1", "T2", "T3"] : ["T1", "T2"];
+    var resIds = mode === "upgrade" ? ["R1"] : (count === 3 ? ["R1", "R2", "R3"] : ["R1", "R2"]);
+    var schedule = buildSchedule(mode, count);
+    var maxStep = schedule.length;
+    var rawStep = Number(p && p.step);
+    if (!Number.isFinite(rawStep)) rawStep = 0;
+    var curStep = Math.max(0, Math.min(maxStep, Math.round(rawStep)));
+
+    var undoLookup = { T1: u1, T2: u2, T3: T3_FIXED_UNDO };
+    var txMap = {};
+    for (var ti = 0; ti < txIds.length; ti += 1) {
+      var tid = txIds[ti];
+      txMap[tid] = {
+        id: tid,
+        undoRows: undoLookup[tid],
+        status: "idle"
+      };
+    }
+
+    var lockTable = {};
+    for (var ri = 0; ri < resIds.length; ri += 1) {
+      lockTable[resIds[ri]] = {
+        id: resIds[ri],
+        title: RES_META[resIds[ri]].title,
+        holders: [],
+        waitQueue: []
+      };
+    }
+
+    var rolledBackVictim = null;
+    var rolledBackCost = 0;
+    var committedRowsTotal = 0;
+    var lastActionNote = "初始待命：所有鎖槽位皆為空，Wait-for Graph 尚無等待邊。";
+    var cycleStepIndex = -1;
+
+    for (var s = 0; s < curStep; s += 1) {
+      var ev = schedule[s];
+      if (ev.kind === "lock") {
+        var rEntry = lockTable[ev.res];
+        var blockers = findBlockers(rEntry.holders, ev.tx, ev.mode);
+        if (blockers.length === 0 && rEntry.waitQueue.length === 0) {
+          grantOrUpgrade(rEntry.holders, ev.tx, ev.mode);
+          txMap[ev.tx].status = "active";
+          lastActionNote = ev.tx + " 成功取得 " + ev.res + " 的 " + ev.mode + " 鎖。";
+        } else {
+          rEntry.waitQueue.push({ tx: ev.tx, mode: ev.mode });
+          txMap[ev.tx].status = "waiting";
+          lastActionNote = ev.tx + " 請求 " + ev.res + "(" + ev.mode + ") 與持有者衝突，進入等待佇列並建立有向邊。";
+        }
+      } else if (ev.kind === "resolve") {
+        var preEdges = collectWaitEdges(lockTable, resIds);
+        var cyc = detectCycleDFS(txIds, preEdges);
+        var victim = selectCheapestVictim(cyc, txMap);
+        if (victim) {
+          rolledBackVictim = victim;
+          rolledBackCost = txMap[victim].undoRows;
+          txMap[victim].status = "aborted";
+          releaseAllLocksOf(lockTable, resIds, victim);
+          wakeCompatibleWaiters(lockTable, resIds, txMap);
+          lastActionNote = "死鎖偵測器回滾最小代價犧牲者 " + victim + "（回滾 " + rolledBackCost + " 列 Undo），釋放其鎖並喚醒等待者！";
+        }
+      } else if (ev.kind === "commit_one") {
+        var cTx = ev.tx;
+        if (txMap[cTx] && txMap[cTx].status !== "aborted") {
+          txMap[cTx].status = "committed";
+          committedRowsTotal += txMap[cTx].undoRows;
+          releaseAllLocksOf(lockTable, resIds, cTx);
+          wakeCompatibleWaiters(lockTable, resIds, txMap);
+          lastActionNote = cTx + " 完成 COMMIT（保全 " + txMap[cTx].undoRows + " 列修改），釋放所持鎖並推進後續等待交易。";
+        }
+      } else if (ev.kind === "commit_all") {
+        for (var ci = 0; ci < txIds.length; ci += 1) {
+          var survivor = txIds[ci];
+          if (txMap[survivor].status !== "aborted" && txMap[survivor].status !== "committed") {
+            txMap[survivor].status = "committed";
+            committedRowsTotal += txMap[survivor].undoRows;
+            releaseAllLocksOf(lockTable, resIds, survivor);
+            wakeCompatibleWaiters(lockTable, resIds, txMap);
+          }
+        }
+        lastActionNote = "所有未回滾交易依序取得所需鎖並完成 COMMIT，鎖表清空。";
+      }
+
+      var checkEdges = collectWaitEdges(lockTable, resIds);
+      var checkCycle = detectCycleDFS(txIds, checkEdges);
+      if (checkCycle.length > 0 && cycleStepIndex === -1) {
+        cycleStepIndex = s + 1;
+      }
+    }
+
+    var edges = collectWaitEdges(lockTable, resIds);
+    var cycleMembers = detectCycleDFS(txIds, edges);
+    var hasCycle = cycleMembers.length > 0;
+    var pendingVictim = hasCycle ? selectCheapestVictim(cycleMembers, txMap) : null;
+    var effectiveVictim = rolledBackVictim || pendingVictim;
+
+    var projectedRollbackRows = rolledBackVictim
+      ? rolledBackCost
+      : (pendingVictim ? txMap[pendingVictim].undoRows : 0);
+
+    var cycleSavedRows = 0;
+    if (hasCycle && pendingVictim) {
+      for (var cm = 0; cm < cycleMembers.length; cm += 1) {
+        if (cycleMembers[cm] !== pendingVictim) {
+          cycleSavedRows += txMap[cycleMembers[cm]].undoRows;
+        }
+      }
+    } else {
+      cycleSavedRows = committedRowsTotal;
+    }
+
+    if (hasCycle && pendingVictim) {
+      var cycleRing = cycleMembers.concat([cycleMembers[0]]).join(" → ");
+      lastActionNote = "偵測到閉環 " + cycleRing + "！比較環上 Undo 修改量後，選定回滾代價最小的 " +
+        pendingVictim + "（" + txMap[pendingVictim].undoRows + " 列）為犧牲者，保全其餘 " + cycleSavedRows + " 列修改。";
+    }
+
+    var activeLockCount = 0;
+    var resourcesOut = [];
+    for (var ro = 0; ro < resIds.length; ro += 1) {
+      var item = lockTable[resIds[ro]];
+      activeLockCount += item.holders.length;
+      resourcesOut.push({
+        id: item.id,
+        title: item.title,
+        holders: item.holders.map(function (h) { return h.tx + "(" + h.mode + ")"; }),
+        waiters: item.waitQueue.map(function (w) { return w.tx + "(" + w.mode + ")"; })
+      });
+    }
+
+    var txNodesOut = [];
+    var committedCount = 0;
+    var abortedCount = 0;
+    for (var to = 0; to < txIds.length; to += 1) {
+      var idOut = txIds[to];
+      var st = txMap[idOut].status;
+      if (st === "committed") committedCount += 1;
+      if (st === "aborted") abortedCount += 1;
+      var heldList = [];
+      for (var rh = 0; rh < resIds.length; rh += 1) {
+        var hs = lockTable[resIds[rh]].holders;
+        for (var hi2 = 0; hi2 < hs.length; hi2 += 1) {
+          if (hs[hi2].tx === idOut) heldList.push(resIds[rh] + ":" + hs[hi2].mode);
+        }
+      }
+      txNodesOut.push({
+        id: idOut,
+        undoRows: txMap[idOut].undoRows,
+        status: st,
+        inCycle: cycleMembers.indexOf(idOut) !== -1,
+        isVictim: effectiveVictim === idOut,
+        heldSummary: heldList.length ? heldList.join(", ") : "無持有鎖"
+      });
+    }
+
+    var cycleEdgeSet = {};
+    if (hasCycle) {
+      for (var ce = 0; ce < cycleMembers.length; ce += 1) {
+        var fromC = cycleMembers[ce];
+        var toC = cycleMembers[(ce + 1) % cycleMembers.length];
+        cycleEdgeSet[fromC + "->" + toC] = true;
+      }
+    }
+
+    var annotatedEdges = edges.map(function (e) {
+      return {
+        from: e.from,
+        to: e.to,
+        res: e.res,
+        wantMode: e.wantMode,
+        inCycle: Boolean(cycleEdgeSet[e.from + "->" + e.to])
+      };
+    });
+
+    var schedulePills = schedule.map(function (item, idx) {
+      return {
+        tick: idx + 1,
+        label: item.label,
+        isCycleTick: (idx + 1) === cycleStepIndex
+      };
+    });
+
+    return {
+      atTick: curStep,
+      totalTicks: maxStep,
+      activeLockCount: activeLockCount,
+      waitEdgeCount: annotatedEdges.length,
+      hasCycle: hasCycle,
+      cycleLen: cycleMembers.length,
+      cycleText: hasCycle ? cycleMembers.concat([cycleMembers[0]]).join(" → ") : "無閉環（DAG）",
+      victimId: effectiveVictim || "無",
+      projectedRollbackRows: projectedRollbackRows,
+      preservedRows: cycleSavedRows,
+      committedCount: committedCount,
+      abortedCount: abortedCount,
+      txNodes: txNodesOut,
+      edges: annotatedEdges,
+      resources: resourcesOut,
+      schedulePills: schedulePills,
+      narrative: lastActionNote
+    };
+  }
+
+  /* (3) DOM 參照與狀態 */
+  function el(id) {
+    return document.getElementById(id);
+  }
+
+  function escHtml(s) {
+    return String(s)
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;");
+  }
+
+  function targetElem(ev) {
+    var t = ev && ev.target;
+    if (!t) return null;
+    return t.nodeType === 1 ? t : t.parentElement;
+  }
+
+  function syncPressedGroup(box, attr, activeVal) {
+    if (!box) return;
+    var btns = box.querySelectorAll("button[" + attr + "]");
+    for (var i = 0; i < btns.length; i += 1) {
+      var match = btns[i].getAttribute(attr) === String(activeVal);
+      btns[i].setAttribute("aria-pressed", match ? "true" : "false");
+    }
+  }
+
+  var idxState = {
+    indexKind: "secondary",
+    isolation: "rr",
+    qLo: 20,
+    qHi: 20
+  };
+
+  var wfgState = {
+    orderMode: "interleaved",
+    txCount: 2,
+    t1Undo: 12,
+    t2Undo: 3,
+    step: 4
+  };
+
+  var domIdx = {
+    kindSeg: el("idx-kind-seg"),
+    isoSeg: el("idx-iso-seg"),
+    loInput: el("idx-lo"),
+    loVal: el("idx-lo-val"),
+    hiInput: el("idx-hi"),
+    hiVal: el("idx-hi-val"),
+    resetBtn: el("idx-reset"),
+    sqlText: el("idx-sql-text"),
+    svgCanvas: el("idx-svg-canvas"),
+    outUnit: el("idx-out-unit"),
+    outRec: el("idx-out-rec"),
+    outGap: el("idx-out-gap"),
+    outBlock: el("idx-out-block"),
+    probeGrid: el("idx-probe-grid"),
+    status: el("idx-status")
+  };
+
+  var domWfg = {
+    modeSeg: el("wfg-mode-seg"),
+    txSeg: el("wfg-tx-seg"),
+    u1Input: el("wfg-u1"),
+    u1Val: el("wfg-u1-val"),
+    u2Input: el("wfg-u2"),
+    u2Val: el("wfg-u2-val"),
+    prevBtn: el("wfg-prev"),
+    nextBtn: el("wfg-next"),
+    resetBtn: el("wfg-reset"),
+    tickLabel: el("wfg-tick-label"),
+    schedList: el("wfg-sched-list"),
+    svgCanvas: el("wfg-svg-canvas"),
+    resGrid: el("wfg-res-grid"),
+    outEdges: el("wfg-out-edges"),
+    outCycle: el("wfg-out-cycle"),
+    outVictim: el("wfg-out-victim"),
+    outCost: el("wfg-out-cost"),
+    status: el("wfg-status")
+  };
+
+  /* (4) render 繪製函式 */
+  function xOnTrack(v) {
+    var clamped = Math.max(0, Math.min(50, v));
+    return 36 + (clamped / 50) * 600;
+  }
+
+  function renderIndexDemo() {
+    if (!domIdx.svgCanvas) return;
+    syncPressedGroup(domIdx.kindSeg, "data-idx-kind", idxState.indexKind);
+    syncPressedGroup(domIdx.isoSeg, "data-idx-iso", idxState.isolation);
+    if (domIdx.loVal) domIdx.loVal.textContent = String(idxState.qLo);
+    if (domIdx.hiVal) domIdx.hiVal.textContent = String(idxState.qHi);
+
+    var res = computeIndexLocks(idxState);
+    if (domIdx.sqlText) domIdx.sqlText.textContent = res.sqlPreview;
+    if (domIdx.outUnit) domIdx.outUnit.textContent = res.unitMode;
+    if (domIdx.outRec) {
+      domIdx.outRec.textContent = res.lockedRecordCount + " 筆" +
+        (res.pkLockCount > 0 ? "（另回表鎖 PK " + res.pkLockCount + " 筆）" : "");
+    }
+    if (domIdx.outGap) {
+      domIdx.outGap.textContent = res.lockedGapCount + " 段" + (res.supremumLocked ? "（含 +supremum）" : "");
+    }
+    if (domIdx.outBlock) {
+      domIdx.outBlock.textContent = res.insertBlockPct + "%（" + res.blockedInsertCount + " 點受阻）";
+    }
+    if (domIdx.status) domIdx.status.textContent = res.explain;
+
+    var loVal = Math.min(idxState.qLo, idxState.qHi);
+    var hiVal = Math.max(idxState.qLo, idxState.qHi);
+    var qx1 = xOnTrack(loVal);
+    var qx2 = xOnTrack(hiVal);
+    var bandLeft = Math.max(24, qx1 - 8);
+    var bandWidth = Math.max(16, (qx2 - qx1) + 16);
+
+    var anchors = [36, 156, 276, 396, 516, 636];
+    var svgParts = [];
+    svgParts.push('<rect x="4" y="4" width="672" height="168" rx="8" fill="#fafaf9" stroke="#ecebe8"/>');
+    svgParts.push('<rect x="' + bandLeft.toFixed(1) + '" y="16" width="' + bandWidth.toFixed(1) +
+      '" height="142" rx="6" fill="#eef2f7" stroke="#cdd9e6" stroke-dasharray="4 3"/>');
+    svgParts.push('<text x="' + ((bandLeft + bandWidth / 2)).toFixed(1) +
+      '" y="30" text-anchor="middle" font-family="JetBrains Mono, monospace" font-size="11" fill="#3f6188">查詢目標範圍 [' +
+      loVal + ', ' + hiVal + ']</text>');
+
+    svgParts.push('<line x1="26" y1="92" x2="654" y2="92" stroke="#dedcd8" stroke-width="2"/>');
+
+    for (var g = 0; g < res.gaps.length; g += 1) {
+      var gx1 = anchors[g] + 22;
+      var gx2 = anchors[g + 1] - 22;
+      var gw = gx2 - gx1;
+      var gItem = res.gaps[g];
+      var gFill = gItem.locked ? "#f6f0e7" : "#ffffff";
+      var gStroke = gItem.locked ? "#a3743e" : "#dedcd8";
+      var gDash = gItem.locked ? "" : ' stroke-dasharray="3 3"';
+      var gTextCol = gItem.locked ? "#a3743e" : "#9aa0a8";
+      svgParts.push('<rect x="' + gx1 + '" y="73" width="' + gw + '" height="38" rx="6" fill="' +
+        gFill + '" stroke="' + gStroke + '" stroke-width="1.6"' + gDash + '/>');
+      svgParts.push('<text x="' + (gx1 + gw / 2) + '" y="89" text-anchor="middle" font-family="JetBrains Mono, monospace" font-size="11" font-weight="700" fill="' +
+        gTextCol + '">' + (gItem.locked ? "GAP LOCK" : "GAP 開放") + '</text>');
+      svgParts.push('<text x="' + (gx1 + gw / 2) + '" y="104" text-anchor="middle" font-family="JetBrains Mono, monospace" font-size="11" fill="#6b7078">' +
+        escHtml(gItem.label) + '</text>');
+    }
+
+    svgParts.push('<circle cx="36" cy="92" r="15" fill="#ffffff" stroke="#dedcd8" stroke-width="1.5"/>');
+    svgParts.push('<text x="36" y="96" text-anchor="middle" font-family="JetBrains Mono, monospace" font-size="11" fill="#6b7078">-∞</text>');
+
+    for (var r = 0; r < res.records.length; r += 1) {
+      var rec = res.records[r];
+      var cx = anchors[r + 1];
+      var rFill = rec.locked ? "#f6f0e7" : "#ffffff";
+      var rStroke = rec.locked ? "#a3743e" : "#dedcd8";
+      var rStrokeW = rec.locked ? "2.4" : "1.5";
+      svgParts.push('<rect x="' + (cx - 19) + '" y="62" width="38" height="60" rx="7" fill="' +
+        rFill + '" stroke="' + rStroke + '" stroke-width="' + rStrokeW + '"/>');
+      svgParts.push('<text x="' + cx + '" y="88" text-anchor="middle" font-family="JetBrains Mono, monospace" font-size="13" font-weight="700" fill="#262a2f">' +
+        rec.key + '</text>');
+      svgParts.push('<text x="' + cx + '" y="108" text-anchor="middle" font-family="JetBrains Mono, monospace" font-size="11" fill="' +
+        (rec.locked ? "#a3743e" : "#9aa0a8") + '">' + (rec.locked ? "REC" : "閒置") + '</text>');
+      if (rec.pkHop) {
+        svgParts.push('<text x="' + cx + '" y="140" text-anchor="middle" font-family="JetBrains Mono, monospace" font-size="11" fill="#3f6188">+鎖PK</text>');
+      }
+    }
+
+    var supFill = res.supremumLocked ? "#f6f0e7" : "#ffffff";
+    var supStroke = res.supremumLocked ? "#a3743e" : "#dedcd8";
+    svgParts.push('<rect x="617" y="66" width="38" height="52" rx="7" fill="' + supFill + '" stroke="' + supStroke + '" stroke-width="1.6"/>');
+    svgParts.push('<text x="636" y="89" text-anchor="middle" font-family="JetBrains Mono, monospace" font-size="11" font-weight="700" fill="#262a2f">+sup</text>');
+    svgParts.push('<text x="636" y="106" text-anchor="middle" font-family="JetBrains Mono, monospace" font-size="11" fill="' +
+      (res.supremumLocked ? "#a3743e" : "#9aa0a8") + '">' + (res.supremumLocked ? "已鎖" : "上界") + '</text>');
+
+    domIdx.svgCanvas.innerHTML = svgParts.join("");
+
+    if (domIdx.probeGrid) {
+      var chips = [];
+      for (var pi = 0; pi < res.insertTests.length; pi += 1) {
+        var it = res.insertTests[pi];
+        chips.push('<span class="dbl-probe-chip ' + (it.blocked ? "blocked" : "pass") + '" title="' + escHtml(it.reason) + '">' +
+          '<b>' + escHtml(it.op) + '</b><span>' + (it.blocked ? "阻塞" : "通過") + '</span></span>');
+      }
+      for (var ui = 0; ui < res.updateTests.length; ui += 1) {
+        var ut = res.updateTests[ui];
+        chips.push('<span class="dbl-probe-chip ' + (ut.blocked ? "blocked" : "pass") + '" title="' + escHtml(ut.reason) + '">' +
+          '<b>' + escHtml(ut.op) + '</b><span>' + (ut.blocked ? "阻塞" : "通過") + '</span></span>');
+      }
+      domIdx.probeGrid.innerHTML = chips.join("");
+    }
+  }
+
+  function renderDeadlockDemo() {
+    if (!domWfg.svgCanvas) return;
+    syncPressedGroup(domWfg.modeSeg, "data-wfg-mode", wfgState.orderMode);
+    syncPressedGroup(domWfg.txSeg, "data-wfg-tx", wfgState.txCount);
+    if (domWfg.u1Val) domWfg.u1Val.textContent = wfgState.t1Undo + " 列";
+    if (domWfg.u2Val) domWfg.u2Val.textContent = wfgState.t2Undo + " 列";
+
+    var sim = computeDeadlockSim(wfgState);
+    wfgState.step = sim.atTick;
+
+    if (domWfg.prevBtn) domWfg.prevBtn.disabled = sim.atTick <= 0;
+    if (domWfg.nextBtn) domWfg.nextBtn.disabled = sim.atTick >= sim.totalTicks;
+    if (domWfg.tickLabel) {
+      domWfg.tickLabel.textContent = "時序游標：t = " + sim.atTick + "（上限 " + sim.totalTicks + " 拍）";
+    }
+
+    if (domWfg.schedList) {
+      var pillsHtml = [];
+      pillsHtml.push('<button type="button" class="dbl-sched-btn' + (sim.atTick === 0 ? " is-cur" : " is-done") +
+        '" data-wfg-tick="0">t0 待命</button>');
+      for (var si = 0; si < sim.schedulePills.length; si += 1) {
+        var sp = sim.schedulePills[si];
+        var cls = "dbl-sched-btn";
+        if (sp.tick === sim.atTick) cls += sp.isCycleTick ? " is-cyc" : " is-cur";
+        else if (sp.tick < sim.atTick) cls += " is-done";
+        pillsHtml.push('<button type="button" class="' + cls + '" data-wfg-tick="' + sp.tick + '">t' +
+          sp.tick + " " + escHtml(sp.label) + '</button>');
+      }
+      domWfg.schedList.innerHTML = pillsHtml.join("");
+    }
+
+    var coords = sim.txNodes.length === 3
+      ? { T1: { x: 155, y: 68 }, T2: { x: 525, y: 68 }, T3: { x: 340, y: 174 } }
+      : { T1: { x: 185, y: 116 }, T2: { x: 495, y: 116 } };
+
+    var gParts = [];
+    gParts.push('<rect x="4" y="4" width="672" height="224" rx="8" fill="#fafaf9" stroke="#ecebe8"/>');
+
+    if (sim.edges.length === 0) {
+      gParts.push('<text x="340" y="24" text-anchor="middle" font-family="JetBrains Mono, monospace" font-size="11.5" fill="#9aa0a8">Wait-for Graph 目前無等待邊（零阻塞）</text>');
+    } else {
+      gParts.push('<text x="340" y="24" text-anchor="middle" font-family="JetBrains Mono, monospace" font-size="11.5" fill="' +
+        (sim.hasCycle ? "#a8554f" : "#3f6188") + '">' +
+        (sim.hasCycle ? ("偵測到死鎖閉環：" + escHtml(sim.cycleText)) : "Wait-for Graph 為有向無環圖（正常排隊等待）") + '</text>');
+    }
+
+    for (var ei = 0; ei < sim.edges.length; ei += 1) {
+      var edge = sim.edges[ei];
+      var pFrom = coords[edge.from];
+      var pTo = coords[edge.to];
+      if (!pFrom || !pTo) continue;
+
+      var dx = pTo.x - pFrom.x;
+      var dy = pTo.y - pFrom.y;
+      var dist = Math.sqrt(dx * dx + dy * dy) || 1;
+      var ux = dx / dist;
+      var uy = dy / dist;
+      var nx = -uy;
+      var ny = ux;
+
+      var hasReverse = sim.edges.some(function (o) { return o.from === edge.to && o.to === edge.from; });
+      var curveShift = hasReverse ? 28 : 0;
+
+      var sx = pFrom.x + ux * 78 + nx * (hasReverse ? 10 : 0);
+      var sy = pFrom.y + uy * 34 + ny * (hasReverse ? 10 : 0);
+      var ex = pTo.x - ux * 80 + nx * (hasReverse ? 10 : 0);
+      var ey = pTo.y - uy * 36 + ny * (hasReverse ? 10 : 0);
+      var mx = (sx + ex) / 2 + nx * curveShift;
+      var my = (sy + ey) / 2 + ny * curveShift;
+
+      var strokeCol = edge.inCycle ? "#a8554f" : "#3f6188";
+      var markerId = edge.inCycle ? "url(#wfg-arr-cycle)" : "url(#wfg-arr-wait)";
+      gParts.push('<path d="M ' + sx.toFixed(1) + " " + sy.toFixed(1) + " Q " + mx.toFixed(1) + " " + my.toFixed(1) +
+        " " + ex.toFixed(1) + " " + ey.toFixed(1) + '" fill="none" stroke="' + strokeCol +
+        '" stroke-width="' + (edge.inCycle ? "2.5" : "2") + '" marker-end="' + markerId + '"/>');
+
+      var lx = (sx + 2 * mx + ex) / 4;
+      var ly = (sy + 2 * my + ey) / 4;
+      gParts.push('<rect x="' + (lx - 44).toFixed(1) + '" y="' + (ly - 10).toFixed(1) +
+        '" width="88" height="19" rx="4" fill="#ffffff" stroke="' + strokeCol + '" stroke-width="1"/>');
+      gParts.push('<text x="' + lx.toFixed(1) + '" y="' + (ly + 3.5).toFixed(1) +
+        '" text-anchor="middle" font-family="JetBrains Mono, monospace" font-size="11" fill="' + strokeCol +
+        '">等 ' + escHtml(edge.res + "(" + edge.wantMode + ")") + '</text>');
+    }
+
+    for (var ni = 0; ni < sim.txNodes.length; ni += 1) {
+      var nd = sim.txNodes[ni];
+      var pt = coords[nd.id];
+      var fill = "#ffffff";
+      var stroke = "#dedcd8";
+      var badgeText = "待命";
+      var badgeCol = "#6b7078";
+
+      if (nd.inCycle) {
+        fill = "#f6ecea";
+        stroke = "#a8554f";
+        badgeText = nd.isVictim ? "成環·待回滾" : "成環阻塞";
+        badgeCol = "#a8554f";
+      } else if (nd.status === "aborted") {
+        fill = "#f6ecea";
+        stroke = "#a8554f";
+        badgeText = "犧牲者已回滾";
+        badgeCol = "#a8554f";
+      } else if (nd.status === "committed") {
+        fill = "#eef4f1";
+        stroke = "#4d7d68";
+        badgeText = "COMMIT";
+        badgeCol = "#4d7d68";
+      } else if (nd.status === "waiting") {
+        fill = "#eef2f7";
+        stroke = "#3f6188";
+        badgeText = "等待鎖";
+        badgeCol = "#3f6188";
+      } else if (nd.status === "active") {
+        fill = "#f6f0e7";
+        stroke = "#a3743e";
+        badgeText = "持鎖執行";
+        badgeCol = "#a3743e";
+      }
+
+      gParts.push('<rect x="' + (pt.x - 76) + '" y="' + (pt.y - 31) +
+        '" width="152" height="62" rx="9" fill="' + fill + '" stroke="' + stroke + '" stroke-width="2"/>');
+      gParts.push('<text x="' + (pt.x - 64) + '" y="' + (pt.y - 10) +
+        '" font-family="JetBrains Mono, monospace" font-size="12.5" font-weight="700" fill="#262a2f">' +
+        escHtml(nd.id) + " · Undo=" + nd.undoRows + '</text>');
+      gParts.push('<text x="' + (pt.x + 64) + '" y="' + (pt.y - 10) +
+        '" text-anchor="end" font-family="JetBrains Mono, monospace" font-size="11" font-weight="700" fill="' +
+        badgeCol + '">' + badgeText + '</text>');
+      gParts.push('<text x="' + (pt.x - 64) + '" y="' + (pt.y + 15) +
+        '" font-family="JetBrains Mono, monospace" font-size="11" fill="#6b7078">持有: ' +
+        escHtml(nd.heldSummary) + '</text>');
+    }
+
+    domWfg.svgCanvas.innerHTML = gParts.join("");
+
+    if (domWfg.resGrid) {
+      var rCards = [];
+      for (var rc = 0; rc < sim.resources.length; rc += 1) {
+        var rInfo = sim.resources[rc];
+        rCards.push(
+          '<div class="dbl-res-card">' +
+            '<div class="dbl-res-head"><span>' + escHtml(rInfo.title) + '</span></div>' +
+            '<div class="dbl-res-line">持有者：<b>' + (rInfo.holders.length ? escHtml(rInfo.holders.join(", ")) : "無") + '</b></div>' +
+            '<div class="dbl-res-line">等待列：' + (rInfo.waiters.length ? escHtml(rInfo.waiters.join(" → ")) : "空") + '</div>' +
+          '</div>'
+        );
+      }
+      domWfg.resGrid.innerHTML = rCards.join("");
+    }
+
+    if (domWfg.outEdges) {
+      domWfg.outEdges.textContent = sim.activeLockCount + " 把鎖 ／ " + sim.waitEdgeCount + " 條等待邊";
+    }
+    if (domWfg.outCycle) {
+      domWfg.outCycle.textContent = sim.cycleText;
+      var cycCard = domWfg.outCycle.parentElement;
+      if (cycCard) {
+        cycCard.classList.toggle("is-bad", sim.hasCycle);
+        cycCard.classList.toggle("is-ok", !sim.hasCycle && sim.committedCount > 0);
+      }
+    }
+    if (domWfg.outVictim) {
+      domWfg.outVictim.textContent = sim.victimId === "無"
+        ? "無須回滾"
+        : (sim.victimId + "（Undo 最少：" + sim.projectedRollbackRows + " 列）");
+    }
+    if (domWfg.outCost) {
+      domWfg.outCost.textContent = "回滾 " + sim.projectedRollbackRows + " 列 ／ 保全 " + sim.preservedRows + " 列";
+    }
+    if (domWfg.status) {
+      domWfg.status.textContent = sim.narrative;
+    }
+  }
+
+  /* (5) 事件綁定與初始化 */
+  if (domIdx.kindSeg) {
+    domIdx.kindSeg.addEventListener("click", function (ev) {
+      var elTarget = targetElem(ev);
+      var btn = elTarget ? elTarget.closest("button[data-idx-kind]") : null;
+      if (!btn) return;
+      idxState.indexKind = btn.getAttribute("data-idx-kind") || "secondary";
+      renderIndexDemo();
+    });
+  }
+
+  if (domIdx.isoSeg) {
+    domIdx.isoSeg.addEventListener("click", function (ev) {
+      var elTarget = targetElem(ev);
+      var btn = elTarget ? elTarget.closest("button[data-idx-iso]") : null;
+      if (!btn) return;
+      idxState.isolation = btn.getAttribute("data-idx-iso") || "rr";
+      renderIndexDemo();
+    });
+  }
+
+  if (domIdx.loInput) {
+    domIdx.loInput.addEventListener("input", function () {
+      idxState.qLo = Number(domIdx.loInput.value) || 20;
+      renderIndexDemo();
+    });
+  }
+
+  if (domIdx.hiInput) {
+    domIdx.hiInput.addEventListener("input", function () {
+      idxState.qHi = Number(domIdx.hiInput.value) || 20;
+      renderIndexDemo();
+    });
+  }
+
+  if (domIdx.resetBtn) {
+    domIdx.resetBtn.addEventListener("click", function () {
+      idxState.indexKind = "secondary";
+      idxState.isolation = "rr";
+      idxState.qLo = 20;
+      idxState.qHi = 20;
+      if (domIdx.loInput) domIdx.loInput.value = "20";
+      if (domIdx.hiInput) domIdx.hiInput.value = "20";
+      renderIndexDemo();
+    });
+  }
+
+  if (domWfg.modeSeg) {
+    domWfg.modeSeg.addEventListener("click", function (ev) {
+      var elTarget = targetElem(ev);
+      var btn = elTarget ? elTarget.closest("button[data-wfg-mode]") : null;
+      if (!btn) return;
+      wfgState.orderMode = btn.getAttribute("data-wfg-mode") || "interleaved";
+      wfgState.step = 0;
+      renderDeadlockDemo();
+    });
+  }
+
+  if (domWfg.txSeg) {
+    domWfg.txSeg.addEventListener("click", function (ev) {
+      var elTarget = targetElem(ev);
+      var btn = elTarget ? elTarget.closest("button[data-wfg-tx]") : null;
+      if (!btn) return;
+      wfgState.txCount = Number(btn.getAttribute("data-wfg-tx")) === 3 ? 3 : 2;
+      wfgState.step = 0;
+      renderDeadlockDemo();
+    });
+  }
+
+  if (domWfg.u1Input) {
+    domWfg.u1Input.addEventListener("input", function () {
+      wfgState.t1Undo = Number(domWfg.u1Input.value) || 12;
+      renderDeadlockDemo();
+    });
+  }
+
+  if (domWfg.u2Input) {
+    domWfg.u2Input.addEventListener("input", function () {
+      wfgState.t2Undo = Number(domWfg.u2Input.value) || 3;
+      renderDeadlockDemo();
+    });
+  }
+
+  if (domWfg.prevBtn) {
+    domWfg.prevBtn.addEventListener("click", function () {
+      wfgState.step = Math.max(0, wfgState.step - 1);
+      renderDeadlockDemo();
+    });
+  }
+
+  if (domWfg.nextBtn) {
+    domWfg.nextBtn.addEventListener("click", function () {
+      wfgState.step += 1;
+      renderDeadlockDemo();
+    });
+  }
+
+  if (domWfg.resetBtn) {
+    domWfg.resetBtn.addEventListener("click", function () {
+      wfgState.orderMode = "interleaved";
+      wfgState.txCount = 2;
+      wfgState.t1Undo = 12;
+      wfgState.t2Undo = 3;
+      wfgState.step = 0;
+      if (domWfg.u1Input) domWfg.u1Input.value = "12";
+      if (domWfg.u2Input) domWfg.u2Input.value = "3";
+      renderDeadlockDemo();
+    });
+  }
+
+  if (domWfg.schedList) {
+    domWfg.schedList.addEventListener("click", function (ev) {
+      var elTarget = targetElem(ev);
+      var btn = elTarget ? elTarget.closest("button[data-wfg-tick]") : null;
+      if (!btn) return;
+      var tick = Number(btn.getAttribute("data-wfg-tick"));
+      if (Number.isFinite(tick)) {
+        wfgState.step = tick;
+        renderDeadlockDemo();
+      }
+    });
+  }
+
+  renderIndexDemo();
+  renderDeadlockDemo();
+})();
+</script>

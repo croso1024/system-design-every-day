@@ -1,0 +1,1139 @@
+<!-- demo-archetype: A｜時序推進（主，第 6 節）＋B｜參數掃描（次，第 3 節） —
+     主 demo 讓讀者設定排程模式、參與交易數與各交易已累積的 Undo 修改列數，逐拍推進鎖管理器的相容性判定，
+     即時繪製 Wait-for Graph 有向邊、以 DFS 偵測閉環並依最小回滾代價選出犧牲者放鎖。選 A 是因為死鎖成環與回滾解鎖本質是交錯時序演化；最近 3 篇未用此型。
+     次 demo 讓讀者在索引數線上切換索引型態、隔離級別與查詢上下界，即時推算實際鎖住的 Record 與 Gap 並驗證哪些並發寫入會被攔截。 -->
+<style>
+  /* ---------- 靜態圖表：分層巢狀 (.dbl-stack)、管線 (.dbl-row)、時序泳道 (.dbl-lane) ---------- */
+  .dbl-stack {
+    margin: 14px 0 0;
+  }
+  .dbl-layer {
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius);
+    padding: 14px 16px;
+  }
+  .dbl-layer.outer {
+    background: var(--bg-soft);
+    border-left: 3px solid var(--accent);
+  }
+  .dbl-layer.inner {
+    margin-top: 12px;
+    background: var(--bg);
+    border-left: 3px solid var(--ok);
+  }
+  .dbl-layer-head {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+    font-size: 14px;
+    margin-bottom: 6px;
+  }
+  .dbl-badge {
+    font-family: var(--mono);
+    font-size: 11px;
+    font-weight: 600;
+    padding: 2px 8px;
+    border-radius: 999px;
+    background: var(--accent-soft);
+    color: var(--accent);
+    border: 1px solid var(--accent-line);
+  }
+  .dbl-badge.ok {
+    background: var(--ok-soft);
+    color: var(--ok);
+    border-color: var(--ok);
+  }
+  .dbl-layer-desc {
+    font-size: 13.5px;
+    color: var(--text-2);
+    margin: 0;
+    line-height: 1.6;
+  }
+
+  .dbl-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    align-items: stretch;
+    justify-content: center;
+    margin: 14px 0 0;
+  }
+  .dbl-node {
+    border: 1px solid var(--border-strong);
+    border-radius: 8px;
+    background: var(--bg);
+    padding: 10px 12px;
+    min-width: 120px;
+    max-width: 185px;
+    text-align: center;
+  }
+  .dbl-node .nn {
+    font-family: var(--mono);
+    font-size: 12px;
+    font-weight: 700;
+    color: var(--text);
+  }
+  .dbl-node .ns {
+    font-size: 11px;
+    color: var(--text-2);
+    margin-top: 4px;
+    line-height: 1.45;
+  }
+  .dbl-node.accent { border-top: 3px solid var(--accent); }
+  .dbl-node.ok     { border-top: 3px solid var(--ok); }
+  .dbl-node.warn   { border-top: 3px solid var(--warn); }
+  .dbl-node.bad    { border-top: 3px solid var(--bad); }
+  .dbl-arrow {
+    display: flex;
+    align-items: center;
+    font-family: var(--mono);
+    font-size: 12.5px;
+    color: var(--text-3);
+    white-space: nowrap;
+  }
+
+  .dbl-lane {
+    display: grid;
+    grid-template-columns: 50px repeat(3, 1fr);
+    gap: 1px;
+    background: var(--border);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    overflow: hidden;
+    margin: 14px 0 0;
+  }
+  .dbl-lane > div {
+    background: var(--bg);
+    padding: 8px 10px;
+    font-size: 12.5px;
+    line-height: 1.5;
+  }
+  .dbl-lane .lh {
+    background: var(--bg-soft);
+    font-family: var(--mono);
+    font-size: 11px;
+    font-weight: 700;
+    color: var(--text-2);
+  }
+  .dbl-lane .lt {
+    background: var(--bg-soft);
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--text-3);
+  }
+  .dbl-lane .lc.act { background: var(--accent-soft); }
+  .dbl-lane .lc.ok  { background: var(--ok-soft); }
+  .dbl-lane .lc.bad { background: var(--bad-soft); }
+
+  /* ---------- 互動模擬器佈局（第 3 節數線掃描 & 第 6 節 Wait-for Graph） ---------- */
+  .dbl-ctrl-grid {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 14px 18px;
+    align-items: flex-end;
+    margin-bottom: 14px;
+  }
+  .dbl-ctrl-cell {
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+    min-width: 180px;
+    flex: 1 1 200px;
+  }
+  .dbl-ctrl-label {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text-2);
+  }
+  .dbl-slider-pair {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 14px 18px;
+    align-items: flex-end;
+    margin-bottom: 14px;
+    padding: 11px 13px;
+    background: var(--bg-soft);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+  }
+  .dbl-slider-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    font-size: 12.5px;
+    color: var(--text-2);
+  }
+  .dbl-slider-head strong {
+    font-family: var(--mono);
+    font-size: 12.5px;
+    color: var(--accent);
+  }
+  .dbl-ctrl-cell input[type="range"] {
+    width: 100%;
+    accent-color: var(--accent);
+    cursor: pointer;
+  }
+  .dbl-ctrl-action {
+    flex: 0 0 auto;
+    display: flex;
+    align-items: center;
+  }
+
+  .dbl-sql-box {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px 10px;
+    padding: 9px 12px;
+    background: var(--code-bg);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    margin-bottom: 12px;
+    font-size: 12.5px;
+  }
+  .dbl-sql-tag {
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--accent);
+    background: var(--accent-soft);
+    border: 1px solid var(--accent-line);
+    border-radius: 4px;
+    padding: 1px 7px;
+  }
+  .dbl-sql-box code {
+    background: none;
+    padding: 0;
+    color: var(--text);
+    font-weight: 500;
+  }
+
+  .dbl-svg-frame {
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    background: var(--bg);
+    padding: 8px 10px;
+    margin-bottom: 12px;
+  }
+
+  .dbl-stat-grid {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 10px;
+    margin-bottom: 12px;
+  }
+  .dbl-stat-card {
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    background: var(--bg-soft);
+    padding: 9px 11px;
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+  }
+  .dbl-stat-card .sk {
+    font-size: 11.5px;
+    color: var(--text-2);
+  }
+  .dbl-stat-card .sv {
+    font-family: var(--mono);
+    font-size: 12.5px;
+    color: var(--text);
+    line-height: 1.35;
+  }
+  .dbl-stat-card.is-bad {
+    background: var(--bad-soft);
+    border-color: var(--bad);
+  }
+  .dbl-stat-card.is-bad .sv { color: var(--bad); }
+  .dbl-stat-card.is-ok {
+    background: var(--ok-soft);
+    border-color: var(--ok);
+  }
+  .dbl-stat-card.is-ok .sv { color: var(--ok); }
+
+  .dbl-probe-panel {
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    padding: 10px 12px;
+    background: var(--bg);
+  }
+  .dbl-probe-title {
+    font-size: 12px;
+    color: var(--text-2);
+    margin-bottom: 8px;
+  }
+  .dbl-probe-chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 7px;
+  }
+  .dbl-probe-chip {
+    font-family: var(--mono);
+    font-size: 11.5px;
+    padding: 4px 9px;
+    border-radius: 6px;
+    border: 1px solid var(--border-strong);
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .dbl-probe-chip.pass {
+    background: var(--ok-soft);
+    border-color: var(--ok);
+    color: var(--ok);
+  }
+  .dbl-probe-chip.blocked {
+    background: var(--warn-soft);
+    border-color: var(--warn);
+    color: var(--warn);
+  }
+
+  .dbl-toolbar {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    margin-bottom: 10px;
+  }
+  .dbl-toolbar-btns {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+  .dbl-tick-pill {
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--text-2);
+    background: var(--bg-soft);
+    border: 1px solid var(--border-strong);
+    border-radius: 999px;
+    padding: 4px 12px;
+  }
+
+  .dbl-sched-list {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-bottom: 12px;
+  }
+  .dbl-sched-btn {
+    font-family: var(--mono);
+    font-size: 11.5px;
+    padding: 5px 9px;
+    border-radius: 6px;
+    border: 1px solid var(--border-strong);
+    background: var(--bg);
+    color: var(--text-2);
+    cursor: pointer;
+    transition: background .15s, border-color .15s, color .15s;
+  }
+  .dbl-sched-btn:hover {
+    border-color: var(--text-3);
+    color: var(--text);
+  }
+  .dbl-sched-btn.is-cur {
+    border-color: var(--accent);
+    background: var(--accent-soft);
+    color: var(--accent);
+    font-weight: 700;
+  }
+  .dbl-sched-btn.is-done {
+    background: var(--bg-soft);
+    color: var(--text);
+  }
+  .dbl-sched-btn.is-cyc {
+    border-color: var(--bad);
+    background: var(--bad-soft);
+    color: var(--bad);
+    font-weight: 700;
+  }
+
+  .dbl-res-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+    gap: 9px;
+    margin-bottom: 12px;
+  }
+  .dbl-res-card {
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    background: var(--bg);
+    padding: 9px 11px;
+    font-size: 12px;
+  }
+  .dbl-res-head {
+    font-family: var(--mono);
+    font-weight: 700;
+    color: var(--text);
+    margin-bottom: 4px;
+    display: flex;
+    justify-content: space-between;
+  }
+  .dbl-res-line {
+    font-family: var(--mono);
+    font-size: 11.5px;
+    color: var(--text-2);
+    line-height: 1.5;
+  }
+
+  .dbl-ctrl-grid[hidden],
+  .dbl-res-grid[hidden],
+  .dbl-sched-list[hidden] {
+    display: none;
+  }
+
+  @media (max-width: 720px) {
+    .dbl-lane {
+      grid-template-columns: 42px repeat(3, minmax(0, 1fr));
+      font-size: 11.5px;
+    }
+    .dbl-stat-grid {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+  }
+</style>
+
+<header class="hero">
+  <div class="eyebrow">Database Internals · 系統設計手冊</div>
+  <h1>資料庫鎖與死鎖 (Row Lock / Gap Lock / Deadlock)</h1>
+  <p class="lede">當多筆交易同時修改同一批資料，MVCC 的歷史快照已不足以保護寫入正確性——此時誰能前進、誰必須排隊、誰又會因為互相等待而被資料庫強制回滾，全看鎖管理器在索引與區間上掛了什麼鎖。</p>
+  <div class="meta">
+    <span class="tag">S / X / Intention Lock</span>
+    <span class="tag">Record / Gap / Next-Key</span>
+    <span class="tag">FOR UPDATE SKIP LOCKED</span>
+    <span class="tag">Wait-for Graph</span>
+    <span class="tag">Optimistic vs Pessimistic</span>
+  </div>
+</header>
+
+<section id="s1">
+  <div class="sec-head">
+    <span class="sec-num">01</span>
+    <h2>並發寫入時，資料庫到底鎖住了什麼？</h2>
+  </div>
+  <p class="sec-sub">從快照讀與當前讀的分界出發，看懂 S／X 鎖與階層式 Intention Lock 如何分工。</p>
+  <p>在現代關聯式資料庫（如 PostgreSQL 與 MySQL InnoDB）中，單純的 <code>SELECT</code> 預設走 MVCC 歷史版本鏈的<strong>快照讀（Snapshot Read）</strong>，讀寫互不阻塞（版本鏈與 Read View 機制詳見「交易隔離級別與 MVCC」篇）。然而一旦進入<strong>寫入與當前讀（Current Read）</strong>——包括 <code>INSERT</code>、<code>UPDATE</code>、<code>DELETE</code>，以及顯式加鎖的 <code>SELECT ... FOR SHARE</code> 與 <code>SELECT ... FOR UPDATE</code>——資料庫就必須讀取最新已提交的版本並掛上<strong>鎖（Lock）</strong>，否則兩筆交易同時基於同一個舊值改寫，就會直接覆蓋彼此的成果。</p>
+
+  <div class="callout accent">
+    <div class="c-title"><span class="ic">邊界</span>單機資料庫鎖 vs 分散式鎖</div>
+    <p>本篇聚焦於<strong>單一資料庫執行個體內部</strong>由鎖管理器（Lock Manager）維護的並行控制；B+Tree 頁結構與叢集索引原理見「資料庫索引原理」篇，而跨微服務、跨儲存系統的租約與 Fencing Token 則由「協調服務」篇探討。</p>
+  </div>
+
+  <h3>基本讀寫模式：Shared Lock (S) 與 Exclusive Lock (X)</h3>
+  <p>鎖管理器在列級（Row-level）最核心的兩種基礎模式，決定了並發交易能否同時接觸同一份目標資料：</p>
+  <ul>
+    <li><strong>Shared Lock（<code>S</code> 鎖，共享鎖／讀鎖）</strong>：允許持有者讀取最新紀錄。多筆交易可<strong>同時持有</strong>同一筆紀錄的 <code>S</code> 鎖，但只要有任何一筆交易握著 <code>S</code> 鎖，其他請求 <code>X</code> 鎖的交易就必須排隊等待。典型觸發語法為 <code>SELECT ... FOR SHARE</code>，或外鍵約束檢查父表紀錄是否存在時自動加上的隱式共享鎖。</li>
+    <li><strong>Exclusive Lock（<code>X</code> 鎖，排他鎖／寫鎖）</strong>：允許持有者修改或刪除紀錄。與任何其他的 <code>S</code> 鎖或 <code>X</code> 鎖皆<strong>互斥</strong>——同一時刻最多只有一筆交易能握住該紀錄的 <code>X</code> 鎖。所有 <code>UPDATE</code>、<code>DELETE</code> 與 <code>SELECT ... FOR UPDATE</code> 都會請求 <code>X</code> 鎖。</li>
+  </ul>
+
+  <h3>為什麼還需要 Intention Lock（意向鎖 IS / IX）？</h3>
+  <p>假設一張訂單表有五千萬列，交易 <var>T<sub>1</sub></var> 鎖住了其中第 38291 列的 <code>X</code> 鎖。此時運維執行需要<strong>全表鎖</strong>的操作（例如某些表級維護指令或顯式 <code>LOCK TABLES ... WRITE</code>），資料庫要怎麼知道「這張表裡有沒有任何一列正被別人鎖著」？如果逐列掃描五千萬筆紀錄去檢查列鎖，表鎖判定的複雜度會退化成 <var>O(N)</var>。</p>
+  <p><strong>意向鎖（Intention Lock）</strong>正是為了把這個檢查降為 <var>O(1)</var> 而設計的<strong>表級旗標（Table-level Lock）</strong>。協定規定：任何交易在對底下某一列申請 <code>S</code> 鎖之前，必須先在資料表層掛上 <strong>Intention Shared（<code>IS</code>）</strong>；申請某列的 <code>X</code> 鎖之前，必須先在表層掛上 <strong>Intention Exclusive（<code>IX</code>）</strong>：</p>
+
+  <div class="dbl-stack">
+    <div class="dbl-layer outer">
+      <div class="dbl-layer-head">
+        <span class="dbl-badge">Layer 1 · Table Level</span>
+        <strong>表級鎖與意向鎖（<code>S</code> / <code>X</code> / <code>IS</code> / <code>IX</code>）</strong>
+      </div>
+      <p class="dbl-layer-desc">交易碰觸任何索引列之前，先在表物件插旗「我正準備鎖底下的某些列」。需要全表鎖的操作只需檢查這一層即可 <var>O(1)</var> 判定衝突。</p>
+      <div class="dbl-layer inner">
+        <div class="dbl-layer-head">
+          <span class="dbl-badge ok">Layer 2 · Index Record &amp; Gap Level</span>
+          <strong>列級與區間鎖（<code>Record S/X</code> · <code>Gap</code> · <code>Next-Key</code> · <code>Insert Intention</code>）</strong>
+        </div>
+        <p class="dbl-layer-desc">真正決定並發寫入吞吐的戰場：兩筆交易都在表層掛了 <code>IX</code>（彼此相容），接著各自下探到索引樹鎖定目標紀錄或縫隙；只要鎖的不是同一筆索引項或衝突區間，就能完全平行寫入。</p>
+      </div>
+    </div>
+  </div>
+  <p class="cap">階層加鎖結構：表級意向鎖只是「樓層入口登記」，並不會阻擋其他交易進入同一張表鎖不同列。</p>
+
+  <p>面試最容易答錯的細節是：<strong><code>IX</code> 與 <code>IX</code> 之間是完全相容的！</strong>意向鎖只跟「全表級的 <code>S</code> / <code>X</code> 鎖」互斥，絕不會阻擋另一筆也要改其他列的交易：</p>
+
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>請求鎖 ＼ 已持有鎖</th>
+          <th><code>IS</code>（意向共享）</th>
+          <th><code>IX</code>（意向排他）</th>
+          <th><code>S</code>（表級共享）</th>
+          <th><code>X</code>（表級排他）</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><strong><code>IS</code>（準備讀某列）</strong></td>
+          <td class="hl">相容（通過）</td>
+          <td class="hl">相容（通過）</td>
+          <td class="hl">相容（全表唯讀可共存）</td>
+          <td>衝突（阻塞等待）</td>
+        </tr>
+        <tr>
+          <td><strong><code>IX</code>（準備寫某列）</strong></td>
+          <td class="hl">相容（通過）</td>
+          <td class="hl">相容（不同列可平行寫）</td>
+          <td>衝突（全表正在唯讀）</td>
+          <td>衝突（阻塞等待）</td>
+        </tr>
+        <tr>
+          <td><strong><code>S</code>（全表共享鎖）</strong></td>
+          <td class="hl">相容（底下僅有讀鎖）</td>
+          <td>衝突（底下有列正在寫）</td>
+          <td class="hl">相容（通過）</td>
+          <td>衝突（阻塞等待）</td>
+        </tr>
+        <tr>
+          <td><strong><code>X</code>（全表排他鎖）</strong></td>
+          <td>衝突（底下有列正在讀）</td>
+          <td>衝突（底下有列正在寫）</td>
+          <td>衝突（阻塞等待）</td>
+          <td>衝突（阻塞等待）</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="cap">表級鎖相容性矩陣：注意左上角 2×2 全為相容——IS 與 IX 彼此從不互擋，真正的列衝突留到索引層才判定。</p>
+
+  <div class="oneliner">
+    <b>一句話答法</b>快照讀靠 MVCC 免鎖讀取，寫入與當前讀靠 S／X 鎖序列化衝突；表級 Intention Lock（IS／IX）則是讓全表鎖能在 O(1) 時間內察覺底下列鎖存在的階層預告機制，IX 與 IX 彼此相容。
+  </div>
+</section>
+
+<hr class="div">
+
+<section id="s2">
+  <div class="sec-head">
+    <span class="sec-num">02</span>
+    <h2>為什麼說「鎖是掛在索引上，而不是資料列上」？</h2>
+  </div>
+  <p class="sec-sub">拆解主鍵、二級索引回表與無索引全表掃描三條加鎖路徑，看清「行鎖變表鎖」的根因。</p>
+  <p>許多工程師第一次遇到「明明 <code>WHERE</code> 只命中 1 列，為什麼另外 10 萬列的 <code>UPDATE</code> 全部卡死」時，才驚覺一個核心事實：<strong>在 InnoDB 裡，Row Lock 並不是鎖在抽象的「邏輯資料列」上，而是掛在執行計畫實際走過的「索引紀錄（Index Record）」上。</strong></p>
+
+  <p>在底層實作中，InnoDB 的記憶體鎖表以 <code>(space_id, page_no)</code> 為雜湊鍵，為該資料頁維護一張位元圖（Bitmap），每個位元對應頁內一筆索引紀錄的序號 <code>heap_no</code>。這意味著查詢最佳化器（Query Planner）選了哪一條索引、掃過多少筆索引項，就決定了鎖管理器在哪些 <code>heap_no</code> 上打勾：</p>
+
+  <ul>
+    <li><strong>路徑一：命中主鍵（Clustered Index）</strong>——例如 <code>UPDATE users SET balance = 50 WHERE id = 42</code>，直接定位主鍵樹上的 <code>id = 42</code> 紀錄並掛上一把 <code>X</code> 鎖，鎖定範圍最精準。</li>
+    <li><strong>路徑二：命中二級索引（Secondary Index）</strong>——例如 <code>UPDATE orders SET state = 'PAID' WHERE order_no = 'ORD-9'</code>。InnoDB 會<strong>先在二級索引 <code>idx_order_no</code> 的紀錄掛上 <code>X</code> 鎖，取出主鍵值後，再回到主鍵樹（Clustered Index）對該筆主鍵紀錄也掛上 <code>X</code> 鎖</strong>。如果只鎖二級索引而不鎖主鍵，另一條直接 <code>WHERE id = 108</code> 走主鍵的 <code>UPDATE</code> 就會繞過鎖保護直接改壞同一列！</li>
+    <li><strong>路徑三：無索引或索引失效（退化為 Clustered Index 全掃描）</strong>——當條件欄位沒建索引、發生隱式型別轉換，或統計資訊判定全表掃描更快時，儲存引擎不知道哪一頁才有符合條件的資料，只能從主鍵樹第一筆一路掃到最後一筆。掃描過程中<strong>每一筆被檢查過的索引紀錄與縫隙都會被上鎖</strong>，表面寫的是單列 <code>UPDATE</code>，實際效果卻等同鎖死整張表。</li>
+  </ul>
+
+  <div class="dbl-row">
+    <div class="dbl-node">
+      <div class="nn">SQL 寫入條件</div>
+      <div class="ns">WHERE order_no = 'ORD-9'</div>
+    </div>
+    <span class="dbl-arrow">──定位──▸</span>
+    <div class="dbl-node warn">
+      <div class="nn">二級索引 idx_order_no</div>
+      <div class="ns">第 1 把鎖：鎖二級索引項</div>
+    </div>
+    <span class="dbl-arrow">──回表 PK──▸</span>
+    <div class="dbl-node accent">
+      <div class="nn">主鍵索引 PRIMARY</div>
+      <div class="ns">第 2 把鎖：鎖叢集索引資料列</div>
+    </div>
+    <span class="dbl-arrow">──改寫──▸</span>
+    <div class="dbl-node ok">
+      <div class="nn">Undo / Redo 與髒頁</div>
+      <div class="ns">持有雙層鎖直到 COMMIT</div>
+    </div>
+  </div>
+  <p class="cap">二級索引寫入的兩段式加鎖：先鎖二級索引再回表鎖主鍵；若另一筆交易從主鍵改同列並連帶更新該二級索引，加鎖方向相反便可能形成死鎖。</p>
+
+  <div class="callout warn">
+    <div class="c-title"><span class="ic">陷阱</span>最隱蔽的「行鎖變表鎖」：隱式型別轉換與函式包欄位</div>
+    <p>若 <code>phone</code> 欄位型別是 <code>VARCHAR(20)</code> 且建有唯一索引，但程式寫成 <code>UPDATE accounts SET vip = 1 WHERE phone = 0912345678</code>（傳入整數而非字串），MySQL 會將整張表的字串轉成數字比對，導致索引無法做區間定位而觸發全表掃描——瞬間把整張 <code>accounts</code> 表的既有列與縫隙全部鎖死。所有帶鎖的 <code>UPDATE</code>／<code>DELETE</code>／<code>FOR UPDATE</code> 上線前，務必確認執行計畫真的走了預期索引。</p>
+  </div>
+
+  <h3>延伸對照：InnoDB 記憶體鎖位元圖 vs PostgreSQL Tuple Header 標記</h3>
+  <p>面試常追問：「如果一筆交易一次 <code>UPDATE</code> 一百萬列，鎖表會不會把記憶體撐爆？」兩大主流引擎給出了截然不同的架構折衷：</p>
+  <ul>
+    <li><strong>InnoDB</strong> 在記憶體鎖雜湊表為每個被鎖頁面配置鎖結構（同一頁內共用一張 Bitmap，每頁約數百 bytes），雖然比每列獨立配置物件省得多，但超大量鎖仍會消耗 Buffer Pool／Lock System 記憶體並提高鎖表檢索成本。</li>
+    <li><strong>PostgreSQL</strong> 則把列級排他鎖直接記在資料頁 <strong>Heap Tuple Header 的 <code>xmax</code> 與 <code>t_infomask</code> 旗標位元</strong>裡（共享列鎖多交易共存時升級為 <code>MultiXactId</code>），不在共享記憶體為每一列建立鎖物件。代價是檢查鎖狀態可能觸發頁面讀取與髒頁寫回，且 PostgreSQL 不實作 InnoDB 式的索引 Gap Lock（其 <code>SERIALIZABLE</code> 改採無阻塞的 SSI 謂詞鎖偵測，詳見「交易隔離級別與 MVCC」篇）。</li>
+  </ul>
+
+  <div class="oneliner">
+    <b>一句話答法</b>InnoDB 的列鎖本質是掛在索引紀錄上：走主鍵鎖 1 處、走二級索引會先鎖二級索引再回表鎖主鍵，而一旦沒走上索引退化成全表掃描，就會沿路鎖住主鍵樹上所有掃過的紀錄與區間。
+  </div>
+</section>
+
+<hr class="div">
+
+<section id="s3">
+  <div class="sec-head">
+    <span class="sec-num">03</span>
+    <h2>Record、Gap 與 Next-Key Lock：封住幻讀的區間幾何</h2>
+  </div>
+  <p class="sec-sub">鎖定既有紀錄只是基本功；鎖住兩個索引值之間的「縫隙」，才能阻止幻影列插進來。</p>
+  <p>如果鎖管理器只能鎖住「已經存在的紀錄（Record Lock）」，那麼當交易 <var>T<sub>1</sub></var> 執行 <code>SELECT * FROM bookings WHERE slot_id BETWEEN 10 AND 30 FOR UPDATE</code> 時，它只能鎖住目前落在 10 到 30 之間的既有列；另一筆交易 <var>T<sub>2</sub></var> 隨即執行 <code>INSERT INTO bookings (slot_id) VALUES (25)</code> 仍會暢行無阻——<var>T<sub>1</sub></var> 再讀一次就會多出一筆「幻影列（Phantom Row）」，預約名額檢查當場破功。</p>
+
+  <p>為了在 <code>REPEATABLE READ</code> 隔離級別下徹底擋住當前讀的幻讀，InnoDB 把索引軸切分成「點（既有索引項）」與「開區間（相鄰索引項之間的縫隙）」，組合出四種精密的鎖原語：</p>
+
+  <ul>
+    <li><strong>Record Lock（紀錄鎖）</strong>：單純鎖定某一筆既有索引項本身（例如 <code>slot_id = 20</code>），阻止其他交易修改或刪除該筆紀錄，但<strong>不阻擋</strong>往它左右兩側插入新值。</li>
+    <li><strong>Gap Lock（間隙鎖）</strong>：只鎖定兩筆索引紀錄之間的<strong>開區間縫隙</strong>（例如 <code>(10, 20)</code>，或是最大紀錄之後直到虛擬上界 <code>+supremum</code> 的 <code>(40, +∞)</code>）。Gap Lock 的<strong>唯一職責是禁止其他交易往這段縫隙插入新紀錄</strong>；因此<strong>Gap S 與 Gap X 彼此完全相容</strong>——兩筆交易可以同時握住同一個 <code>(10, 20)</code> 的 Gap Lock 而不互擋！</li>
+    <li><strong>Next-Key Lock（臨鍵鎖）</strong>：<code>Gap Lock + Record Lock</code> 合體而成的<strong>左開右閉區間</strong> <code>(prev_key, key]</code>（例如 <code>(10, 20]</code>）。這是 InnoDB 在 <code>REPEATABLE READ</code> 下掃描索引時的預設基本單位。</li>
+    <li><strong>Insert Intention Lock（插入意向鎖）</strong>：<code>INSERT</code> 寫入新列前，會先檢查目標落點所在的縫隙是否已被別人掛上 Gap Lock；若有則阻塞等待並掛上 Insert Intention Lock。多筆交易同時往同一個未被鎖住的縫隙插入<strong>不同鍵值</strong>時，Insert Intention Lock 之間互不相撞。</li>
+  </ul>
+
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>查詢型態（以既有鍵 <code>10, 20, 30, 40</code> 為例）</th>
+          <th><code>REPEATABLE READ</code> 實際鎖定範圍</th>
+          <th><code>READ COMMITTED</code> 實際鎖定範圍</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><strong>唯一索引 · 等值命中</strong><br><code>WHERE slot_id = 20</code></td>
+          <td class="hl">退化為純 <strong>Record Lock</strong>：只鎖 <code>[20]</code>（唯一鍵不可能再插入第二個 20，無須鎖縫隙）</td>
+          <td>純 <strong>Record Lock</strong>：只鎖 <code>[20]</code></td>
+        </tr>
+        <tr>
+          <td><strong>唯一索引 · 等值未命中</strong><br><code>WHERE slot_id = 25</code></td>
+          <td>定位到第一筆 <code>&gt; 25</code> 的 <code>30</code>，退化為純 <strong>Gap Lock</strong>：鎖開區間 <code>(20, 30)</code></td>
+          <td><strong>不留任何鎖</strong>（0 Record、0 Gap）</td>
+        </tr>
+        <tr>
+          <td><strong>非唯一二級索引 · 等值命中</strong><br><code>WHERE slot_id = 20</code></td>
+          <td>無法退化為單點！鎖 <strong>Next-Key</strong> <code>(10, 20]</code>（含回表鎖 PK）＋向右掃到 <code>30</code> 掛 <strong>Gap Lock</strong> <code>(20, 30)</code>，封死前後插入重複 <code>20</code> 的可能</td>
+          <td>純 <strong>Record Lock</strong>：只鎖命中的 <code>[20]</code> 與對應 PK（無 Gap Lock）</td>
+        </tr>
+        <tr>
+          <td><strong>範圍掃描</strong><br><code>BETWEEN lo AND hi</code></td>
+          <td>涵蓋範圍內命中的紀錄與縫隙；非唯一索引（或上界落在縫隙內）會一路鎖到第一筆 <code>&gt; hi</code> 之前的尾端 Gap（超過最大值則鎖到 <code>+supremum</code>）</td>
+          <td>僅保留符合 <code>lo &lt;= k &lt;= hi</code> 的 <strong>Record Lock</strong>，區間縫隙完全開放 <code>INSERT</code></td>
+        </tr>
+        <tr>
+          <td><strong>無索引（全表掃描）</strong></td>
+          <td>掃過 Clustered Index 全部紀錄：<strong>4 筆 Record ＋ 5 段 Gap ＋ supremum 全鎖</strong>，整張表無法寫入</td>
+          <td>掃描後釋放不符條件的列鎖（MySQL post-filter unlock），僅留命中列的 Record Lock</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="cap">InnoDB 加鎖退化規則表（以 MySQL 8.0 為準）：同樣一句 WHERE 條件，有沒有唯一約束與處於哪種隔離級別，鎖住的區間天差地遠。</p>
+  <div class="demo" id="demo-index-locks">
+    <div class="demo-bar">
+      <span class="label">互動 · 索引數線 Record / Gap 加鎖掃描器</span>
+      <span class="label" style="text-transform:none;font-family:var(--sans);font-size:12px;color:var(--text-2)">切換索引型態、隔離級別與查詢上下界（相等時為等值查詢）</span>
+    </div>
+    <div class="demo-body">
+      <div class="dbl-ctrl-grid">
+        <div class="dbl-ctrl-cell">
+          <div class="dbl-ctrl-label">索引結構</div>
+          <div class="seg" id="idx-kind-seg" role="group" aria-label="索引結構切換">
+            <button type="button" data-idx-kind="unique" aria-pressed="false">唯一索引 UNIQUE</button>
+            <button type="button" data-idx-kind="secondary" aria-pressed="true">非唯一二級索引</button>
+            <button type="button" data-idx-kind="noindex" aria-pressed="false">無索引（全掃描）</button>
+          </div>
+        </div>
+        <div class="dbl-ctrl-cell">
+          <div class="dbl-ctrl-label">交易隔離級別</div>
+          <div class="seg" id="idx-iso-seg" role="group" aria-label="隔離級別切換">
+            <button type="button" data-idx-iso="rr" aria-pressed="true">Repeatable Read</button>
+            <button type="button" data-idx-iso="rc" aria-pressed="false">Read Committed</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="dbl-slider-pair">
+        <div class="dbl-ctrl-cell">
+          <div class="dbl-slider-head">
+            <span>查詢下界 <code>qLo</code></span>
+            <strong id="idx-lo-val">20</strong>
+          </div>
+          <input type="range" id="idx-lo" min="5" max="45" step="5" value="20" aria-label="查詢下界">
+        </div>
+        <div class="dbl-ctrl-cell">
+          <div class="dbl-slider-head">
+            <span>查詢上界 <code>qHi</code></span>
+            <strong id="idx-hi-val">20</strong>
+          </div>
+          <input type="range" id="idx-hi" min="5" max="45" step="5" value="20" aria-label="查詢上界">
+        </div>
+        <div class="dbl-ctrl-action">
+          <button type="button" class="btn" id="idx-reset">重置預設</button>
+        </div>
+      </div>
+
+      <div class="dbl-sql-box">
+        <span class="dbl-sql-tag">當前交易 T1 執行</span>
+        <code id="idx-sql-text">SELECT * FROM bookings WHERE slot_id = 20 FOR UPDATE;</code>
+      </div>
+
+      <div class="dbl-svg-frame">
+        <svg id="idx-svg" viewBox="0 0 680 176" style="width:100%; height:auto" role="img" aria-labelledby="idx-svg-title">
+          <title id="idx-svg-title">索引數線上的 Record Lock 與 Gap Lock 分佈圖</title>
+          <g id="idx-svg-canvas"></g>
+        </svg>
+      </div>
+
+      <div class="dbl-stat-grid">
+        <div class="dbl-stat-card">
+          <span class="sk">實際鎖定模式</span>
+          <strong class="sv" id="idx-out-unit">Next-Key + 尾端 Gap</strong>
+        </div>
+        <div class="dbl-stat-card">
+          <span class="sk">鎖定索引紀錄數</span>
+          <strong class="sv" id="idx-out-rec">1 筆（含回表 PK 1 筆）</strong>
+        </div>
+        <div class="dbl-stat-card">
+          <span class="sk">鎖定縫隙區間數</span>
+          <strong class="sv" id="idx-out-gap">2 段開區間</strong>
+        </div>
+        <div class="dbl-stat-card">
+          <span class="sk">並發 INSERT 攔截率</span>
+          <strong class="sv" id="idx-out-block">50%（3 / 6 點阻塞）</strong>
+        </div>
+      </div>
+
+      <div class="dbl-probe-panel">
+        <div class="dbl-probe-title">另一筆交易 T2 此刻嘗試並發寫入的結果（由上方鎖集合即時判定）：</div>
+        <div class="dbl-probe-chips" id="idx-probe-grid"></div>
+      </div>
+
+      <div class="legend">
+        <span><i class="dot ns-lock"></i>已加鎖（Record X / Gap Lock，攔截衝突寫入）</span>
+        <span><i class="dot ns-idle"></i>未加鎖（開放其他交易寫入）</span>
+        <span><i class="dot ns-ok"></i>T2 測試寫入可立即通過</span>
+      </div>
+
+      <div class="status-line" id="idx-status">
+        在非唯一二級索引 ＋ Repeatable Read 下等值查詢 slot_id = 20，InnoDB 會同時鎖住 (10, 20] 與尾端縫隙 (20, 30)。
+      </div>
+    </div>
+  </div>
+
+  <div class="oneliner">
+    <b>一句話答法</b>Record Lock 鎖既有索引點、Gap Lock 鎖點與點之間的開區間以阻止幻影 INSERT，兩者合為 Next-Key Lock；唯有「唯一索引 ＋ 等值命中」才會退化成單純的 Record Lock。
+  </div>
+</section>
+
+<hr class="div">
+
+<section id="s4">
+  <div class="sec-head">
+    <span class="sec-num">04</span>
+    <h2>SELECT FOR UPDATE、NOWAIT 與 SKIP LOCKED 實戰</h2>
+  </div>
+  <p class="sec-sub">顯式當前讀如何消滅遺失更新，以及如何用 SKIP LOCKED 把資料表變成高吞吐工作佇列。</p>
+  <p>在預設的快照讀下，如果應用程式寫出「先 <code>SELECT balance</code> 讀進記憶體計算、再 <code>UPDATE accounts SET balance = :new_val</code> 寫回」的讀改寫（Read-Modify-Write）邏輯，兩筆並發交易會同時讀到舊餘額 <code>100</code>、各自扣 <code>30</code> 後寫回 <code>70</code>——其中一筆扣款無聲無息蒸發，形成典型的 <strong>Lost Update（遺失更新）</strong>。</p>
+
+  <p>當業務規則複雜到無法塞進單條原子 <code>UPDATE</code> 時，就必須在讀取當下直接把快照讀升級為<strong>顯式加鎖的當前讀</strong>：</p>
+
+  <ul>
+    <li><strong><code>SELECT ... FOR SHARE</code></strong>：讀取最新已提交版本並掛上 <code>S</code> 鎖。適合「交易期間這筆父設定（例如匯率檔、商戶啟用狀態）不准被別人改掉或刪掉，但允許其他讀取者一起參考」的情境。</li>
+    <li><strong><code>SELECT ... FOR UPDATE</code></strong>：讀取最新已提交版本並直接掛上 <code>X</code> 鎖，把後續要修改的資料列先行獨佔，直到本筆交易 <code>COMMIT</code> 或 <code>ROLLBACK</code> 才釋放。</li>
+  </ul>
+
+  <h3>搶不到鎖時的三種尾綴策略：預設等待、<code>NOWAIT</code>、<code>SKIP LOCKED</code></h3>
+  <p>自 MySQL 8.0 與 PostgreSQL 9.5 起，標準 SQL 為 <code>FOR UPDATE</code> 提供了兩種非阻塞修飾詞，徹底改變了高併發系統保護連線池與排程任務的寫法：</p>
+
+  <ul>
+    <li><strong>預設（不加尾綴）</strong>：進入鎖等待佇列阻塞，直到前手放鎖或觸發 <code>innodb_lock_wait_timeout</code>（預設 50 秒）／PostgreSQL <code>lock_timeout</code>。高流量熱點下，數百條執行緒卡死等待同一列，會在幾秒內把資料庫連線池耗盡。</li>
+    <li><strong><code>FOR UPDATE NOWAIT</code></strong>：一旦目標列已被鎖住，<strong>0 毫秒立即拋錯返回</strong>，絕不排隊阻塞。適合秒殺搶購、座位鎖定等需要「搶不到就立刻回傳忙碌或已售出」的快速失敗（Fail-fast）API。</li>
+    <li><strong><code>FOR UPDATE SKIP LOCKED</code></strong>：掃描過程中遇到已被其他活躍交易鎖住的列時，<strong>不等待也不報錯，直接跳過它</strong>，繼續往後找第一筆目前沒被鎖住的列上鎖返回。</li>
+  </ul>
+
+  <h3>經典架構模式：用資料表實作工作佇列（DB-backed Job Queue）</h3>
+  <p>在中小型系統或需要與業務資料<strong>同庫強一致寫入（Transactional Outbox / 本地佇列）</strong>的場景，工程團隊常直接拿關聯式資料表當工作佇列。若沒有 <code>SKIP LOCKED</code>，10 台 Worker 同時執行 <code>ORDER BY id LIMIT 1 FOR UPDATE</code> 都會卡在佇列頭同一筆 <code>id = 101</code> 上排隊，並發度退化為 1；加上 <code>SKIP LOCKED</code> 後，多台 Worker 便能無鎖爭用地平行領取不同任務：</p>
+
+  <pre><code>-- PostgreSQL 單句原子領取（CTE + FOR UPDATE SKIP LOCKED）
+WITH picked AS (
+  SELECT id FROM job_queue
+  WHERE status = 'pending' AND run_at &lt;= NOW()
+  ORDER BY run_at ASC, id ASC
+  LIMIT 1
+  FOR UPDATE SKIP LOCKED
+)
+UPDATE job_queue AS q
+SET status = 'processing',
+    worker_id = 'worker-b',
+    lease_until = NOW() + INTERVAL '5 minutes'
+FROM picked
+WHERE q.id = picked.id
+RETURNING q.*;</code></pre>
+
+  <div class="dbl-lane">
+    <div class="lh">時刻</div>
+    <div class="lh">Worker A 交易</div>
+    <div class="lh">Worker B 交易</div>
+    <div class="lh">job_queue 列鎖狀態</div>
+
+    <div class="lt">t1</div>
+    <div class="lc act">掃描 pending，命中 <code>job#101</code> 並掛上 <code>X</code> 鎖</div>
+    <div class="lc">—</div>
+    <div class="lc"><code>#101</code> 鎖定中；<code>#102</code> 閒置</div>
+
+    <div class="lt">t2</div>
+    <div class="lc">更新 <code>#101</code> 為 <code>processing</code>（尚未提交）</div>
+    <div class="lc act">掃描至 <code>#101</code> 見已鎖 → <strong>SKIP</strong>，鎖定 <code>#102</code></div>
+    <div class="lc ok"><code>#101</code> 歸 A、<code>#102</code> 歸 B，零阻塞</div>
+
+    <div class="lt">t3</div>
+    <div class="lc ok"><code>COMMIT</code> 釋放列鎖，在交易外執行耗時任務</div>
+    <div class="lc ok">更新 <code>#102</code> 並 <code>COMMIT</code> 釋放列鎖</div>
+    <div class="lc">兩筆皆標記 <code>lease_until</code>，連線立即歸還池</div>
+
+    <div class="lt">t4</div>
+    <div class="lc">外部 API 完成，短交易標記 <code>#101 = done</code></div>
+    <div class="lc bad">Worker B 當機未回報 → 租約到期由 Reaper 回收重跑</div>
+    <div class="lc ok">透過 <code>lease_until</code> 兼顧高吞吐與至少一次投遞</div>
+  </div>
+  <p class="cap">SKIP LOCKED 佇列標準時序：注意 t3 先 COMMIT 放鎖才去跑外部 I/O，避免長交易把連線與 Undo History 拖垮。</p>
+
+  <div class="callout warn">
+    <div class="c-title"><span class="ic">鐵律</span>絕不可抱著 FOR UPDATE 鎖去打外部 API</div>
+    <p><code>SKIP LOCKED</code> 只負責「領取任務的那 1 毫秒」不互卡。如果你把呼叫第三方金流、寄信或推論服務包在同一筆 <code>BEGIN ... COMMIT</code> 內，交易拉長到數秒，不僅佔死資料庫連線，還會阻止 MVCC 清理舊版本（Vacuum / Purge 停滯）；此外 <code>SKIP LOCKED</code> 回傳的是<strong>不完整視圖</strong>，只適合「隨便領一筆待辦任務即可」的佇列，<strong>不可</strong>用於報表加總或餘額核對。</p>
+  </div>
+
+  <div class="oneliner">
+    <b>一句話答法</b>SELECT FOR UPDATE 把讀改寫收進排他鎖保護，搭配 NOWAIT 可保護連線池快速失敗，搭配 SKIP LOCKED 則能讓多個 Worker 無阻塞平行領取不同待辦列，是實作交易型工作佇列與 Outbox 輪詢的標準原語。
+  </div>
+</section>
+
+<hr class="div">
+
+<section id="s5">
+  <div class="sec-head">
+    <span class="sec-num">05</span>
+    <h2>悲觀鎖與樂觀鎖的工程取捨</h2>
+  </div>
+  <p class="sec-sub">原地原子更新、FOR UPDATE 預先佔鎖、Version CAS 提交檢驗——三種防寫入衝突手段的邊界。</p>
+  <p>在系統設計面試被問到「扣庫存或搶票該用悲觀鎖還是樂觀鎖」時，千萬別急著二選一——實務上防範寫入衝突共有<strong>三層武器</strong>，工程選型的關鍵在於「<strong>鎖被握住多久</strong>」以及「<strong>同一列同時有多少人在搶</strong>」。</p>
+
+  <h3>第一優先：單句原子條件更新（Atomic Conditional UPDATE）</h3>
+  <p>只要不變量（Invariant）能寫進單條 SQL 的 <code>SET</code> 與 <code>WHERE</code>，就不需要把值讀回應用程式再寫回：</p>
+  <pre><code>UPDATE inventory
+SET stock = stock - :qty
+WHERE sku_id = 42 AND stock &gt;= :qty;
+-- 檢查 affected_rows：1 代表扣減成功；0 代表庫存不足，直接回傳售罄</code></pre>
+  <p>這條語句在資料庫內部依然會對 <code>sku_id = 42</code> 掛上 <code>X</code> Record Lock（本質仍是資料庫層的排他鎖），但若在單語句自動提交或交易最後一步執行，鎖持有時間 <var>T<sub>hold</sub></var> 只包含引擎內部毫秒甚至百微秒級的記憶體改寫與 WAL 落盤，<strong>完全省去了應用程式與資料庫之間的網路往返（RTT）</strong>。單一熱點列的理論吞吐上限直接受限於鎖持有時間的倒數：</p>
+
+  <div class="formula">TPS<sub>max (single hot row)</sub> = 1 / T<sub>hold</sub></div>
+
+  <p>把 <var>T<sub>hold</sub></var> 從跨兩次網路 RTT 的 <code>5 ms</code> 壓縮到單句執行的 <code>0.25 ms</code>，單列串行吞吐上限立刻從 <code>200 TPS</code> 跳升至 <code>4,000 TPS</code>。</p>
+
+  <h3>當單條 SQL 寫不完：悲觀鎖 vs 樂觀鎖（Version CAS）</h3>
+  <p>當業務必須跨多張表讀取、套用複雜計價規則後才能決定新值，就必須在「<strong>先鎖再算（悲觀鎖）</strong>」與「<strong>先算最後驗版本（樂觀鎖）</strong>」之間抉擇：</p>
+
+  <ul>
+    <li><strong>悲觀鎖（Pessimistic Locking）</strong>：假設衝突大概率會發生，交易一開始就以 <code>SELECT ... FOR UPDATE</code> 取得排他鎖，算完再 <code>UPDATE</code> 提交。優點是<strong>搶到鎖就保證能一次成功提交，沒有白做工的重試風暴</strong>；缺點是持鎖時間橫跨應用層運算與多次網路 RTT，高併發下排隊嚴重且容易因多列加鎖順序不一致而死鎖。</li>
+    <li><strong>樂觀鎖（Optimistic Concurrency Control，OCC）</strong>：假設衝突罕見，讀取時走普通無鎖快照讀，一併讀出單調遞增的 <code>version</code> 欄位；提交時才以 Compare-And-Swap（CAS）語意驗證版本未被他人改動：</li>
+  </ul>
+
+  <pre><code>-- 1. 無鎖讀取（甚至可跨前端頁面停留數分鐘）
+SELECT price, content, version FROM articles WHERE id = 9;   -- 讀到 version = 7
+
+-- 2. 提交時檢驗版本號並原子 +1
+UPDATE articles
+SET price = :new_price, content = :new_content, version = version + 1
+WHERE id = 9 AND version = 7;
+-- affected_rows = 1 → 成功；affected_rows = 0 → 版本已變，重讀重算或提示使用者合併</code></pre>
+
+  <div class="callout accent">
+    <div class="c-title"><span class="ic">關鍵</span>為什麼樂觀鎖一定要用單調遞增 version，不能直接比對舊欄位值？</div>
+    <p>若條件寫成 <code>WHERE id = 9 AND balance = 100</code>，當餘額在期間經歷 <code>100 → 20 → 100</code>（且同時變更了信用額度或凍結狀態），比對舊值會誤判「沒人動過」而放行，這就是經典的 <strong>ABA 問題</strong>。只增不減的整數 <code>version</code>（或高精確度狀態序號）才能嚴格捕捉任何中間改動。</p>
+  </div>
+
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>評估維度</th>
+          <th>單句原子條件 <code>UPDATE</code></th>
+          <th>悲觀鎖 <code>SELECT FOR UPDATE</code></th>
+          <th>樂觀鎖 <code>version</code> CAS</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><strong>鎖持有時間 <var>T<sub>hold</sub></var></strong></td>
+          <td class="hl">極短（單次引擎內執行 ＋ COMMIT）</td>
+          <td>長（涵蓋多次 App ↔ DB RTT 與運算）</td>
+          <td class="hl">極短（僅最後 <code>UPDATE</code> 瞬間掛鎖）</td>
+        </tr>
+        <tr>
+          <td><strong>高衝突熱點表現</strong></td>
+          <td class="hl">最佳（排隊有序、每筆皆有效推進）</td>
+          <td>穩定但吞吐受限，易塞滿連線池</td>
+          <td><strong>崩潰</strong>：<var>K</var> 筆同讀同版，1 成 <var>K-1</var> 敗，引發 <var>O(K<sup>2</sup>)</var> 重試風暴</td>
+        </tr>
+        <tr>
+          <td><strong>跨 HTTP 請求（人類思考時間）</strong></td>
+          <td>不適用</td>
+          <td><strong>嚴禁</strong>（連線與鎖不能跨請求懸掛）</td>
+          <td class="hl">唯一正解（搭配 HTTP <code>ETag</code> / 表單 <code>version</code> 防覆蓋）</td>
+        </tr>
+        <tr>
+          <td><strong>死鎖風險</strong></td>
+          <td>單列幾乎為零；多列批次需排好序</td>
+          <td>高（多步加鎖持有期長，易交錯成環）</td>
+          <td>低（讀取階段不持鎖，大幅縮短重疊視窗）</td>
+        </tr>
+        <tr>
+          <td><strong>典型適用場景</strong></td>
+          <td>扣庫存、領取配額、計數器累加</td>
+          <td>帳務多表核銷、複雜狀態機轉移、高衝突重運算</td>
+          <td>讀多寫少設定檔、協作文件／後台表單防呆、低衝突庫存</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="cap">寫入並行控制選型表：讀多寫少或跨請求選樂觀鎖；高爭用單列計數優先壓成單句原子 UPDATE；複雜多表強一致且重試昂貴才開悲觀鎖。</p>
+
+  <div class="oneliner">
+    <b>一句話答法</b>能壓進單條條件 UPDATE 就別分兩步讀寫；讀多寫少或需跨人類操作時間用 version 樂觀鎖省下持鎖開銷，高衝突且重試代價昂貴的多步交易則用悲觀鎖排隊保吞吐。
+  </div>
+</section>
+
+<hr class="div">
+
+<section id="s6">
+  <div class="sec-head">
+    <span class="sec-num">06</span>
+    <h2>死鎖成因、Wait-for Graph 偵測與犧牲者選擇</h2>
+  </div>
+  <p class="sec-sub">循環等待如何成形、資料庫如何在毫秒內抓環，以及為什麼回滾的總是「改最少」的那筆交易。</p>
+  <p>單純的「鎖等待（Lock Wait）」只要前手提交就會自然解開；<strong>死鎖（Deadlock）</strong>則是兩筆以上的交易彼此握著對方下一步需要的鎖，形成<strong>有向循環等待（Circular Wait）</strong>——如果沒有外力介入，環上的每一筆交易都會永遠等下去。</p>
+
+  <h3>線上最高頻的三種死鎖原型</h3>
+  <ol>
+    <li><strong>多資源逆序加鎖（AB-BA 交錯）</strong>：<var>T<sub>1</sub></var> 先鎖帳戶 <code>A</code> 再鎖帳戶 <code>B</code>，同一毫秒 <var>T<sub>2</sub></var> 先鎖帳戶 <code>B</code> 再鎖帳戶 <code>A</code>。這不只發生在兩條獨立 <code>UPDATE</code>，連單條批次 <code>UPDATE items SET ... WHERE id IN (9, 2)</code> 與 <code>WHERE id IN (2, 9)</code> 若執行計畫依輸入順序逐筆加鎖，也會直接互卡。</li>
+    <li><strong>同列鎖升級與 Gap 相容陷阱（最反直覺！）</strong>：兩筆交易先在<strong>同一列</strong>取得相容的 <code>S</code> 鎖，隨後雙雙執行 <code>UPDATE</code> 請求升級為 <code>X</code> 鎖——<var>T<sub>1</sub></var> 等 <var>T<sub>2</sub></var> 放掉 <code>S</code> 鎖，<var>T<sub>2</sub></var> 也等 <var>T<sub>1</sub></var> 放掉 <code>S</code> 鎖，單一列上直接死鎖！同理，第 3 節提過<strong>兩把 Gap Lock 彼此相容</strong>，因此兩筆交易同時執行「先 <code>SELECT ... FOR UPDATE</code> 查某唯一鍵不存在（雙雙拿到同一段 Gap Lock），接著各自 <code>INSERT</code>（雙雙請求 Insert Intention Lock）」時，也會在同一段縫隙上瞬間死鎖：</li>
+  </ol>
+
+  <pre class="mermaid">
+sequenceDiagram
+    participant T1 as 交易 T1
+    participant DB as InnoDB 鎖管理器
+    participant T2 as 交易 T2
+    T1->>DB: SELECT id=25 FOR UPDATE
+    DB-->>T1: 核發 Gap Lock (20,30)
+    T2->>DB: SELECT id=25 FOR UPDATE
+    DB-->>T2: Gap 相容！同獲 (20,30)
+    T1->>DB: INSERT id=25
+    Note over T1,DB: 等 T2 釋放 Gap Lock
+    T2->>DB: INSERT id=25
+    Note over DB,T2: 成環！回滾代價較小者
+    DB-->>T2: Error 1213 Deadlock
+    DB-->>T1: 喚醒並完成 INSERT
+  </pre>
+  <p class="cap">經典「查無此列再插入」死鎖：前兩步 Gap Lock 彼此相容不會排隊，導致雙方同時踏入陷阱，直到雙雙 INSERT 才互等成環。</p>
+
+  <ol start="3">
+    <li><strong>多索引路徑交錯</strong>：<var>T<sub>1</sub></var> 走二級索引 <code>idx_email</code> 更新（加鎖順序：<code>idx_email → PRIMARY</code>），而 <var>T<sub>2</sub></var> 走主鍵更新同一列並修改了 <code>email</code> 欄位（加鎖順序：<code>PRIMARY → idx_email</code>），在微秒級時間差內迎頭相撞。</li>
+  </ol>
+
+  <h3>Wait-for Graph 主動抓環 vs Timeout 被動逾時</h3>
+  <p>面對死鎖，為什麼資料庫不能只靠 <code>innodb_lock_wait_timeout</code>（預設 50 秒）逾時解開？因為在高併發線上服務裡，讓兩條持鎖連線白白卡死 50 秒，後面排隊依賴它們的數百個請求會像骨牌一樣連鎖逾時。</p>
+  <p>因此主流引擎都實作了<strong>等待圖（Wait-for Graph，WFG）</strong>主動偵測：以交易為節點，只要 <var>T<sub>i</sub></var> 請求的鎖與 <var>T<sub>j</sub></var> 已持有的鎖（或排在前面等待中的不透明鎖請求）衝突，就畫一條有向邊 <var>T<sub>i</sub> → T<sub>j</sub></var>，並以深度優先搜尋（DFS）檢查是否出現有向環：</p>
+  <ul>
+    <li><strong>MySQL InnoDB（立即偵測）</strong>：開啟 <code>innodb_deadlock_detect = ON</code>（預設）時，每次鎖請求發生阻塞的當下就立刻遍歷 Wait-for Graph，微秒級抓出死鎖。但在「數百執行緒同時搶<strong>同一列</strong>」的極端熱點下，每次阻塞都鎖住全域鎖表做 <var>O(V+E)</var> 圖搜尋會燒光 CPU（MySQL 8.0.18 起改由背景專用執行緒非同步掃描大幅緩解此瓶頸）。</li>
+    <li><strong>PostgreSQL（延遲偵測折衷）</strong>：阻塞當下<strong>不立刻建圖</strong>，而是先睡一個 <code>deadlock_timeout</code>（預設 <code>1s</code>）；99.9% 的正常鎖爭用在幾毫秒內就拿鎖離開，完全零圖搜尋成本，只有睡眠滿 1 秒仍未獲鎖的交易才會喚醒死鎖偵測器跑一次 Wait-for Graph。</li>
+  </ul>
+
+  <h3>誰會被選為犧牲者（Victim Selection）？</h3>
+  <p>一旦偵測到環（例如 <var>T<sub>1</sub> → T<sub>2</sub> → T<sub>1</sub></var>），資料庫只需強制 <code>ROLLBACK</code> 環上<strong>其中一筆</strong>交易即可破環。InnoDB 的 <code>lock_deadlock_select_victim</code> 遵循<strong>最小回滾代價原則</strong>：比較環上各交易目前已產生的 <strong>Undo Log 紀錄筆數（鎖權重與已修改列數 <code>trx-&gt;undo_no</code>）</strong>，挑<strong>修改量最少、回滾最便宜</strong>的那筆交易作為犧牲者回滾並回傳 <code>SQLSTATE 40001</code>（MySQL Error <code>1213</code>），保留已經做完大量寫入的重型交易繼續前進。</p>
+  <div class="demo" id="demo-deadlock-wfg">
+    <div class="demo-bar">
+      <span class="label">互動 · Wait-for Graph 死鎖偵測與犧牲者選擇模擬器</span>
+      <span class="label" style="text-transform:none;font-family:var(--sans);font-size:12px;color:var(--text-2)">調整加鎖順序與各交易 Undo 權重，逐拍推進觀察成環與回滾放鎖</span>
+    </div>
+    <div class="demo-body">
+      <div class="dbl-ctrl-grid">
+        <div class="dbl-ctrl-cell">
+          <div class="dbl-ctrl-label">加鎖排程模式</div>
+          <div class="seg" id="wfg-mode-seg" role="group" aria-label="加鎖排程模式">
+            <button type="button" data-wfg-mode="interleaved" aria-pressed="true">逆序互鎖 (AB-BA)</button>
+            <button type="button" data-wfg-mode="upgrade" aria-pressed="false">同列鎖升級 (S→X)</button>
+            <button type="button" data-wfg-mode="canonical" aria-pressed="false">固定升冪順序 (無環)</button>
+          </div>
+        </div>
+        <div class="dbl-ctrl-cell">
+          <div class="dbl-ctrl-label">參與交易拓樸</div>
+          <div class="seg" id="wfg-tx-seg" role="group" aria-label="參與交易數量">
+            <button type="button" data-wfg-tx="2" aria-pressed="true">雙交易 (T1, T2)</button>
+            <button type="button" data-wfg-tx="3" aria-pressed="false">三方鏈路 (T1..T3，T3 Undo=6)</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="dbl-slider-pair">
+        <div class="dbl-ctrl-cell">
+          <div class="dbl-slider-head">
+            <span>T1 已寫入 Undo 修改量</span>
+            <strong id="wfg-u1-val">12 列</strong>
+          </div>
+          <input type="range" id="wfg-u1" min="1" max="20" step="1" value="12" aria-label="T1 已寫入 Undo 列數">
+        </div>
+        <div class="dbl-ctrl-cell">
+          <div class="dbl-slider-head">
+            <span>T2 已寫入 Undo 修改量</span>
+            <strong id="wfg-u2-val">3 列</strong>
+          </div>
+          <input type="range" id="wfg-u2" min="1" max="20" step="1" value="3" aria-label="T2 已寫入 Undo 列數">
+        </div>
+      </div>
+
+      <div class="dbl-toolbar">
+        <div class="dbl-toolbar-btns">
+          <button type="button" class="btn" id="wfg-prev">◀ 上一拍</button>
+          <button type="button" class="btn primary" id="wfg-next">下一拍 ▶</button>
+          <button type="button" class="btn" id="wfg-reset">重置排程</button>
+        </div>
+        <span class="dbl-tick-pill" id="wfg-tick-label">時序游標：t = 0（全數待命）</span>
+      </div>
+
+      <div class="dbl-sched-list" id="wfg-sched-list" aria-label="排程事件序列（點擊可跳至該拍）"></div>
+
+      <div class="dbl-svg-frame">
+        <svg id="wfg-svg" viewBox="0 0 680 232" style="width:100%; height:auto" role="img" aria-labelledby="wfg-svg-title">
+          <title id="wfg-svg-title">交易等待圖 Wait-for Graph 與鎖持有狀態</title>
+          <defs>
+            <marker id="wfg-arr-wait" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+              <path d="M 0 1.5 L 9 5 L 0 8.5 z" fill="#3f6188"></path>
+            </marker>
+            <marker id="wfg-arr-cycle" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+              <path d="M 0 1.5 L 9 5 L 0 8.5 z" fill="#a8554f"></path>
+            </marker>
+          </defs>
+          <g id="wfg-svg-canvas"></g>
+        </svg>
+      </div>
+
+      <div class="dbl-res-grid" id="wfg-res-grid"></div>
+
+      <div class="dbl-stat-grid">
+        <div class="dbl-stat-card">
+          <span class="sk">活躍鎖 ／ 等待有向邊</span>
+          <strong class="sv" id="wfg-out-edges">0 把鎖 ／ 0 條邊</strong>
+        </div>
+        <div class="dbl-stat-card">
+          <span class="sk">DFS 環路偵測</span>
+          <strong class="sv" id="wfg-out-cycle">無閉環</strong>
+        </div>
+        <div class="dbl-stat-card">
+          <span class="sk">犧牲者判定（最小 Undo）</span>
+          <strong class="sv" id="wfg-out-victim">無須回滾</strong>
+        </div>
+        <div class="dbl-stat-card">
+          <span class="sk">回滾代價 ／ 已提交保全量</span>
+          <strong class="sv" id="wfg-out-cost">回滾 0 列 ／ 提交 0 列</strong>
+        </div>
+      </div>
+
+      <div class="legend">
+        <span><i class="dot ns-lock"></i>持有鎖執行中</span>
+        <span><i class="dot ns-wait"></i>等待他方釋放鎖（WFG 有向邊）</span>
+        <span><i class="dot ns-bad"></i>死鎖成環 ／ 選為犧牲者回滾</span>
+        <span><i class="dot ns-ok"></i>已提交完成（COMMIT）</span>
+      </div>
+
+      <div class="status-line" id="wfg-status">
+        按「下一拍 ▶」依序執行各交易的鎖請求，或直接點擊排程事件跳至成環瞬間。
+      </div>
+    </div>
+  </div>
+
+  <div class="oneliner">
+    <b>一句話答法</b>死鎖源於多筆交易對鎖資源形成有向等待環（包含逆序加鎖與同列 S→X／Gap→Insert 升級）；資料庫透過 Wait-for Graph 抓環並主動回滾 Undo 修改量最小的犧牲者以瞬間解套。
+  </div>
+</section>
+
+<hr class="div">
+
+<section id="s7">
+  <div class="sec-head">
+    <span class="sec-num">07</span>
+    <h2>應用端防禦清單、重試協定與面試 FAQ</h2>
+  </div>
+  <p class="sec-sub">把鎖競爭擋在架構層的四條鐵律、正確的交易重試寫法，以及高頻考題拆解。</p>
+  <p>在分散式與高併發後端中，死鎖<strong>不可能也不需要</strong>被徹底消滅到零——就像網路封包重傳一樣，工程目標是「<strong>架構上把發生率壓低兩個數量級，程式碼裡讓偶發死鎖對使用者無感</strong>」。</p>
+
+  <h3>把鎖競爭與死鎖壓到最低的四條架構鐵律</h3>
+  <ol>
+    <li><strong>全域固定加鎖順序（Canonical Resource Ordering）</strong>：只要一筆交易會鎖定多筆同類資源（例如 A 轉帳給 B、一次結算多筆購物車商品），在進入交易或發送批次 SQL 前，<strong>一律先在應用程式記憶體按主鍵升冪排序（<code>sort((a, b) =&gt; a.id - b.id)</code>）</strong>。第 6 節的模擬器已驗證：當所有交易都先鎖小號再鎖大號，Wait-for Graph 在拓樸上只會形成有向無環圖（DAG），絕不可能成環。</li>
+    <li><strong>把最熱點的那條 SQL 移到交易最後一步</strong>：交易內所有的鎖都是在 <code>COMMIT</code> 瞬間才一次釋放（Strict 2PL，嚴格兩階段鎖定），但<strong>加鎖時刻</strong>卻是執行到該條 SQL 才發生！如果一筆訂單交易包含「① 插入訂單主檔 → ② 插入明細 → ③ 扣減熱門商品總庫存 → ④ 寫入稽核紀錄」，把第 ③ 步調到 <code>COMMIT</code> 前最後一行執行，就能讓熱點庫存鎖的持有時間從整筆交易耗時縮短到最後幾百微秒。</li>
+    <li><strong>收斂鎖定半徑，消除無謂的 Gap Lock</strong>：
+      <ul>
+        <li>用唯一約束搭配原子 Upsert（MySQL <code>INSERT ... ON DUPLICATE KEY UPDATE</code>／PostgreSQL <code>INSERT ... ON CONFLICT DO UPDATE</code>）取代「先 <code>SELECT FOR UPDATE</code> 查不存在再 <code>INSERT</code>」。</li>
+        <li>若業務不依賴當前讀的區間防幻讀且使用 Row-based Binlog，將隔離級別設為 <code>READ COMMITTED</code> 可直接卸除搜尋掃描的 Gap Lock 與大半部分死鎖來源。</li>
+      </ul>
+    </li>
+    <li><strong>為寫入連線設定合理的防守逾時</strong>：將會話級 <code>lock_timeout</code>（PostgreSQL）或 <code>innodb_lock_wait_timeout</code> 從預設的 50 秒調降至符合 SLA 的 <code>2s ~ 5s</code>（或針對搶購路徑直接使用 <code>NOWAIT</code>），防止慢查詢持鎖時引發全站執行緒雪崩。</li>
+  </ol>
+
+  <h3>應用端標準死鎖重試協定（Transaction-level Retry）</h3>
+  <p>當資料庫回傳序列化或死鎖錯誤（SQL 標準 <code>SQLSTATE 40001</code>、MySQL Error <code>1213</code>、PostgreSQL <code>40P01</code>）時，<strong>整筆交易其實已經被資料庫引擎自動回滾完畢</strong>。應用端重試必須遵守三個關鍵細節：</p>
+
+  <div class="trap">
+    <span class="tn">誤區 1</span>
+    <div><strong>只重送報錯的那一條 SQL</strong>——死鎖發生後舊交易已回滾、先前讀取的值與鎖全部失效；重試單位必須是<strong>整個交易閉包（重新 <code>BEGIN</code>、重讀最新資料、重算業務邏輯再寫入）</strong>。</div>
+  </div>
+  <div class="trap">
+    <span class="tn">誤區 2</span>
+    <div><strong>0 延遲緊密迴圈立刻重試</strong>——剛對撞的兩台應用伺服器若在 0 毫秒後同時重跑相同順序，極高機率再次在同一個時間點迎頭互鎖；重試之間應加入 <code>5ms ~ 40ms</code> 的<strong>指數退避與隨機抖動（Exponential Backoff + Jitter）</strong>錯開相位。</div>
+  </div>
+  <div class="trap">
+    <span class="tn">誤區 3</span>
+    <div><strong>交易閉包內夾帶不可重入的外部副作用</strong>——若閉包裡發送了沒有冪等鍵（Idempotency Key）的扣款 RPC 或推播訊息，重跑交易就會重複觸發外部動作。外部通知應改寫進同庫 Outbox 表，提交後非同步投遞。</div>
+  </div>
+
+  <pre><code>// 標準交易重試包裝器（虛擬碼）
+async function runTxWithDeadlockRetry(db, maxAttempts, workFn) {
+  for (let attempt = 1; attempt &lt;= maxAttempts; attempt++) {
+    try {
+      return await db.transaction(async (tx) =&gt; workFn(tx)); // 每次皆全新 BEGIN + 重讀重算
+    } catch (err) {
+      const retryable = err.sqlState === '40001' || err.errno === 1213 || err.code === '40P01';
+      if (!retryable || attempt === maxAttempts) throw err;
+      const baseMs = 8 * Math.pow(2, attempt - 1);
+      const jitterMs = Math.floor(Math.random() * baseMs);
+      await sleep(baseMs + jitterMs); // 隨機抖動錯開並發重試相位
+    }
+  }
+}</code></pre>
+
+  <h3>面試高頻追問 FAQ</h3>
+
+  <details class="faq">
+    <summary><span class="q">Q1</span><span>單條 UPDATE 語句、沒有顯式寫 BEGIN...COMMIT，也有可能發生死鎖嗎？</span><span class="chev">▸</span></summary>
+    <div class="ans">
+      <p><strong>完全有可能！</strong>在自動提交（Autocommit）模式下，單條 <code>UPDATE</code> 本身就是一筆獨立交易，但它在底層並不是一瞬間把所有鎖一次拿齊，而是<strong>隨著索引掃描逐筆加鎖</strong>。</p>
+      <p>例如兩條自動提交的 <code>UPDATE</code> 分別走了不同的二級索引卻命中同一批資料列（加鎖順序一正一反），或是單條範圍 <code>UPDATE</code> 掃描途中與另一條反向掃描／回表更新交錯，一樣會在單句執行期間形成循環等待並拋出 Error 1213。</p>
+    </div>
+  </details>
+
+  <details class="faq">
+    <summary><span class="q">Q2</span><span>既然已經有 MVCC 了，為什麼高併發系統還是常常被鎖卡住？</span><span class="chev">▸</span></summary>
+    <div class="ans">
+      <p>MVCC 只解放了「<strong>純讀取（快照讀）不阻塞寫入、寫入也不阻塞純讀取</strong>」這兩個方向；但「<strong>寫入對寫入（Write-Write Conflict）</strong>」依然必須靠排他鎖串行化。</p>
+      <p>只要多筆交易集中修改同一個熱點列（如商戶總餘額、熱門活動剩餘名額），或是查詢沒走索引、在 Repeatable Read 下觸發大範圍 Next-Key Lock，寫入執行緒之間依然會大排長龍。</p>
+    </div>
+  </details>
+
+  <details class="faq">
+    <summary><span class="q">Q3</span><span>MySQL 遇到死鎖時如何排查第一現場？</span><span class="chev">▸</span></summary>
+    <div class="ans">
+      <p>實務排查三板斧：① 執行 <code>SHOW ENGINE INNODB STATUS</code> 查看 <code>LATEST DETECTED DEADLOCK</code> 區塊，裡面會完整印出參與死鎖的兩筆交易當時正在執行的 SQL、各自持有的鎖（<code>HOLDS THE LOCK(S)</code>，標明是 <code>rec but not gap</code>、<code>gap before rec</code> 還是普通 Next-Key Lock）與正在等待的鎖（<code>WAITING FOR THIS LOCK TO BE GRANTED</code>），以及最後誰被 <code>WE ROLL BACK TRANSACTION</code>；② 開啟 <code>innodb_print_all_deadlocks = ON</code>，將每一次死鎖完整記錄到錯誤日誌以免被下一次覆蓋；③ 即時阻塞現場則查 <code>performance_schema.data_locks</code> 與 <code>data_lock_waits</code>。</p>
+    </div>
+  </details>
+
+  <details class="faq">
+    <summary><span class="q">Q4</span><span>秒殺扣減單一商品庫存 10,000 件，單列鎖上限撐不住怎麼辦？</span><span class="chev">▸</span></summary>
+    <div class="ans">
+      <p>當單列原子 <code>UPDATE</code> 也撞上物理鎖持有時間天花板時，資料庫層有兩種經典擴展思路：① <strong>庫存分桶（Inventory Bucketing / Slotted Counter）</strong>——把 1 列 <code>stock = 10000</code> 拆成 16 或 64 列子桶（每桶 <code>625</code> 件），請求按雜湊隨機挑一桶扣減，直接把鎖競爭攤薄 16～64 倍（桶空時再降級掃其他非空桶）；② <strong>請求合併（Group / Batch Update）</strong>或前置快取預扣（詳見「Redis 架構」與「快取模式」相關篇章），把高頻小扣減聚合成低頻批次落庫。</p>
+    </div>
+  </details>
+
+  <div class="oneliner">
+    <b>一句話答法</b>工程防死鎖靠「固定資源加鎖序、熱點 SQL 後置、精準索引縮減 Gap 範圍、整筆交易帶隨機抖動重試」四招並進，讓資料庫鎖保護一致性而不拖垮吞吐。
+  </div>
+</section>
