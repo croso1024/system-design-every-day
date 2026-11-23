@@ -1,0 +1,3753 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>線上 Schema 變更與零停機 Migration | System Design Every Day</title>
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect x='3' y='2' width='26' height='28' rx='6' fill='%23386f5a' stroke='%2374b59b' stroke-width='1.5'/%3E%3Crect x='3.8' y='2.8' width='24.4' height='23.5' rx='4.8' fill='%2352967c'/%3E%3Cpath d='M9 2.8V26.3' stroke='%2374b59b' stroke-width='1.5' stroke-opacity='.75'/%3E%3Cpath d='M7.5 28.1H25' stroke='%23e6f5ef' stroke-width='1.8' stroke-linecap='round'/%3E%3Cpath d='M14 14.5L21.5 10.2M14 14.5L21.5 18.8M21.5 10.2V18.8' stroke='%23dcf2e9' stroke-width='2.1' stroke-linecap='round'/%3E%3Ccircle cx='14' cy='14.5' r='2.9' fill='%23ffffff'/%3E%3Ccircle cx='21.5' cy='10.2' r='2.7' fill='%23f6e29c'/%3E%3Ccircle cx='21.5' cy='18.8' r='2.7' fill='%23ffffff'/%3E%3C/svg%3E">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@300;400;500;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+  <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+  <script>
+    mermaid.initialize({
+      startOnLoad: true,
+      theme: 'default',
+      securityLevel: 'loose'
+    });
+  </script>
+  <style>
+    /* 全站設計 token 的唯一來源。scripts/lib/books.js 會把「第一個 :root 區塊」原樣抽進首頁：
+       請保持單一區塊、區塊內不得出現 `}`；首頁領域色依賴 --accent / --ok / --warn。 */
+    :root {
+      --bg: #ffffff;
+      --bg-soft: #fafaf9;
+      --text: #262a2f;
+      --text-2: #6b7078;
+      --text-3: #9aa0a8;
+      --border: #ecebe8;
+      --border-strong: #dedcd8;
+      --code-bg: #f6f5f3;
+      --accent: #3f6188;
+      --accent-soft: #eef2f7;
+      --accent-line: #cdd9e6;
+      --ok: #4d7d68;
+      --ok-soft: #eef4f1;
+      --warn: #a3743e;
+      --warn-soft: #f6f0e7;
+      --bad: #a8554f;
+      --bad-soft: #f6ecea;
+      --radius: 10px;
+      --radius-sm: 7px;
+      --maxw: 760px;
+      --sans: "Noto Sans TC", system-ui, -apple-system, "Segoe UI", sans-serif;
+      --mono: "JetBrains Mono", "SFMono-Regular", Menlo, Consolas, monospace;
+    }
+
+    /* ---------- base reset ----------
+       等價於 Tailwind preflight 的最小重置（頁面不載入 Tailwind，utility class 不會生效）。
+       文章頁與各篇 demo CSS 都以這組基準值撰寫，改動會讓所有產物的間距、清單、按鈕外觀一起變動。
+       新增規則請一律寫在這個區塊之後，並使用 :root 的 token。 */
+    *, *::before, *::after {
+      box-sizing: border-box;
+      border: 0 solid var(--border);
+    }
+
+    html {
+      line-height: 1.5;
+      -webkit-text-size-adjust: 100%;
+      tab-size: 4;
+    }
+
+    h1, h2, h3, h4, h5, h6 {
+      margin: 0;
+      font-size: inherit;
+      font-weight: inherit;
+    }
+
+    p, blockquote, dl, dd, figure, pre, hr {
+      margin: 0;
+    }
+
+    hr {
+      height: 0;
+      color: inherit;
+      border-top-width: 1px;
+    }
+
+    a {
+      color: inherit;
+      text-decoration: inherit;
+    }
+
+    b, strong {
+      font-weight: bolder;
+    }
+
+    code, kbd, samp, pre {
+      font-family: var(--mono);
+      font-size: 1em;
+    }
+
+    small {
+      font-size: 80%;
+    }
+
+    sub, sup {
+      position: relative;
+      font-size: 75%;
+      line-height: 0;
+      vertical-align: baseline;
+    }
+    sub { bottom: -0.25em; }
+    sup { top: -0.5em; }
+
+    table {
+      border-collapse: collapse;
+      border-color: inherit;
+      text-indent: 0;
+    }
+
+    ol, ul, menu {
+      list-style: none;
+      margin: 0;
+      padding: 0;
+    }
+
+    img, svg, video, canvas, audio, iframe, embed, object {
+      display: block;
+      vertical-align: middle;
+    }
+
+    img, video {
+      max-width: 100%;
+      height: auto;
+    }
+
+    button, input, optgroup, select, textarea {
+      margin: 0;
+      padding: 0;
+      font: inherit;
+      line-height: inherit;
+      color: inherit;
+    }
+
+    button, select {
+      text-transform: none;
+    }
+
+    button, [type="button"], [type="reset"], [type="submit"] {
+      -webkit-appearance: button;
+      background-color: transparent;
+      background-image: none;
+    }
+
+    button, [role="button"] {
+      cursor: pointer;
+    }
+
+    :disabled {
+      cursor: default;
+    }
+
+    input::placeholder, textarea::placeholder {
+      opacity: 1;
+      color: var(--text-3);
+    }
+
+    textarea {
+      resize: vertical;
+    }
+
+    fieldset {
+      margin: 0;
+      padding: 0;
+    }
+
+    legend {
+      padding: 0;
+    }
+
+    summary {
+      display: list-item;
+    }
+
+    [hidden] {
+      display: none;
+    }
+
+    html {
+      scroll-behavior: smooth;
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      html {
+        scroll-behavior: auto;
+      }
+      * {
+        animation-duration: .001ms !important;
+        transition-duration: .001ms !important;
+      }
+    }
+
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font-family: var(--sans);
+      font-weight: 400;
+      font-size: 16px;
+      line-height: 1.78;
+      -webkit-font-smoothing: antialiased;
+      letter-spacing: .005em;
+    }
+
+    ::selection {
+      background: var(--accent-soft);
+    }
+
+    /* ---------- layout ---------- */
+    .wrap {
+      display: flex;
+      max-width: 1180px;
+      margin: 0 auto;
+      gap: 0;
+    }
+
+    .toc {
+      width: 248px;
+      flex: 0 0 248px;
+      position: sticky;
+      top: 0;
+      height: 100vh;
+      padding: 54px 22px 40px 28px;
+      overflow-y: auto;
+      border-right: 1px solid var(--border);
+      transition: width .2s ease, flex-basis .2s ease, padding .2s ease, opacity .15s ease, border-color .15s ease;
+    }
+
+    .toc-kicker {
+      font-family: var(--mono);
+      font-size: 11px;
+      letter-spacing: .14em;
+      text-transform: uppercase;
+      color: var(--text-3);
+      margin-bottom: 20px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+    }
+
+    /* desktop：側欄內收合鈕；≤920px 隱藏，改由 .toc-toggle accordion 控制 */
+    .toc-collapse {
+      display: none;
+      flex: 0 0 auto;
+      align-items: center;
+      justify-content: center;
+      width: 28px;
+      height: 28px;
+      padding: 0;
+      border: none;
+      background: none;
+      border-radius: 6px;
+      color: var(--text-2);
+      line-height: 1;
+      cursor: pointer;
+    }
+
+    .toc-collapse:hover {
+      color: var(--text);
+      background: var(--bg-soft);
+    }
+
+    .toc-collapse:focus-visible {
+      outline: 2px solid var(--accent);
+      outline-offset: 2px;
+    }
+
+    .toc-collapse svg {
+      display: block;
+    }
+
+    /* desktop：側欄收合後的展開鈕（預設隱藏） */
+    .toc-reopen {
+      display: none;
+      position: fixed;
+      top: 18px;
+      left: 18px;
+      z-index: 900;
+      align-items: center;
+      gap: 7px;
+      font-size: 12.5px;
+      line-height: 1;
+      color: var(--text-2);
+      background: var(--bg);
+      border: 1px solid var(--border-strong);
+      border-radius: 999px;
+      padding: 7px 13px 7px 11px;
+      box-shadow: 0 1px 3px rgba(0, 0, 0, .06), 0 4px 12px rgba(0, 0, 0, .04);
+      cursor: pointer;
+      transition: background .15s, border-color .15s, color .15s;
+    }
+
+    .toc-reopen:hover {
+      background: var(--bg-soft);
+      color: var(--text);
+      border-color: var(--text-3);
+    }
+
+    .toc-reopen svg {
+      flex: 0 0 auto;
+      display: block;
+    }
+
+    @media (min-width: 921px) {
+      .toc-collapse {
+        display: inline-flex;
+      }
+
+      body.toc-collapsed .toc {
+        width: 0;
+        flex-basis: 0;
+        padding: 0;
+        opacity: 0;
+        overflow: hidden;
+        border-right-color: transparent;
+        pointer-events: none;
+      }
+
+      body.toc-collapsed .toc-reopen {
+        display: inline-flex;
+      }
+    }
+
+    .toc-kicker a {
+      color: var(--text-3);
+      text-decoration: none;
+      border-bottom: none;
+      transition: color .15s;
+    }
+
+    .toc-kicker a:hover {
+      color: var(--text);
+    }
+
+    .toc-title {
+      font-size: 15px;
+      font-weight: 700;
+      line-height: 1.4;
+      margin: 0 0 12px;
+    }
+
+    .toc-actions {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 8px;
+      margin: 0 0 18px;
+    }
+
+    .read-toggle {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      font-family: var(--sans);
+      font-size: 12.5px;
+      line-height: 1.3;
+      color: var(--text-2);
+      background: var(--bg);
+      border: 1px solid var(--border-strong);
+      border-radius: 999px;
+      padding: 5px 12px 5px 10px;
+      cursor: pointer;
+      transition: background .15s, border-color .15s, color .15s;
+    }
+
+    .read-toggle:hover {
+      background: var(--bg-soft);
+      color: var(--text);
+      border-color: var(--text-3);
+    }
+
+    .read-toggle:focus-visible {
+      outline: 2px solid var(--accent);
+      outline-offset: 2px;
+    }
+
+    .read-toggle[aria-pressed="true"] {
+      background: var(--ok-soft);
+      border-color: var(--ok);
+      color: var(--ok);
+      font-weight: 600;
+    }
+
+    .read-toggle .read-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      border: 1.5px solid currentColor;
+      flex: 0 0 auto;
+    }
+
+    .read-toggle[aria-pressed="true"] .read-dot {
+      background: var(--ok);
+      border-color: var(--ok);
+    }
+
+    .article-foot {
+      margin-top: 56px;
+      padding-top: 24px;
+      border-top: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      flex-wrap: wrap;
+    }
+
+    .article-foot-left {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      flex-wrap: wrap;
+    }
+
+    .article-foot-hint {
+      font-size: 13.5px;
+      color: var(--text-2);
+    }
+
+    .read-toggle.read-toggle-lg {
+      font-size: 13.5px;
+      padding: 7px 16px 7px 13px;
+    }
+
+    .article-foot-back {
+      font-size: 13.5px;
+      color: var(--text-2);
+      border-bottom: 1px solid var(--border-strong);
+    }
+
+    .article-foot-back:hover {
+      color: var(--text);
+      border-color: var(--text);
+    }
+
+    .toc a {
+      display: flex;
+      gap: 10px;
+      align-items: baseline;
+      text-decoration: none;
+      color: var(--text-2);
+      font-size: 13.5px;
+      padding: 6px 10px;
+      border-radius: 6px;
+      line-height: 1.45;
+      transition: background .15s, color .15s;
+      border-bottom: none;
+    }
+
+    .toc a:hover {
+      background: var(--bg-soft);
+      color: var(--text);
+      border-bottom: none;
+    }
+
+    .toc a.active {
+      color: var(--accent);
+      background: var(--accent-soft);
+      font-weight: 500;
+      border-bottom: none;
+    }
+
+    .toc a .n {
+      font-family: var(--mono);
+      font-size: 11px;
+      color: var(--text-3);
+      flex: 0 0 18px;
+    }
+
+    .toc a.active .n {
+      color: var(--accent);
+    }
+
+    main {
+      flex: 1 1 auto;
+      min-width: 0;
+      padding: 0 40px;
+    }
+
+    .inner {
+      max-width: var(--maxw);
+      margin: 0 auto;
+      padding: 72px 0 140px;
+    }
+
+    /* ---------- hero ---------- */
+    .hero {
+      margin-bottom: 64px;
+    }
+
+    .hero .eyebrow {
+      font-family: var(--mono);
+      font-size: 12px;
+      letter-spacing: .16em;
+      text-transform: uppercase;
+      color: var(--accent);
+      margin-bottom: 18px;
+    }
+
+    .hero h1 {
+      font-size: 40px;
+      line-height: 1.18;
+      font-weight: 700;
+      margin: 0 0 18px;
+      letter-spacing: -.01em;
+    }
+
+    .hero .lede {
+      font-size: 18px;
+      line-height: 1.7;
+      color: var(--text-2);
+      font-weight: 300;
+      margin: 0;
+      max-width: 620px;
+    }
+
+    .hero .meta {
+      margin-top: 28px;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+
+    .tag {
+      font-family: var(--mono);
+      font-size: 12px;
+      color: var(--text-2);
+      border: 1px solid var(--border-strong);
+      padding: 4px 11px;
+      border-radius: 999px;
+      background: var(--bg-soft);
+    }
+
+    /* ---------- sections ---------- */
+    section {
+      padding-top: 30px;
+      scroll-margin-top: 24px;
+    }
+
+    .sec-head {
+      display: flex;
+      align-items: baseline;
+      gap: 14px;
+      margin: 0 0 8px;
+    }
+
+    .sec-num {
+      font-family: var(--mono);
+      font-size: 13px;
+      color: var(--text-3);
+      font-weight: 500;
+      padding-top: 6px;
+      flex: 0 0 auto;
+    }
+
+    h2 {
+      font-size: 27px;
+      font-weight: 700;
+      line-height: 1.3;
+      margin: 0;
+      letter-spacing: -.01em;
+    }
+
+    .sec-sub {
+      color: var(--text-2);
+      font-size: 15px;
+      margin: 2px 0 28px 0;
+      font-weight: 300;
+    }
+
+    h3 {
+      font-size: 18.5px;
+      font-weight: 700;
+      margin: 38px 0 12px;
+      line-height: 1.45;
+    }
+
+    h4 {
+      font-size: 15.5px;
+      font-weight: 700;
+      margin: 26px 0 8px;
+      color: var(--text);
+    }
+
+    p {
+      margin: 0 0 16px;
+    }
+
+    a {
+      color: var(--accent);
+      text-decoration: none;
+      border-bottom: 1px solid var(--accent-line);
+      transition: border-color .15s;
+    }
+
+    a:hover {
+      border-color: var(--accent);
+    }
+
+    strong {
+      font-weight: 700;
+    }
+
+    em {
+      font-style: normal;
+      background: var(--accent-soft);
+      padding: 0 4px;
+      border-radius: 4px;
+      font-weight: 500;
+      color: #2f4d6e;
+    }
+
+    hr.div {
+      border: none;
+      border-top: 1px solid var(--border);
+      margin: 46px 0;
+    }
+
+    ul, ol {
+      margin: 0 0 18px;
+      padding-left: 22px;
+    }
+
+    li {
+      margin: 7px 0;
+      padding-left: 4px;
+    }
+
+    code {
+      font-family: var(--mono);
+      font-size: .86em;
+      background: var(--code-bg);
+      padding: 2px 6px;
+      border-radius: 5px;
+      color: #43494f;
+    }
+
+    pre {
+      background: var(--code-bg);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 16px 18px;
+      overflow-x: auto;
+      margin: 0 0 20px;
+      line-height: 1.6;
+    }
+
+    pre code {
+      background: none;
+      padding: 0;
+      font-size: 13px;
+    }
+
+    /* ---------- math notation ---------- */
+    /* 行內數學變數，如 W、R、N。本站不載入 MathJax/KaTeX，請勿使用 $...$ 或 \[...\] LaTeX 分隔符。 */
+    var {
+      font-family: var(--mono);
+      font-style: normal;
+      font-weight: 500;
+      color: var(--accent);
+    }
+
+    /* 區塊數學公式，置中等寬呈現，記得將 > < & 轉義為 &gt; &lt; &amp;。 */
+    .formula {
+      font-family: var(--mono);
+      font-size: 15px;
+      text-align: center;
+      background: var(--bg-soft);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      padding: 14px 18px;
+      margin: 0 0 20px;
+      color: var(--text);
+      letter-spacing: .03em;
+      overflow-x: auto;
+    }
+
+    /* ---------- callouts ---------- */
+    .callout {
+      border: 1px solid var(--border);
+      border-left: 3px solid var(--border-strong);
+      background: var(--bg-soft);
+      border-radius: var(--radius-sm);
+      padding: 15px 18px;
+      margin: 0 0 22px;
+      font-size: 14.5px;
+    }
+
+    .callout .c-title {
+      font-weight: 700;
+      font-size: 13px;
+      letter-spacing: .02em;
+      margin-bottom: 5px;
+      display: flex;
+      gap: 7px;
+      align-items: center;
+    }
+
+    .callout p:last-child {
+      margin-bottom: 0;
+    }
+
+    .callout.accent {
+      border-left-color: var(--accent);
+      background: var(--accent-soft);
+    }
+
+    .callout.accent .c-title {
+      color: #2f4d6e;
+    }
+
+    .callout.warn {
+      border-left-color: var(--warn);
+      background: var(--warn-soft);
+    }
+
+    .callout.warn .c-title {
+      color: var(--warn);
+    }
+
+    .callout .ic {
+      font-family: var(--mono);
+      font-size: 11px;
+      border: 1px solid currentColor;
+      border-radius: 4px;
+      padding: 0 4px;
+      line-height: 1.5;
+      opacity: .8;
+    }
+
+    .oneliner {
+      border: 1px dashed var(--accent-line);
+      border-radius: var(--radius-sm);
+      padding: 13px 16px;
+      margin: 0 0 22px;
+      font-size: 14.5px;
+      background: #fbfcfd;
+    }
+
+    .oneliner b {
+      font-family: var(--mono);
+      font-size: 11px;
+      letter-spacing: .08em;
+      color: var(--accent);
+      display: block;
+      margin-bottom: 4px;
+      text-transform: uppercase;
+    }
+
+    /* ---------- tables ---------- */
+    .tbl-wrap {
+      overflow-x: auto;
+      margin: 0 0 24px;
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+    }
+
+    table {
+      border-collapse: collapse;
+      width: 100%;
+      font-size: 14px;
+      min-width: 520px;
+    }
+
+    th, td {
+      text-align: left;
+      padding: 11px 14px;
+      border-bottom: 1px solid var(--border);
+      vertical-align: top;
+    }
+
+    th {
+      font-weight: 700;
+      background: var(--bg-soft);
+      font-size: 12.5px;
+      letter-spacing: .02em;
+      color: var(--text-2);
+      position: sticky;
+      top: 0;
+    }
+
+    tr:last-child td {
+      border-bottom: none;
+    }
+
+    td.hl {
+      background: var(--accent-soft);
+    }
+
+    .cap {
+      font-size: 12.5px;
+      color: var(--text-3);
+      margin: 12px 0 26px;
+      font-family: var(--mono);
+    }
+
+    /* 圖與圖說的間距由 .cap 的 margin-top（12px）保證不重疊；緊鄰 .cap 的前一個元素預設不貢獻 margin-bottom，
+       讓全站間距一致。頁面以更高權重的選擇器替該元素設下邊距，或瀏覽器不支援 :has() 時，間距只會變鬆、不會重疊。 */
+    main :has(+ .cap) {
+      margin-bottom: 0;
+    }
+
+    /* ---------- interactive shell ---------- */
+    .demo {
+      border: 1px solid var(--border-strong);
+      border-radius: var(--radius);
+      background: var(--bg);
+      margin: 24px 0 26px;
+      overflow: hidden;
+    }
+
+    .demo-bar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      flex-wrap: wrap;
+      padding: 13px 16px;
+      border-bottom: 1px solid var(--border);
+      background: var(--bg-soft);
+    }
+
+    .demo-bar .label {
+      font-family: var(--mono);
+      font-size: 11px;
+      letter-spacing: .1em;
+      text-transform: uppercase;
+      color: var(--text-3);
+    }
+
+    .demo-body {
+      padding: 20px 18px;
+    }
+
+    .seg {
+      display: inline-flex;
+      border: 1px solid var(--border-strong);
+      border-radius: 999px;
+      overflow: hidden;
+      background: var(--bg);
+    }
+
+    .seg button {
+      border: none;
+      background: none;
+      font-family: var(--sans);
+      font-size: 12.5px;
+      color: var(--text-2);
+      padding: 6px 14px;
+      cursor: pointer;
+      transition: background .15s, color .15s;
+    }
+
+    .seg button:hover {
+      color: var(--text);
+    }
+
+    .seg button[aria-pressed="true"] {
+      background: var(--accent);
+      color: #fff;
+    }
+
+    .btn {
+      font-family: var(--sans);
+      font-size: 13px;
+      border: 1px solid var(--border-strong);
+      background: var(--bg);
+      color: var(--text);
+      padding: 7px 16px;
+      border-radius: 7px;
+      cursor: pointer;
+      transition: background .15s, border-color .15s;
+    }
+
+    .btn:hover {
+      background: var(--bg-soft);
+      border-color: var(--text-3);
+    }
+
+    .btn.primary {
+      background: var(--accent);
+      color: #fff;
+      border-color: var(--accent);
+    }
+
+    .btn.primary:hover {
+      background: #365578;
+    }
+
+    .btn:disabled {
+      opacity: .4;
+      cursor: not-allowed;
+    }
+
+    .btn:focus-visible, .seg button:focus-visible, .toc a:focus-visible, a:focus-visible,
+    summary:focus-visible {
+      outline: 2px solid var(--accent);
+      outline-offset: 2px;
+      border-radius: 4px;
+    }
+
+    .status-line {
+      font-size: 13.5px;
+      color: var(--text-2);
+      min-height: 42px;
+      margin-top: 14px;
+      background: var(--bg-soft);
+      border-radius: var(--radius-sm);
+      padding: 10px 13px;
+      border: 1px solid var(--border);
+    }
+
+    .status-line b {
+      color: var(--text);
+    }
+
+    .legend {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 14px;
+      font-size: 11.5px;
+      color: var(--text-2);
+      margin-top: 14px;
+      font-family: var(--mono);
+    }
+
+    .legend span {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .dot {
+      width: 9px;
+      height: 9px;
+      border-radius: 3px;
+      display: inline-block;
+      border: 1px solid rgba(0, 0, 0, .08);
+    }
+
+    /* node states used across diagrams */
+    .ns-idle {
+      background: #fff;
+      border-color: var(--border-strong);
+    }
+
+    .ns-lock {
+      background: var(--warn-soft);
+      border-color: var(--warn);
+    }
+
+    .ns-ok {
+      background: var(--ok-soft);
+      border-color: var(--ok);
+    }
+
+    .ns-bad {
+      background: var(--bad-soft);
+      border-color: var(--bad);
+    }
+
+    .ns-wait {
+      background: var(--accent-soft);
+      border-color: var(--accent);
+    }
+
+    /* FAQ */
+    details.faq {
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      margin-bottom: 10px;
+      background: #fff;
+      overflow: hidden;
+    }
+
+    details.faq summary {
+      cursor: pointer;
+      padding: 14px 16px;
+      font-weight: 600;
+      font-size: 14.5px;
+      list-style: none;
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      align-items: center;
+    }
+
+    details.faq summary::-webkit-details-marker {
+      display: none;
+    }
+
+    details.faq summary .q {
+      font-family: var(--mono);
+      font-size: 11px;
+      color: var(--accent);
+      flex: 0 0 auto;
+    }
+
+    details.faq summary .chev {
+      transition: transform .2s;
+      color: var(--text-3);
+      flex: 0 0 auto;
+      font-size: 13px;
+    }
+
+    details.faq[open] summary .chev {
+      transform: rotate(90deg);
+    }
+
+    details.faq .ans {
+      padding: 0 16px 16px;
+      font-size: 14px;
+      color: var(--text-2);
+    }
+
+    details.faq .ans p {
+      margin: 0 0 10px;
+    }
+
+    details.faq .ans p:last-child {
+      margin: 0;
+    }
+
+    .trap {
+      display: flex;
+      gap: 10px;
+      font-size: 14px;
+      margin: 9px 0;
+    }
+
+    .trap .tn {
+      font-family: var(--mono);
+      font-size: 11px;
+      color: var(--bad);
+      flex: 0 0 auto;
+      border: 1px solid var(--bad-soft);
+      background: var(--bad-soft);
+      border-radius: 4px;
+      padding: 1px 6px;
+      height: fit-content;
+      margin-top: 2px;
+    }
+
+    /* mobile responsive */
+    .toc-toggle {
+      display: none;
+    }
+
+    @media (max-width: 920px) {
+      .wrap {
+        flex-direction: column;
+      }
+      .toc {
+        position: static;
+        width: auto;
+        height: auto;
+        border-right: none;
+        border-bottom: 1px solid var(--border);
+        padding: 18px 22px;
+        transition: none;
+      }
+      .toc-title {
+        margin-bottom: 0;
+      }
+      .toc-actions {
+        margin: 10px 0 0;
+      }
+      .toc-kicker {
+        margin-bottom: 10px;
+      }
+      .toc-nav {
+        display: none;
+        margin-top: 16px;
+      }
+      .toc-nav.open {
+        display: block;
+      }
+      .toc-toggle {
+        display: inline-block;
+        margin-top: 0;
+      }
+      .toc-collapse,
+      .toc-reopen {
+        display: none !important;
+      }
+      main {
+        padding: 0 22px;
+      }
+      .inner {
+        padding: 40px 0 100px;
+      }
+      .hero h1 {
+        font-size: 31px;
+      }
+    }
+
+    @media print {
+      .toc-reopen { display: none !important; }
+    }
+
+    @media (max-width: 480px) {
+      body {
+        font-size: 15px;
+      }
+      .hero h1 {
+        font-size: 27px;
+      }
+      h2 {
+        font-size: 23px;
+      }
+      .demo-body {
+        padding: 16px 13px;
+      }
+    }
+  </style>
+</head>
+<body data-topic-id="online-schema-migration">
+  <div class="wrap">
+    <!-- ===================== TOC SIDEBAR ===================== -->
+    <nav class="toc" id="toc-panel" aria-label="目錄">
+      <div class="toc-kicker">
+        <a href="../index.html">← 返回目錄</a>
+        <button class="toc-collapse" type="button" aria-expanded="true" aria-controls="toc-panel"
+                aria-label="收合目錄" title="收合目錄">
+          <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor"
+               stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M15 18l-6-6 6-6"/>
+          </svg>
+        </button>
+      </div>
+      <div class="toc-title">線上 Schema 變更與零停機 Migration</div>
+      <div class="toc-actions">
+        <button class="read-toggle" type="button" data-read-toggle aria-pressed="false" title="切換本文已讀狀態">
+          <span class="read-dot" aria-hidden="true"></span>
+          <span class="read-label">標記為已讀</span>
+        </button>
+        <button class="btn toc-toggle" type="button" aria-expanded="false" aria-controls="toc-nav">目錄 ▾</button>
+      </div>
+      <div class="toc-nav" id="toc-nav">
+        <a href="#s1"><span class="n">01</span>為什麼一句 10ms 的 ALTER 會癱瘓整座資料庫？</a>
+        <a href="#s2"><span class="n">02</span>資料庫原生防護原語：lock_timeout、CONCURRENTLY 與 NOT VALID</a>
+        <a href="#s3"><span class="n">03</span>破壞性變更與雙版本並存：Expand / Contract 實戰</a>
+        <a href="#s4"><span class="n">04</span>億級大表 Backfill：主鍵游標分批與動態節流</a>
+        <a href="#s5"><span class="n">05</span>影子表線上遷移工具：pt-online-schema-change vs gh-ost</a>
+        <a href="#s6"><span class="n">06</span>線上變更選型決策器、生產 Runbook 與面試追問</a>
+      </div>
+    </nav>
+    <button class="btn toc-reopen" type="button" aria-expanded="true" aria-controls="toc-panel"
+            aria-label="展開目錄" title="展開目錄">
+      <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor"
+           stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M9 18l6-6-6-6"/>
+      </svg>
+      <span>目錄</span>
+    </button>
+
+    <!-- ===================== MAIN CONTENT ===================== -->
+    <main>
+      <div class="inner">
+        <!-- demo-archetype: E｜決策器（主，第 6 節）＋F｜拆解器（次，第 3 節）＋B｜參數掃描（次，第 4 節） —
+     主 demo 讓讀者輸入資料庫引擎、變更動作、表規模熱度與並存回滾要求，推導線上變更路徑、鎖層級、是否重寫全表與防護步驟；
+     選 E 是因為線上 Schema 變更的核心考點正是依引擎機制與相容性邊界選出正確執行策略，且不與最近三篇撞形。
+     次 demo：第 3 節拆解並重排欄位改名的六個演進階段，即時檢驗新舊版程式讀寫與回滾相容性；
+     第 4 節調整表列數、批次大小、節流休眠與線上寫入量，即時試算 Backfill 耗時、複寫延遲與 P99 衝擊。 -->
+<style>
+  /* ---------- 圖表元件：Swimlane / Split / Row ---------- */
+  .osm-lane {
+    display: grid;
+    grid-template-columns: 52px repeat(3, 1fr);
+    gap: 1px;
+    background: var(--border);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    overflow: hidden;
+    margin: 14px 0 0;
+  }
+  .osm-lane > div {
+    background: #fff;
+    padding: 9px 11px;
+    font-size: 12.5px;
+    line-height: 1.52;
+  }
+  .osm-lane .lh {
+    background: var(--bg-soft);
+    font-family: var(--mono);
+    font-size: 11px;
+    font-weight: 700;
+    color: var(--text-2);
+  }
+  .osm-lane .lt {
+    background: var(--bg-soft);
+    font-family: var(--mono);
+    font-size: 11.5px;
+    font-weight: 600;
+    color: var(--text-3);
+  }
+  .osm-lane .lc.act  { background: var(--accent-soft); }
+  .osm-lane .lc.ok   { background: var(--ok-soft); }
+  .osm-lane .lc.warn { background: var(--warn-soft); }
+  .osm-lane .lc.bad  { background: var(--bad-soft); }
+  @media (max-width: 720px) {
+    .osm-lane {
+      grid-template-columns: 42px repeat(3, minmax(0, 1fr));
+      font-size: 11.5px;
+    }
+  }
+
+  .osm-split {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 12px;
+    margin: 14px 0 0;
+  }
+  @media (max-width: 680px) {
+    .osm-split { grid-template-columns: 1fr; }
+  }
+  .osm-pane {
+    border: 1px solid var(--border);
+    border-top: 3px solid var(--border-strong);
+    border-radius: var(--radius-sm);
+    background: #fff;
+    padding: 14px 16px;
+  }
+  .osm-pane.accent { border-top-color: var(--accent); }
+  .osm-pane.ok     { border-top-color: var(--ok); }
+  .osm-pane .pt {
+    font-weight: 700;
+    font-size: 14px;
+    color: var(--text);
+    margin-bottom: 2px;
+  }
+  .osm-pane .ps {
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--text-3);
+    margin-bottom: 9px;
+  }
+  .osm-pane ul {
+    list-style: disc;
+    margin: 0;
+    padding-left: 18px;
+    font-size: 13px;
+    color: var(--text-2);
+    line-height: 1.65;
+  }
+
+  .osm-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    align-items: stretch;
+    justify-content: center;
+    margin: 14px 0 0;
+  }
+  .osm-node {
+    border: 1px solid var(--border-strong);
+    border-radius: 8px;
+    background: #fff;
+    padding: 9px 11px;
+    min-width: 110px;
+    max-width: 148px;
+    text-align: center;
+  }
+  .osm-node .nn {
+    font-family: var(--mono);
+    font-size: 12px;
+    font-weight: 700;
+    color: var(--text);
+  }
+  .osm-node .ns {
+    font-size: 11px;
+    color: var(--text-2);
+    margin-top: 3px;
+    line-height: 1.4;
+  }
+  .osm-node.accent { border-top: 3px solid var(--accent); }
+  .osm-node.warn   { border-top: 3px solid var(--warn); }
+  .osm-node.ok     { border-top: 3px solid var(--ok); }
+  .osm-arrow {
+    display: flex;
+    align-items: center;
+    font-family: var(--mono);
+    font-size: 13px;
+    color: var(--text-3);
+    white-space: nowrap;
+  }
+
+  /* ---------- 共用控制列與計算指標格 ---------- */
+  .osm-ctrl-head {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    margin-bottom: 14px;
+  }
+  .osm-chk-label {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    font-size: 12.5px;
+    color: var(--text-2);
+    cursor: pointer;
+  }
+  .osm-chk-label input {
+    accent-color: var(--accent);
+  }
+
+  .osm-kpi-grid {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 9px;
+    margin: 12px 0 14px;
+  }
+  @media (max-width: 720px) {
+    .osm-kpi-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  }
+  .osm-kpi-card {
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    background: var(--bg-soft);
+    padding: 9px 11px;
+  }
+  .osm-kpi-card .kl {
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--text-3);
+    margin-bottom: 3px;
+  }
+  .osm-kpi-card .kv {
+    font-family: var(--mono);
+    font-size: 13.5px;
+    font-weight: 700;
+    color: var(--text);
+    line-height: 1.35;
+  }
+  .osm-kpi-card .kv.ok   { color: var(--ok); }
+  .osm-kpi-card .kv.warn { color: var(--warn); }
+  .osm-kpi-card .kv.bad  { color: var(--bad); }
+
+  .osm-knobs {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 11px 16px;
+    margin-bottom: 12px;
+  }
+  @media (max-width: 640px) {
+    .osm-knobs { grid-template-columns: 1fr; }
+  }
+  .osm-knob {
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+    font-size: 12.5px;
+    color: var(--text-2);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    background: var(--bg-soft);
+    padding: 9px 12px;
+  }
+  .osm-knob .kl {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    gap: 8px;
+  }
+  .osm-knob .kl strong {
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--accent);
+  }
+  .osm-knob input[type="range"] {
+    width: 100%;
+    accent-color: var(--accent);
+    cursor: pointer;
+  }
+  .osm-knob select {
+    width: 100%;
+    border: 1px solid var(--border-strong);
+    border-radius: 6px;
+    background: #fff;
+    padding: 6px 9px;
+    font-size: 13px;
+    color: var(--text);
+    cursor: pointer;
+  }
+
+  /* ---------- Demo 1：五階段順序重排拆解器 ---------- */
+  .osm-ord-list {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .osm-ord-list[hidden] { display: none; }
+  .osm-ord-item {
+    border: 1px solid var(--border-strong);
+    border-left: 4px solid var(--border-strong);
+    border-radius: var(--radius-sm);
+    background: #fff;
+    padding: 10px 12px;
+    transition: border-color .15s, background .15s;
+  }
+  .osm-ord-item.ok {
+    border-left-color: var(--ok);
+  }
+  .osm-ord-item.warn {
+    border-left-color: var(--warn);
+    background: var(--warn-soft);
+  }
+  .osm-ord-item.bad {
+    border-left-color: var(--bad);
+    background: var(--bad-soft);
+  }
+  .osm-ord-top {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    flex-wrap: wrap;
+  }
+  .osm-ord-title {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    font-size: 13.5px;
+    font-weight: 700;
+    color: var(--text);
+  }
+  .osm-ord-idx {
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--accent);
+    background: var(--accent-soft);
+    border: 1px solid var(--accent-line);
+    border-radius: 4px;
+    padding: 1px 6px;
+  }
+  .osm-ord-btns {
+    display: inline-flex;
+    gap: 5px;
+  }
+  .osm-move-btn {
+    font-family: var(--mono);
+    font-size: 11.5px;
+    padding: 3px 9px;
+    border: 1px solid var(--border-strong);
+    border-radius: 5px;
+    background: var(--bg);
+    color: var(--text-2);
+  }
+  .osm-move-btn:hover:not(:disabled) {
+    background: var(--bg-soft);
+    color: var(--text);
+  }
+  .osm-move-btn:disabled {
+    opacity: .35;
+    cursor: not-allowed;
+  }
+  .osm-ord-meta {
+    margin-top: 6px;
+    font-family: var(--mono);
+    font-size: 11.5px;
+    color: var(--text-2);
+  }
+  .osm-probe-pills {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-top: 7px;
+  }
+  .osm-pill {
+    font-family: var(--mono);
+    font-size: 11px;
+    padding: 2px 8px;
+    border-radius: 5px;
+    border: 1px solid var(--border-strong);
+    background: var(--bg-soft);
+    color: var(--text-2);
+  }
+  .osm-pill.ok {
+    background: var(--ok-soft);
+    border-color: var(--ok);
+    color: var(--ok);
+  }
+  .osm-pill.warn {
+    background: var(--warn-soft);
+    border-color: var(--warn);
+    color: var(--warn);
+  }
+  .osm-pill.bad {
+    background: var(--bad-soft);
+    border-color: var(--bad);
+    color: var(--bad);
+    font-weight: 600;
+  }
+  .osm-ord-note {
+    margin-top: 6px;
+    font-size: 12.5px;
+    color: var(--text-2);
+    line-height: 1.5;
+  }
+
+  /* ---------- Demo 2：SVG 畫布框 ---------- */
+  .osm-svg-box {
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    background: #fff;
+    padding: 8px 10px;
+    margin-top: 6px;
+  }
+
+  /* ---------- Demo 3：選型決策器輸出面板 ---------- */
+  .osm-dec-hero {
+    border: 1px solid var(--accent-line);
+    border-left: 4px solid var(--accent);
+    border-radius: var(--radius-sm);
+    background: var(--accent-soft);
+    padding: 12px 15px;
+    margin: 12px 0;
+  }
+  .osm-dec-hero.ok {
+    border-color: var(--ok);
+    background: var(--ok-soft);
+  }
+  .osm-dec-hero.warn {
+    border-color: var(--warn);
+    background: var(--warn-soft);
+  }
+  .osm-dec-tag {
+    font-family: var(--mono);
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: .06em;
+    text-transform: uppercase;
+    color: var(--accent);
+    margin-bottom: 3px;
+  }
+  .osm-dec-title {
+    font-size: 16px;
+    font-weight: 700;
+    color: var(--text);
+    margin-bottom: 4px;
+  }
+  .osm-dec-why {
+    font-size: 13.5px;
+    color: var(--text-2);
+    margin: 0;
+    line-height: 1.58;
+  }
+  .osm-dec-cols {
+    display: grid;
+    grid-template-columns: 1fr 1.15fr;
+    gap: 12px;
+    margin-top: 10px;
+  }
+  @media (max-width: 720px) {
+    .osm-dec-cols { grid-template-columns: 1fr; }
+  }
+  .osm-dec-box {
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    background: #fff;
+    padding: 11px 13px;
+  }
+  .osm-dec-box .bt {
+    font-family: var(--mono);
+    font-size: 11.5px;
+    font-weight: 700;
+    color: var(--text-2);
+    margin-bottom: 8px;
+  }
+  .osm-path-ul {
+    list-style: disc;
+    margin: 0;
+    padding-left: 18px;
+    font-size: 12.8px;
+    color: var(--text-2);
+    line-height: 1.62;
+  }
+  .osm-sql-pre {
+    margin: 0;
+    padding: 10px 12px;
+    font-size: 12px;
+    line-height: 1.55;
+    background: var(--code-bg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    overflow-x: auto;
+  }
+</style>
+
+<header class="hero">
+  <div class="eyebrow">Database Internals · 系統設計手冊</div>
+  <h1>線上 Schema 變更與零停機 Migration</h1>
+  <p class="lede">在每秒承受數千筆讀寫的線上資料表上改結構，真正的殺手往往不是 <code>ALTER TABLE</code> 本身跑得慢，而是一把等不到前序交易釋放的排他元資料鎖，加上滾動部署期間新舊版程式對同一張表的契約撕裂。</p>
+  <div class="meta">
+    <span class="tag">Metadata Lock Convoy</span>
+    <span class="tag">INSTANT / CONCURRENTLY</span>
+    <span class="tag">Expand &amp; Contract</span>
+    <span class="tag">Keyset Backfill &amp; Throttling</span>
+    <span class="tag">gh-ost vs pt-osc</span>
+  </div>
+</header>
+
+<section id="s1">
+  <div class="sec-head">
+    <span class="sec-num">01</span>
+    <h2>為什麼一句 10ms 的 ALTER 會癱瘓整座資料庫？</h2>
+  </div>
+  <p class="sec-sub">從 Metadata Lock 佇列護航效應與實體重寫代價出發，拆解 PostgreSQL 與 MySQL InnoDB 的 DDL 鎖行為。</p>
+  <p>在單機開發環境對幾千列的資料表下 <code>ALTER TABLE users ADD COLUMN ...</code>，毫秒間就能收工；但把同一句 SQL 放到每秒數千筆查詢的生產主庫，卻經常在三十秒內把應用端連線池全部卡死、觸發全站雪崩。許多工程師的第一反應是「因為大表搬移資料很慢」，但真實事故現場裡，<strong>就算是一句只需要 5 毫秒改完資料字典（Catalog）的輕量 DDL，照樣能癱瘓整座叢集</strong>。</p>
+
+  <p>在進入細節前先劃清知識邊界：資料列鎖、區間鎖（Gap / Next-Key Lock）與死鎖偵測機制由<a href="../database-locking-deadlock/index.html">資料庫鎖與死鎖</a>篇負責；服務實例的滾動更新與金絲雀流量調度由<a href="../deployment-strategies/index.html">部署與發佈策略</a>篇負責；跨實體節點的資料分片搬遷則由<a href="../data-sharding-in-practice/index.html">分片實戰與線上擴容</a>篇負責。本篇專注於<strong>單一邏輯資料庫內，如何在讀寫不中斷的前提下安全演進表結構與資料內容</strong>。</p>
+
+  <h3>頭號殺手：元資料鎖佇列護航效應（Lock Queue Convoy）</h3>
+  <p>無論是 PostgreSQL 的表級鎖（Table-level Lock）還是 MySQL Server 層的 <strong>Metadata Lock（MDL）</strong>，都必須保護「查詢執行期間表結構不會半路變形」這條不變量。因此，哪怕是最普通的快照讀 <code>SELECT</code>（不加任何列鎖），在執行期間都會持有一把最輕量的共享結構鎖——PostgreSQL 稱為 <code>ACCESS SHARE</code>，MySQL 稱為 <code>MDL_SHARED_READ</code>。</p>
+
+  <p>這把共享鎖平時與所有的 <code>SELECT</code>、<code>INSERT</code>、<code>UPDATE</code> 完全相容，唯獨與修改表定義所需的最高級排他鎖——PostgreSQL 的 <code>ACCESS EXCLUSIVE</code> 與 MySQL 的 <code>MDL_EXCLUSIVE</code>——<strong>正面互斥</strong>。更致命的是，鎖管理器的等待佇列為了防止排他鎖「餓死（Starvation）」，一旦有 <code>ALTER TABLE</code> 在佇列中排隊等鎖，<strong>後續新抵達的所有普通 <code>SELECT</code> 與 <code>INSERT</code> 都不能插隊，必須排在這句 <code>ALTER</code> 後面</strong>：</p>
+
+  <div class="osm-lane">
+    <div class="lh">時刻</div>
+    <div class="lh">慢查詢 Tx A</div>
+    <div class="lh">變更腳本 Tx B (DDL)</div>
+    <div class="lh">線上業務查詢 Tx C1..C500</div>
+
+    <div class="lt">t1</div>
+    <div class="lc act">報表慢查詢或未提交的 <code>idle in transaction</code>，持續握著 <code>MDL_SHARED_READ</code> / <code>ACCESS SHARE</code></div>
+    <div class="lc">尚未執行</div>
+    <div class="lc ok">同拿共享鎖，每秒數千筆正常讀寫</div>
+
+    <div class="lt">t2</div>
+    <div class="lc act">仍在執行中（已跑 15 秒，預計還需 45 秒）</div>
+    <div class="lc warn">送出 <code>ALTER TABLE</code>：請求排他鎖，被 Tx A 擋住，進入鎖佇列等待</div>
+    <div class="lc bad">新來的 <code>SELECT</code> 因佇列中有排他鎖申請，<strong>全數被擋在 Tx B 後方</strong></div>
+
+    <div class="lt">t3</div>
+    <div class="lc act">繼續慢慢掃描，對外頭的災難毫不知情</div>
+    <div class="lc warn">繼續死等 Tx A 結束</div>
+    <div class="lc bad">短短數秒堆積數百條等待執行緒，應用端 Connection Pool 耗盡、HTTP 502/504</div>
+
+    <div class="lt">t4</div>
+    <div class="lc">終於提交並釋放共享鎖（或被 DBA 手動強殺）</div>
+    <div class="lc ok">取得排他鎖，花 5ms 改完 Catalog 後釋放</div>
+    <div class="lc warn">瞬間湧入積壓請求，引發短暫 CPU 尖峰後才恢復</div>
+  </div>
+  <p class="cap">鎖佇列放大效應：把服務打掛的不是 t4 那 5 毫秒的 Catalog 變更，而是 t2 到 t4 之間「一筆慢交易卡住 DDL、DDL 反過來擋死全站普通查詢」的三方連鎖阻塞。</p>
+
+  <h3>第二重代價：全表實體重寫（Table Rewrite）vs 原地與瞬間演算法</h3>
+  <p>躲過鎖排隊只是第一關；第二關是<strong>這句 DDL 在拿到鎖之後到底要做多少實體 I/O</strong>。現代引擎把 DDL 分為三個量級：</p>
+  <ul>
+    <li><strong>瞬間元資料變更（Metadata-only / <code>INSTANT</code>）</strong>：只修改系統目錄或資料列版本表，不掃描也不改寫既有資料頁。PostgreSQL 11 起，<code>ADD COLUMN ... DEFAULT &lt;非揮發常數&gt;</code> 會將預設值存在 <code>pg_attribute.attmissingval</code>，讀取舊 Tuple 時由引擎動態補上，億級大表也能在數毫秒內收工（注意：若預設值是 <code>random()</code> 或 <code>gen_random_uuid()</code> 這類每次求值不同的揮發函式，仍會強制重寫全表）。MySQL 8.0.12 引入尾端加欄的 <code>ALGORITHM=INSTANT</code>，8.0.29 起更透過列版本號（最多累積 64 個版本）支援任意位置加減欄位。</li>
+    <li><strong>原地線上變更（<code>INPLACE</code> + Online DML Log）</strong>：需要在背景掃描資料頁（例如建立次級索引），但不建立整張新表；引擎在掃描期間將併發的業務 <code>INSERT/UPDATE/DELETE</code> 暫存在記憶體變更日誌（MySQL <code>innodb_online_alter_log_max_size</code>），掃描尾聲再追平並短暫升級排他鎖完成切換。</li>
+    <li><strong>全表實體重寫（Table Rewrite / <code>COPY</code>）</strong>：例如將主鍵從 <code>INT</code> 改為 <code>BIGINT</code>，每一列的實體 byte 佈局都改變，資料庫必須配置全新檔案把數億列逐一轉型重寫並重建所有索引——磁碟空間瞬間翻倍，且在原生 <code>ALTER</code> 下會長時間鎖死寫入（PostgreSQL 甚至全程握緊 <code>ACCESS EXCLUSIVE</code> 連讀一起封死）。</li>
+  </ul>
+
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>常見 DDL 操作</th>
+          <th>PostgreSQL (14+) 鎖與重寫行為</th>
+          <th>MySQL 8.0 InnoDB 演算法與鎖行為</th>
+          <th>線上直跑風險</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>新增可空欄位 / 常數預設值欄位</td>
+          <td class="hl">短暫 <code>ACCESS EXCLUSIVE</code>；僅改 Catalog，<strong>免重寫表</strong></td>
+          <td class="hl"><code>ALGORITHM=INSTANT</code>；僅改資料字典（頭尾短暫 MDL）</td>
+          <td>低（仍須設 <code>lock_timeout</code> 防排隊）</td>
+        </tr>
+        <tr>
+          <td>放寬字串長度<br><code>VARCHAR(64) &rarr; VARCHAR(128)</code></td>
+          <td>短暫 <code>ACCESS EXCLUSIVE</code>；共用 <code>varlena</code> 格式免重寫表（若被視圖或函式索引引用除外）</td>
+          <td><strong>陷阱！</strong><code>utf8mb4</code> 下 64 字元為 256B（2-byte 長度前綴）可 <code>INPLACE</code>；但 <code>VARCHAR(60) &rarr; VARCHAR(100)</code> 跨過 255B 邊界會退回 <code>COPY</code> 鎖表重寫</td>
+          <td>中（MySQL 必加 <code>ALGORITHM=INPLACE, LOCK=NONE</code> 斷言）</td>
+        </tr>
+        <tr>
+          <td>放大整數型別<br><code>INT &rarr; BIGINT</code></td>
+          <td>全程持有 <code>ACCESS EXCLUSIVE</code> <strong>重寫整張 Heap 與相關索引</strong></td>
+          <td><code>ALGORITHM=COPY</code>（鎖寫入全表拷貝重寫）</td>
+          <td>極高（億級表必停擺，須走 Expand/Contract 或影子表）</td>
+        </tr>
+        <tr>
+          <td>建立次級索引</td>
+          <td>一般 <code>CREATE INDEX</code> 拿 <code>SHARE</code> 擋寫入；加 <code>CONCURRENTLY</code> 降為 <code>SHARE UPDATE EXCLUSIVE</code> 不擋讀寫</td>
+          <td class="hl">預設 <code>ALGORITHM=INPLACE, LOCK=NONE</code> 背景建 B+Tree 並重放 Online Row Log</td>
+          <td>中（耗 I/O 與暫存空間，PG 失敗會留 <code>INVALID</code> 索引）</td>
+        </tr>
+        <tr>
+          <td>既有欄位直接加 <code>NOT NULL</code></td>
+          <td>直接 <code>SET NOT NULL</code> 需握 <code>ACCESS EXCLUSIVE</code> 全表掃描驗證；改走 <code>CHECK NOT VALID</code> 才免長鎖</td>
+          <td><code>ALGORITHM=INPLACE</code> 全表掃描檢查是否有 NULL（高併發易撐爆 Online Log）</td>
+          <td>高（大表嚴禁裸下 <code>SET NOT NULL</code>）</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="cap">同一個 SQL 子句在不同引擎與邊界條件下可能相差萬倍耗時；MySQL 建議顯式指定 <code>ALGORITHM=INSTANT</code> 或 <code>LOCK=NONE</code>，一旦引擎發現做不到就會立即報錯退回，而非默默退化成鎖表重寫。</p>
+
+  <div class="callout warn">
+    <div class="c-title"><span class="ic">陷阱</span>外層交易包裹多句 DDL 會把短鎖拖成長鎖</div>
+    <p>PostgreSQL 支援交易式 DDL（Transactional DDL）。許多 ORM Migration 框架預設把「瞬間加欄位」與「耗時資料轉換」包進同一個 <code>BEGIN ... COMMIT</code> 區塊——一旦第一句取得 <code>ACCESS EXCLUSIVE</code>，<strong>這把最高級排他鎖會一路握到整個交易 <code>COMMIT</code> 才釋放</strong>！在生產環境中，需要排他鎖的 Catalog 變更必須拆成獨立的極短交易單獨提交。</p>
+  </div>
+
+  <div class="oneliner">
+    <b>一句話答法</b>線上 DDL 有兩道生死線：進場時怕慢查詢卡住排他鎖引發 FIFO 佇列雪崩，進場後怕觸發全表實體重寫；前者靠鎖逾時快速放棄，後者靠瞬間元資料演算法、雙階段驗證或影子表繞開。
+  </div>
+</section>
+
+<section id="s2">
+  <div class="sec-head">
+    <span class="sec-num">02</span>
+    <h2>資料庫原生防護原語：lock_timeout、CONCURRENTLY 與 NOT VALID</h2>
+  </div>
+  <p class="sec-sub">在不引入外部工具的前提下，把排他鎖持有時間壓到毫秒級、把全表掃描降級為不擋讀寫的背景驗證。</p>
+  <p>在搬出沉重的外部遷移框架之前，現代關聯式資料庫其實內建了三把極其實用的安全手術刀。只要掌握它們的運作邊界，八成以上的日常加欄、建索引與補約束都能在毫秒級鎖視窗內安全落地。</p>
+
+  <h3>第一道防線：<code>lock_timeout</code> 快敗重試迴圈（絕不裸跑 DDL）</h3>
+  <p>既然第 1 節的雪崩源自「<code>ALTER</code> 卡在鎖佇列裡死等慢查詢」，最直接的解法就是<strong>嚴禁 DDL 在佇列裡久留</strong>。切記區分 <code>statement_timeout</code>（限制整句 SQL 總執行時間）與 <code>lock_timeout</code>（專管等鎖排隊時間）：我們只希望「搶不到鎖時在 1～2 秒內立刻放棄讓路」，若搶到鎖開始安全做事就不該誤殺。</p>
+
+  <pre><code>-- PostgreSQL：外層由腳本以指數退避重試 5~10 次，每次只允許排隊 1.5 秒
+BEGIN;
+  SET LOCAL lock_timeout = '1500ms';
+  ALTER TABLE orders ADD COLUMN phone_e164 VARCHAR(32);
+COMMIT;
+
+-- MySQL 8.0：鎖等待上限設為 2 秒，並強制斷言必須走 INSTANT 演算法
+SET SESSION lock_wait_timeout = 2;
+ALTER TABLE orders ADD COLUMN phone_e164 VARCHAR(32), ALGORITHM=INSTANT;</code></pre>
+
+  <p>一旦線上恰巧有慢查詢佔著共享鎖，<code>ALTER</code> 會在 1.5 秒後主動拋出鎖逾時錯誤退出佇列，積壓在它後方的業務請求瞬間恢復暢通；部署腳本休息數秒後再次嘗試，直到逮到沒有長查詢的空檔完成毫秒級寫入。<strong>寧可讓發佈流水線重試十次，也絕不讓線上請求陪葬排隊三秒。</strong></p>
+
+  <h3>第二道防線：<code>CREATE INDEX CONCURRENTLY</code> 的兩階段追趕</h3>
+  <p>在億級大表建立索引必然要讀取並排序全表資料。傳統 <code>CREATE INDEX</code> 持有 <code>SHARE</code> 鎖，掃描半小時就封鎖寫入半小時；加上 <code>CONCURRENTLY</code> 後，PostgreSQL 改拿與普通讀寫完全相容的 <code>SHARE UPDATE EXCLUSIVE</code>（僅與其他 DDL 或 <code>VACUUM FULL</code> 互斥），拆成三個內部交易分兩趟掃描完成：</p>
+
+  <pre class="mermaid">
+sequenceDiagram
+    participant D as DDL 工作階段
+    participant C as 系統目錄
+    participant W as 線上寫入交易
+    participant H as 資料表與索引
+    D->>C: 登記 INVALID 索引
+    Note over C,W: 等待舊寫入提交
+    W->>H: 新寫入同步維護新索引
+    D->>H: 第一趟基準快照掃描
+    Note over D,W: 等待期間開啟的交易結束
+    D->>H: 第二趟掃描補齊遺漏列
+    D->>C: 標記索引 VALID 可用
+</pre>
+  <p class="cap"><code>CONCURRENTLY</code> 不必鎖寫入的秘密：先讓新來的寫入主動雙寫新索引（HOT 鏈與狀態位同步），再靠第二趟快照掃描把「第一趟掃描前就已啟動、尚未提交」的那批邊界交易補齊。</p>
+
+  <div class="callout warn">
+    <div class="c-title"><span class="ic">陷阱</span><code>INVALID</code> 幽靈索引殘骸與交易限制</div>
+    <p><code>CREATE INDEX CONCURRENTLY</code> 有兩條硬鐵律：第一，因為它內部必須自己分段提交多筆交易以推進快照，<strong>絕對不能包在 <code>BEGIN ... COMMIT</code> 區塊內執行</strong>（多數 ORM Migration 需顯式宣告關閉外層交易，如 Rails 的 <code>disable_ddl_transaction!</code> 或 Flyway 的 non-transactional 設定）。第二，若建唯一索引時撞上重複資料、或中途遭遇死鎖與斷線，系統目錄會留下一顆標記為 <code>INVALID</code> 的半成品索引——<strong>查詢最佳化器完全不會用它加速讀取，但每一筆線上 <code>INSERT / UPDATE</code> 卻仍被迫持續寫入它</strong>！上線腳本失敗後務必巡檢 <code>pg_index.indisvalid = false</code>，並以 <code>DROP INDEX CONCURRENTLY</code> 清除（PostgreSQL 12 起亦可用 <code>REINDEX INDEX CONCURRENTLY</code> 原地修復）。</p>
+  </div>
+
+  <h3>第三道防線：<code>NOT VALID</code> 兩段式約束與免鎖轉正 <code>NOT NULL</code></h3>
+  <p>替大表補上外鍵（Foreign Key）或非空約束（<code>NOT NULL</code>）是另一個高頻踩雷點：直接執行 <code>ADD CONSTRAINT ... FOREIGN KEY</code> 會在子表與父表同時掛鎖並掃描全表；直接執行 <code>ALTER COLUMN ... SET NOT NULL</code> 則會握著最高級 <code>ACCESS EXCLUSIVE</code> 掃過每一頁確認沒有空值。</p>
+
+  <p>正確工程手法是把「攔截未來新髒資料」與「驗證歷史存量資料」徹底拆開：</p>
+  <pre><code>-- 步驟 1（毫秒級短鎖）：掛上 NOT VALID 檢查約束，新寫入立即受檢，但不掃描歷史舊列
+SET lock_timeout = '1500ms';
+ALTER TABLE orders
+  ADD CONSTRAINT chk_orders_phone_nn CHECK (phone_e164 IS NOT NULL) NOT VALID;
+
+-- 步驟 2（不擋讀寫）：只拿 SHARE UPDATE EXCLUSIVE 慢慢掃完全表，將約束標記為 VALID
+ALTER TABLE orders VALIDATE CONSTRAINT chk_orders_phone_nn;
+
+-- 步驟 3（PostgreSQL 12+ 毫秒級免重掃）：引擎見 chk_orders_phone_nn 已驗證通過，
+-- 直接證明全表無 NULL，跳過全表掃描瞬間轉正為欄位級 NOT NULL，隨後卸除臨時約束
+SET lock_timeout = '1500ms';
+ALTER TABLE orders ALTER COLUMN phone_e164 SET NOT NULL;
+ALTER TABLE orders DROP CONSTRAINT chk_orders_phone_nn;</code></pre>
+
+  <div class="oneliner">
+    <b>一句話答法</b>原生安全 DDL 的三板斧：所有排他鎖操作必掛 <code>lock_timeout</code> 退避重試，建索引用 <code>CONCURRENTLY</code> 並監控 <code>INVALID</code> 殘骸，加外鍵或 <code>NOT NULL</code> 一律先掛 <code>NOT VALID</code> 攔新寫入、再用低階鎖 <code>VALIDATE</code> 驗舊資料。
+  </div>
+</section>
+
+<section id="s3">
+  <div class="sec-head">
+    <span class="sec-num">03</span>
+    <h2>破壞性變更與雙版本並存：Expand / Contract 實戰</h2>
+  </div>
+  <p class="sec-sub">引擎層的不鎖表救不了應用層的 SQL 報錯——拆解欄位改名、拆分與非空約束的相容演進順序。</p>
+  <p>許多團隊學完 <code>ALGORITHM=INSTANT</code> 後，興沖沖地在線上執行 <code>ALTER TABLE users RENAME COLUMN phone TO phone_e164</code>——資料庫確實只花 3 毫秒就改完了，但下一秒監控警報全面炸裂：線上正在運行的數十台舊版應用程式實例（<var>v1</var>）發出的每一條 <code>SELECT phone</code> 與 <code>INSERT INTO users (phone)</code> 全部拋出 <code>Unknown column 'phone'</code>！</p>
+
+  <p><a href="../deployment-strategies/index.html">部署與發佈策略</a>篇從流量調度視角指出：滾動更新與金絲雀發佈期間，線上必然同時存在 <var>v1</var> 與 <var>v2</var> 兩代程式碼共用同一座資料庫。落實到資料庫 Schema 與 SQL 契約層面，任何「改名、拆分欄位、合併欄位、改變資料語意或收緊約束」的破壞性變更，都必須拆解成<strong>向後與向前雙向相容的多階段 Expand / Contract 序列</strong>，且藏有三個極易在面試與實戰漏掉的資料庫細節：</p>
+
+  <ul>
+    <li><strong>新增欄位期（Expand）嚴禁直接掛無預設值的 <code>NOT NULL</code></strong>：新欄位剛加進去時，<var>v1</var> 完全不知道它的存在；若直接標記 <code>NOT NULL</code> 且無 <code>DEFAULT</code>，<var>v1</var> 的每一筆 <code>INSERT</code> 都會因違反非空約束當場失敗。</li>
+    <li><strong>切讀停寫期（Cutover）的「舊欄 <code>NOT NULL</code> 反咬陷阱」</strong>：假設舊欄位 <code>phone</code> 原本就帶有 <code>NOT NULL</code> 約束。當演進走到後期、新版程式 <var>v3</var> 準備「停止雙寫舊欄、只寫新欄 <code>phone_e164</code>」時，如果忘了<strong>先解除舊欄 <code>phone</code> 的 <code>NOT NULL</code> 約束</strong>，<var>v3</var> 一上線就會因為沒填 <code>phone</code> 而全部寫入失敗！</li>
+    <li><strong>ORM 欄位快取與 <code>SELECT *</code> 防護</strong>：部分框架會在進程啟動時讀取系統表快取 Schema，若未宣告忽略即將廢棄的舊欄（如 Rails <code>ignored_columns</code>），直接執行 <code>DROP COLUMN</code> 仍會讓執行中的新版實例崩潰。MySQL 8.0.23 起可先下毫秒級的 <code>ALTER TABLE ... ALTER COLUMN phone SET INVISIBLE</code> 隱藏欄位觀察數日，確認零查詢引用後再真正刪除。</li>
+  </ul>
+
+  <h3>雙寫（Dual-Write）該寫在應用層還是資料庫 Trigger？</h3>
+  <p>在過渡期讓新舊欄位保持同步有兩種經典實作，兩者在「版本退場耦合」與「資料庫負載」上恰成互補：</p>
+
+  <div class="osm-split">
+    <div class="osm-pane accent">
+      <div class="pt">方案 A · 應用層雙寫（Application Dual-Write）</div>
+      <div class="ps">由新版程式 v2 同時寫入 old_col 與 new_col</div>
+      <ul>
+        <li><strong>優點</strong>：轉換邏輯（如電話國碼正規化）可用熟悉的應用語言撰寫並覆蓋完整單元測試；不消耗資料庫 CPU 解析觸發器。</li>
+        <li><strong>硬約束</strong>：只要線上還有任何一台 <var>v1</var> 實例存活（例如 Canary 僅放量 20%），<var>v1</var> 寫入的列其新欄仍是 <code>NULL</code>；因此<strong>最終一輪收尾 Backfill 必須在 <var>v1</var> 100% 下線後才能封口</strong>。</li>
+      </ul>
+    </div>
+    <div class="osm-pane ok">
+      <div class="pt">方案 B · 資料庫觸發器雙向鏡像（DB Trigger Sync）</div>
+      <div class="ps">BEFORE INSERT / UPDATE 自動互補新舊欄位</div>
+      <ul>
+        <li><strong>優點</strong>：在單筆交易內由引擎保證原子同步——哪怕 <var>v1</var> 只寫舊欄、或回滾後 <var>v1</var> 接手，Trigger 都會自動補齊另一欄，Backfill 可隨時開始且不會產生新空洞。</li>
+        <li><strong>代價</strong>：每筆寫入額外承受 Trigger 解譯開銷，複雜字串或跨表邏輯難以維護，且容易被開發者遺忘在資料庫內。</li>
+      </ul>
+    </div>
+  </div>
+  <p class="cap">選擇準則：欄位轉換邏輯複雜或寫入極高頻時優先走「應用層雙寫＋等 v1 全退場後封口回填」；多服務共用同一張表、難以同步升級所有寫入端時，用輕量 <code>BEFORE</code> Trigger 兜底最穩妥。</p>
+  <div class="demo" id="demo-expand-order">
+    <div class="demo-bar">
+      <span class="label">互動拆解器 · 欄位改名與非空約束演進順序實驗室</span>
+      <span class="label" style="text-transform:none;font-family:var(--sans);font-size:12px;color:var(--text-2)">上下調整六個變更動作的執行順序，即時拆解每個時間點的新舊版讀寫契約</span>
+    </div>
+    <div class="demo-body">
+      <div class="osm-ctrl-head">
+        <div class="seg" role="group" aria-label="演進順序預設情境">
+          <button type="button" data-ord-preset="canonical" aria-pressed="true">標準零停機順序</button>
+          <button type="button" data-ord-preset="early-nn" aria-pressed="false">誤區：過早鎖約束</button>
+          <button type="button" data-ord-preset="skip-backfill" aria-pressed="false">誤區：未回填先切讀</button>
+          <button type="button" data-ord-preset="early-drop" aria-pressed="false">誤區：過早刪舊欄</button>
+        </div>
+        <label class="osm-chk-label" for="ord-rollback-chk">
+          <input type="checkbox" id="ord-rollback-chk" checked>
+          <span>同時檢驗「發佈異常緊急退回前一版程式」是否掉資料或報錯</span>
+        </label>
+        <button type="button" class="btn" id="ord-reset-btn">重置標準順序</button>
+      </div>
+
+      <div class="osm-kpi-grid">
+        <div class="osm-kpi-card">
+          <div class="kl">讀寫探針結果</div>
+          <div class="kv" id="ord-kpi-safe">—</div>
+        </div>
+        <div class="osm-kpi-card">
+          <div class="kl">首個異常動作</div>
+          <div class="kv" id="ord-kpi-break">—</div>
+        </div>
+        <div class="osm-kpi-card">
+          <div class="kl">靜默漏寫／讀空值</div>
+          <div class="kv" id="ord-kpi-loss">—</div>
+        </div>
+        <div class="osm-kpi-card">
+          <div class="kl">緊急回滾保護</div>
+          <div class="kv" id="ord-kpi-rb">—</div>
+        </div>
+      </div>
+
+      <div class="osm-ord-list" id="ord-list" aria-live="polite"></div>
+
+      <div class="status-line" id="ord-status">載入演進計畫拆解器中…</div>
+      <div class="legend">
+        <span><i class="dot ns-ok"></i>新舊並存與回滾皆安全</span>
+        <span><i class="dot ns-lock"></i>可運行但回滾受限或有空值風險</span>
+        <span><i class="dot ns-bad"></i>SQL 報錯或寫入中斷</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="oneliner">
+    <b>一句話答法</b>欄位改名或拆分必須走「加可空新欄 &rarr; 部署雙寫與 Fallback 讀 &rarr; 等舊版全退場後分批回填 &rarr; 解舊欄 NOT NULL 並驗證新欄非空 &rarr; 切單寫新欄 &rarr; 觀察期後刪舊欄」，漏掉「先解舊欄 NOT NULL」是線上最隱蔽的翻車點。
+  </div>
+</section>
+
+<section id="s4">
+  <div class="sec-head">
+    <span class="sec-num">04</span>
+    <h2>億級大表 Backfill：主鍵游標分批與動態節流</h2>
+  </div>
+  <p class="sec-sub">把單筆毀滅性大交易拆成可觀測、可剎車的短交易微批次，守住 MVCC 垃圾回收與從庫複寫延遲預算。</p>
+  <p>當新欄位掛好、雙寫程式碼也全量上線後，接下來要把資料表裡既有的數千萬到數億筆歷史舊資料補齊（Backfill）。此時若直接執行一句看似無害的 <code>UPDATE orders SET phone_e164 = ... WHERE phone_e164 IS NULL;</code>，會在四個維度同時引爆生產事故：</p>
+
+  <ul>
+    <li><strong>列鎖覆蓋面失控</strong>：單筆長交易一路累積數千萬把排他列鎖直到提交才釋放，線上正常的訂單更新高機率撞鎖超時或形成環狀死鎖（見<a href="../database-locking-deadlock/index.html">資料庫鎖與死鎖</a>篇）。</li>
+    <li><strong>MVCC 版本膨脹與 Undo 塞爆</strong>：PostgreSQL 的每次 <code>UPDATE</code> 都會產生新 Tuple 並留下舊 Dead Tuple，長交易不提交會卡住全域最舊快照，令 <code>AUTOVACUUM</code> 無法清理垃圾；InnoDB 則會撐爆 Undo Log 拖垮快照讀性能（見<a href="../transaction-isolation-mvcc/index.html">交易隔離級別與 MVCC</a>篇）。</li>
+    <li><strong>主從複寫延遲（Replication Lag）尖峰</strong>：單筆巨型交易在提交瞬間傾倒數十 GB 的 WAL 或 Binlog，從庫回放執行緒被長交易獨佔，讀寫分離從庫瞬間落後數百秒（見<a href="../data-replication-basics/index.html">資料複製基礎</a>篇）。</li>
+    <li><strong>崩潰回滾災難</strong>：跑到第 99% 因逾時或 OOM 中斷時，資料庫必須逐列做 Undo Rollback，回滾耗費的磁碟 I/O 往往比正向寫入更久。</li>
+  </ul>
+
+  <h3>黃金範式：主鍵區間切批（Keyset Bounding）＋ 閉迴路節流</h3>
+  <p>工程上標準的 Backfill Worker 絕不使用 <code>LIMIT ... OFFSET</code>（深分頁會重掃前面數千萬筆索引，總複雜度退化為 <var>O(N&sup2;)</var>），而是沿著叢集主鍵（Clustered Primary Key）每次切一段固定寬度的 ID 區間獨立提交：</p>
+
+  <pre><code>-- 每次推進固定主鍵區間 (cursor, cursor + batch_size]，每批獨立交易提交
+UPDATE orders
+SET    phone_e164 = CONCAT('+886', SUBSTRING(phone, 2))
+WHERE  id &gt; :cursor
+  AND  id &lt;= :cursor + :batch_size
+  AND  phone_e164 IS NULL;</code></pre>
+
+  <div class="callout accent">
+    <div class="c-title"><span class="ic">關鍵</span>為什麼用 <code>id &lt;= :cursor + :batch_size</code> 封頂，而不是 <code>WHERE col IS NULL LIMIT 2000</code>？</div>
+    <p>假設資料表中間有一段連續兩千萬筆資料早已由雙寫填好非空值，而 <code>phone_e164</code> 上又還沒有索引。若寫成 <code>WHERE id &gt; :cursor AND phone_e164 IS NULL ORDER BY id LIMIT 2000</code>，資料庫為了湊滿 2,000 筆空值，會在<strong>單一交易內一口氣掃過兩千萬個主鍵頁</strong>，瞬間退化成慢查詢！用主鍵上下界把掃描範圍硬鎖在 <var>batch_size</var> 個 ID 內，哪怕這批只有 0 筆需要更新，單批 I/O 上限也永遠可預測。</p>
+  </div>
+
+  <div class="osm-row">
+    <div class="osm-node accent">
+      <div class="nn">1. 主鍵切片</div>
+      <div class="ns">(cursor, cursor+B]</div>
+    </div>
+    <span class="osm-arrow">▸</span>
+    <div class="osm-node">
+      <div class="nn">2. 短交易更新</div>
+      <div class="ns">獨立 COMMIT 釋鎖</div>
+    </div>
+    <span class="osm-arrow">▸</span>
+    <div class="osm-node">
+      <div class="nn">3. 日誌傳遞</div>
+      <div class="ns">WAL / Binlog 回放</div>
+    </div>
+    <span class="osm-arrow">▸</span>
+    <div class="osm-node warn">
+      <div class="nn">4. 健康度探針</div>
+      <div class="ns">查 Lag 與活躍執行緒</div>
+    </div>
+    <span class="osm-arrow">▸</span>
+    <div class="osm-node ok">
+      <div class="nn">5. 動態休眠</div>
+      <div class="ns">Sleep 或暫停讓路</div>
+    </div>
+  </div>
+  <p class="cap">閉迴路節流管線：Worker 每跑完幾批就讀取從庫複寫延遲與主庫 <code>Threads_running</code>，一旦逼近警戒水位立即拉長休眠或完全暫停，把 I/O 優先權讓給線上業務。</p>
+
+  <p>設總列數為 <var>N</var>、單批大小為 <var>B</var>、單批資料庫執行耗時為 <var>t_exec</var>、批次間固定休眠為 <var>t_sleep</var>，且從庫最大回放速率為 <var>C_rep</var>（列／秒）、線上業務自身寫入速率為 <var>W_app</var>，則有效推進吞吐率 <var>R_bf</var> 與總耗時需同時滿足：</p>
+
+  <div class="formula">R_bf = B / (t_exec + t_sleep) &nbsp;&nbsp;&amp;&nbsp;&nbsp; W_app + R_bf &lt; C_rep</div>
+
+  <p>只要 <var>W_app + R_bf &gt; C_rep</var>，超出從庫回放能力的差額就會逐秒累積成複寫延遲峰值；此時把 <var>B</var> 調小（壓低單批鎖持有毫秒數）並拉大 <var>t_sleep</var>，就是用「背景總遷移時長（數十分鐘至數小時）」換取「線上 P99 零抖動」。</p>
+  <div class="demo" id="demo-backfill-sim">
+    <div class="demo-bar">
+      <span class="label">互動參數掃描 · 大表 Backfill 與影子表節流試算器</span>
+      <span class="label" style="text-transform:none;font-family:var(--sans);font-size:12px;color:var(--text-2)">拖動滑桿觀察批次大小、休眠間隔與業務寫入量如何決定耗時與複寫延遲</span>
+    </div>
+    <div class="demo-body">
+      <div class="osm-ctrl-head">
+        <div class="seg" role="group" aria-label="資料回填與搬遷機制">
+          <button type="button" data-bf-mode="chunked" aria-pressed="true">原表分批 Backfill</button>
+          <button type="button" data-bf-mode="ptosc" aria-pressed="false">Trigger 影子表 (pt-osc)</button>
+          <button type="button" data-bf-mode="ghost" aria-pressed="false">Binlog 影子表 (gh-ost)</button>
+        </div>
+        <button type="button" class="btn" id="bf-reset-btn">重置參數</button>
+      </div>
+
+      <div class="osm-knobs">
+        <label class="osm-knob" for="bf-rows">
+          <span class="kl">資料表總列數 <strong id="bf-rows-val">60M 列</strong></span>
+          <input type="range" id="bf-rows" min="5" max="200" step="5" value="60">
+        </label>
+        <label class="osm-knob" for="bf-batch">
+          <span class="kl">單批大小 (batch_size) <strong id="bf-batch-val">2,500 列</strong></span>
+          <input type="range" id="bf-batch" min="500" max="50000" step="500" value="2500">
+        </label>
+        <label class="osm-knob" for="bf-sleep">
+          <span class="kl">批次休眠間隔 (sleep) <strong id="bf-sleep-val">40 ms</strong></span>
+          <input type="range" id="bf-sleep" min="0" max="300" step="10" value="40">
+        </label>
+        <label class="osm-knob" for="bf-qps">
+          <span class="kl">線上業務寫入速率 <strong id="bf-qps-val">2,200 筆/秒</strong></span>
+          <input type="range" id="bf-qps" min="200" max="8000" step="200" value="2200">
+        </label>
+      </div>
+
+      <div class="osm-kpi-grid">
+        <div class="osm-kpi-card">
+          <div class="kl">預估總耗時</div>
+          <div class="kv" id="bf-out-duration">—</div>
+        </div>
+        <div class="osm-kpi-card">
+          <div class="kl">單批鎖持有／交易耗時</div>
+          <div class="kv" id="bf-out-lock">—</div>
+        </div>
+        <div class="osm-kpi-card">
+          <div class="kl">從庫複寫延遲峰值</div>
+          <div class="kv" id="bf-out-lag">—</div>
+        </div>
+        <div class="osm-kpi-card">
+          <div class="kl">線上寫入 P99 衝擊</div>
+          <div class="kv" id="bf-out-p99">—</div>
+        </div>
+      </div>
+
+      <div class="osm-svg-box">
+        <svg id="bf-svg" viewBox="0 0 680 186" style="width:100%;height:auto" role="img" aria-label="從庫回放容量水位與複寫延遲曲線">
+          <title>從庫回放容量預算與遷移期間複寫延遲變化圖</title>
+        </svg>
+      </div>
+
+      <div class="status-line" id="bf-status">載入節流試算器中…</div>
+      <div class="legend">
+        <span><i class="dot ns-wait"></i>線上業務寫入負載</span>
+        <span><i class="dot ns-lock"></i>Trigger 同步放大／自動節流介入</span>
+        <span><i class="dot ns-ok"></i>安全水位（Lag &le; 2s）</span>
+        <span><i class="dot ns-bad"></i>超出從庫回放上限（Lag 持續堆積）</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="oneliner">
+    <b>一句話答法</b>大表回填永遠走「主鍵區間切片＋每批幾千列短交易提交＋監控從庫延遲動態 Sleep」；單批寧可抓 1,000～5,000 列跑兩小時，也絕不開五萬列大交易賭線上不死鎖。
+  </div>
+</section>
+
+<section id="s5">
+  <div class="sec-head">
+    <span class="sec-num">05</span>
+    <h2>影子表線上遷移工具：pt-online-schema-change vs gh-ost</h2>
+  </div>
+  <p class="sec-sub">當全表重寫無可避免時，如何靠「背景分批拷貝＋增量變更追趕＋原子換表」達成近乎零感知的線上重構。</p>
+  <p>當遇到「主鍵由 <code>INT</code> 升 <code>BIGINT</code>」、「調整叢集索引順序」、「轉移字元集 <code>utf8mb4</code>」或「回收數百 GB 刪除碎片」這類<strong>物理上無可避免必須重寫整張表</strong>的手術時，即便 MySQL 提供部分 <code>INPLACE</code> 支援，它也存在兩個致命硬傷：第一，引擎全速掃盤無法感知「從庫是不是已經延遲了三十秒」而自動踩剎車；第二，高寫入期間一旦增量緩衝區（<code>innodb_online_alter_log_max_size</code>）被塞滿，耗時兩小時的 DDL 會在最後一刻直接報錯作廢。</p>
+
+  <p>為了解決這道難題，業界發展出成熟的<strong>影子表（Shadow / Ghost Table）線上遷移架構</strong>：不在原表上動刀，而是先建一張套用好新結構的空表（毫秒級完成），接著在背景同時推進<strong>「存量分批拷貝」</strong>與<strong>「增量異動追趕」</strong>，等兩張表完全同步後，再用毫秒級的原子 <code>RENAME TABLE</code> 瞬間偷天換日。</p>
+
+  <h3>兩大流派對決：Trigger 同步觸發（pt-osc）vs Binlog 非同步串流（gh-ost）</h3>
+  <p>Percona 的 <code>pt-online-schema-change</code> 與 GitHub 開源的 <code>gh-ost</code> 走了截然不同的增量擷取路線，這決定了它們在高併發熱表上的生死表現：</p>
+
+  <svg viewBox="0 0 720 268" style="width:100%;height:auto" role="img" aria-label="pt-osc 觸發器同步寫入與 gh-ost Binlog 非同步串流架構對照">
+    <title>pt-online-schema-change 與 gh-ost 增量同步架構對照圖</title>
+    <defs>
+      <marker id="osm-arr-ink" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+        <path d="M 0 1 L 9 5 L 0 9 z" fill="#6b7078"/>
+      </marker>
+      <marker id="osm-arr-warn" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+        <path d="M 0 1 L 9 5 L 0 9 z" fill="#a3743e"/>
+      </marker>
+      <marker id="osm-arr-ok" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+        <path d="M 0 1 L 9 5 L 0 9 z" fill="#4d7d68"/>
+      </marker>
+    </defs>
+
+    <!-- Left Panel: pt-osc -->
+    <rect x="6" y="8" width="344" height="252" rx="9" fill="#fafaf9" stroke="#dedcd8"/>
+    <text x="22" y="31" font-family="var(--mono)" font-size="12" font-weight="700" fill="#a3743e">pt-osc · 業務交易內 Trigger 同步雙寫</text>
+
+    <rect x="22" y="48" width="96" height="46" rx="6" fill="#ffffff" stroke="#dedcd8"/>
+    <text x="70" y="68" text-anchor="middle" font-family="var(--mono)" font-size="11.5" font-weight="700" fill="#262a2f">線上寫入 Tx</text>
+    <text x="70" y="84" text-anchor="middle" font-family="var(--mono)" font-size="11" fill="#6b7078">INSERT/UPDATE</text>
+
+    <line x1="118" y1="71" x2="152" y2="71" stroke="#6b7078" stroke-width="1.5" marker-end="url(#osm-arr-ink)"/>
+
+    <!-- Transaction boundary box -->
+    <rect x="156" y="42" width="180" height="204" rx="7" fill="#f6f0e7" stroke="#a3743e" stroke-dasharray="4 3"/>
+    <text x="246" y="58" text-anchor="middle" font-family="var(--mono)" font-size="11" font-weight="700" fill="#a3743e">同一個資料庫交易與鎖週期</text>
+
+    <rect x="172" y="68" width="148" height="44" rx="6" fill="#ffffff" stroke="#dedcd8"/>
+    <text x="246" y="87" text-anchor="middle" font-family="var(--mono)" font-size="11.5" font-weight="700" fill="#262a2f">原表 orders</text>
+    <text x="246" y="103" text-anchor="middle" font-family="var(--mono)" font-size="11" fill="#a8554f">掛載 3 支 AFTER Trigger</text>
+
+    <line x1="214" y1="112" x2="214" y2="178" stroke="#a3743e" stroke-width="1.8" marker-end="url(#osm-arr-warn)"/>
+    <text x="206" y="148" text-anchor="end" font-family="var(--mono)" font-size="11" fill="#a3743e">同步觸發</text>
+
+    <line x1="282" y1="112" x2="282" y2="178" stroke="#6b7078" stroke-width="1.4" stroke-dasharray="3 3" marker-end="url(#osm-arr-ink)"/>
+    <text x="288" y="148" font-family="var(--mono)" font-size="11" fill="#6b7078">分批拷貝</text>
+
+    <rect x="172" y="182" width="148" height="48" rx="6" fill="#ffffff" stroke="#a3743e"/>
+    <text x="246" y="202" text-anchor="middle" font-family="var(--mono)" font-size="11.5" font-weight="700" fill="#262a2f">影子表 _orders_new</text>
+    <text x="246" y="219" text-anchor="middle" font-family="var(--mono)" font-size="11" fill="#6b7078">鎖競爭回傳至業務 Tx</text>
+
+    <!-- Right Panel: gh-ost -->
+    <rect x="370" y="8" width="344" height="252" rx="9" fill="#fafaf9" stroke="#dedcd8"/>
+    <text x="386" y="31" font-family="var(--mono)" font-size="12" font-weight="700" fill="#4d7d68">gh-ost · 零 Trigger + Binlog 非同步串流</text>
+
+    <rect x="386" y="54" width="92" height="46" rx="6" fill="#ffffff" stroke="#dedcd8"/>
+    <text x="432" y="74" text-anchor="middle" font-family="var(--mono)" font-size="11.5" font-weight="700" fill="#262a2f">線上寫入 Tx</text>
+    <text x="432" y="90" text-anchor="middle" font-family="var(--mono)" font-size="11" fill="#6b7078">原速提交</text>
+
+    <line x1="478" y1="77" x2="508" y2="77" stroke="#6b7078" stroke-width="1.5" marker-end="url(#osm-arr-ink)"/>
+
+    <rect x="512" y="54" width="186" height="46" rx="6" fill="#eef4f1" stroke="#4d7d68"/>
+    <text x="605" y="74" text-anchor="middle" font-family="var(--mono)" font-size="11.5" font-weight="700" fill="#262a2f">原表 orders（無 Trigger）</text>
+    <text x="605" y="90" text-anchor="middle" font-family="var(--mono)" font-size="11" fill="#4d7d68">正常寫出 ROW Binlog</text>
+
+    <line x1="558" y1="100" x2="468" y2="132" stroke="#4d7d68" stroke-width="1.6" marker-end="url(#osm-arr-ok)"/>
+    <text x="494" y="116" text-anchor="end" font-family="var(--mono)" font-size="11" fill="#4d7d68">偽裝從庫拉取</text>
+
+    <rect x="386" y="136" width="166" height="46" rx="6" fill="#eef2f7" stroke="#3f6188"/>
+    <text x="469" y="155" text-anchor="middle" font-family="var(--mono)" font-size="11.5" font-weight="700" fill="#262a2f">gh-ost 節流協調器</text>
+    <text x="469" y="171" text-anchor="middle" font-family="var(--mono)" font-size="11" fill="#3f6188">超標可連增量一併暫停</text>
+
+    <line x1="636" y1="100" x2="636" y2="196" stroke="#6b7078" stroke-width="1.4" stroke-dasharray="3 3" marker-end="url(#osm-arr-ink)"/>
+    <text x="642" y="152" font-family="var(--mono)" font-size="11" fill="#6b7078">分批讀取</text>
+
+    <line x1="490" y1="182" x2="554" y2="202" stroke="#4d7d68" stroke-width="1.6" marker-end="url(#osm-arr-ok)"/>
+
+    <rect x="536" y="200" width="162" height="46" rx="6" fill="#ffffff" stroke="#4d7d68"/>
+    <text x="617" y="219" text-anchor="middle" font-family="var(--mono)" font-size="11.5" font-weight="700" fill="#262a2f">影子表 _orders_gho</text>
+    <text x="617" y="235" text-anchor="middle" font-family="var(--mono)" font-size="11" fill="#6b7078">追平後原子 RENAME</text>
+  </svg>
+  <p class="cap">核心架構分水嶺：<code>pt-osc</code> 把影子表寫入塞進業務交易本身，尖峰時無法卸載 Trigger 成本；<code>gh-ost</code> 透過 ROW 格式 Binlog 把增量同步徹底移出業務熱路徑，緊急時能做到 100% 靜默暫停。</p>
+
+  <h3>為什麼 <code>gh-ost</code> 在高併發場景勝出？拆解三個工程細節</h3>
+  <ul>
+    <li><strong>真正意義上的「隨時緊急煞車（True Throttling）」</strong>：在 <code>pt-osc</code> 下，當主庫 CPU 飆到 95% 時按暫停，只能停下背景拷貝執行緒，原表上的三支 Trigger 依然在每一筆用戶下單時同步執行——想拔掉 Trigger 又得再拿一次排他 <code>MDL_EXCLUSIVE</code> 鎖並宣告遷移作廢。<code>gh-ost</code> 原表完全乾淨，只要停止消費 Binlog 與分批查詢，主庫負荷瞬間歸零，等流量洪峰過去再從斷點 Binlog 位點無縫續傳。</li>
+    <li><strong>可動態線上調參與預演驗證</strong>：<code>gh-ost</code> 內建 Unix Socket 控制介面，執行途中可隨時動態調整 <code>chunk-size</code> 與 <code>max-lag-millis</code>；甚至支援 <code>--test-on-replica</code>，直接在生產從庫完整跑完一次遷移與切換測試再停機校驗資料一致性。</li>
+    <li><strong>雙連線無縫原子 Cut-over</strong>：最後換表那一刻，如何確保「不會在鎖定原表與重命名之間漏掉最後幾筆 Binlog」？<code>gh-ost</code> 利用 MySQL 中 <code>RENAME TABLE</code> 優先權高於一般 <code>DML</code> 的特性：先由連線 A 執行 <code>LOCK TABLES orders WRITE</code> 擋住新寫入，再由連線 B 送出 <code>RENAME TABLE orders TO _orders_del, _orders_gho TO orders</code>（此時連線 B 排在連線 A 之後、但排在所有被擋的業務 DML 之前）；<code>gh-ost</code> 從 Binlog 讀到自己寫入的心跳標記，確認封鎖前最後一筆變更已套進 <code>_orders_gho</code> 後，連線 A 釋放鎖——連線 B 瞬間完成原子換表，業務端只感受到數十毫秒的微小停頓，零資料遺失。</li>
+  </ul>
+
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>比較維度</th>
+          <th>MySQL 原生 <code>INPLACE</code> DDL</th>
+          <th><code>pt-online-schema-change</code></th>
+          <th><code>gh-ost</code> (及 Vitess <code>vreplication</code>)</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>增量同步機制</td>
+          <td>引擎內部 Online DML Row Log</td>
+          <td>原表掛 3 支 <code>AFTER</code> Trigger 同步寫</td>
+          <td class="hl">偽裝從庫解析 <code>ROW</code> 格式 Binlog</td>
+        </tr>
+        <tr>
+          <td>業務寫入熱路徑開銷</td>
+          <td>低（記憶體追加日誌）</td>
+          <td>高（同交易解譯 Trigger + 雙倍列鎖）</td>
+          <td class="hl">極低（原表零 Trigger，完全解耦）</td>
+        </tr>
+        <tr>
+          <td>從庫延遲感知與暫停</td>
+          <td>無（全速執行，無法半路暫停）</td>
+          <td>僅能暫停分批拷貝，Trigger 無法停</td>
+          <td class="hl">雙向自動節流，可連同增量完全暫停</td>
+        </tr>
+        <tr>
+          <td>外鍵（Foreign Key）支援</td>
+          <td>支援（視操作而定）</td>
+          <td class="hl">支援（透過 <code>--alter-foreign-keys-method</code>）</td>
+          <td>嚴格受限（預設拒絕有子表外鍵參照的表）</td>
+        </tr>
+        <tr>
+          <td>額外磁碟與前置條件</td>
+          <td>視是否重建表而定</td>
+          <td>需 &gt; 1 倍原表可用磁碟空間</td>
+          <td>需 &gt; 1 倍磁碟空間 + 強制 <code>binlog_format=ROW</code></td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="cap">工具沒有絕對通吃：大型網路公司普遍移除實體外鍵約束，因此以 <code>gh-ost</code> 為首選；若遺留系統高度依賴跨表外鍵，則需評估 <code>pt-osc</code> 的 <code>rebuild_constraints</code> 模式或改走應用層分階段遷移。</p>
+
+  <div class="callout accent">
+    <div class="c-title"><span class="ic">延伸</span>PostgreSQL 生態系的對應工具：<code>pg_repack</code> 與 <code>pgroll</code></div>
+    <p>PostgreSQL 因為具備第 2 節介紹的 <code>CONCURRENTLY</code>、<code>attmissingval</code> 與兩段式約束，日常 DDL 對外部工具的依賴遠低於 MySQL。遇到真正需要重整膨脹表或改實體型別時，社群常用 <strong><code>pg_repack</code></strong>（透過輕量 Trigger 記錄增量至日誌表、背景建新 Heap 後短暫排他鎖交換檔案指標）；而新一代工具如 <strong><code>pgroll</code></strong> 則自動化管理多版本 Schema Views，讓新舊版應用程式連上不同 search_path 視圖各自讀寫，省去手工維護雙寫程式碼的負擔。</p>
+  </div>
+
+  <div class="oneliner">
+    <b>一句話答法</b>影子表工具把「鎖表重寫」轉化為「空表改結構＋背景拷貝＋增量追趕＋毫秒級原子 RENAME」；<code>gh-ost</code> 改讀 Binlog 拔除原表 Trigger，徹底解決了高併發下觸發器拖垮業務交易與無法真暫停的痛點。
+  </div>
+</section>
+
+<section id="s6">
+  <div class="sec-head">
+    <span class="sec-num">06</span>
+    <h2>線上變更選型決策器、生產 Runbook 與面試追問</h2>
+  </div>
+  <p class="sec-sub">綜合引擎能力、表熱度與發佈約束選出正確變更路徑，並盤點上線前後的防禦檢查表與高頻考題。</p>
+  <p>實務與系統設計面試中，「該用原生 Online DDL、兩段式約束、影子表工具還是五階段 Expand / Contract？」從來不是單選題，而是由<strong>資料庫引擎底層實作、變更是否破壞舊版 SQL 契約、表規模熱度與外鍵環境</strong>四個維度共同決定的決策樹。請透過下方決策器組合不同生產條件，觀察推導路徑與防護指令的變化：</p>
+
+  <div class="demo" id="demo-ddl-decision">
+    <div class="demo-bar">
+      <span class="label">互動決策器 · 線上 Schema 變更路徑與鎖防護推導</span>
+      <span class="label" style="text-transform:none;font-family:var(--sans);font-size:12px;color:var(--text-2)">設定四項生產環境條件，即時推導最佳執行策略、鎖視窗與防護 Runbook</span>
+    </div>
+    <div class="demo-body">
+      <div class="osm-knobs">
+        <label class="osm-knob" for="dec-engine">
+          <span class="kl">1 · 資料庫引擎</span>
+          <select id="dec-engine">
+            <option value="pg">PostgreSQL 14+</option>
+            <option value="mysql">MySQL 8.0 InnoDB</option>
+          </select>
+        </label>
+        <label class="osm-knob" for="dec-op">
+          <span class="kl">2 · 目標變更動作</span>
+          <select id="dec-op">
+            <option value="retype-int-bigint">實體型別升級（INT &rarr; BIGINT）</option>
+            <option value="add-col-const">新增欄位（可空或常數預設值）</option>
+            <option value="add-index">新增次級索引（Secondary Index）</option>
+            <option value="add-not-null">既有欄位收緊 NOT NULL 或外鍵</option>
+            <option value="rename-split">欄位改名或語意拆分</option>
+          </select>
+        </label>
+        <label class="osm-knob" for="dec-scale">
+          <span class="kl">3 · 資料表規模與熱度</span>
+          <select id="dec-scale">
+            <option value="hot-large">億級高併發熱表（&gt; 5,000 萬列）</option>
+            <option value="small-cold">中小型低頻表（&lt; 50 萬列）</option>
+          </select>
+        </label>
+        <label class="osm-knob" for="dec-deploy">
+          <span class="kl">4 · 部署型態與外鍵約束</span>
+          <select id="dec-deploy">
+            <option value="rolling-nofk">滾動／金絲雀並存（無外鍵參照）</option>
+            <option value="rolling-fk">滾動／金絲雀並存（含子表外鍵）</option>
+            <option value="maint-window">允許數十秒短暫停寫窗口</option>
+          </select>
+        </label>
+      </div>
+
+      <div class="osm-ctrl-head" style="margin-top:4px">
+        <button type="button" class="btn" id="dec-reset-btn">重置預設題組</button>
+      </div>
+
+      <div class="osm-dec-hero" id="dec-hero-box">
+        <div class="osm-dec-tag" id="dec-out-badge">建議路徑</div>
+        <div class="osm-dec-title" id="dec-out-pick">—</div>
+        <p class="osm-dec-why" id="dec-out-why">—</p>
+      </div>
+
+      <div class="osm-kpi-grid">
+        <div class="osm-kpi-card">
+          <div class="kl">最高鎖層級</div>
+          <div class="kv" id="dec-out-lock">—</div>
+        </div>
+        <div class="osm-kpi-card">
+          <div class="kl">全表重寫與空間</div>
+          <div class="kv" id="dec-out-rewrite">—</div>
+        </div>
+        <div class="osm-kpi-card">
+          <div class="kl">預估阻塞讀寫視窗</div>
+          <div class="kv" id="dec-out-window">—</div>
+        </div>
+        <div class="osm-kpi-card">
+          <div class="kl">不影響結論的維度</div>
+          <div class="kv" id="dec-out-ignored">—</div>
+        </div>
+      </div>
+
+      <div class="osm-dec-cols">
+        <div class="osm-dec-box">
+          <div class="bt">推導路徑與邊界依據</div>
+          <ul class="osm-path-ul" id="dec-path-list"></ul>
+        </div>
+        <div class="osm-dec-box">
+          <div class="bt">防護執行 Runbook / SQL 範本</div>
+          <pre class="osm-sql-pre"><code id="dec-sql-box"></code></pre>
+        </div>
+      </div>
+
+      <div class="status-line" id="dec-status">載入選型決策器中…</div>
+    </div>
+  </div>
+  <h3>生產環境變更前後標準防禦清單（Pre-flight &amp; Post-flight Checklist）</h3>
+  <div class="trap">
+    <span class="tn">上線前</span>
+    <div><strong>清查長交易與孤兒連線</strong>：執行前先查 <code>pg_stat_activity</code>（找出 <code>idle in transaction</code> 與長報表）或 MySQL <code>information_schema.innodb_trx</code>，並確認磁碟剩餘空間大於目標表總容量的 <var>1.5</var>～<var>2.2</var> 倍（含索引與暫存排序檔）。</div>
+  </div>
+  <div class="trap">
+    <span class="tn">上線中</span>
+    <div><strong>強制雙重保險絲</strong>：每一條需要排他鎖的 DDL 都必須搭配 <code>lock_timeout</code>（1～3 秒）與顯式演算法斷言（如 <code>ALGORITHM=INSTANT</code>）；所有背景 Backfill 與影子表工具都必須綁定從庫複寫延遲上限（如 Lag &gt; 2 秒自動暫停）。</div>
+  </div>
+  <div class="trap">
+    <span class="tn">上線後</span>
+    <div><strong>巡檢半成品殘骸與統計資訊</strong>：確認沒有遺留 <code>INVALID</code> 索引、未卸除的過渡期 Trigger 或未刪除的影子舊表（如 <code>_orders_old</code> 佔滿磁碟）；大面積資料回填後主動執行 <code>ANALYZE</code> 更新查詢最佳化器統計資訊（避免查詢計畫走歪，見<a href="../query-planning-explain/index.html">查詢計畫與 EXPLAIN</a>篇）。</div>
+  </div>
+
+  <h3>面試高頻追問 FAQ</h3>
+
+  <details class="faq" open>
+    <summary>
+      <span><span class="q">Q1 ·</span> PostgreSQL 核心訂單表的 <code>INT</code> 主鍵即將突破 21 億上限，如何在不停機前提下升級為 <code>BIGINT</code>？</span>
+      <span class="chev">▸</span>
+    </summary>
+    <div class="ans">
+      <p>絕對不能直接下 <code>ALTER TABLE orders ALTER COLUMN id TYPE BIGINT</code>，這會握著 <code>ACCESS EXCLUSIVE</code> 重寫數百 GB 的 Heap 與所有索引。標準零停機解法分五步：(1) <strong>Expand</strong>：毫秒級新增可空欄位 <code>id_big BIGINT</code>，並掛一支輕量 <code>BEFORE INSERT</code> Trigger 讓新寫入自動執行 <code>NEW.id_big := NEW.id</code>；(2) <strong>Backfill</strong>：用主鍵游標分批將歷史列的 <code>id</code> 填進 <code>id_big</code>；(3) <strong>平行建唯一索引與驗證非空</strong>：執行 <code>CREATE UNIQUE INDEX CONCURRENTLY idx_orders_id_big ON orders(id_big)</code>，並以 <code>CHECK (id_big IS NOT NULL) NOT VALID</code> + <code>VALIDATE CONSTRAINT</code> 完成非空證明；(4) <strong>毫秒級換主鍵</strong>：在 <code>SET LOCAL lock_timeout = '1500ms'</code> 保護的單一短交易內，將欄位改名對調並使用 <code>ALTER TABLE orders DROP CONSTRAINT orders_pkey, ADD CONSTRAINT orders_pkey PRIMARY KEY USING INDEX idx_orders_id_big</code>——直接把剛建好的唯一索引升級為主鍵，<strong>完全跳過全表重掃</strong>；(5) 將 Sequence 升為 <code>BIGINT</code>，待舊版程式退場後清理舊 <code>INT</code> 欄位。</p>
+    </div>
+  </details>
+
+  <details class="faq">
+    <summary>
+      <span><span class="q">Q2 ·</span> <code>gh-ost</code> 最後一步做 <code>RENAME TABLE</code> 切換時，若剛好有一條慢查詢在讀原表，會不會一樣引發鎖佇列雪崩？</span>
+      <span class="chev">▸</span>
+    </summary>
+    <div class="ans">
+      <p>如果無防護地死等，確實會！因為 <code>RENAME TABLE</code> 依然需要取得 <code>MDL_EXCLUSIVE</code>。<code>gh-ost</code> 之所以安全，是因為它內建了嚴格的 <code>--cut-over-lock-timeout-seconds</code>（預設僅 3 秒）與最大重試上限：一旦在切換瞬間被長查詢擋住超過 3 秒，<code>gh-ost</code> 會<strong>主動放棄該次 Cut-over 連線並釋放鎖請求</strong>，讓後方業務查詢立刻通行，自己則退回背景繼續追趕這幾秒產生的幾十筆 Binlog，等幾秒後再次嘗試切換，直到順利逮到無長查詢的毫秒空檔。</p>
+    </div>
+  </details>
+
+  <details class="faq">
+    <summary>
+      <span><span class="q">Q3 ·</span> 既然我們有主從架構，直接「先在從庫跑完 DDL、再做主從切換（Rolling Replica Upgrade）」不就不用影子表了嗎？</span>
+      <span class="chev">▸</span>
+    </summary>
+    <div class="ans">
+      <p>從庫輪流變更確實能把重寫 I/O 隔離在離線從庫上，在超大規模叢集中常與影子表搭配使用，但它有三個嚴格限制：(1) <strong>主從複寫格式相容性</strong>：在 <code>ROW</code> 格式 Binlog 下，主庫（舊結構）與從庫（新結構）只有在尾端加減欄等少數情況下能跨結構回放，若在中間插欄或修改不二進位相容的型別，複寫執行緒會直接斷裂；(2) <strong>主從切換本身是一次基礎設施級有感事件</strong>，切換瞬間連線重連、Buffer Pool 冷快取預熱都會造成延遲抖動；(3) <strong>應用層契約問題仍在</strong>：切換那一秒線上仍有新舊程式並存，破壞性改名或刪欄一樣必須遵循 Expand / Contract。</p>
+    </div>
+  </details>
+
+  <details class="faq">
+    <summary>
+      <span><span class="q">Q4 ·</span> MySQL 8.0 的 <code>ALGORITHM=INSTANT</code> 可以無限次對同一張表加減欄位嗎？</span>
+      <span class="chev">▸</span>
+    </summary>
+    <div class="ans">
+      <p>不行！MySQL 8.0.29+ 的任意位置加減欄位靠的是在系統表維護 <code>TOTAL_ROW_VERSIONS</code> 版本號（上限為 <strong>64 個版本</strong>）。每執行一次 <code>INSTANT</code> 加欄或刪欄就會消耗一個版本號；一旦累積滿 64 次，第 65 次 DDL 就會被迫退回重建整張表（可查 <code>information_schema.innodb_tables</code> 監控剩餘額度）。此外，含有 <code>FULLTEXT</code> 全文索引或使用 <code>ROW_FORMAT=COMPRESSED</code> 的資料表亦不支援 <code>INSTANT</code>。</p>
+    </div>
+  </details>
+
+  <div class="oneliner">
+    <b>一句話答法</b>零停機 Schema 變更的本質是把「一次性的鎖表＋契約突變」拆解為「受 <code>lock_timeout</code> 保護的毫秒級元資料變更 ＋ 節流分批的背景資料追趕 ＋ 雙向相容的多階段應用發佈」。
+  </div>
+</section>
+
+        <footer class="article-foot" aria-label="閱讀進度與導覽">
+          <div class="article-foot-left">
+            <button class="read-toggle read-toggle-lg" type="button" data-read-toggle aria-pressed="false">
+              <span class="read-dot" aria-hidden="true"></span>
+              <span class="read-label">標記為已讀</span>
+            </button>
+            <span class="article-foot-hint" data-read-hint>讀完本篇後可標記為已讀；進度只存在這個瀏覽器，首頁學習地圖會依此顯示。</span>
+          </div>
+          <a class="article-foot-back" href="../index.html">← 返回系統設計知識地圖</a>
+        </footer>
+      </div>
+    </main>
+  </div>
+
+  <script>
+    "use strict";
+    document.addEventListener("DOMContentLoaded", function () {
+      /* ===== TOC scrollspy, mobile accordion & desktop collapse ===== */
+      (function () {
+        var links = Array.prototype.slice.call(document.querySelectorAll(".toc-nav a"));
+        var map = {};
+        links.forEach(function (a) {
+          var href = a.getAttribute("href");
+          if (href && href.startsWith("#")) {
+            map[href.slice(1)] = a;
+          }
+        });
+        var secs = links.map(function (a) {
+          var href = a.getAttribute("href");
+          return href && href.startsWith("#") ? document.getElementById(href.slice(1)) : null;
+        }).filter(Boolean);
+
+        if (secs.length > 0 && typeof IntersectionObserver !== "undefined") {
+          var obs = new IntersectionObserver(function (entries) {
+            entries.forEach(function (e) {
+              if (e.isIntersecting) {
+                links.forEach(function (l) { l.classList.remove("active"); });
+                var act = map[e.target.id];
+                if (act) act.classList.add("active");
+              }
+            });
+          }, { rootMargin: "-20% 0px -70% 0px", threshold: 0 });
+          secs.forEach(function (s) { obs.observe(s); });
+        }
+
+        /* mobile：目錄 accordion（≤920px） */
+        var toggle = document.querySelector(".toc-toggle");
+        var nav = document.querySelector(".toc-nav");
+        if (toggle && nav) {
+          toggle.addEventListener("click", function () {
+            var open = nav.classList.toggle("open");
+            toggle.setAttribute("aria-expanded", open ? "true" : "false");
+          });
+          nav.addEventListener("click", function (e) {
+            if (e.target.closest("a") && window.innerWidth <= 920) {
+              nav.classList.remove("open");
+              toggle.setAttribute("aria-expanded", "false");
+            }
+          });
+        }
+
+        /* desktop：收合側欄（預設展開；不持久化） */
+        var collapseBtn = document.querySelector(".toc-collapse");
+        var reopenBtn = document.querySelector(".toc-reopen");
+        function setTocCollapsed(collapsed) {
+          document.body.classList.toggle("toc-collapsed", collapsed);
+          if (collapseBtn) collapseBtn.setAttribute("aria-expanded", collapsed ? "false" : "true");
+          if (reopenBtn) reopenBtn.setAttribute("aria-expanded", collapsed ? "false" : "true");
+          if (collapsed && reopenBtn) reopenBtn.focus();
+          else if (!collapsed && collapseBtn) collapseBtn.focus();
+        }
+        if (collapseBtn) {
+          collapseBtn.addEventListener("click", function () { setTocCollapsed(true); });
+        }
+        if (reopenBtn) {
+          reopenBtn.addEventListener("click", function () { setTocCollapsed(false); });
+        }
+
+        /* ===== 已讀狀態追蹤（localStorage + file:// fallback） =====
+           儲存格式（key、envelope、window.name 前綴）與 templates/home-learning-map.js 的同名函式共用，改動須兩邊同步。 */
+        var STORAGE_KEY = "sded.read.v1";
+        var WIN_PREFIX = "sded.read.v1:";
+        var topicId = document.body.getAttribute("data-topic-id") || "";
+        var readBtns = Array.prototype.slice.call(document.querySelectorAll("[data-read-toggle]"));
+        var readHint = document.querySelector("[data-read-hint]");
+
+        function parseEnvelope(raw) {
+          if (!raw || typeof raw !== "string") return null;
+          try {
+            var parsed = JSON.parse(raw);
+            if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+            if (parsed.v === 1 && parsed.items && typeof parsed.items === "object" && !Array.isArray(parsed.items)) {
+              return { updatedAt: Number(parsed.updatedAt) || 0, items: parsed.items };
+            }
+            return { updatedAt: 1, items: parsed };
+          } catch (e) {
+            return null;
+          }
+        }
+
+        function loadReadMap() {
+          var fromLs = null;
+          var fromWin = null;
+          try { fromLs = parseEnvelope(window.localStorage.getItem(STORAGE_KEY)); } catch (e) {}
+          if (window.location.protocol === "file:") {
+            try {
+              if (typeof window.name === "string" && window.name.indexOf(WIN_PREFIX) === 0) {
+                fromWin = parseEnvelope(window.name.slice(WIN_PREFIX.length));
+              }
+            } catch (e) {}
+          }
+          var chosen = fromLs;
+          if (fromWin && (!chosen || fromWin.updatedAt > chosen.updatedAt)) {
+            chosen = fromWin;
+            try {
+              window.localStorage.setItem(STORAGE_KEY, JSON.stringify({ v: 1, updatedAt: chosen.updatedAt, items: chosen.items }));
+            } catch (e) {}
+          } else if (chosen && window.location.protocol === "file:") {
+            try {
+              window.name = WIN_PREFIX + JSON.stringify({ v: 1, updatedAt: chosen.updatedAt, items: chosen.items });
+            } catch (e) {}
+          }
+          return chosen && chosen.items ? Object.assign({}, chosen.items) : {};
+        }
+
+        function saveReadMap(items) {
+          var env = JSON.stringify({ v: 1, updatedAt: Date.now(), items: items });
+          try { window.localStorage.setItem(STORAGE_KEY, env); } catch (e) {}
+          if (window.location.protocol === "file:") {
+            try { window.name = WIN_PREFIX + env; } catch (e) {}
+          }
+        }
+
+        function todayLocal() {
+          var d = new Date();
+          return d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0") + "-" + String(d.getDate()).padStart(2, "0");
+        }
+
+        function syncReadUi() {
+          if (!topicId || !readBtns.length) return;
+          var map = loadReadMap();
+          var val = map[topicId];
+          var isRead = Boolean(val);
+          var dateStr = typeof val === "string" && /^\d{4}-\d{2}-\d{2}$/.test(val) ? val : "";
+          readBtns.forEach(function (btn) {
+            btn.setAttribute("aria-pressed", isRead ? "true" : "false");
+            var label = btn.querySelector(".read-label");
+            if (label) {
+              label.textContent = isRead ? "✓ 已讀" : "標記為已讀";
+            }
+          });
+          if (readHint) {
+            readHint.textContent = isRead
+              ? ("已標記為已讀" + (dateStr ? "（" + dateStr + "）" : "") + "。進度只存在這個瀏覽器，首頁學習地圖會依此顯示。")
+              : "讀完本篇後可標記為已讀；進度只存在這個瀏覽器，首頁學習地圖會依此顯示。";
+          }
+        }
+
+        function toggleRead() {
+          if (!topicId) return;
+          var map = loadReadMap();
+          if (map[topicId]) {
+            delete map[topicId];
+          } else {
+            map[topicId] = todayLocal();
+          }
+          saveReadMap(map);
+          syncReadUi();
+        }
+
+        readBtns.forEach(function (btn) {
+          btn.addEventListener("click", toggleRead);
+        });
+        window.addEventListener("pageshow", syncReadUi);
+        window.addEventListener("storage", function (e) {
+          if (!e.key || e.key === STORAGE_KEY) syncReadUi();
+        });
+        syncReadUi();
+      })();
+    });
+  </script>
+
+  
+<script>
+(function () {
+  "use strict";
+
+  /* (1) 常數與演進規則表 */
+  var STAGE_DEFS = {
+    expand: {
+      code: "expand",
+      shortName: "Expand 加可空新欄",
+      sqlHint: "ALTER TABLE users ADD COLUMN phone_e164 VARCHAR(32) NULL;"
+    },
+    dual_write: {
+      code: "dual_write",
+      shortName: "發佈 v2 雙寫＋退回讀",
+      sqlHint: "INSERT (phone, phone_e164); SELECT COALESCE(phone_e164, phone)"
+    },
+    backfill: {
+      code: "backfill",
+      shortName: "分批 Backfill 歷史列",
+      sqlHint: "UPDATE users SET phone_e164 = ... WHERE id > :cur AND id <= :cur + 2500"
+    },
+    relax_and_validate: {
+      code: "relax_and_validate",
+      shortName: "解舊欄非空＋驗新欄非空",
+      sqlHint: "ALTER phone DROP NOT NULL; ADD CHECK (phone_e164 IS NOT NULL) NOT VALID + VALIDATE"
+    },
+    cutover_v3: {
+      code: "cutover_v3",
+      shortName: "發佈 v3 單讀寫新欄",
+      sqlHint: "INSERT (phone_e164); SELECT phone_e164 FROM users"
+    },
+    contract_drop: {
+      code: "contract_drop",
+      shortName: "Contract 刪除舊欄",
+      sqlHint: "ALTER TABLE users DROP COLUMN phone;"
+    }
+  };
+
+  var ORDER_PRESETS = {
+    canonical: ["expand", "dual_write", "backfill", "relax_and_validate", "cutover_v3", "contract_drop"],
+    "early-nn": ["expand", "relax_and_validate", "dual_write", "backfill", "cutover_v3", "contract_drop"],
+    "skip-backfill": ["expand", "dual_write", "relax_and_validate", "cutover_v3", "backfill", "contract_drop"],
+    "early-drop": ["expand", "dual_write", "contract_drop", "backfill", "relax_and_validate", "cutover_v3"]
+  };
+
+  var REPLICA_CAP_RPS = 9500;
+  var PRIMARY_IOPS_BUDGET = 14000;
+
+  /* (2) 純計算函式與 @probe 斷言 */
+  function clampNum(v, lo, hi, fallback) {
+    var n = Number(v);
+    if (!Number.isFinite(n)) return fallback;
+    if (n < lo) return lo;
+    if (n > hi) return hi;
+    return n;
+  }
+
+  function round1(x) {
+    return Math.round(x * 10) / 10;
+  }
+
+  // @probe fn       computeMigrationPlan
+  // @probe baseline {"order":["expand","dual_write","backfill","relax_and_validate","cutover_v3","contract_drop"],"testRollback":true}
+  // @probe sweep    {"order":[["expand","relax_and_validate","dual_write","backfill","cutover_v3","contract_drop"],["expand","dual_write","cutover_v3","backfill","relax_and_validate","contract_drop"],["expand","dual_write","contract_drop","backfill","relax_and_validate","cutover_v3"]],"testRollback":[false]}
+  function computeMigrationPlan(p) {
+    var rawOrder = (p && Array.isArray(p.order) && p.order.length === 6) ? p.order : ORDER_PRESETS.canonical;
+    var checkRb = Boolean(p && p.testRollback);
+
+    var hasOld = true;
+    var hasNew = false;
+    var oldNotNull = true;
+    var newNotNull = false;
+    var nullPct = 100;
+    var appGen = 1;
+    var seenV2 = false;
+
+    var rows = [];
+    var brokenCount = 0;
+    var warnCount = 0;
+    var silentLossCount = 0;
+    var rbRiskCount = 0;
+    var firstBadPos = -1;
+    var firstBadTitle = "全程無中斷";
+
+    for (var i = 0; i < rawOrder.length; i += 1) {
+      var stepId = rawOrder[i];
+      var def = STAGE_DEFS[stepId] || STAGE_DEFS.expand;
+      var probes = [];
+      var note = "";
+      var level = "ok";
+
+      if (stepId === "expand") {
+        hasNew = true;
+        if (appGen === 1 && !hasOld) {
+          level = "bad";
+          probes.push({ tag: "v1 讀寫: 找不到 phone", state: "bad" });
+          note = "舊欄已遭移除，補加新欄也救不回正在運行的 v1 實例。";
+        } else {
+          probes.push({ tag: "DDL: Catalog 瞬間加可空欄", state: "ok" });
+          probes.push({ tag: "線上 v" + appGen + " 讀寫: 相容通過", state: "ok" });
+          note = "新欄允許 NULL，線上既有程式無感略過新欄，歷史列新欄空值率 " + nullPct + "%。";
+        }
+      } else if (stepId === "dual_write") {
+        if (!hasOld || !hasNew) {
+          level = "bad";
+          var missCol = !hasNew ? "phone_e164" : "phone";
+          probes.push({ tag: "v2 雙寫: 缺欄位 " + missCol, state: "bad" });
+          note = "發佈 v2 雙寫前表內缺少 " + missCol + "，INSERT 與 SELECT COALESCE 當場報錯。";
+        } else if (newNotNull && appGen === 1) {
+          level = "bad";
+          probes.push({ tag: "滾動並存期 v1 寫入: 違反新欄 NOT NULL", state: "bad" });
+          probes.push({ tag: "v2 雙寫: 正常", state: "ok" });
+          note = "滾動更新期間 v1 與 v2 同時在線，v1 只寫 phone 未填 phone_e164，撞上過早鎖死的 NOT NULL 直接崩潰！";
+        } else {
+          appGen = 2;
+          seenV2 = true;
+          if (nullPct > 18) nullPct = 82;
+          probes.push({ tag: "並存期 v1+v2 寫入: 雙向通過", state: "ok" });
+          probes.push({ tag: "v2 讀取 COALESCE: 新舊列皆可讀", state: "ok" });
+          if (checkRb) {
+            probes.push({ tag: "退回 v1: 舊欄完整無掉單", state: "ok" });
+          }
+          note = "v2 全量接手並同步雙寫新舊欄；新寫入兩欄齊全，但仍有 " + nullPct + "% 歷史舊列待回填。";
+        }
+      } else if (stepId === "backfill") {
+        if (!hasNew || !hasOld) {
+          level = "bad";
+          probes.push({ tag: "Backfill SQL: 來源或目標欄不存在", state: "bad" });
+          note = !hasNew ? "尚未 Expand 建立 phone_e164，無法執行回填。" : "舊欄 phone 已被刪除，歷史資料永久遺失，無法回填！";
+          if (!hasOld) silentLossCount += 1;
+        } else if (appGen === 1) {
+          level = "warn";
+          nullPct = 16;
+          silentLossCount += 1;
+          probes.push({ tag: "分批回填舊列: 完成當下快照", state: "ok" });
+          probes.push({ tag: "線上 v1 持續寫入: 不斷製造新 NULL", state: "warn" });
+          note = "雙寫尚未上線！背景剛補完歷史列，線上 v1 又立刻寫入約 16% 只含舊欄的新空洞，永遠無法收斂歸零。";
+        } else {
+          nullPct = 0;
+          probes.push({ tag: "主鍵切片回填: 空值率歸 0%", state: "ok" });
+          probes.push({ tag: "線上 v" + appGen + " 併發讀寫: 短交易無阻塞", state: "ok" });
+          note = "所有寫入端皆已寫入新欄，分批回填順利把存量 NULL 徹底清零。";
+        }
+      } else if (stepId === "relax_and_validate") {
+        if (!hasNew) {
+          level = "bad";
+          probes.push({ tag: "VALIDATE 非空: phone_e164 不存在", state: "bad" });
+          note = "目標新欄尚未建立，無法掛載非空檢查約束。";
+        } else if (nullPct > 0) {
+          level = "bad";
+          oldNotNull = false;
+          probes.push({ tag: "解舊欄 NOT NULL: 成功", state: "ok" });
+          probes.push({ tag: "VALIDATE 新欄非空: 失敗 (剩 " + nullPct + "% NULL)", state: "bad" });
+          note = "表內仍殘留 " + nullPct + "% 的 phone_e164 空值（未完成雙寫後封口回填），VALIDATE CONSTRAINT 當場報錯中止！";
+        } else if (appGen === 1) {
+          level = "bad";
+          oldNotNull = false;
+          newNotNull = true;
+          probes.push({ tag: "鎖定新欄 NOT NULL: v1 寫入立即報錯", state: "bad" });
+          note = "線上仍是只寫舊欄的 v1，一旦強制新欄 NOT NULL，後續所有用戶寫入全部失敗。";
+        } else {
+          oldNotNull = false;
+          newNotNull = true;
+          probes.push({ tag: "舊欄解除 NOT NULL: 為停寫鋪路", state: "ok" });
+          probes.push({ tag: "NOT VALID + VALIDATE: 免長鎖轉正非空", state: "ok" });
+          note = "先拆掉舊欄的 NOT NULL 地雷，再以低階鎖完成新欄非空驗證，此時進入可安全切單寫狀態。";
+        }
+      } else if (stepId === "cutover_v3") {
+        if (!hasNew) {
+          level = "bad";
+          probes.push({ tag: "v3 讀寫: 找不到 phone_e164", state: "bad" });
+          note = "新欄不存在，v3 無法啟動。";
+        } else {
+          appGen = 3;
+          if (hasOld && oldNotNull) {
+            level = "bad";
+            probes.push({ tag: "v3 單寫新欄: 撞上舊欄 phone NOT NULL", state: "bad" });
+            note = "經典翻車！v3 停止寫入舊欄 phone，但舊欄仍掛著 NOT NULL 約束，每一筆 INSERT 都拋出非空違規錯誤！";
+          } else {
+            probes.push({ tag: "v3 單寫新欄: 寫入通過", state: "ok" });
+          }
+
+          if (nullPct > 0) {
+            level = "bad";
+            silentLossCount += 1;
+            probes.push({ tag: "v3 單讀新欄: 讀出 " + nullPct + "% 空值", state: "bad" });
+            note = (note ? note + " 此外，" : "") + "歷史資料尚未回填完畢就拔掉 COALESCE 退回讀，導致 " + nullPct + "% 用戶電話讀成 NULL！";
+          } else {
+            probes.push({ tag: "v3 單讀新欄: 100% 命中非空值", state: "ok" });
+          }
+
+          if (checkRb && level !== "bad") {
+            if (seenV2 && hasOld) {
+              probes.push({ tag: "退回 v2: 安全｜直退 v1: 漏讀新單", state: "warn" });
+              rbRiskCount += 1;
+            } else {
+              level = "warn";
+              probes.push({ tag: "無 v2 緩衝，退回 v1 必掉新資料", state: "bad" });
+              rbRiskCount += 1;
+            }
+          }
+          if (!note) {
+            note = checkRb
+              ? "v3 穩定單讀寫新欄；注意停寫舊欄後僅能無損退回 v2（讀 COALESCE），不可跨代退回只讀舊欄的 v1。"
+              : "v3 穩定單讀寫新欄，線上已無任何 SQL 依賴舊欄 phone。";
+          }
+        }
+      } else if (stepId === "contract_drop") {
+        if (appGen < 3) {
+          level = "bad";
+          hasOld = false;
+          oldNotNull = false;
+          probes.push({ tag: "線上 v" + appGen + " 存取 phone: Unknown column", state: "bad" });
+          note = "舊欄引用尚未清空（線上仍在跑 v" + appGen + "）就執行 DROP COLUMN，導致生產讀寫全面崩潰！";
+        } else {
+          hasOld = false;
+          oldNotNull = false;
+          probes.push({ tag: "DROP COLUMN phone: 零依賴安全清理", state: "ok" });
+          if (checkRb) {
+            probes.push({ tag: "物理收縮完成: 關閉舊版回滾通道", state: "warn" });
+            rbRiskCount += 1;
+          }
+          note = "確認無慢查詢與舊實例引用後安全移除舊欄，Schema 演進閉環完成。";
+        }
+      }
+
+      if (level === "bad") {
+        brokenCount += 1;
+        if (firstBadPos === -1) {
+          firstBadPos = i + 1;
+          firstBadTitle = "#" + (i + 1) + " " + def.shortName;
+        }
+      } else if (level === "warn") {
+        warnCount += 1;
+      }
+
+      var schemaSummary = "欄位[" + (hasOld ? (oldNotNull ? "phone(NN)" : "phone(NULL)") : "phone(已刪)") +
+        " , " + (hasNew ? (newNotNull ? "phone_e164(NN)" : "phone_e164(NULL)") : "無新欄") +
+        "] · 新欄空值 " + nullPct + "% · 線上程式 v" + appGen;
+
+      rows.push({
+        pos: i + 1,
+        code: def.code,
+        title: def.shortName,
+        sqlHint: def.sqlHint,
+        level: level,
+        schemaSummary: schemaSummary,
+        probes: probes,
+        note: note
+      });
+    }
+
+    var passedCount = rawOrder.length - brokenCount;
+    var rbVerdict = brokenCount > 0
+      ? "正向發佈已中斷"
+      : (!checkRb ? "未開啟回滾檢驗" : (seenV2 ? "v2 期全安全／v3 期退 v2" : "缺雙寫緩衝層"));
+
+    return {
+      rows: rows,
+      passedCount: passedCount,
+      brokenCount: brokenCount,
+      warnCount: warnCount,
+      silentLossCount: silentLossCount,
+      rbRiskCount: rbRiskCount,
+      firstBadPos: firstBadPos,
+      firstBadTitle: firstBadTitle,
+      rbVerdict: rbVerdict,
+      allGreen: brokenCount === 0 && warnCount === 0
+    };
+  }
+
+  // @probe fn       computeBackfillSim
+  // @probe baseline {"mode":"chunked","rowsM":60,"batchSize":2500,"sleepMs":40,"onlineWriteQps":2200}
+  // @probe sweep    {"mode":["ptosc","ghost"],"rowsM":[10,180],"batchSize":[500,40000],"sleepMs":[0,260],"onlineWriteQps":[400,7200]}
+  function computeBackfillSim(p) {
+    var mode = (p && (p.mode === "ptosc" || p.mode === "ghost")) ? p.mode : "chunked";
+    var rowsM = clampNum(p && p.rowsM, 5, 200, 60);
+    var batch = clampNum(p && p.batchSize, 500, 50000, 2500);
+    var sleepMs = clampNum(p && p.sleepMs, 0, 300, 40);
+    var appQps = clampNum(p && p.onlineWriteQps, 200, 8000, 2200);
+
+    var totalRows = rowsM * 1000000;
+    var batches = Math.ceil(totalRows / batch);
+
+    var contentionFactor = 1 + (appQps / 8500);
+    var batchNonlinearPenalty = Math.pow(batch / 10000, 1.65) * 16;
+    var baseExecMs = (2.1 + batch * 0.0044 + batchNonlinearPenalty) * contentionFactor;
+
+    var modeExecMult = mode === "ptosc" ? 1.22 : (mode === "ghost" ? 1.08 : 1.0);
+    var execMs = round1(baseExecMs * modeExecMult);
+
+    var lockHoldMs = mode === "ghost"
+      ? round1(Math.min(18, execMs * 0.28))
+      : (mode === "ptosc" ? round1(execMs * 0.92) : execMs);
+
+    var triggerExtraRps = mode === "ptosc" ? Math.round(appQps * 0.95) : 0;
+    var rawMigRps = batch / ((execMs + sleepMs) / 1000);
+
+    var throttleDutyPct = 0;
+    var effectiveMigRps = rawMigRps;
+
+    if (mode === "ghost") {
+      var safeAllowance = REPLICA_CAP_RPS * 0.88 - appQps;
+      if (safeAllowance < 350) {
+        effectiveMigRps = 350;
+        throttleDutyPct = 92;
+      } else if (rawMigRps > safeAllowance) {
+        throttleDutyPct = Math.min(90, Math.round((1 - safeAllowance / rawMigRps) * 100));
+        effectiveMigRps = safeAllowance;
+      }
+    }
+
+    var totalWriteRps = Math.round(appQps + triggerExtraRps + effectiveMigRps);
+    var wallSec = totalRows / Math.max(1, effectiveMigRps);
+    var wallMinutes = round1(wallSec / 60);
+
+    var overloadRps = totalWriteRps - REPLICA_CAP_RPS;
+    var peakLagSec;
+    if (mode === "ghost") {
+      var ghostBaseLag = 0.35 + (totalWriteRps / REPLICA_CAP_RPS) * 1.1 + (batch / 50000) * 0.9;
+      peakLagSec = appQps > REPLICA_CAP_RPS * 0.9
+        ? round1(ghostBaseLag + (appQps - REPLICA_CAP_RPS * 0.9) * 0.006)
+        : round1(Math.min(2.4, ghostBaseLag));
+    } else if (overloadRps <= 0) {
+      peakLagSec = round1(0.25 + (totalWriteRps / REPLICA_CAP_RPS) * 1.15 + (batch / 25000) * 1.4);
+    } else {
+      var accumSec = (overloadRps / REPLICA_CAP_RPS) * Math.min(wallSec, 900) * 0.42 + (batch / 10000) * 2.2;
+      peakLagSec = round1(Math.min(600, 1.8 + accumSec));
+    }
+
+    var iopsUsed = Math.round(appQps * 1.15 + triggerExtraRps * 1.25 + effectiveMigRps * 1.1);
+    var iopsPct = Math.min(199, Math.round((iopsUsed / PRIMARY_IOPS_BUDGET) * 100));
+
+    var dutyRatio = execMs / Math.max(1, execMs + sleepMs);
+    var p99ImpactMs;
+    if (mode === "ptosc") {
+      p99ImpactMs = round1(2.6 + Math.pow(appQps / 1700, 1.28) * 3.4 + (batch / 18000) * 4.2 * dutyRatio);
+    } else if (mode === "ghost") {
+      p99ImpactMs = round1(0.4 + (iopsPct / 100) * 1.35 + (batch / 40000) * 0.8);
+    } else {
+      p99ImpactMs = round1(0.6 + Math.pow(batch / 8000, 1.35) * dutyRatio * (0.7 + appQps / 2400) * 2.9);
+    }
+
+    var lagCurve = [];
+    for (var s = 0; s <= 7; s += 1) {
+      var frac = s / 7;
+      var pointLag;
+      if (overloadRps > 0 && mode !== "ghost") {
+        pointLag = round1(0.3 + (peakLagSec - 0.3) * Math.pow(frac, 0.85));
+      } else {
+        var wave = Math.sin(frac * Math.PI) * 0.35 + 0.65;
+        pointLag = round1(Math.max(0.2, peakLagSec * wave));
+      }
+      lagCurve.push(pointLag);
+    }
+
+    var riskState = "ok";
+    if (peakLagSec > 10 || lockHoldMs > 120 || p99ImpactMs > 18) {
+      riskState = "bad";
+    } else if (peakLagSec > 2.0 || lockHoldMs > 45 || p99ImpactMs > 7 || throttleDutyPct > 55) {
+      riskState = "warn";
+    }
+
+    return {
+      batches: batches,
+      execMs: execMs,
+      lockHoldMs: lockHoldMs,
+      wallMinutes: wallMinutes,
+      appWriteShareRps: Math.round(appQps),
+      triggerShareRps: triggerExtraRps,
+      migShareRps: Math.round(effectiveMigRps),
+      totalWriteRps: totalWriteRps,
+      overloadRps: Math.max(0, overloadRps),
+      throttleDutyPct: throttleDutyPct,
+      peakLagSec: peakLagSec,
+      iopsPct: iopsPct,
+      p99ImpactMs: p99ImpactMs,
+      lagCurve: lagCurve,
+      riskState: riskState
+    };
+  }
+
+  // @probe fn       computeDdlDecision
+  // @probe baseline {"engine":"pg","op":"retype-int-bigint","scale":"hot-large","deploy":"rolling-nofk"}
+  // @probe sweep    {"engine":["mysql"],"op":["add-col-const","add-index","add-not-null","rename-split"],"scale":["small-cold"],"deploy":["rolling-fk","maint-window"]}
+  function computeDdlDecision(p) {
+    var eng = (p && p.engine === "mysql") ? "mysql" : "pg";
+    var op = (p && p.op) ? p.op : "retype-int-bigint";
+    var scale = (p && p.scale === "small-cold") ? "small-cold" : "hot-large";
+    var dep = (p && (p.deploy === "rolling-fk" || p.deploy === "maint-window")) ? p.deploy : "rolling-nofk";
+
+    var path = [];
+    var ignored = [];
+    var tone = "ok";
+    var pick = "";
+    var why = "";
+    var lockLevel = "";
+    var rewriteCost = "";
+    var blockWindow = "";
+    var sql = "";
+
+    if (op === "rename-split") {
+      ignored.push("資料庫引擎（PG 與 MySQL 皆受限於應用層舊 SQL 契約）");
+      if (dep === "maint-window") {
+        tone = "warn";
+        pick = "停寫維護窗口內同步升級程式＋瞬間 RENAME / 轉寫";
+        why = "因為允許短暫停寫窗口且無新舊版並存需求，可在停寫期間同時切換程式碼與欄位名稱；但若涉及億級資料拆分仍建議預先回填。";
+        lockLevel = eng === "pg" ? "短暫 ACCESS EXCLUSIVE" : "短暫 MDL_EXCLUSIVE";
+        rewriteCost = scale === "hot-large" ? "改名免重寫；若拆分大表需預先回填" : "免重寫（毫秒級元資料）";
+        blockWindow = scale === "hot-large" ? "停寫窗口 15 ~ 60 秒" : "停寫窗口 < 5 秒";
+        path.push("動作為破壞性改名或拆分，先檢查是否要求滾動並存");
+        path.push("允許停寫窗口：可省略線上雙寫，但大表資料轉換仍須在窗口前預跑");
+        sql = "-- 窗口前預跑新欄回填（若需拆分），窗口內停寫後執行：\nSET lock_timeout = '2s';\nALTER TABLE users RENAME COLUMN phone TO phone_e164;";
+      } else {
+        tone = "ok";
+        ignored.push("表規模（小表同樣會因舊版 SQL 找不到欄位而報錯）");
+        pick = "五階段 Expand / Dual-Write / Backfill / Contract 演進";
+        why = "引擎層 RENAME 雖只需數毫秒，但滾動發佈期間 v1 與 v2 實例同時在線，直接改名會讓 v1 查詢當場拋出 Unknown column 錯誤！";
+        lockLevel = "各階段僅毫秒級元資料鎖（搭配 lock_timeout）";
+        rewriteCost = "免鎖表重寫；由背景短交易分批回填新欄";
+        blockWindow = "< 15 ms（分多次發佈，零停機）";
+        path.push("動作為欄位改名／拆分：破壞既有 SQL 欄位名稱契約");
+        path.push("部署為滾動並存：單次原子 DDL 必打掛舊版實例，強制走 Expand / Contract");
+        if (dep === "rolling-fk") {
+          path.push("含子表外鍵參照：切讀前須同步在子表補齊指向新欄的 NOT VALID 外鍵");
+        }
+        sql = "-- 1. Expand 加可空欄  2. v2 雙寫+COALESCE 讀  3. 主鍵分批 Backfill\n-- 4. 解舊欄 NOT NULL + 新欄 NOT VALID 驗證  5. v3 單讀寫  6. DROP 舊欄\nSET lock_timeout = '1500ms';\nALTER TABLE users ADD COLUMN phone_e164 VARCHAR(32) NULL;";
+      }
+      return {
+        tone: tone,
+        pick: pick,
+        why: why,
+        lockLevel: lockLevel,
+        rewriteCost: rewriteCost,
+        blockWindow: blockWindow,
+        ignoredText: ignored.length ? ignored.join("、") : "無（四維度皆參與決策）",
+        ignoredCount: ignored.length,
+        path: path,
+        sql: sql
+      };
+    }
+
+    if (op === "add-col-const") {
+      ignored.push("表規模與外鍵（現代引擎皆走元資料字典更新）");
+      ignored.push("部署型態（加法變更天然向後相容舊版 SELECT 指定欄位）");
+      tone = "ok";
+      if (eng === "pg") {
+        pick = "PostgreSQL 原生 Catalog 瞬間加欄 + lock_timeout 重試";
+        why = "PostgreSQL 11+ 將非揮發常數預設值寫入 pg_attribute.attmissingval，不改寫任何既有 Heap 資料頁；唯一風險是排隊等鎖。";
+        lockLevel = "ACCESS EXCLUSIVE（僅持有數毫秒）";
+        rewriteCost = "零重寫、零額外磁碟膨脹";
+        blockWindow = "< 10 ms（以 lock_timeout 防止鎖佇列護航阻塞）";
+        path.push("PostgreSQL 14+ 新增常數預設值欄位：觸發 attmissingval 快速路徑");
+        path.push("強制包裹 lock_timeout 退避重試，攔截長查詢造成的 FIFO 鎖排隊");
+        sql = "BEGIN;\n  SET LOCAL lock_timeout = '1500ms';\n  ALTER TABLE orders ADD COLUMN tier VARCHAR(16) DEFAULT 'standard';\nCOMMIT;";
+      } else {
+        pick = "MySQL 8.0 ALGORITHM=INSTANT 瞬間加欄 + lock_wait_timeout";
+        why = "MySQL 8.0 支援透過資料字典與列版本號（上限 64 版）瞬間新增欄位，顯式宣告 ALGORITHM=INSTANT 可防止意外退回鎖表重建。";
+        lockLevel = "MDL_EXCLUSIVE（僅修改資料字典數毫秒）";
+        rewriteCost = "零重寫（注意 TOTAL_ROW_VERSIONS 不可超過 64）";
+        blockWindow = "< 10 ms（逾時 2 秒立即放棄重試）";
+        path.push("MySQL 8.0 新增常數預設值欄位：支援 INSTANT 演算法");
+        path.push("顯式斷言 ALGORITHM=INSTANT 並限制 lock_wait_timeout");
+        sql = "SET SESSION lock_wait_timeout = 2;\nALTER TABLE orders ADD COLUMN tier VARCHAR(16) DEFAULT 'standard',\n  ALGORITHM=INSTANT;";
+      }
+      return {
+        tone: tone,
+        pick: pick,
+        why: why,
+        lockLevel: lockLevel,
+        rewriteCost: rewriteCost,
+        blockWindow: blockWindow,
+        ignoredText: ignored.join("、"),
+        ignoredCount: ignored.length,
+        path: path,
+        sql: sql
+      };
+    }
+
+    if (op === "add-index") {
+      ignored.push("外鍵參照關係（新增次級索引不破壞既有約束）");
+      if (eng === "pg") {
+        if (scale === "small-cold" && dep === "maint-window") {
+          tone = "ok";
+          pick = "維護窗口內標準單趟 CREATE INDEX（平行 Worker 加速）";
+          why = "小表且允許數秒停寫時，標準 CREATE INDEX 只需掃描一趟並可吃滿平行建索引執行緒，比 CONCURRENTLY 更快且無 INVALID 殘留風險。";
+          lockLevel = "SHARE（期間擋寫入、允許讀取）";
+          rewriteCost = "不重寫主表，僅建立新 B+Tree 索引檔";
+          blockWindow = "約 0.5 ~ 3 秒停寫";
+          path.push("小表且有停寫窗口：標準單趟建索引最簡潔高效");
+          sql = "SET lock_timeout = '2s';\nCREATE INDEX idx_orders_created_at ON orders (created_at);";
+        } else {
+          tone = "ok";
+          pick = "CREATE INDEX CONCURRENTLY 兩階段非阻塞建索引";
+          why = "降級使用 SHARE UPDATE EXCLUSIVE 鎖，兩趟快照掃描期間完全不阻塞線上 INSERT / UPDATE / DELETE；務必在交易區塊外執行並巡檢 INVALID 狀態。";
+          lockLevel = "SHARE UPDATE EXCLUSIVE（不擋普通讀寫）";
+          rewriteCost = "免重寫主表；兩趟全表掃描建立索引";
+          blockWindow = "頭尾快照等待僅數毫秒（零停寫）";
+          path.push("PostgreSQL 線上無停機建索引：必用 CONCURRENTLY 避開 SHARE 寫入鎖");
+          path.push(scale === "hot-large" ? "億級熱表：調低工作執行緒 I/O 衝擊並在完成後驗證 indisvalid" : "滾動環境：保持讀寫零中斷");
+          sql = "-- 嚴禁包在 BEGIN...COMMIT 內！失敗須 DROP INDEX CONCURRENTLY 重來\nSET lock_timeout = '2s';\nCREATE INDEX CONCURRENTLY idx_orders_created_at ON orders (created_at);";
+        }
+      } else {
+        tone = scale === "hot-large" ? "warn" : "ok";
+        pick = scale === "hot-large" && dep === "rolling-nofk"
+          ? "MySQL INPLACE LOCK=NONE（若從庫延遲敏感則改走 gh-ost）"
+          : "MySQL 原生 ALGORITHM=INPLACE, LOCK=NONE 線上建索引";
+        why = scale === "hot-large"
+          ? "InnoDB 原生 INPLACE 建索引不鎖寫入，但在億級高寫入熱表上無法自動按從庫 Lag 節流，且可能寫滿 innodb_online_alter_log_max_size；對延遲極度敏感時可改用 gh-ost。"
+          : "中小型表直接使用 InnoDB 原生 INPLACE + LOCK=NONE 即可在背景建好次級索引並重放增量日誌。";
+        lockLevel = "準備與提交瞬間短暫 MDL_EXCLUSIVE，掃描期 LOCK=NONE";
+        rewriteCost = "不重寫主表，建立次級索引＋記憶體 Online DML Log";
+        blockWindow = "< 20 ms（受 lock_wait_timeout 保護）";
+        path.push("MySQL 8.0 建立次級索引：原生支援 INPLACE + LOCK=NONE");
+        path.push(scale === "hot-large" ? "億級熱表警示：評估 Online Log 上限與從庫延遲承受度" : "小表低負載：原生 Online DDL 秒級完成");
+        sql = "SET SESSION lock_wait_timeout = 2;\nALTER TABLE orders ADD INDEX idx_created_at (created_at),\n  ALGORITHM=INPLACE, LOCK=NONE;";
+      }
+      return {
+        tone: tone,
+        pick: pick,
+        why: why,
+        lockLevel: lockLevel,
+        rewriteCost: rewriteCost,
+        blockWindow: blockWindow,
+        ignoredText: ignored.join("、"),
+        ignoredCount: ignored.length,
+        path: path,
+        sql: sql
+      };
+    }
+
+    if (op === "add-not-null") {
+      if (eng === "pg") {
+        ignored.push("外鍵結構（PostgreSQL 兩段式約束同時適用於 CHECK 與 FOREIGN KEY）");
+        tone = "ok";
+        pick = "NOT VALID 攔截新寫入 + VALIDATE 背景驗舊列 + 免重掃轉正";
+        why = "直接 SET NOT NULL 會握緊 ACCESS EXCLUSIVE 掃完全表；先掛 CHECK NOT VALID 只需毫秒短鎖，VALIDATE 階段只拿 SHARE UPDATE EXCLUSIVE 不擋讀寫，PG 12+ 隨後可毫秒級轉正 NOT NULL！";
+        lockLevel = "掛約束瞬間短鎖，掃描驗證期 SHARE UPDATE EXCLUSIVE";
+        rewriteCost = "零重寫，僅單趟低階鎖背景掃描驗證";
+        blockWindow = scale === "hot-large" ? "< 15 ms（徹底避開億級表長鎖掃描）" : "< 5 ms";
+        path.push("PostgreSQL 收緊非空或外鍵約束：切開新寫入檢查與存量掃描");
+        path.push(dep === "maint-window" ? "即使有短窗口，大表仍用兩段式避免長鎖超時" : "滾動環境：確認雙寫與回填已清零 NULL 後執行兩段式轉正");
+        sql = "SET lock_timeout = '1500ms';\nALTER TABLE orders ADD CONSTRAINT chk_nn CHECK (user_id IS NOT NULL) NOT VALID;\nALTER TABLE orders VALIDATE CONSTRAINT chk_nn;\nALTER TABLE orders ALTER COLUMN user_id SET NOT NULL;\nALTER TABLE orders DROP CONSTRAINT chk_nn;";
+      } else {
+        if (scale === "small-cold") {
+          tone = "ok";
+          pick = "MySQL 原生 MODIFY COLUMN ... NOT NULL (ALGORITHM=INPLACE)";
+          why = "中小型低頻表全表非空檢查僅需數百毫秒，顯式加 LOCK=NONE 與鎖等待逾時即可安全完成。";
+          lockLevel = "頭尾短暫 MDL_EXCLUSIVE，檢查期 LOCK=NONE";
+          rewriteCost = "免重寫資料頁，全表掃描確認無 NULL";
+          blockWindow = "< 30 ms";
+          path.push("MySQL 小表補 NOT NULL：原生 INPLACE 掃描極快");
+          sql = "SET SESSION lock_wait_timeout = 2;\nALTER TABLE orders MODIFY COLUMN user_id BIGINT NOT NULL,\n  ALGORITHM=INPLACE, LOCK=NONE;";
+        } else {
+          tone = "warn";
+          pick = dep === "rolling-fk"
+            ? "pt-online-schema-change 影子表遷移（支援外鍵重綁）"
+            : "gh-ost 影子表分批遷移（無觸發器、支援從庫節流）";
+          why = "MySQL 無對應 PG 的 NOT VALID 免掃轉正機制，億級熱表直接 MODIFY NOT NULL 易撐爆 Online DML Log 且無法節流；改走影子表最可控。";
+          lockLevel = "原表無長鎖，Cut-over 瞬間短暫排他鎖";
+          rewriteCost = "建立 1 倍大小影子表並分批拷貝";
+          blockWindow = "Cut-over 瞬間 20 ~ 80 ms";
+          path.push("MySQL 億級熱表收緊非空：避開不受控的全速 INPLACE 掃描");
+          path.push(dep === "rolling-fk" ? "表含子表外鍵：gh-ost 受限，改選 pt-osc rebuild_constraints" : "無外鍵參照：首選 gh-ost 讀 Binlog 零 Trigger 遷移");
+          sql = dep === "rolling-fk"
+            ? "pt-online-schema-change --alter \"MODIFY user_id BIGINT NOT NULL\" \\\n  --alter-foreign-keys-method=rebuild_constraints --max-lag=2s D=app,t=orders --execute"
+            : "gh-ost --database=app --table=orders \\\n  --alter=\"MODIFY COLUMN user_id BIGINT NOT NULL\" \\\n  --max-lag-millis=1500 --cut-over-lock-timeout-seconds=3 --execute";
+        }
+      }
+      return {
+        tone: tone,
+        pick: pick,
+        why: why,
+        lockLevel: lockLevel,
+        rewriteCost: rewriteCost,
+        blockWindow: blockWindow,
+        ignoredText: ignored.length ? ignored.join("、") : "無（四維度皆參與決策）",
+        ignoredCount: ignored.length,
+        path: path,
+        sql: sql
+      };
+    }
+
+    /* op === retype-int-bigint */
+    if (scale === "small-cold" && dep === "maint-window") {
+      ignored.push("引擎差異（小表在停寫窗口內皆可直接完成實體型別轉換）");
+      tone = "ok";
+      pick = "停寫維護窗口內原生 ALTER COLUMN TYPE BIGINT（附鎖逾時保護）";
+      why = "50 萬列以下小表實體重寫僅約數百毫秒至兩秒，又有維護窗口兜底，不必引入複雜的雙欄或影子表工程。";
+      lockLevel = eng === "pg" ? "ACCESS EXCLUSIVE（重寫期間持有）" : "MDL_SHARED_NO_WRITE（COPY 期間鎖寫）";
+      rewriteCost = "全表重寫（資料量小，I/O 瞬間完成）";
+      blockWindow = "0.5 ~ 2.5 秒（於維護窗口內執行）";
+      path.push("實體型別升級（INT 轉 BIGINT）必改實體 byte 佈局");
+      path.push("小表＋允許停寫窗口：直接重寫投報率最高");
+      sql = eng === "pg"
+        ? "SET lock_timeout = '3s';\nALTER TABLE orders ALTER COLUMN id TYPE BIGINT;"
+        : "SET SESSION lock_wait_timeout = 3;\nALTER TABLE orders MODIFY COLUMN id BIGINT NOT NULL;";
+    } else if (eng === "pg") {
+      if (scale === "small-cold") {
+        tone = "warn";
+        pick = "低峰期 lock_timeout 保護下原生重寫（或零抖動雙欄切換）";
+        why = "小表（< 50 萬列）原生重寫約 0.4 ~ 1.5 秒，多數微服務可容忍短暫抖動；若追求嚴格零阻塞則比照大表走雙欄鏡像。";
+        lockLevel = "ACCESS EXCLUSIVE（持有約 0.4 ~ 1.5 秒）";
+        rewriteCost = "全表重寫（體積小）";
+        blockWindow = "400 ~ 1500 ms";
+        path.push("PostgreSQL 升級 INT 至 BIGINT：原生語法必重寫 Heap");
+        path.push("表規模小：評估 1 秒級鎖視窗是否符合 SLA，否則升級為雙欄法");
+        sql = "BEGIN;\n  SET LOCAL lock_timeout = '1500ms';\n  ALTER TABLE orders ALTER COLUMN amount TYPE BIGINT;\nCOMMIT;";
+      } else {
+        tone = dep === "maint-window" ? "warn" : "ok";
+        pick = "PostgreSQL 雙欄鏡像 Trigger + CONCURRENTLY 唯一索引換欄法";
+        why = dep === "maint-window"
+          ? "注意衝突：億級大表重寫 Heap 需數十分鐘，數十秒維護窗口根本裝不下！仍必須提前在背景完成新欄回填與平行建索引，再於窗口內秒級換欄。"
+          : "避開數十分鐘 ACCESS EXCLUSIVE 鎖表的唯一正途：新增 BIGINT 影子欄並以 Trigger 同步、分批回填、CONCURRENTLY 建索引，最後在毫秒短交易內對調欄位並 USING INDEX 切換約束。";
+        lockLevel = "全程無長鎖，最終切換瞬間 ACCESS EXCLUSIVE < 25ms";
+        rewriteCost = "不鎖表重寫；同表內分批回填新欄（後由 VACUUM 回收舊空間）";
+        blockWindow = "10 ~ 25 ms（最終換欄短交易）";
+        path.push("PostgreSQL 億級表 INT 升 BIGINT：原生 ALTER 會長時間封死全站讀寫");
+        path.push("改走表內影子欄＋Trigger 同步＋分批回填＋PRIMARY KEY USING INDEX 瞬間轉正");
+        if (dep === "rolling-fk") {
+          path.push("含子表外鍵：切換前須先在各子表新增 BIGINT 外鍵欄並以 NOT VALID 驗證通過");
+        }
+        sql = "-- 預先完成 id_big 回填、UNIQUE INDEX CONCURRENTLY 與非空驗證後，瞬間切換：\nBEGIN;\n  SET LOCAL lock_timeout = '1500ms';\n  ALTER TABLE orders DROP CONSTRAINT orders_pkey,\n    ADD CONSTRAINT orders_pkey PRIMARY KEY USING INDEX idx_orders_id_big;\nCOMMIT;";
+      }
+    } else {
+      /* MySQL INT -> BIGINT without maint-window */
+      if (dep === "rolling-fk") {
+        tone = "warn";
+        pick = "pt-online-schema-change 影子表遷移（外鍵重綁模式）";
+        why = "MySQL INT 轉 BIGINT 屬於 COPY 重寫操作；因存在子表外鍵參照，gh-ost 預設拒絕執行，需改用支援 rebuild_constraints 的 pt-osc 並嚴格限制批次大小。";
+        lockLevel = "原表掛 Trigger，Cut-over 短暫 MDL_EXCLUSIVE";
+        rewriteCost = "建立 1 倍影子表分批拷貝";
+        blockWindow = "Cut-over 約 30 ~ 100 ms（期間業務寫入帶 Trigger 開銷）";
+        path.push("MySQL INT 升 BIGINT：原生為鎖寫 COPY，線上必須走影子表");
+        path.push("表含子表外鍵：排除 gh-ost，選用 pt-osc 搭配外鍵重建策略");
+        sql = "pt-online-schema-change --alter \"MODIFY COLUMN id BIGINT NOT NULL\" \\\n  --alter-foreign-keys-method=rebuild_constraints --chunk-size=2000 --max-lag=2s D=app,t=orders --execute";
+      } else {
+        tone = "ok";
+        pick = "gh-ost 無觸發器 Binlog 影子表遷移";
+        why = "MySQL INT 轉 BIGINT 必須重建實體表；gh-ost 不在原表掛任何 Trigger，透過拉取 ROW Binlog 非同步追趕並支援依從庫延遲自動暫停，是線上熱表重構的黃金標準。";
+        lockLevel = "原表零長鎖、零 Trigger；僅 Cut-over 瞬間短暫鎖表";
+        rewriteCost = "建立 _gho 影子表（需預留 > 1.2 倍可用磁碟空間）";
+        blockWindow = "Cut-over 雙連線原子 RENAME < 50 ms";
+        path.push("MySQL INT 升 BIGINT：需全表實體重寫，排除原生鎖表 COPY");
+        path.push("無外鍵阻礙：首選 gh-ost 以保護線上熱路徑 P99 與從庫延遲");
+        sql = "gh-ost --database=app --table=orders \\\n  --alter=\"MODIFY COLUMN id BIGINT NOT NULL\" \\\n  --chunk-size=2500 --max-lag-millis=1500 \\\n  --cut-over-lock-timeout-seconds=3 --execute";
+      }
+    }
+
+    return {
+      tone: tone,
+      pick: pick,
+      why: why,
+      lockLevel: lockLevel,
+      rewriteCost: rewriteCost,
+      blockWindow: blockWindow,
+      ignoredText: ignored.length ? ignored.join("、") : "無（四維度皆參與決策）",
+      ignoredCount: ignored.length,
+      path: path,
+      sql: sql
+    };
+  }
+
+  /* (3) DOM 參照與互動狀態 */
+  function el(id) {
+    return document.getElementById(id);
+  }
+
+  var ordDemoRoot = el("demo-expand-order");
+  var ordRollbackChk = el("ord-rollback-chk");
+  var ordResetBtn = el("ord-reset-btn");
+  var ordKpiSafe = el("ord-kpi-safe");
+  var ordKpiBreak = el("ord-kpi-break");
+  var ordKpiLoss = el("ord-kpi-loss");
+  var ordKpiRb = el("ord-kpi-rb");
+  var ordListEl = el("ord-list");
+  var ordStatusEl = el("ord-status");
+
+  var bfDemoRoot = el("demo-backfill-sim");
+  var bfResetBtn = el("bf-reset-btn");
+  var bfRowsInput = el("bf-rows");
+  var bfRowsVal = el("bf-rows-val");
+  var bfBatchInput = el("bf-batch");
+  var bfBatchVal = el("bf-batch-val");
+  var bfSleepInput = el("bf-sleep");
+  var bfSleepVal = el("bf-sleep-val");
+  var bfQpsInput = el("bf-qps");
+  var bfQpsVal = el("bf-qps-val");
+  var bfOutDuration = el("bf-out-duration");
+  var bfOutLock = el("bf-out-lock");
+  var bfOutLag = el("bf-out-lag");
+  var bfOutP99 = el("bf-out-p99");
+  var bfSvg = el("bf-svg");
+  var bfStatusEl = el("bf-status");
+
+  var decDemoRoot = el("demo-ddl-decision");
+  var decEngineSel = el("dec-engine");
+  var decOpSel = el("dec-op");
+  var decScaleSel = el("dec-scale");
+  var decDeploySel = el("dec-deploy");
+  var decResetBtn = el("dec-reset-btn");
+  var decHeroBox = el("dec-hero-box");
+  var decOutBadge = el("dec-out-badge");
+  var decOutPick = el("dec-out-pick");
+  var decOutWhy = el("dec-out-why");
+  var decOutLock = el("dec-out-lock");
+  var decOutRewrite = el("dec-out-rewrite");
+  var decOutWindow = el("dec-out-window");
+  var decOutIgnored = el("dec-out-ignored");
+  var decPathList = el("dec-path-list");
+  var decSqlBox = el("dec-sql-box");
+  var decStatusEl = el("dec-status");
+
+  var uiState = {
+    order: ORDER_PRESETS.canonical.slice(),
+    activePreset: "canonical",
+    testRollback: true,
+    bfMode: "chunked",
+    bfRowsM: 60,
+    bfBatch: 2500,
+    bfSleep: 40,
+    bfQps: 2200,
+    decEngine: "pg",
+    decOp: "retype-int-bigint",
+    decScale: "hot-large",
+    decDeploy: "rolling-nofk"
+  };
+
+  /* (4) 畫面渲染函式 */
+  function escHtml(s) {
+    return String(s)
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;");
+  }
+
+  function fmtInt(n) {
+    return Math.round(n).toLocaleString("en-US");
+  }
+
+  function syncPressedGroup(rootEl, attrName, activeVal) {
+    if (!rootEl) return;
+    var btns = rootEl.querySelectorAll("button[" + attrName + "]");
+    for (var i = 0; i < btns.length; i += 1) {
+      var v = btns[i].getAttribute(attrName);
+      btns[i].setAttribute("aria-pressed", v === activeVal ? "true" : "false");
+    }
+  }
+
+  function setKpiTone(node, text, tone) {
+    if (!node) return;
+    node.textContent = text;
+    node.className = "kv" + (tone ? " " + tone : "");
+  }
+
+  function renderOrderDemo() {
+    if (!ordDemoRoot) return;
+    syncPressedGroup(ordDemoRoot, "data-ord-preset", uiState.activePreset);
+    if (ordRollbackChk) ordRollbackChk.checked = uiState.testRollback;
+
+    var res = computeMigrationPlan({
+      order: uiState.order,
+      testRollback: uiState.testRollback
+    });
+
+    setKpiTone(
+      ordKpiSafe,
+      "通過 " + res.passedCount + " 關 · 異常 " + res.brokenCount + " 處",
+      res.brokenCount > 0 ? "bad" : (res.warnCount > 0 ? "warn" : "ok")
+    );
+    setKpiTone(
+      ordKpiBreak,
+      res.firstBadTitle,
+      res.brokenCount > 0 ? "bad" : "ok"
+    );
+    setKpiTone(
+      ordKpiLoss,
+      res.silentLossCount > 0 ? res.silentLossCount + " 處空值或掉資料風險" : "0 處資料遺失",
+      res.silentLossCount > 0 ? "bad" : "ok"
+    );
+    setKpiTone(
+      ordKpiRb,
+      res.rbVerdict,
+      res.brokenCount > 0 ? "bad" : (res.warnCount > 0 ? "warn" : "ok")
+    );
+
+    if (ordListEl) {
+      var html = [];
+      for (var i = 0; i < res.rows.length; i += 1) {
+        var r = res.rows[i];
+        var pills = [];
+        for (var j = 0; j < r.probes.length; j += 1) {
+          var pr = r.probes[j];
+          pills.push('<span class="osm-pill ' + escHtml(pr.state) + '">' + escHtml(pr.tag) + "</span>");
+        }
+        var disableUp = i === 0 ? " disabled" : "";
+        var disableDown = i === res.rows.length - 1 ? " disabled" : "";
+
+        html.push(
+          '<div class="osm-ord-item ' + escHtml(r.level) + '">' +
+            '<div class="osm-ord-top">' +
+              '<div class="osm-ord-title">' +
+                '<span class="osm-ord-idx">順序 ' + r.pos + "</span>" +
+                "<span>" + escHtml(r.title) + "</span>" +
+              "</div>" +
+              '<div class="osm-ord-btns">' +
+                '<button type="button" class="osm-move-btn" data-move-idx="' + i + '" data-move-dir="-1"' + disableUp + ' aria-label="上移此步驟">↑ 上移</button>' +
+                '<button type="button" class="osm-move-btn" data-move-idx="' + i + '" data-move-dir="1"' + disableDown + ' aria-label="下移此步驟">↓ 下移</button>' +
+              "</div>" +
+            "</div>" +
+            '<div class="osm-ord-meta">' + escHtml(r.sqlHint) + " ｜ " + escHtml(r.schemaSummary) + "</div>" +
+            '<div class="osm-probe-pills">' + pills.join("") + "</div>" +
+            '<div class="osm-ord-note">' + escHtml(r.note) + "</div>" +
+          "</div>"
+        );
+      }
+      ordListEl.innerHTML = html.join("");
+    }
+
+    if (ordStatusEl) {
+      if (res.brokenCount > 0) {
+        ordStatusEl.innerHTML = "<b>相容性斷裂：</b>在「" + escHtml(res.firstBadTitle) + "」發生線上讀寫中斷或非空約束違規，請用上下移按鈕把前置條件排到它前面。";
+      } else if (res.warnCount > 0) {
+        ordStatusEl.innerHTML = "<b>存在空值收斂或回滾缺口：</b>雖然當下未拋 SQL 語法錯，但存在舊版持續寫入空洞或缺少雙寫緩衝層，建議對齊標準順序。";
+      } else {
+        ordStatusEl.innerHTML = "<b>全階段零停機驗證通過：</b>每個時間點新舊版實例皆可正常讀寫，且雙寫期具備完整回滾保護。";
+      }
+    }
+  }
+
+  function renderBackfillDemo() {
+    if (!bfDemoRoot) return;
+    syncPressedGroup(bfDemoRoot, "data-bf-mode", uiState.bfMode);
+
+    if (bfRowsVal) bfRowsVal.textContent = uiState.bfRowsM + "M 列";
+    if (bfBatchVal) bfBatchVal.textContent = fmtInt(uiState.bfBatch) + " 列";
+    if (bfSleepVal) bfSleepVal.textContent = uiState.bfSleep + " ms";
+    if (bfQpsVal) bfQpsVal.textContent = fmtInt(uiState.bfQps) + " 筆/秒";
+
+    var sim = computeBackfillSim({
+      mode: uiState.bfMode,
+      rowsM: uiState.bfRowsM,
+      batchSize: uiState.bfBatch,
+      sleepMs: uiState.bfSleep,
+      onlineWriteQps: uiState.bfQps
+    });
+
+    var durLabel = sim.wallMinutes >= 60
+      ? round1(sim.wallMinutes / 60) + " 小時 (" + fmtInt(sim.batches) + " 批)"
+      : sim.wallMinutes + " 分鐘 (" + fmtInt(sim.batches) + " 批)";
+    setKpiTone(bfOutDuration, durLabel, sim.throttleDutyPct > 65 ? "warn" : "");
+
+    setKpiTone(
+      bfOutLock,
+      "鎖 " + sim.lockHoldMs + " ms / 批 " + sim.execMs + " ms",
+      sim.lockHoldMs > 120 ? "bad" : (sim.lockHoldMs > 45 ? "warn" : "ok")
+    );
+    setKpiTone(
+      bfOutLag,
+      sim.peakLagSec + " 秒" + (sim.throttleDutyPct > 0 ? " (節流 " + sim.throttleDutyPct + "%)" : ""),
+      sim.peakLagSec > 10 ? "bad" : (sim.peakLagSec > 2.0 ? "warn" : "ok")
+    );
+    setKpiTone(
+      bfOutP99,
+      "+" + sim.p99ImpactMs + " ms (IOPS " + sim.iopsPct + "%)",
+      sim.p99ImpactMs > 18 ? "bad" : (sim.p99ImpactMs > 7 ? "warn" : "ok")
+    );
+
+    if (bfSvg) {
+      var scaleMaxRps = Math.max(13500, sim.totalWriteRps * 1.08);
+      var barFullW = 284;
+      var wApp = Math.round((sim.appWriteShareRps / scaleMaxRps) * barFullW);
+      var wTrig = Math.round((sim.triggerShareRps / scaleMaxRps) * barFullW);
+      var wMig = Math.max(2, Math.round((sim.migShareRps / scaleMaxRps) * barFullW));
+      var capX = 20 + Math.round((REPLICA_CAP_RPS / scaleMaxRps) * barFullW);
+      var migFill = sim.overloadRps > 0 ? "#f6ecea" : "#eef4f1";
+      var migStroke = sim.overloadRps > 0 ? "#a8554f" : "#4d7d68";
+
+      var chartX0 = 368;
+      var chartW = 290;
+      var chartY0 = 38;
+      var chartH = 112;
+      var maxPlotLag = Math.max(5, sim.peakLagSec * 1.15);
+      var slaY = Math.round(chartY0 + chartH - (2.0 / maxPlotLag) * chartH);
+      var pts = [];
+      var dots = [];
+      for (var k = 0; k < sim.lagCurve.length; k += 1) {
+        var px = Math.round(chartX0 + (k / (sim.lagCurve.length - 1)) * chartW);
+        var py = Math.round(chartY0 + chartH - (sim.lagCurve[k] / maxPlotLag) * chartH);
+        pts.push(px + "," + py);
+        var dCol = sim.lagCurve[k] > 2.0 ? (sim.lagCurve[k] > 10 ? "#a8554f" : "#a3743e") : "#4d7d68";
+        dots.push('<circle cx="' + px + '" cy="' + py + '" r="3.5" fill="' + dCol + '"/>');
+      }
+      var lineStroke = sim.peakLagSec > 10 ? "#a8554f" : (sim.peakLagSec > 2.0 ? "#a3743e" : "#4d7d68");
+
+      bfSvg.innerHTML =
+        '<title>從庫回放容量預算與遷移期間複寫延遲變化圖</title>' +
+        '<rect x="6" y="6" width="322" height="174" rx="7" fill="#fafaf9" stroke="#ecebe8"/>' +
+        '<text x="20" y="27" font-family="var(--mono)" font-size="11.5" font-weight="700" fill="#262a2f">每秒寫入負載 vs 從庫回放上限</text>' +
+        '<rect x="20" y="52" width="' + barFullW + '" height="30" rx="5" fill="#ffffff" stroke="#dedcd8"/>' +
+        '<rect x="20" y="52" width="' + wApp + '" height="30" rx="4" fill="#eef2f7" stroke="#3f6188"/>' +
+        (wTrig > 0 ? '<rect x="' + (20 + wApp) + '" y="52" width="' + wTrig + '" height="30" fill="#f6f0e7" stroke="#a3743e"/>' : "") +
+        '<rect x="' + (20 + wApp + wTrig) + '" y="52" width="' + wMig + '" height="30" fill="' + migFill + '" stroke="' + migStroke + '"/>' +
+        '<line x1="' + capX + '" y1="42" x2="' + capX + '" y2="94" stroke="#a8554f" stroke-width="1.8" stroke-dasharray="4 3"/>' +
+        '<text x="' + Math.min(308, Math.max(24, capX)) + '" y="39" text-anchor="middle" font-family="var(--mono)" font-size="11" font-weight="700" fill="#a8554f">從庫上限 9.5k/s</text>' +
+        '<text x="20" y="114" font-family="var(--mono)" font-size="11" fill="#262a2f">業務寫入: ' + fmtInt(sim.appWriteShareRps) + '/s' +
+          (sim.triggerShareRps > 0 ? ' ｜ Trigger: +' + fmtInt(sim.triggerShareRps) + '/s' : ' ｜ 無 Trigger 放大') + '</text>' +
+        '<text x="20" y="134" font-family="var(--mono)" font-size="11" fill="#262a2f">遷移推進: ' + fmtInt(sim.migShareRps) + '/s ｜ 合計: ' + fmtInt(sim.totalWriteRps) + '/s</text>' +
+        '<text x="20" y="156" font-family="var(--mono)" font-size="11" fill="' + (sim.throttleDutyPct > 0 ? "#4d7d68" : (sim.overloadRps > 0 ? "#a8554f" : "#6b7078")) + '">' +
+          (sim.throttleDutyPct > 0
+            ? "保護生效：gh-ost 自動節流降速 " + sim.throttleDutyPct + "% 守住從庫"
+            : (sim.overloadRps > 0 ? "超載 +" + fmtInt(sim.overloadRps) + "/s：從庫回放不及持續積壓" : "餘裕充足：總寫入低於從庫回放上限")) +
+        "</text>" +
+
+        '<rect x="340" y="6" width="334" height="174" rx="7" fill="#fafaf9" stroke="#ecebe8"/>' +
+        '<text x="354" y="27" font-family="var(--mono)" font-size="11.5" font-weight="700" fill="#262a2f">遷移進度 (0% → 100%) 從庫延遲曲線</text>' +
+        '<line x1="' + chartX0 + '" y1="' + (chartY0 + chartH) + '" x2="' + (chartX0 + chartW) + '" y2="' + (chartY0 + chartH) + '" stroke="#dedcd8"/>' +
+        '<line x1="' + chartX0 + '" y1="' + chartY0 + '" x2="' + chartX0 + '" y2="' + (chartY0 + chartH) + '" stroke="#dedcd8"/>' +
+        '<line x1="' + chartX0 + '" y1="' + slaY + '" x2="' + (chartX0 + chartW) + '" y2="' + slaY + '" stroke="#4d7d68" stroke-width="1.2" stroke-dasharray="4 3"/>' +
+        '<text x="' + (chartX0 + chartW - 2) + '" y="' + Math.max(chartY0 + 11, slaY - 4) + '" text-anchor="end" font-family="var(--mono)" font-size="11" fill="#4d7d68">SLA 2.0s</text>' +
+        '<polyline fill="none" stroke="' + lineStroke + '" stroke-width="2.2" points="' + pts.join(" ") + '"/>' +
+        dots.join("") +
+        '<text x="' + chartX0 + '" y="168" font-family="var(--mono)" font-size="11" fill="#6b7078">0%</text>' +
+        '<text x="' + (chartX0 + Math.round(chartW / 2)) + '" y="168" text-anchor="middle" font-family="var(--mono)" font-size="11" fill="#6b7078">50% 進度</text>' +
+        '<text x="' + (chartX0 + chartW) + '" y="168" text-anchor="end" font-family="var(--mono)" font-size="11" fill="#6b7078">峰值 ' + sim.peakLagSec + 's</text>';
+    }
+
+    if (bfStatusEl) {
+      if (uiState.bfMode === "ghost" && sim.throttleDutyPct > 0) {
+        bfStatusEl.innerHTML = "<b>gh-ost 閉迴路節流保護生效：</b>偵測到業務寫入加上全速拷貝會超過從庫上限，自動插入 " + sim.throttleDutyPct + "% 節流空檔，將複寫延遲壓在 <b>" + sim.peakLagSec + " 秒</b>（總時長拉長至 " + sim.wallMinutes + " 分鐘）。";
+      } else if (sim.riskState === "bad") {
+        bfStatusEl.innerHTML = "<b>高風險參數組合：</b>單批鎖持有 <b>" + sim.lockHoldMs + " ms</b>、從庫延遲峰值飆至 <b>" + sim.peakLagSec + " 秒</b>！請縮小 batch_size 至 1,000～5,000 並調高 sleep 間隔，或改用 gh-ost 自動節流。";
+      } else if (sim.riskState === "warn") {
+        bfStatusEl.innerHTML = "<b>接近警戒水位：</b>線上 P99 附加 <b>+" + sim.p99ImpactMs + " ms</b>、峰值延遲 <b>" + sim.peakLagSec + " 秒</b>；若遇流量尖峰建議再調高批次休眠間隔。";
+      } else {
+        bfStatusEl.innerHTML = "<b>平滑安全區間：</b>單批短交易僅持鎖 <b>" + sim.lockHoldMs + " ms</b>，總寫入速率低於從庫回放線，可在背景穩定跑完 <b>" + fmtInt(sim.batches) + "</b> 個微批次。";
+      }
+    }
+  }
+
+  function renderDecisionDemo() {
+    if (!decDemoRoot) return;
+    if (decEngineSel) decEngineSel.value = uiState.decEngine;
+    if (decOpSel) decOpSel.value = uiState.decOp;
+    if (decScaleSel) decScaleSel.value = uiState.decScale;
+    if (decDeploySel) decDeploySel.value = uiState.decDeploy;
+
+    var dec = computeDdlDecision({
+      engine: uiState.decEngine,
+      op: uiState.decOp,
+      scale: uiState.decScale,
+      deploy: uiState.decDeploy
+    });
+
+    if (decHeroBox) {
+      decHeroBox.className = "osm-dec-hero " + dec.tone;
+    }
+    if (decOutBadge) {
+      decOutBadge.textContent = dec.tone === "warn" ? "建議路徑（含架構約束提醒）" : "推薦零停機執行路徑";
+    }
+    if (decOutPick) decOutPick.textContent = dec.pick;
+    if (decOutWhy) decOutWhy.textContent = dec.why;
+
+    setKpiTone(decOutLock, dec.lockLevel, "");
+    setKpiTone(decOutRewrite, dec.rewriteCost, "");
+    setKpiTone(decOutWindow, dec.blockWindow, dec.tone === "warn" ? "warn" : "ok");
+    setKpiTone(decOutIgnored, dec.ignoredText, "");
+
+    if (decPathList) {
+      var items = [];
+      for (var i = 0; i < dec.path.length; i += 1) {
+        items.push("<li>" + escHtml(dec.path[i]) + "</li>");
+      }
+      decPathList.innerHTML = items.join("");
+    }
+    if (decSqlBox) {
+      decSqlBox.textContent = dec.sql;
+    }
+    if (decStatusEl) {
+      decStatusEl.innerHTML = "<b>決策摘要：</b>共使用 <b>" + (4 - dec.ignoredCount) + "</b> 項關鍵約束導出「" + escHtml(dec.pick) + "」；所有需要排他元資料鎖的步驟皆已附上逾時保護。";
+    }
+  }
+
+  /* (5) 事件綁定與初始化 */
+  function targetElement(e) {
+    var t = e && e.target;
+    if (!t) return null;
+    return t.nodeType === 1 ? t : t.parentElement;
+  }
+
+  function detectPresetName(arr) {
+    var keys = Object.keys(ORDER_PRESETS);
+    for (var i = 0; i < keys.length; i += 1) {
+      var k = keys[i];
+      var preset = ORDER_PRESETS[k];
+      var same = true;
+      for (var j = 0; j < preset.length; j += 1) {
+        if (preset[j] !== arr[j]) { same = false; break; }
+      }
+      if (same) return k;
+    }
+    return "custom";
+  }
+
+  if (ordDemoRoot) {
+    ordDemoRoot.addEventListener("click", function (e) {
+      var elem = targetElement(e);
+      if (!elem) return;
+
+      var presetBtn = elem.closest("button[data-ord-preset]");
+      if (presetBtn) {
+        var key = presetBtn.getAttribute("data-ord-preset");
+        if (ORDER_PRESETS[key]) {
+          uiState.order = ORDER_PRESETS[key].slice();
+          uiState.activePreset = key;
+          renderOrderDemo();
+        }
+        return;
+      }
+
+      var moveBtn = elem.closest("button[data-move-idx]");
+      if (moveBtn) {
+        var idx = parseInt(moveBtn.getAttribute("data-move-idx"), 10);
+        var dir = parseInt(moveBtn.getAttribute("data-move-dir"), 10);
+        var nextIdx = idx + dir;
+        if (idx >= 0 && idx < uiState.order.length && nextIdx >= 0 && nextIdx < uiState.order.length) {
+          var tmp = uiState.order[idx];
+          uiState.order[idx] = uiState.order[nextIdx];
+          uiState.order[nextIdx] = tmp;
+          uiState.activePreset = detectPresetName(uiState.order);
+          renderOrderDemo();
+        }
+      }
+    });
+  }
+
+  if (ordRollbackChk) {
+    ordRollbackChk.addEventListener("change", function () {
+      uiState.testRollback = Boolean(ordRollbackChk.checked);
+      renderOrderDemo();
+    });
+  }
+
+  if (ordResetBtn) {
+    ordResetBtn.addEventListener("click", function () {
+      uiState.order = ORDER_PRESETS.canonical.slice();
+      uiState.activePreset = "canonical";
+      uiState.testRollback = true;
+      renderOrderDemo();
+    });
+  }
+
+  if (bfDemoRoot) {
+    bfDemoRoot.addEventListener("click", function (e) {
+      var elem = targetElement(e);
+      if (!elem) return;
+      var modeBtn = elem.closest("button[data-bf-mode]");
+      if (modeBtn) {
+        var m = modeBtn.getAttribute("data-bf-mode");
+        if (m === "chunked" || m === "ptosc" || m === "ghost") {
+          uiState.bfMode = m;
+          renderBackfillDemo();
+        }
+      }
+    });
+  }
+
+  if (bfRowsInput) {
+    bfRowsInput.addEventListener("input", function () {
+      uiState.bfRowsM = Number(bfRowsInput.value);
+      renderBackfillDemo();
+    });
+  }
+  if (bfBatchInput) {
+    bfBatchInput.addEventListener("input", function () {
+      uiState.bfBatch = Number(bfBatchInput.value);
+      renderBackfillDemo();
+    });
+  }
+  if (bfSleepInput) {
+    bfSleepInput.addEventListener("input", function () {
+      uiState.bfSleep = Number(bfSleepInput.value);
+      renderBackfillDemo();
+    });
+  }
+  if (bfQpsInput) {
+    bfQpsInput.addEventListener("input", function () {
+      uiState.bfQps = Number(bfQpsInput.value);
+      renderBackfillDemo();
+    });
+  }
+
+  if (bfResetBtn) {
+    bfResetBtn.addEventListener("click", function () {
+      uiState.bfMode = "chunked";
+      uiState.bfRowsM = 60;
+      uiState.bfBatch = 2500;
+      uiState.bfSleep = 40;
+      uiState.bfQps = 2200;
+      if (bfRowsInput) bfRowsInput.value = "60";
+      if (bfBatchInput) bfBatchInput.value = "2500";
+      if (bfSleepInput) bfSleepInput.value = "40";
+      if (bfQpsInput) bfQpsInput.value = "2200";
+      renderBackfillDemo();
+    });
+  }
+
+  function onDecisionChange() {
+    if (decEngineSel) uiState.decEngine = decEngineSel.value;
+    if (decOpSel) uiState.decOp = decOpSel.value;
+    if (decScaleSel) uiState.decScale = decScaleSel.value;
+    if (decDeploySel) uiState.decDeploy = decDeploySel.value;
+    renderDecisionDemo();
+  }
+
+  if (decEngineSel) decEngineSel.addEventListener("change", onDecisionChange);
+  if (decOpSel) decOpSel.addEventListener("change", onDecisionChange);
+  if (decScaleSel) decScaleSel.addEventListener("change", onDecisionChange);
+  if (decDeploySel) decDeploySel.addEventListener("change", onDecisionChange);
+
+  if (decResetBtn) {
+    decResetBtn.addEventListener("click", function () {
+      uiState.decEngine = "pg";
+      uiState.decOp = "retype-int-bigint";
+      uiState.decScale = "hot-large";
+      uiState.decDeploy = "rolling-nofk";
+      renderDecisionDemo();
+    });
+  }
+
+  renderOrderDemo();
+  renderBackfillDemo();
+  renderDecisionDemo();
+})();
+</script>
+
+
+<!-- 全螢幕檢視：切換按鈕、樣式與 F 鍵快捷鍵 -->
+<style>
+  .fs-toggle {
+    position: fixed;
+    top: 18px;
+    right: 18px;
+    z-index: 1000;
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    font-family: var(--sans);
+    font-size: 12.5px;
+    line-height: 1;
+    color: var(--text-2);
+    background: var(--bg);
+    border: 1px solid var(--border-strong);
+    border-radius: 999px;
+    padding: 7px 13px 7px 11px;
+    cursor: pointer;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, .06), 0 4px 12px rgba(0, 0, 0, .04);
+    transition: background .15s, border-color .15s, color .15s;
+  }
+
+  .fs-toggle:hover {
+    background: var(--bg-soft);
+    color: var(--text);
+    border-color: var(--text-3);
+  }
+
+  .fs-toggle:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+
+  .fs-toggle[aria-pressed="true"] {
+    background: var(--accent);
+    color: #fff;
+    border-color: var(--accent);
+  }
+
+  .fs-toggle .fs-ic {
+    flex: 0 0 auto;
+    display: block;
+  }
+
+  @media print {
+    .fs-toggle { display: none !important; }
+  }
+
+  @media (max-width: 480px) {
+    .fs-toggle { padding: 8px; }
+    .fs-toggle .fs-label { display: none; }
+  }
+</style>
+<button id="fs-toggle-btn" class="fs-toggle" type="button" aria-pressed="false"
+        aria-label="切換全螢幕檢視 (快捷鍵 F)" title="全螢幕檢視 (F)">
+  <svg class="fs-ic fs-ic-expand" viewBox="0 0 24 24" width="15" height="15" fill="none"
+       stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+    <path d="M8 3H5a2 2 0 0 0-2 2v3m18 0V5a2 2 0 0 0-2-2h-3m0 18h3a2 2 0 0 0 2-2v-3M3 16v3a2 2 0 0 0 2 2h3"/>
+  </svg>
+  <svg class="fs-ic fs-ic-compress" viewBox="0 0 24 24" width="15" height="15" fill="none"
+       stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="display:none">
+    <path d="M8 3v3a2 2 0 0 1-2 2H3m18 0h-3a2 2 0 0 1-2-2V3m0 18v-3a2 2 0 0 1 2-2h3M3 16h3a2 2 0 0 1 2 2v3"/>
+  </svg>
+  <span class="fs-label">全螢幕</span>
+</button>
+<script>
+  "use strict";
+  (function () {
+    var btn = document.getElementById("fs-toggle-btn");
+    if (!btn) return;
+    var docEl = document.documentElement;
+    var canFs = !!(docEl.requestFullscreen || docEl.webkitRequestFullscreen);
+    // 不支援 Fullscreen API (如 iPhone Safari) → 隱藏按鈕，避免壞掉的 UI
+    if (!canFs) { btn.style.display = "none"; return; }
+
+    var expandIc = btn.querySelector(".fs-ic-expand");
+    var compressIc = btn.querySelector(".fs-ic-compress");
+    var label = btn.querySelector(".fs-label");
+
+    function isFs() {
+      return !!(document.fullscreenElement || document.webkitFullscreenElement);
+    }
+    function enter() {
+      if (docEl.requestFullscreen) docEl.requestFullscreen();
+      else if (docEl.webkitRequestFullscreen) docEl.webkitRequestFullscreen();
+    }
+    function exit() {
+      if (document.exitFullscreen) document.exitFullscreen();
+      else if (document.webkitExitFullscreen) document.webkitExitFullscreen();
+    }
+    function toggle() { isFs() ? exit() : enter(); }
+    function sync() {
+      var on = isFs();
+      btn.setAttribute("aria-pressed", on ? "true" : "false");
+      if (label) label.textContent = on ? "離開全螢幕" : "全螢幕";
+      if (expandIc) expandIc.style.display = on ? "none" : "block";
+      if (compressIc) compressIc.style.display = on ? "block" : "none";
+    }
+
+    btn.addEventListener("click", toggle);
+    document.addEventListener("fullscreenchange", sync);
+    document.addEventListener("webkitfullscreenchange", sync);
+    document.addEventListener("keydown", function (e) {
+      if (e.key !== "f" && e.key !== "F") return;
+      if (e.metaKey || e.ctrlKey || e.altKey) return;
+      var t = e.target;
+      var tag = t && t.tagName ? t.tagName.toUpperCase() : "";
+      if (tag === "INPUT" || tag === "TEXTAREA" || (t && t.isContentEditable)) return;
+      e.preventDefault();
+      toggle();
+    });
+    sync();
+  })();
+</script>
+</body>
+</html>

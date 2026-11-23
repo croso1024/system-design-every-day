@@ -1,0 +1,1136 @@
+<script>
+(function () {
+  "use strict";
+
+  /* (1) 常數與演進規則表 */
+  var STAGE_DEFS = {
+    expand: {
+      code: "expand",
+      shortName: "Expand 加可空新欄",
+      sqlHint: "ALTER TABLE users ADD COLUMN phone_e164 VARCHAR(32) NULL;"
+    },
+    dual_write: {
+      code: "dual_write",
+      shortName: "發佈 v2 雙寫＋退回讀",
+      sqlHint: "INSERT (phone, phone_e164); SELECT COALESCE(phone_e164, phone)"
+    },
+    backfill: {
+      code: "backfill",
+      shortName: "分批 Backfill 歷史列",
+      sqlHint: "UPDATE users SET phone_e164 = ... WHERE id > :cur AND id <= :cur + 2500"
+    },
+    relax_and_validate: {
+      code: "relax_and_validate",
+      shortName: "解舊欄非空＋驗新欄非空",
+      sqlHint: "ALTER phone DROP NOT NULL; ADD CHECK (phone_e164 IS NOT NULL) NOT VALID + VALIDATE"
+    },
+    cutover_v3: {
+      code: "cutover_v3",
+      shortName: "發佈 v3 單讀寫新欄",
+      sqlHint: "INSERT (phone_e164); SELECT phone_e164 FROM users"
+    },
+    contract_drop: {
+      code: "contract_drop",
+      shortName: "Contract 刪除舊欄",
+      sqlHint: "ALTER TABLE users DROP COLUMN phone;"
+    }
+  };
+
+  var ORDER_PRESETS = {
+    canonical: ["expand", "dual_write", "backfill", "relax_and_validate", "cutover_v3", "contract_drop"],
+    "early-nn": ["expand", "relax_and_validate", "dual_write", "backfill", "cutover_v3", "contract_drop"],
+    "skip-backfill": ["expand", "dual_write", "relax_and_validate", "cutover_v3", "backfill", "contract_drop"],
+    "early-drop": ["expand", "dual_write", "contract_drop", "backfill", "relax_and_validate", "cutover_v3"]
+  };
+
+  var REPLICA_CAP_RPS = 9500;
+  var PRIMARY_IOPS_BUDGET = 14000;
+
+  /* (2) 純計算函式與 @probe 斷言 */
+  function clampNum(v, lo, hi, fallback) {
+    var n = Number(v);
+    if (!Number.isFinite(n)) return fallback;
+    if (n < lo) return lo;
+    if (n > hi) return hi;
+    return n;
+  }
+
+  function round1(x) {
+    return Math.round(x * 10) / 10;
+  }
+
+  // @probe fn       computeMigrationPlan
+  // @probe baseline {"order":["expand","dual_write","backfill","relax_and_validate","cutover_v3","contract_drop"],"testRollback":true}
+  // @probe sweep    {"order":[["expand","relax_and_validate","dual_write","backfill","cutover_v3","contract_drop"],["expand","dual_write","cutover_v3","backfill","relax_and_validate","contract_drop"],["expand","dual_write","contract_drop","backfill","relax_and_validate","cutover_v3"]],"testRollback":[false]}
+  function computeMigrationPlan(p) {
+    var rawOrder = (p && Array.isArray(p.order) && p.order.length === 6) ? p.order : ORDER_PRESETS.canonical;
+    var checkRb = Boolean(p && p.testRollback);
+
+    var hasOld = true;
+    var hasNew = false;
+    var oldNotNull = true;
+    var newNotNull = false;
+    var nullPct = 100;
+    var appGen = 1;
+    var seenV2 = false;
+
+    var rows = [];
+    var brokenCount = 0;
+    var warnCount = 0;
+    var silentLossCount = 0;
+    var rbRiskCount = 0;
+    var firstBadPos = -1;
+    var firstBadTitle = "全程無中斷";
+
+    for (var i = 0; i < rawOrder.length; i += 1) {
+      var stepId = rawOrder[i];
+      var def = STAGE_DEFS[stepId] || STAGE_DEFS.expand;
+      var probes = [];
+      var note = "";
+      var level = "ok";
+
+      if (stepId === "expand") {
+        hasNew = true;
+        if (appGen === 1 && !hasOld) {
+          level = "bad";
+          probes.push({ tag: "v1 讀寫: 找不到 phone", state: "bad" });
+          note = "舊欄已遭移除，補加新欄也救不回正在運行的 v1 實例。";
+        } else {
+          probes.push({ tag: "DDL: Catalog 瞬間加可空欄", state: "ok" });
+          probes.push({ tag: "線上 v" + appGen + " 讀寫: 相容通過", state: "ok" });
+          note = "新欄允許 NULL，線上既有程式無感略過新欄，歷史列新欄空值率 " + nullPct + "%。";
+        }
+      } else if (stepId === "dual_write") {
+        if (!hasOld || !hasNew) {
+          level = "bad";
+          var missCol = !hasNew ? "phone_e164" : "phone";
+          probes.push({ tag: "v2 雙寫: 缺欄位 " + missCol, state: "bad" });
+          note = "發佈 v2 雙寫前表內缺少 " + missCol + "，INSERT 與 SELECT COALESCE 當場報錯。";
+        } else if (newNotNull && appGen === 1) {
+          level = "bad";
+          probes.push({ tag: "滾動並存期 v1 寫入: 違反新欄 NOT NULL", state: "bad" });
+          probes.push({ tag: "v2 雙寫: 正常", state: "ok" });
+          note = "滾動更新期間 v1 與 v2 同時在線，v1 只寫 phone 未填 phone_e164，撞上過早鎖死的 NOT NULL 直接崩潰！";
+        } else {
+          appGen = 2;
+          seenV2 = true;
+          if (nullPct > 18) nullPct = 82;
+          probes.push({ tag: "並存期 v1+v2 寫入: 雙向通過", state: "ok" });
+          probes.push({ tag: "v2 讀取 COALESCE: 新舊列皆可讀", state: "ok" });
+          if (checkRb) {
+            probes.push({ tag: "退回 v1: 舊欄完整無掉單", state: "ok" });
+          }
+          note = "v2 全量接手並同步雙寫新舊欄；新寫入兩欄齊全，但仍有 " + nullPct + "% 歷史舊列待回填。";
+        }
+      } else if (stepId === "backfill") {
+        if (!hasNew || !hasOld) {
+          level = "bad";
+          probes.push({ tag: "Backfill SQL: 來源或目標欄不存在", state: "bad" });
+          note = !hasNew ? "尚未 Expand 建立 phone_e164，無法執行回填。" : "舊欄 phone 已被刪除，歷史資料永久遺失，無法回填！";
+          if (!hasOld) silentLossCount += 1;
+        } else if (appGen === 1) {
+          level = "warn";
+          nullPct = 16;
+          silentLossCount += 1;
+          probes.push({ tag: "分批回填舊列: 完成當下快照", state: "ok" });
+          probes.push({ tag: "線上 v1 持續寫入: 不斷製造新 NULL", state: "warn" });
+          note = "雙寫尚未上線！背景剛補完歷史列，線上 v1 又立刻寫入約 16% 只含舊欄的新空洞，永遠無法收斂歸零。";
+        } else {
+          nullPct = 0;
+          probes.push({ tag: "主鍵切片回填: 空值率歸 0%", state: "ok" });
+          probes.push({ tag: "線上 v" + appGen + " 併發讀寫: 短交易無阻塞", state: "ok" });
+          note = "所有寫入端皆已寫入新欄，分批回填順利把存量 NULL 徹底清零。";
+        }
+      } else if (stepId === "relax_and_validate") {
+        if (!hasNew) {
+          level = "bad";
+          probes.push({ tag: "VALIDATE 非空: phone_e164 不存在", state: "bad" });
+          note = "目標新欄尚未建立，無法掛載非空檢查約束。";
+        } else if (nullPct > 0) {
+          level = "bad";
+          oldNotNull = false;
+          probes.push({ tag: "解舊欄 NOT NULL: 成功", state: "ok" });
+          probes.push({ tag: "VALIDATE 新欄非空: 失敗 (剩 " + nullPct + "% NULL)", state: "bad" });
+          note = "表內仍殘留 " + nullPct + "% 的 phone_e164 空值（未完成雙寫後封口回填），VALIDATE CONSTRAINT 當場報錯中止！";
+        } else if (appGen === 1) {
+          level = "bad";
+          oldNotNull = false;
+          newNotNull = true;
+          probes.push({ tag: "鎖定新欄 NOT NULL: v1 寫入立即報錯", state: "bad" });
+          note = "線上仍是只寫舊欄的 v1，一旦強制新欄 NOT NULL，後續所有用戶寫入全部失敗。";
+        } else {
+          oldNotNull = false;
+          newNotNull = true;
+          probes.push({ tag: "舊欄解除 NOT NULL: 為停寫鋪路", state: "ok" });
+          probes.push({ tag: "NOT VALID + VALIDATE: 免長鎖轉正非空", state: "ok" });
+          note = "先拆掉舊欄的 NOT NULL 地雷，再以低階鎖完成新欄非空驗證，此時進入可安全切單寫狀態。";
+        }
+      } else if (stepId === "cutover_v3") {
+        if (!hasNew) {
+          level = "bad";
+          probes.push({ tag: "v3 讀寫: 找不到 phone_e164", state: "bad" });
+          note = "新欄不存在，v3 無法啟動。";
+        } else {
+          appGen = 3;
+          if (hasOld && oldNotNull) {
+            level = "bad";
+            probes.push({ tag: "v3 單寫新欄: 撞上舊欄 phone NOT NULL", state: "bad" });
+            note = "經典翻車！v3 停止寫入舊欄 phone，但舊欄仍掛著 NOT NULL 約束，每一筆 INSERT 都拋出非空違規錯誤！";
+          } else {
+            probes.push({ tag: "v3 單寫新欄: 寫入通過", state: "ok" });
+          }
+
+          if (nullPct > 0) {
+            level = "bad";
+            silentLossCount += 1;
+            probes.push({ tag: "v3 單讀新欄: 讀出 " + nullPct + "% 空值", state: "bad" });
+            note = (note ? note + " 此外，" : "") + "歷史資料尚未回填完畢就拔掉 COALESCE 退回讀，導致 " + nullPct + "% 用戶電話讀成 NULL！";
+          } else {
+            probes.push({ tag: "v3 單讀新欄: 100% 命中非空值", state: "ok" });
+          }
+
+          if (checkRb && level !== "bad") {
+            if (seenV2 && hasOld) {
+              probes.push({ tag: "退回 v2: 安全｜直退 v1: 漏讀新單", state: "warn" });
+              rbRiskCount += 1;
+            } else {
+              level = "warn";
+              probes.push({ tag: "無 v2 緩衝，退回 v1 必掉新資料", state: "bad" });
+              rbRiskCount += 1;
+            }
+          }
+          if (!note) {
+            note = checkRb
+              ? "v3 穩定單讀寫新欄；注意停寫舊欄後僅能無損退回 v2（讀 COALESCE），不可跨代退回只讀舊欄的 v1。"
+              : "v3 穩定單讀寫新欄，線上已無任何 SQL 依賴舊欄 phone。";
+          }
+        }
+      } else if (stepId === "contract_drop") {
+        if (appGen < 3) {
+          level = "bad";
+          hasOld = false;
+          oldNotNull = false;
+          probes.push({ tag: "線上 v" + appGen + " 存取 phone: Unknown column", state: "bad" });
+          note = "舊欄引用尚未清空（線上仍在跑 v" + appGen + "）就執行 DROP COLUMN，導致生產讀寫全面崩潰！";
+        } else {
+          hasOld = false;
+          oldNotNull = false;
+          probes.push({ tag: "DROP COLUMN phone: 零依賴安全清理", state: "ok" });
+          if (checkRb) {
+            probes.push({ tag: "物理收縮完成: 關閉舊版回滾通道", state: "warn" });
+            rbRiskCount += 1;
+          }
+          note = "確認無慢查詢與舊實例引用後安全移除舊欄，Schema 演進閉環完成。";
+        }
+      }
+
+      if (level === "bad") {
+        brokenCount += 1;
+        if (firstBadPos === -1) {
+          firstBadPos = i + 1;
+          firstBadTitle = "#" + (i + 1) + " " + def.shortName;
+        }
+      } else if (level === "warn") {
+        warnCount += 1;
+      }
+
+      var schemaSummary = "欄位[" + (hasOld ? (oldNotNull ? "phone(NN)" : "phone(NULL)") : "phone(已刪)") +
+        " , " + (hasNew ? (newNotNull ? "phone_e164(NN)" : "phone_e164(NULL)") : "無新欄") +
+        "] · 新欄空值 " + nullPct + "% · 線上程式 v" + appGen;
+
+      rows.push({
+        pos: i + 1,
+        code: def.code,
+        title: def.shortName,
+        sqlHint: def.sqlHint,
+        level: level,
+        schemaSummary: schemaSummary,
+        probes: probes,
+        note: note
+      });
+    }
+
+    var passedCount = rawOrder.length - brokenCount;
+    var rbVerdict = brokenCount > 0
+      ? "正向發佈已中斷"
+      : (!checkRb ? "未開啟回滾檢驗" : (seenV2 ? "v2 期全安全／v3 期退 v2" : "缺雙寫緩衝層"));
+
+    return {
+      rows: rows,
+      passedCount: passedCount,
+      brokenCount: brokenCount,
+      warnCount: warnCount,
+      silentLossCount: silentLossCount,
+      rbRiskCount: rbRiskCount,
+      firstBadPos: firstBadPos,
+      firstBadTitle: firstBadTitle,
+      rbVerdict: rbVerdict,
+      allGreen: brokenCount === 0 && warnCount === 0
+    };
+  }
+
+  // @probe fn       computeBackfillSim
+  // @probe baseline {"mode":"chunked","rowsM":60,"batchSize":2500,"sleepMs":40,"onlineWriteQps":2200}
+  // @probe sweep    {"mode":["ptosc","ghost"],"rowsM":[10,180],"batchSize":[500,40000],"sleepMs":[0,260],"onlineWriteQps":[400,7200]}
+  function computeBackfillSim(p) {
+    var mode = (p && (p.mode === "ptosc" || p.mode === "ghost")) ? p.mode : "chunked";
+    var rowsM = clampNum(p && p.rowsM, 5, 200, 60);
+    var batch = clampNum(p && p.batchSize, 500, 50000, 2500);
+    var sleepMs = clampNum(p && p.sleepMs, 0, 300, 40);
+    var appQps = clampNum(p && p.onlineWriteQps, 200, 8000, 2200);
+
+    var totalRows = rowsM * 1000000;
+    var batches = Math.ceil(totalRows / batch);
+
+    var contentionFactor = 1 + (appQps / 8500);
+    var batchNonlinearPenalty = Math.pow(batch / 10000, 1.65) * 16;
+    var baseExecMs = (2.1 + batch * 0.0044 + batchNonlinearPenalty) * contentionFactor;
+
+    var modeExecMult = mode === "ptosc" ? 1.22 : (mode === "ghost" ? 1.08 : 1.0);
+    var execMs = round1(baseExecMs * modeExecMult);
+
+    var lockHoldMs = mode === "ghost"
+      ? round1(Math.min(18, execMs * 0.28))
+      : (mode === "ptosc" ? round1(execMs * 0.92) : execMs);
+
+    var triggerExtraRps = mode === "ptosc" ? Math.round(appQps * 0.95) : 0;
+    var rawMigRps = batch / ((execMs + sleepMs) / 1000);
+
+    var throttleDutyPct = 0;
+    var effectiveMigRps = rawMigRps;
+
+    if (mode === "ghost") {
+      var safeAllowance = REPLICA_CAP_RPS * 0.88 - appQps;
+      if (safeAllowance < 350) {
+        effectiveMigRps = 350;
+        throttleDutyPct = 92;
+      } else if (rawMigRps > safeAllowance) {
+        throttleDutyPct = Math.min(90, Math.round((1 - safeAllowance / rawMigRps) * 100));
+        effectiveMigRps = safeAllowance;
+      }
+    }
+
+    var totalWriteRps = Math.round(appQps + triggerExtraRps + effectiveMigRps);
+    var wallSec = totalRows / Math.max(1, effectiveMigRps);
+    var wallMinutes = round1(wallSec / 60);
+
+    var overloadRps = totalWriteRps - REPLICA_CAP_RPS;
+    var peakLagSec;
+    if (mode === "ghost") {
+      var ghostBaseLag = 0.35 + (totalWriteRps / REPLICA_CAP_RPS) * 1.1 + (batch / 50000) * 0.9;
+      peakLagSec = appQps > REPLICA_CAP_RPS * 0.9
+        ? round1(ghostBaseLag + (appQps - REPLICA_CAP_RPS * 0.9) * 0.006)
+        : round1(Math.min(2.4, ghostBaseLag));
+    } else if (overloadRps <= 0) {
+      peakLagSec = round1(0.25 + (totalWriteRps / REPLICA_CAP_RPS) * 1.15 + (batch / 25000) * 1.4);
+    } else {
+      var accumSec = (overloadRps / REPLICA_CAP_RPS) * Math.min(wallSec, 900) * 0.42 + (batch / 10000) * 2.2;
+      peakLagSec = round1(Math.min(600, 1.8 + accumSec));
+    }
+
+    var iopsUsed = Math.round(appQps * 1.15 + triggerExtraRps * 1.25 + effectiveMigRps * 1.1);
+    var iopsPct = Math.min(199, Math.round((iopsUsed / PRIMARY_IOPS_BUDGET) * 100));
+
+    var dutyRatio = execMs / Math.max(1, execMs + sleepMs);
+    var p99ImpactMs;
+    if (mode === "ptosc") {
+      p99ImpactMs = round1(2.6 + Math.pow(appQps / 1700, 1.28) * 3.4 + (batch / 18000) * 4.2 * dutyRatio);
+    } else if (mode === "ghost") {
+      p99ImpactMs = round1(0.4 + (iopsPct / 100) * 1.35 + (batch / 40000) * 0.8);
+    } else {
+      p99ImpactMs = round1(0.6 + Math.pow(batch / 8000, 1.35) * dutyRatio * (0.7 + appQps / 2400) * 2.9);
+    }
+
+    var lagCurve = [];
+    for (var s = 0; s <= 7; s += 1) {
+      var frac = s / 7;
+      var pointLag;
+      if (overloadRps > 0 && mode !== "ghost") {
+        pointLag = round1(0.3 + (peakLagSec - 0.3) * Math.pow(frac, 0.85));
+      } else {
+        var wave = Math.sin(frac * Math.PI) * 0.35 + 0.65;
+        pointLag = round1(Math.max(0.2, peakLagSec * wave));
+      }
+      lagCurve.push(pointLag);
+    }
+
+    var riskState = "ok";
+    if (peakLagSec > 10 || lockHoldMs > 120 || p99ImpactMs > 18) {
+      riskState = "bad";
+    } else if (peakLagSec > 2.0 || lockHoldMs > 45 || p99ImpactMs > 7 || throttleDutyPct > 55) {
+      riskState = "warn";
+    }
+
+    return {
+      batches: batches,
+      execMs: execMs,
+      lockHoldMs: lockHoldMs,
+      wallMinutes: wallMinutes,
+      appWriteShareRps: Math.round(appQps),
+      triggerShareRps: triggerExtraRps,
+      migShareRps: Math.round(effectiveMigRps),
+      totalWriteRps: totalWriteRps,
+      overloadRps: Math.max(0, overloadRps),
+      throttleDutyPct: throttleDutyPct,
+      peakLagSec: peakLagSec,
+      iopsPct: iopsPct,
+      p99ImpactMs: p99ImpactMs,
+      lagCurve: lagCurve,
+      riskState: riskState
+    };
+  }
+
+  // @probe fn       computeDdlDecision
+  // @probe baseline {"engine":"pg","op":"retype-int-bigint","scale":"hot-large","deploy":"rolling-nofk"}
+  // @probe sweep    {"engine":["mysql"],"op":["add-col-const","add-index","add-not-null","rename-split"],"scale":["small-cold"],"deploy":["rolling-fk","maint-window"]}
+  function computeDdlDecision(p) {
+    var eng = (p && p.engine === "mysql") ? "mysql" : "pg";
+    var op = (p && p.op) ? p.op : "retype-int-bigint";
+    var scale = (p && p.scale === "small-cold") ? "small-cold" : "hot-large";
+    var dep = (p && (p.deploy === "rolling-fk" || p.deploy === "maint-window")) ? p.deploy : "rolling-nofk";
+
+    var path = [];
+    var ignored = [];
+    var tone = "ok";
+    var pick = "";
+    var why = "";
+    var lockLevel = "";
+    var rewriteCost = "";
+    var blockWindow = "";
+    var sql = "";
+
+    if (op === "rename-split") {
+      ignored.push("資料庫引擎（PG 與 MySQL 皆受限於應用層舊 SQL 契約）");
+      if (dep === "maint-window") {
+        tone = "warn";
+        pick = "停寫維護窗口內同步升級程式＋瞬間 RENAME / 轉寫";
+        why = "因為允許短暫停寫窗口且無新舊版並存需求，可在停寫期間同時切換程式碼與欄位名稱；但若涉及億級資料拆分仍建議預先回填。";
+        lockLevel = eng === "pg" ? "短暫 ACCESS EXCLUSIVE" : "短暫 MDL_EXCLUSIVE";
+        rewriteCost = scale === "hot-large" ? "改名免重寫；若拆分大表需預先回填" : "免重寫（毫秒級元資料）";
+        blockWindow = scale === "hot-large" ? "停寫窗口 15 ~ 60 秒" : "停寫窗口 < 5 秒";
+        path.push("動作為破壞性改名或拆分，先檢查是否要求滾動並存");
+        path.push("允許停寫窗口：可省略線上雙寫，但大表資料轉換仍須在窗口前預跑");
+        sql = "-- 窗口前預跑新欄回填（若需拆分），窗口內停寫後執行：\nSET lock_timeout = '2s';\nALTER TABLE users RENAME COLUMN phone TO phone_e164;";
+      } else {
+        tone = "ok";
+        ignored.push("表規模（小表同樣會因舊版 SQL 找不到欄位而報錯）");
+        pick = "五階段 Expand / Dual-Write / Backfill / Contract 演進";
+        why = "引擎層 RENAME 雖只需數毫秒，但滾動發佈期間 v1 與 v2 實例同時在線，直接改名會讓 v1 查詢當場拋出 Unknown column 錯誤！";
+        lockLevel = "各階段僅毫秒級元資料鎖（搭配 lock_timeout）";
+        rewriteCost = "免鎖表重寫；由背景短交易分批回填新欄";
+        blockWindow = "< 15 ms（分多次發佈，零停機）";
+        path.push("動作為欄位改名／拆分：破壞既有 SQL 欄位名稱契約");
+        path.push("部署為滾動並存：單次原子 DDL 必打掛舊版實例，強制走 Expand / Contract");
+        if (dep === "rolling-fk") {
+          path.push("含子表外鍵參照：切讀前須同步在子表補齊指向新欄的 NOT VALID 外鍵");
+        }
+        sql = "-- 1. Expand 加可空欄  2. v2 雙寫+COALESCE 讀  3. 主鍵分批 Backfill\n-- 4. 解舊欄 NOT NULL + 新欄 NOT VALID 驗證  5. v3 單讀寫  6. DROP 舊欄\nSET lock_timeout = '1500ms';\nALTER TABLE users ADD COLUMN phone_e164 VARCHAR(32) NULL;";
+      }
+      return {
+        tone: tone,
+        pick: pick,
+        why: why,
+        lockLevel: lockLevel,
+        rewriteCost: rewriteCost,
+        blockWindow: blockWindow,
+        ignoredText: ignored.length ? ignored.join("、") : "無（四維度皆參與決策）",
+        ignoredCount: ignored.length,
+        path: path,
+        sql: sql
+      };
+    }
+
+    if (op === "add-col-const") {
+      ignored.push("表規模與外鍵（現代引擎皆走元資料字典更新）");
+      ignored.push("部署型態（加法變更天然向後相容舊版 SELECT 指定欄位）");
+      tone = "ok";
+      if (eng === "pg") {
+        pick = "PostgreSQL 原生 Catalog 瞬間加欄 + lock_timeout 重試";
+        why = "PostgreSQL 11+ 將非揮發常數預設值寫入 pg_attribute.attmissingval，不改寫任何既有 Heap 資料頁；唯一風險是排隊等鎖。";
+        lockLevel = "ACCESS EXCLUSIVE（僅持有數毫秒）";
+        rewriteCost = "零重寫、零額外磁碟膨脹";
+        blockWindow = "< 10 ms（以 lock_timeout 防止鎖佇列護航阻塞）";
+        path.push("PostgreSQL 14+ 新增常數預設值欄位：觸發 attmissingval 快速路徑");
+        path.push("強制包裹 lock_timeout 退避重試，攔截長查詢造成的 FIFO 鎖排隊");
+        sql = "BEGIN;\n  SET LOCAL lock_timeout = '1500ms';\n  ALTER TABLE orders ADD COLUMN tier VARCHAR(16) DEFAULT 'standard';\nCOMMIT;";
+      } else {
+        pick = "MySQL 8.0 ALGORITHM=INSTANT 瞬間加欄 + lock_wait_timeout";
+        why = "MySQL 8.0 支援透過資料字典與列版本號（上限 64 版）瞬間新增欄位，顯式宣告 ALGORITHM=INSTANT 可防止意外退回鎖表重建。";
+        lockLevel = "MDL_EXCLUSIVE（僅修改資料字典數毫秒）";
+        rewriteCost = "零重寫（注意 TOTAL_ROW_VERSIONS 不可超過 64）";
+        blockWindow = "< 10 ms（逾時 2 秒立即放棄重試）";
+        path.push("MySQL 8.0 新增常數預設值欄位：支援 INSTANT 演算法");
+        path.push("顯式斷言 ALGORITHM=INSTANT 並限制 lock_wait_timeout");
+        sql = "SET SESSION lock_wait_timeout = 2;\nALTER TABLE orders ADD COLUMN tier VARCHAR(16) DEFAULT 'standard',\n  ALGORITHM=INSTANT;";
+      }
+      return {
+        tone: tone,
+        pick: pick,
+        why: why,
+        lockLevel: lockLevel,
+        rewriteCost: rewriteCost,
+        blockWindow: blockWindow,
+        ignoredText: ignored.join("、"),
+        ignoredCount: ignored.length,
+        path: path,
+        sql: sql
+      };
+    }
+
+    if (op === "add-index") {
+      ignored.push("外鍵參照關係（新增次級索引不破壞既有約束）");
+      if (eng === "pg") {
+        if (scale === "small-cold" && dep === "maint-window") {
+          tone = "ok";
+          pick = "維護窗口內標準單趟 CREATE INDEX（平行 Worker 加速）";
+          why = "小表且允許數秒停寫時，標準 CREATE INDEX 只需掃描一趟並可吃滿平行建索引執行緒，比 CONCURRENTLY 更快且無 INVALID 殘留風險。";
+          lockLevel = "SHARE（期間擋寫入、允許讀取）";
+          rewriteCost = "不重寫主表，僅建立新 B+Tree 索引檔";
+          blockWindow = "約 0.5 ~ 3 秒停寫";
+          path.push("小表且有停寫窗口：標準單趟建索引最簡潔高效");
+          sql = "SET lock_timeout = '2s';\nCREATE INDEX idx_orders_created_at ON orders (created_at);";
+        } else {
+          tone = "ok";
+          pick = "CREATE INDEX CONCURRENTLY 兩階段非阻塞建索引";
+          why = "降級使用 SHARE UPDATE EXCLUSIVE 鎖，兩趟快照掃描期間完全不阻塞線上 INSERT / UPDATE / DELETE；務必在交易區塊外執行並巡檢 INVALID 狀態。";
+          lockLevel = "SHARE UPDATE EXCLUSIVE（不擋普通讀寫）";
+          rewriteCost = "免重寫主表；兩趟全表掃描建立索引";
+          blockWindow = "頭尾快照等待僅數毫秒（零停寫）";
+          path.push("PostgreSQL 線上無停機建索引：必用 CONCURRENTLY 避開 SHARE 寫入鎖");
+          path.push(scale === "hot-large" ? "億級熱表：調低工作執行緒 I/O 衝擊並在完成後驗證 indisvalid" : "滾動環境：保持讀寫零中斷");
+          sql = "-- 嚴禁包在 BEGIN...COMMIT 內！失敗須 DROP INDEX CONCURRENTLY 重來\nSET lock_timeout = '2s';\nCREATE INDEX CONCURRENTLY idx_orders_created_at ON orders (created_at);";
+        }
+      } else {
+        tone = scale === "hot-large" ? "warn" : "ok";
+        pick = scale === "hot-large" && dep === "rolling-nofk"
+          ? "MySQL INPLACE LOCK=NONE（若從庫延遲敏感則改走 gh-ost）"
+          : "MySQL 原生 ALGORITHM=INPLACE, LOCK=NONE 線上建索引";
+        why = scale === "hot-large"
+          ? "InnoDB 原生 INPLACE 建索引不鎖寫入，但在億級高寫入熱表上無法自動按從庫 Lag 節流，且可能寫滿 innodb_online_alter_log_max_size；對延遲極度敏感時可改用 gh-ost。"
+          : "中小型表直接使用 InnoDB 原生 INPLACE + LOCK=NONE 即可在背景建好次級索引並重放增量日誌。";
+        lockLevel = "準備與提交瞬間短暫 MDL_EXCLUSIVE，掃描期 LOCK=NONE";
+        rewriteCost = "不重寫主表，建立次級索引＋記憶體 Online DML Log";
+        blockWindow = "< 20 ms（受 lock_wait_timeout 保護）";
+        path.push("MySQL 8.0 建立次級索引：原生支援 INPLACE + LOCK=NONE");
+        path.push(scale === "hot-large" ? "億級熱表警示：評估 Online Log 上限與從庫延遲承受度" : "小表低負載：原生 Online DDL 秒級完成");
+        sql = "SET SESSION lock_wait_timeout = 2;\nALTER TABLE orders ADD INDEX idx_created_at (created_at),\n  ALGORITHM=INPLACE, LOCK=NONE;";
+      }
+      return {
+        tone: tone,
+        pick: pick,
+        why: why,
+        lockLevel: lockLevel,
+        rewriteCost: rewriteCost,
+        blockWindow: blockWindow,
+        ignoredText: ignored.join("、"),
+        ignoredCount: ignored.length,
+        path: path,
+        sql: sql
+      };
+    }
+
+    if (op === "add-not-null") {
+      if (eng === "pg") {
+        ignored.push("外鍵結構（PostgreSQL 兩段式約束同時適用於 CHECK 與 FOREIGN KEY）");
+        tone = "ok";
+        pick = "NOT VALID 攔截新寫入 + VALIDATE 背景驗舊列 + 免重掃轉正";
+        why = "直接 SET NOT NULL 會握緊 ACCESS EXCLUSIVE 掃完全表；先掛 CHECK NOT VALID 只需毫秒短鎖，VALIDATE 階段只拿 SHARE UPDATE EXCLUSIVE 不擋讀寫，PG 12+ 隨後可毫秒級轉正 NOT NULL！";
+        lockLevel = "掛約束瞬間短鎖，掃描驗證期 SHARE UPDATE EXCLUSIVE";
+        rewriteCost = "零重寫，僅單趟低階鎖背景掃描驗證";
+        blockWindow = scale === "hot-large" ? "< 15 ms（徹底避開億級表長鎖掃描）" : "< 5 ms";
+        path.push("PostgreSQL 收緊非空或外鍵約束：切開新寫入檢查與存量掃描");
+        path.push(dep === "maint-window" ? "即使有短窗口，大表仍用兩段式避免長鎖超時" : "滾動環境：確認雙寫與回填已清零 NULL 後執行兩段式轉正");
+        sql = "SET lock_timeout = '1500ms';\nALTER TABLE orders ADD CONSTRAINT chk_nn CHECK (user_id IS NOT NULL) NOT VALID;\nALTER TABLE orders VALIDATE CONSTRAINT chk_nn;\nALTER TABLE orders ALTER COLUMN user_id SET NOT NULL;\nALTER TABLE orders DROP CONSTRAINT chk_nn;";
+      } else {
+        if (scale === "small-cold") {
+          tone = "ok";
+          pick = "MySQL 原生 MODIFY COLUMN ... NOT NULL (ALGORITHM=INPLACE)";
+          why = "中小型低頻表全表非空檢查僅需數百毫秒，顯式加 LOCK=NONE 與鎖等待逾時即可安全完成。";
+          lockLevel = "頭尾短暫 MDL_EXCLUSIVE，檢查期 LOCK=NONE";
+          rewriteCost = "免重寫資料頁，全表掃描確認無 NULL";
+          blockWindow = "< 30 ms";
+          path.push("MySQL 小表補 NOT NULL：原生 INPLACE 掃描極快");
+          sql = "SET SESSION lock_wait_timeout = 2;\nALTER TABLE orders MODIFY COLUMN user_id BIGINT NOT NULL,\n  ALGORITHM=INPLACE, LOCK=NONE;";
+        } else {
+          tone = "warn";
+          pick = dep === "rolling-fk"
+            ? "pt-online-schema-change 影子表遷移（支援外鍵重綁）"
+            : "gh-ost 影子表分批遷移（無觸發器、支援從庫節流）";
+          why = "MySQL 無對應 PG 的 NOT VALID 免掃轉正機制，億級熱表直接 MODIFY NOT NULL 易撐爆 Online DML Log 且無法節流；改走影子表最可控。";
+          lockLevel = "原表無長鎖，Cut-over 瞬間短暫排他鎖";
+          rewriteCost = "建立 1 倍大小影子表並分批拷貝";
+          blockWindow = "Cut-over 瞬間 20 ~ 80 ms";
+          path.push("MySQL 億級熱表收緊非空：避開不受控的全速 INPLACE 掃描");
+          path.push(dep === "rolling-fk" ? "表含子表外鍵：gh-ost 受限，改選 pt-osc rebuild_constraints" : "無外鍵參照：首選 gh-ost 讀 Binlog 零 Trigger 遷移");
+          sql = dep === "rolling-fk"
+            ? "pt-online-schema-change --alter \"MODIFY user_id BIGINT NOT NULL\" \\\n  --alter-foreign-keys-method=rebuild_constraints --max-lag=2s D=app,t=orders --execute"
+            : "gh-ost --database=app --table=orders \\\n  --alter=\"MODIFY COLUMN user_id BIGINT NOT NULL\" \\\n  --max-lag-millis=1500 --cut-over-lock-timeout-seconds=3 --execute";
+        }
+      }
+      return {
+        tone: tone,
+        pick: pick,
+        why: why,
+        lockLevel: lockLevel,
+        rewriteCost: rewriteCost,
+        blockWindow: blockWindow,
+        ignoredText: ignored.length ? ignored.join("、") : "無（四維度皆參與決策）",
+        ignoredCount: ignored.length,
+        path: path,
+        sql: sql
+      };
+    }
+
+    /* op === retype-int-bigint */
+    if (scale === "small-cold" && dep === "maint-window") {
+      ignored.push("引擎差異（小表在停寫窗口內皆可直接完成實體型別轉換）");
+      tone = "ok";
+      pick = "停寫維護窗口內原生 ALTER COLUMN TYPE BIGINT（附鎖逾時保護）";
+      why = "50 萬列以下小表實體重寫僅約數百毫秒至兩秒，又有維護窗口兜底，不必引入複雜的雙欄或影子表工程。";
+      lockLevel = eng === "pg" ? "ACCESS EXCLUSIVE（重寫期間持有）" : "MDL_SHARED_NO_WRITE（COPY 期間鎖寫）";
+      rewriteCost = "全表重寫（資料量小，I/O 瞬間完成）";
+      blockWindow = "0.5 ~ 2.5 秒（於維護窗口內執行）";
+      path.push("實體型別升級（INT 轉 BIGINT）必改實體 byte 佈局");
+      path.push("小表＋允許停寫窗口：直接重寫投報率最高");
+      sql = eng === "pg"
+        ? "SET lock_timeout = '3s';\nALTER TABLE orders ALTER COLUMN id TYPE BIGINT;"
+        : "SET SESSION lock_wait_timeout = 3;\nALTER TABLE orders MODIFY COLUMN id BIGINT NOT NULL;";
+    } else if (eng === "pg") {
+      if (scale === "small-cold") {
+        tone = "warn";
+        pick = "低峰期 lock_timeout 保護下原生重寫（或零抖動雙欄切換）";
+        why = "小表（< 50 萬列）原生重寫約 0.4 ~ 1.5 秒，多數微服務可容忍短暫抖動；若追求嚴格零阻塞則比照大表走雙欄鏡像。";
+        lockLevel = "ACCESS EXCLUSIVE（持有約 0.4 ~ 1.5 秒）";
+        rewriteCost = "全表重寫（體積小）";
+        blockWindow = "400 ~ 1500 ms";
+        path.push("PostgreSQL 升級 INT 至 BIGINT：原生語法必重寫 Heap");
+        path.push("表規模小：評估 1 秒級鎖視窗是否符合 SLA，否則升級為雙欄法");
+        sql = "BEGIN;\n  SET LOCAL lock_timeout = '1500ms';\n  ALTER TABLE orders ALTER COLUMN amount TYPE BIGINT;\nCOMMIT;";
+      } else {
+        tone = dep === "maint-window" ? "warn" : "ok";
+        pick = "PostgreSQL 雙欄鏡像 Trigger + CONCURRENTLY 唯一索引換欄法";
+        why = dep === "maint-window"
+          ? "注意衝突：億級大表重寫 Heap 需數十分鐘，數十秒維護窗口根本裝不下！仍必須提前在背景完成新欄回填與平行建索引，再於窗口內秒級換欄。"
+          : "避開數十分鐘 ACCESS EXCLUSIVE 鎖表的唯一正途：新增 BIGINT 影子欄並以 Trigger 同步、分批回填、CONCURRENTLY 建索引，最後在毫秒短交易內對調欄位並 USING INDEX 切換約束。";
+        lockLevel = "全程無長鎖，最終切換瞬間 ACCESS EXCLUSIVE < 25ms";
+        rewriteCost = "不鎖表重寫；同表內分批回填新欄（後由 VACUUM 回收舊空間）";
+        blockWindow = "10 ~ 25 ms（最終換欄短交易）";
+        path.push("PostgreSQL 億級表 INT 升 BIGINT：原生 ALTER 會長時間封死全站讀寫");
+        path.push("改走表內影子欄＋Trigger 同步＋分批回填＋PRIMARY KEY USING INDEX 瞬間轉正");
+        if (dep === "rolling-fk") {
+          path.push("含子表外鍵：切換前須先在各子表新增 BIGINT 外鍵欄並以 NOT VALID 驗證通過");
+        }
+        sql = "-- 預先完成 id_big 回填、UNIQUE INDEX CONCURRENTLY 與非空驗證後，瞬間切換：\nBEGIN;\n  SET LOCAL lock_timeout = '1500ms';\n  ALTER TABLE orders DROP CONSTRAINT orders_pkey,\n    ADD CONSTRAINT orders_pkey PRIMARY KEY USING INDEX idx_orders_id_big;\nCOMMIT;";
+      }
+    } else {
+      /* MySQL INT -> BIGINT without maint-window */
+      if (dep === "rolling-fk") {
+        tone = "warn";
+        pick = "pt-online-schema-change 影子表遷移（外鍵重綁模式）";
+        why = "MySQL INT 轉 BIGINT 屬於 COPY 重寫操作；因存在子表外鍵參照，gh-ost 預設拒絕執行，需改用支援 rebuild_constraints 的 pt-osc 並嚴格限制批次大小。";
+        lockLevel = "原表掛 Trigger，Cut-over 短暫 MDL_EXCLUSIVE";
+        rewriteCost = "建立 1 倍影子表分批拷貝";
+        blockWindow = "Cut-over 約 30 ~ 100 ms（期間業務寫入帶 Trigger 開銷）";
+        path.push("MySQL INT 升 BIGINT：原生為鎖寫 COPY，線上必須走影子表");
+        path.push("表含子表外鍵：排除 gh-ost，選用 pt-osc 搭配外鍵重建策略");
+        sql = "pt-online-schema-change --alter \"MODIFY COLUMN id BIGINT NOT NULL\" \\\n  --alter-foreign-keys-method=rebuild_constraints --chunk-size=2000 --max-lag=2s D=app,t=orders --execute";
+      } else {
+        tone = "ok";
+        pick = "gh-ost 無觸發器 Binlog 影子表遷移";
+        why = "MySQL INT 轉 BIGINT 必須重建實體表；gh-ost 不在原表掛任何 Trigger，透過拉取 ROW Binlog 非同步追趕並支援依從庫延遲自動暫停，是線上熱表重構的黃金標準。";
+        lockLevel = "原表零長鎖、零 Trigger；僅 Cut-over 瞬間短暫鎖表";
+        rewriteCost = "建立 _gho 影子表（需預留 > 1.2 倍可用磁碟空間）";
+        blockWindow = "Cut-over 雙連線原子 RENAME < 50 ms";
+        path.push("MySQL INT 升 BIGINT：需全表實體重寫，排除原生鎖表 COPY");
+        path.push("無外鍵阻礙：首選 gh-ost 以保護線上熱路徑 P99 與從庫延遲");
+        sql = "gh-ost --database=app --table=orders \\\n  --alter=\"MODIFY COLUMN id BIGINT NOT NULL\" \\\n  --chunk-size=2500 --max-lag-millis=1500 \\\n  --cut-over-lock-timeout-seconds=3 --execute";
+      }
+    }
+
+    return {
+      tone: tone,
+      pick: pick,
+      why: why,
+      lockLevel: lockLevel,
+      rewriteCost: rewriteCost,
+      blockWindow: blockWindow,
+      ignoredText: ignored.length ? ignored.join("、") : "無（四維度皆參與決策）",
+      ignoredCount: ignored.length,
+      path: path,
+      sql: sql
+    };
+  }
+
+  /* (3) DOM 參照與互動狀態 */
+  function el(id) {
+    return document.getElementById(id);
+  }
+
+  var ordDemoRoot = el("demo-expand-order");
+  var ordRollbackChk = el("ord-rollback-chk");
+  var ordResetBtn = el("ord-reset-btn");
+  var ordKpiSafe = el("ord-kpi-safe");
+  var ordKpiBreak = el("ord-kpi-break");
+  var ordKpiLoss = el("ord-kpi-loss");
+  var ordKpiRb = el("ord-kpi-rb");
+  var ordListEl = el("ord-list");
+  var ordStatusEl = el("ord-status");
+
+  var bfDemoRoot = el("demo-backfill-sim");
+  var bfResetBtn = el("bf-reset-btn");
+  var bfRowsInput = el("bf-rows");
+  var bfRowsVal = el("bf-rows-val");
+  var bfBatchInput = el("bf-batch");
+  var bfBatchVal = el("bf-batch-val");
+  var bfSleepInput = el("bf-sleep");
+  var bfSleepVal = el("bf-sleep-val");
+  var bfQpsInput = el("bf-qps");
+  var bfQpsVal = el("bf-qps-val");
+  var bfOutDuration = el("bf-out-duration");
+  var bfOutLock = el("bf-out-lock");
+  var bfOutLag = el("bf-out-lag");
+  var bfOutP99 = el("bf-out-p99");
+  var bfSvg = el("bf-svg");
+  var bfStatusEl = el("bf-status");
+
+  var decDemoRoot = el("demo-ddl-decision");
+  var decEngineSel = el("dec-engine");
+  var decOpSel = el("dec-op");
+  var decScaleSel = el("dec-scale");
+  var decDeploySel = el("dec-deploy");
+  var decResetBtn = el("dec-reset-btn");
+  var decHeroBox = el("dec-hero-box");
+  var decOutBadge = el("dec-out-badge");
+  var decOutPick = el("dec-out-pick");
+  var decOutWhy = el("dec-out-why");
+  var decOutLock = el("dec-out-lock");
+  var decOutRewrite = el("dec-out-rewrite");
+  var decOutWindow = el("dec-out-window");
+  var decOutIgnored = el("dec-out-ignored");
+  var decPathList = el("dec-path-list");
+  var decSqlBox = el("dec-sql-box");
+  var decStatusEl = el("dec-status");
+
+  var uiState = {
+    order: ORDER_PRESETS.canonical.slice(),
+    activePreset: "canonical",
+    testRollback: true,
+    bfMode: "chunked",
+    bfRowsM: 60,
+    bfBatch: 2500,
+    bfSleep: 40,
+    bfQps: 2200,
+    decEngine: "pg",
+    decOp: "retype-int-bigint",
+    decScale: "hot-large",
+    decDeploy: "rolling-nofk"
+  };
+
+  /* (4) 畫面渲染函式 */
+  function escHtml(s) {
+    return String(s)
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;");
+  }
+
+  function fmtInt(n) {
+    return Math.round(n).toLocaleString("en-US");
+  }
+
+  function syncPressedGroup(rootEl, attrName, activeVal) {
+    if (!rootEl) return;
+    var btns = rootEl.querySelectorAll("button[" + attrName + "]");
+    for (var i = 0; i < btns.length; i += 1) {
+      var v = btns[i].getAttribute(attrName);
+      btns[i].setAttribute("aria-pressed", v === activeVal ? "true" : "false");
+    }
+  }
+
+  function setKpiTone(node, text, tone) {
+    if (!node) return;
+    node.textContent = text;
+    node.className = "kv" + (tone ? " " + tone : "");
+  }
+
+  function renderOrderDemo() {
+    if (!ordDemoRoot) return;
+    syncPressedGroup(ordDemoRoot, "data-ord-preset", uiState.activePreset);
+    if (ordRollbackChk) ordRollbackChk.checked = uiState.testRollback;
+
+    var res = computeMigrationPlan({
+      order: uiState.order,
+      testRollback: uiState.testRollback
+    });
+
+    setKpiTone(
+      ordKpiSafe,
+      "通過 " + res.passedCount + " 關 · 異常 " + res.brokenCount + " 處",
+      res.brokenCount > 0 ? "bad" : (res.warnCount > 0 ? "warn" : "ok")
+    );
+    setKpiTone(
+      ordKpiBreak,
+      res.firstBadTitle,
+      res.brokenCount > 0 ? "bad" : "ok"
+    );
+    setKpiTone(
+      ordKpiLoss,
+      res.silentLossCount > 0 ? res.silentLossCount + " 處空值或掉資料風險" : "0 處資料遺失",
+      res.silentLossCount > 0 ? "bad" : "ok"
+    );
+    setKpiTone(
+      ordKpiRb,
+      res.rbVerdict,
+      res.brokenCount > 0 ? "bad" : (res.warnCount > 0 ? "warn" : "ok")
+    );
+
+    if (ordListEl) {
+      var html = [];
+      for (var i = 0; i < res.rows.length; i += 1) {
+        var r = res.rows[i];
+        var pills = [];
+        for (var j = 0; j < r.probes.length; j += 1) {
+          var pr = r.probes[j];
+          pills.push('<span class="osm-pill ' + escHtml(pr.state) + '">' + escHtml(pr.tag) + "</span>");
+        }
+        var disableUp = i === 0 ? " disabled" : "";
+        var disableDown = i === res.rows.length - 1 ? " disabled" : "";
+
+        html.push(
+          '<div class="osm-ord-item ' + escHtml(r.level) + '">' +
+            '<div class="osm-ord-top">' +
+              '<div class="osm-ord-title">' +
+                '<span class="osm-ord-idx">順序 ' + r.pos + "</span>" +
+                "<span>" + escHtml(r.title) + "</span>" +
+              "</div>" +
+              '<div class="osm-ord-btns">' +
+                '<button type="button" class="osm-move-btn" data-move-idx="' + i + '" data-move-dir="-1"' + disableUp + ' aria-label="上移此步驟">↑ 上移</button>' +
+                '<button type="button" class="osm-move-btn" data-move-idx="' + i + '" data-move-dir="1"' + disableDown + ' aria-label="下移此步驟">↓ 下移</button>' +
+              "</div>" +
+            "</div>" +
+            '<div class="osm-ord-meta">' + escHtml(r.sqlHint) + " ｜ " + escHtml(r.schemaSummary) + "</div>" +
+            '<div class="osm-probe-pills">' + pills.join("") + "</div>" +
+            '<div class="osm-ord-note">' + escHtml(r.note) + "</div>" +
+          "</div>"
+        );
+      }
+      ordListEl.innerHTML = html.join("");
+    }
+
+    if (ordStatusEl) {
+      if (res.brokenCount > 0) {
+        ordStatusEl.innerHTML = "<b>相容性斷裂：</b>在「" + escHtml(res.firstBadTitle) + "」發生線上讀寫中斷或非空約束違規，請用上下移按鈕把前置條件排到它前面。";
+      } else if (res.warnCount > 0) {
+        ordStatusEl.innerHTML = "<b>存在空值收斂或回滾缺口：</b>雖然當下未拋 SQL 語法錯，但存在舊版持續寫入空洞或缺少雙寫緩衝層，建議對齊標準順序。";
+      } else {
+        ordStatusEl.innerHTML = "<b>全階段零停機驗證通過：</b>每個時間點新舊版實例皆可正常讀寫，且雙寫期具備完整回滾保護。";
+      }
+    }
+  }
+
+  function renderBackfillDemo() {
+    if (!bfDemoRoot) return;
+    syncPressedGroup(bfDemoRoot, "data-bf-mode", uiState.bfMode);
+
+    if (bfRowsVal) bfRowsVal.textContent = uiState.bfRowsM + "M 列";
+    if (bfBatchVal) bfBatchVal.textContent = fmtInt(uiState.bfBatch) + " 列";
+    if (bfSleepVal) bfSleepVal.textContent = uiState.bfSleep + " ms";
+    if (bfQpsVal) bfQpsVal.textContent = fmtInt(uiState.bfQps) + " 筆/秒";
+
+    var sim = computeBackfillSim({
+      mode: uiState.bfMode,
+      rowsM: uiState.bfRowsM,
+      batchSize: uiState.bfBatch,
+      sleepMs: uiState.bfSleep,
+      onlineWriteQps: uiState.bfQps
+    });
+
+    var durLabel = sim.wallMinutes >= 60
+      ? round1(sim.wallMinutes / 60) + " 小時 (" + fmtInt(sim.batches) + " 批)"
+      : sim.wallMinutes + " 分鐘 (" + fmtInt(sim.batches) + " 批)";
+    setKpiTone(bfOutDuration, durLabel, sim.throttleDutyPct > 65 ? "warn" : "");
+
+    setKpiTone(
+      bfOutLock,
+      "鎖 " + sim.lockHoldMs + " ms / 批 " + sim.execMs + " ms",
+      sim.lockHoldMs > 120 ? "bad" : (sim.lockHoldMs > 45 ? "warn" : "ok")
+    );
+    setKpiTone(
+      bfOutLag,
+      sim.peakLagSec + " 秒" + (sim.throttleDutyPct > 0 ? " (節流 " + sim.throttleDutyPct + "%)" : ""),
+      sim.peakLagSec > 10 ? "bad" : (sim.peakLagSec > 2.0 ? "warn" : "ok")
+    );
+    setKpiTone(
+      bfOutP99,
+      "+" + sim.p99ImpactMs + " ms (IOPS " + sim.iopsPct + "%)",
+      sim.p99ImpactMs > 18 ? "bad" : (sim.p99ImpactMs > 7 ? "warn" : "ok")
+    );
+
+    if (bfSvg) {
+      var scaleMaxRps = Math.max(13500, sim.totalWriteRps * 1.08);
+      var barFullW = 284;
+      var wApp = Math.round((sim.appWriteShareRps / scaleMaxRps) * barFullW);
+      var wTrig = Math.round((sim.triggerShareRps / scaleMaxRps) * barFullW);
+      var wMig = Math.max(2, Math.round((sim.migShareRps / scaleMaxRps) * barFullW));
+      var capX = 20 + Math.round((REPLICA_CAP_RPS / scaleMaxRps) * barFullW);
+      var migFill = sim.overloadRps > 0 ? "#f6ecea" : "#eef4f1";
+      var migStroke = sim.overloadRps > 0 ? "#a8554f" : "#4d7d68";
+
+      var chartX0 = 368;
+      var chartW = 290;
+      var chartY0 = 38;
+      var chartH = 112;
+      var maxPlotLag = Math.max(5, sim.peakLagSec * 1.15);
+      var slaY = Math.round(chartY0 + chartH - (2.0 / maxPlotLag) * chartH);
+      var pts = [];
+      var dots = [];
+      for (var k = 0; k < sim.lagCurve.length; k += 1) {
+        var px = Math.round(chartX0 + (k / (sim.lagCurve.length - 1)) * chartW);
+        var py = Math.round(chartY0 + chartH - (sim.lagCurve[k] / maxPlotLag) * chartH);
+        pts.push(px + "," + py);
+        var dCol = sim.lagCurve[k] > 2.0 ? (sim.lagCurve[k] > 10 ? "#a8554f" : "#a3743e") : "#4d7d68";
+        dots.push('<circle cx="' + px + '" cy="' + py + '" r="3.5" fill="' + dCol + '"/>');
+      }
+      var lineStroke = sim.peakLagSec > 10 ? "#a8554f" : (sim.peakLagSec > 2.0 ? "#a3743e" : "#4d7d68");
+
+      bfSvg.innerHTML =
+        '<title>從庫回放容量預算與遷移期間複寫延遲變化圖</title>' +
+        '<rect x="6" y="6" width="322" height="174" rx="7" fill="#fafaf9" stroke="#ecebe8"/>' +
+        '<text x="20" y="27" font-family="var(--mono)" font-size="11.5" font-weight="700" fill="#262a2f">每秒寫入負載 vs 從庫回放上限</text>' +
+        '<rect x="20" y="52" width="' + barFullW + '" height="30" rx="5" fill="#ffffff" stroke="#dedcd8"/>' +
+        '<rect x="20" y="52" width="' + wApp + '" height="30" rx="4" fill="#eef2f7" stroke="#3f6188"/>' +
+        (wTrig > 0 ? '<rect x="' + (20 + wApp) + '" y="52" width="' + wTrig + '" height="30" fill="#f6f0e7" stroke="#a3743e"/>' : "") +
+        '<rect x="' + (20 + wApp + wTrig) + '" y="52" width="' + wMig + '" height="30" fill="' + migFill + '" stroke="' + migStroke + '"/>' +
+        '<line x1="' + capX + '" y1="42" x2="' + capX + '" y2="94" stroke="#a8554f" stroke-width="1.8" stroke-dasharray="4 3"/>' +
+        '<text x="' + Math.min(308, Math.max(24, capX)) + '" y="39" text-anchor="middle" font-family="var(--mono)" font-size="11" font-weight="700" fill="#a8554f">從庫上限 9.5k/s</text>' +
+        '<text x="20" y="114" font-family="var(--mono)" font-size="11" fill="#262a2f">業務寫入: ' + fmtInt(sim.appWriteShareRps) + '/s' +
+          (sim.triggerShareRps > 0 ? ' ｜ Trigger: +' + fmtInt(sim.triggerShareRps) + '/s' : ' ｜ 無 Trigger 放大') + '</text>' +
+        '<text x="20" y="134" font-family="var(--mono)" font-size="11" fill="#262a2f">遷移推進: ' + fmtInt(sim.migShareRps) + '/s ｜ 合計: ' + fmtInt(sim.totalWriteRps) + '/s</text>' +
+        '<text x="20" y="156" font-family="var(--mono)" font-size="11" fill="' + (sim.throttleDutyPct > 0 ? "#4d7d68" : (sim.overloadRps > 0 ? "#a8554f" : "#6b7078")) + '">' +
+          (sim.throttleDutyPct > 0
+            ? "保護生效：gh-ost 自動節流降速 " + sim.throttleDutyPct + "% 守住從庫"
+            : (sim.overloadRps > 0 ? "超載 +" + fmtInt(sim.overloadRps) + "/s：從庫回放不及持續積壓" : "餘裕充足：總寫入低於從庫回放上限")) +
+        "</text>" +
+
+        '<rect x="340" y="6" width="334" height="174" rx="7" fill="#fafaf9" stroke="#ecebe8"/>' +
+        '<text x="354" y="27" font-family="var(--mono)" font-size="11.5" font-weight="700" fill="#262a2f">遷移進度 (0% → 100%) 從庫延遲曲線</text>' +
+        '<line x1="' + chartX0 + '" y1="' + (chartY0 + chartH) + '" x2="' + (chartX0 + chartW) + '" y2="' + (chartY0 + chartH) + '" stroke="#dedcd8"/>' +
+        '<line x1="' + chartX0 + '" y1="' + chartY0 + '" x2="' + chartX0 + '" y2="' + (chartY0 + chartH) + '" stroke="#dedcd8"/>' +
+        '<line x1="' + chartX0 + '" y1="' + slaY + '" x2="' + (chartX0 + chartW) + '" y2="' + slaY + '" stroke="#4d7d68" stroke-width="1.2" stroke-dasharray="4 3"/>' +
+        '<text x="' + (chartX0 + chartW - 2) + '" y="' + Math.max(chartY0 + 11, slaY - 4) + '" text-anchor="end" font-family="var(--mono)" font-size="11" fill="#4d7d68">SLA 2.0s</text>' +
+        '<polyline fill="none" stroke="' + lineStroke + '" stroke-width="2.2" points="' + pts.join(" ") + '"/>' +
+        dots.join("") +
+        '<text x="' + chartX0 + '" y="168" font-family="var(--mono)" font-size="11" fill="#6b7078">0%</text>' +
+        '<text x="' + (chartX0 + Math.round(chartW / 2)) + '" y="168" text-anchor="middle" font-family="var(--mono)" font-size="11" fill="#6b7078">50% 進度</text>' +
+        '<text x="' + (chartX0 + chartW) + '" y="168" text-anchor="end" font-family="var(--mono)" font-size="11" fill="#6b7078">峰值 ' + sim.peakLagSec + 's</text>';
+    }
+
+    if (bfStatusEl) {
+      if (uiState.bfMode === "ghost" && sim.throttleDutyPct > 0) {
+        bfStatusEl.innerHTML = "<b>gh-ost 閉迴路節流保護生效：</b>偵測到業務寫入加上全速拷貝會超過從庫上限，自動插入 " + sim.throttleDutyPct + "% 節流空檔，將複寫延遲壓在 <b>" + sim.peakLagSec + " 秒</b>（總時長拉長至 " + sim.wallMinutes + " 分鐘）。";
+      } else if (sim.riskState === "bad") {
+        bfStatusEl.innerHTML = "<b>高風險參數組合：</b>單批鎖持有 <b>" + sim.lockHoldMs + " ms</b>、從庫延遲峰值飆至 <b>" + sim.peakLagSec + " 秒</b>！請縮小 batch_size 至 1,000～5,000 並調高 sleep 間隔，或改用 gh-ost 自動節流。";
+      } else if (sim.riskState === "warn") {
+        bfStatusEl.innerHTML = "<b>接近警戒水位：</b>線上 P99 附加 <b>+" + sim.p99ImpactMs + " ms</b>、峰值延遲 <b>" + sim.peakLagSec + " 秒</b>；若遇流量尖峰建議再調高批次休眠間隔。";
+      } else {
+        bfStatusEl.innerHTML = "<b>平滑安全區間：</b>單批短交易僅持鎖 <b>" + sim.lockHoldMs + " ms</b>，總寫入速率低於從庫回放線，可在背景穩定跑完 <b>" + fmtInt(sim.batches) + "</b> 個微批次。";
+      }
+    }
+  }
+
+  function renderDecisionDemo() {
+    if (!decDemoRoot) return;
+    if (decEngineSel) decEngineSel.value = uiState.decEngine;
+    if (decOpSel) decOpSel.value = uiState.decOp;
+    if (decScaleSel) decScaleSel.value = uiState.decScale;
+    if (decDeploySel) decDeploySel.value = uiState.decDeploy;
+
+    var dec = computeDdlDecision({
+      engine: uiState.decEngine,
+      op: uiState.decOp,
+      scale: uiState.decScale,
+      deploy: uiState.decDeploy
+    });
+
+    if (decHeroBox) {
+      decHeroBox.className = "osm-dec-hero " + dec.tone;
+    }
+    if (decOutBadge) {
+      decOutBadge.textContent = dec.tone === "warn" ? "建議路徑（含架構約束提醒）" : "推薦零停機執行路徑";
+    }
+    if (decOutPick) decOutPick.textContent = dec.pick;
+    if (decOutWhy) decOutWhy.textContent = dec.why;
+
+    setKpiTone(decOutLock, dec.lockLevel, "");
+    setKpiTone(decOutRewrite, dec.rewriteCost, "");
+    setKpiTone(decOutWindow, dec.blockWindow, dec.tone === "warn" ? "warn" : "ok");
+    setKpiTone(decOutIgnored, dec.ignoredText, "");
+
+    if (decPathList) {
+      var items = [];
+      for (var i = 0; i < dec.path.length; i += 1) {
+        items.push("<li>" + escHtml(dec.path[i]) + "</li>");
+      }
+      decPathList.innerHTML = items.join("");
+    }
+    if (decSqlBox) {
+      decSqlBox.textContent = dec.sql;
+    }
+    if (decStatusEl) {
+      decStatusEl.innerHTML = "<b>決策摘要：</b>共使用 <b>" + (4 - dec.ignoredCount) + "</b> 項關鍵約束導出「" + escHtml(dec.pick) + "」；所有需要排他元資料鎖的步驟皆已附上逾時保護。";
+    }
+  }
+
+  /* (5) 事件綁定與初始化 */
+  function targetElement(e) {
+    var t = e && e.target;
+    if (!t) return null;
+    return t.nodeType === 1 ? t : t.parentElement;
+  }
+
+  function detectPresetName(arr) {
+    var keys = Object.keys(ORDER_PRESETS);
+    for (var i = 0; i < keys.length; i += 1) {
+      var k = keys[i];
+      var preset = ORDER_PRESETS[k];
+      var same = true;
+      for (var j = 0; j < preset.length; j += 1) {
+        if (preset[j] !== arr[j]) { same = false; break; }
+      }
+      if (same) return k;
+    }
+    return "custom";
+  }
+
+  if (ordDemoRoot) {
+    ordDemoRoot.addEventListener("click", function (e) {
+      var elem = targetElement(e);
+      if (!elem) return;
+
+      var presetBtn = elem.closest("button[data-ord-preset]");
+      if (presetBtn) {
+        var key = presetBtn.getAttribute("data-ord-preset");
+        if (ORDER_PRESETS[key]) {
+          uiState.order = ORDER_PRESETS[key].slice();
+          uiState.activePreset = key;
+          renderOrderDemo();
+        }
+        return;
+      }
+
+      var moveBtn = elem.closest("button[data-move-idx]");
+      if (moveBtn) {
+        var idx = parseInt(moveBtn.getAttribute("data-move-idx"), 10);
+        var dir = parseInt(moveBtn.getAttribute("data-move-dir"), 10);
+        var nextIdx = idx + dir;
+        if (idx >= 0 && idx < uiState.order.length && nextIdx >= 0 && nextIdx < uiState.order.length) {
+          var tmp = uiState.order[idx];
+          uiState.order[idx] = uiState.order[nextIdx];
+          uiState.order[nextIdx] = tmp;
+          uiState.activePreset = detectPresetName(uiState.order);
+          renderOrderDemo();
+        }
+      }
+    });
+  }
+
+  if (ordRollbackChk) {
+    ordRollbackChk.addEventListener("change", function () {
+      uiState.testRollback = Boolean(ordRollbackChk.checked);
+      renderOrderDemo();
+    });
+  }
+
+  if (ordResetBtn) {
+    ordResetBtn.addEventListener("click", function () {
+      uiState.order = ORDER_PRESETS.canonical.slice();
+      uiState.activePreset = "canonical";
+      uiState.testRollback = true;
+      renderOrderDemo();
+    });
+  }
+
+  if (bfDemoRoot) {
+    bfDemoRoot.addEventListener("click", function (e) {
+      var elem = targetElement(e);
+      if (!elem) return;
+      var modeBtn = elem.closest("button[data-bf-mode]");
+      if (modeBtn) {
+        var m = modeBtn.getAttribute("data-bf-mode");
+        if (m === "chunked" || m === "ptosc" || m === "ghost") {
+          uiState.bfMode = m;
+          renderBackfillDemo();
+        }
+      }
+    });
+  }
+
+  if (bfRowsInput) {
+    bfRowsInput.addEventListener("input", function () {
+      uiState.bfRowsM = Number(bfRowsInput.value);
+      renderBackfillDemo();
+    });
+  }
+  if (bfBatchInput) {
+    bfBatchInput.addEventListener("input", function () {
+      uiState.bfBatch = Number(bfBatchInput.value);
+      renderBackfillDemo();
+    });
+  }
+  if (bfSleepInput) {
+    bfSleepInput.addEventListener("input", function () {
+      uiState.bfSleep = Number(bfSleepInput.value);
+      renderBackfillDemo();
+    });
+  }
+  if (bfQpsInput) {
+    bfQpsInput.addEventListener("input", function () {
+      uiState.bfQps = Number(bfQpsInput.value);
+      renderBackfillDemo();
+    });
+  }
+
+  if (bfResetBtn) {
+    bfResetBtn.addEventListener("click", function () {
+      uiState.bfMode = "chunked";
+      uiState.bfRowsM = 60;
+      uiState.bfBatch = 2500;
+      uiState.bfSleep = 40;
+      uiState.bfQps = 2200;
+      if (bfRowsInput) bfRowsInput.value = "60";
+      if (bfBatchInput) bfBatchInput.value = "2500";
+      if (bfSleepInput) bfSleepInput.value = "40";
+      if (bfQpsInput) bfQpsInput.value = "2200";
+      renderBackfillDemo();
+    });
+  }
+
+  function onDecisionChange() {
+    if (decEngineSel) uiState.decEngine = decEngineSel.value;
+    if (decOpSel) uiState.decOp = decOpSel.value;
+    if (decScaleSel) uiState.decScale = decScaleSel.value;
+    if (decDeploySel) uiState.decDeploy = decDeploySel.value;
+    renderDecisionDemo();
+  }
+
+  if (decEngineSel) decEngineSel.addEventListener("change", onDecisionChange);
+  if (decOpSel) decOpSel.addEventListener("change", onDecisionChange);
+  if (decScaleSel) decScaleSel.addEventListener("change", onDecisionChange);
+  if (decDeploySel) decDeploySel.addEventListener("change", onDecisionChange);
+
+  if (decResetBtn) {
+    decResetBtn.addEventListener("click", function () {
+      uiState.decEngine = "pg";
+      uiState.decOp = "retype-int-bigint";
+      uiState.decScale = "hot-large";
+      uiState.decDeploy = "rolling-nofk";
+      renderDecisionDemo();
+    });
+  }
+
+  renderOrderDemo();
+  renderBackfillDemo();
+  renderDecisionDemo();
+})();
+</script>

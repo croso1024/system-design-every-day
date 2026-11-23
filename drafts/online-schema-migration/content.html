@@ -1,0 +1,1154 @@
+<!-- demo-archetype: E｜決策器（主，第 6 節）＋F｜拆解器（次，第 3 節）＋B｜參數掃描（次，第 4 節） —
+     主 demo 讓讀者輸入資料庫引擎、變更動作、表規模熱度與並存回滾要求，推導線上變更路徑、鎖層級、是否重寫全表與防護步驟；
+     選 E 是因為線上 Schema 變更的核心考點正是依引擎機制與相容性邊界選出正確執行策略，且不與最近三篇撞形。
+     次 demo：第 3 節拆解並重排欄位改名的六個演進階段，即時檢驗新舊版程式讀寫與回滾相容性；
+     第 4 節調整表列數、批次大小、節流休眠與線上寫入量，即時試算 Backfill 耗時、複寫延遲與 P99 衝擊。 -->
+<style>
+  /* ---------- 圖表元件：Swimlane / Split / Row ---------- */
+  .osm-lane {
+    display: grid;
+    grid-template-columns: 52px repeat(3, 1fr);
+    gap: 1px;
+    background: var(--border);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    overflow: hidden;
+    margin: 14px 0 0;
+  }
+  .osm-lane > div {
+    background: #fff;
+    padding: 9px 11px;
+    font-size: 12.5px;
+    line-height: 1.52;
+  }
+  .osm-lane .lh {
+    background: var(--bg-soft);
+    font-family: var(--mono);
+    font-size: 11px;
+    font-weight: 700;
+    color: var(--text-2);
+  }
+  .osm-lane .lt {
+    background: var(--bg-soft);
+    font-family: var(--mono);
+    font-size: 11.5px;
+    font-weight: 600;
+    color: var(--text-3);
+  }
+  .osm-lane .lc.act  { background: var(--accent-soft); }
+  .osm-lane .lc.ok   { background: var(--ok-soft); }
+  .osm-lane .lc.warn { background: var(--warn-soft); }
+  .osm-lane .lc.bad  { background: var(--bad-soft); }
+  @media (max-width: 720px) {
+    .osm-lane {
+      grid-template-columns: 42px repeat(3, minmax(0, 1fr));
+      font-size: 11.5px;
+    }
+  }
+
+  .osm-split {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 12px;
+    margin: 14px 0 0;
+  }
+  @media (max-width: 680px) {
+    .osm-split { grid-template-columns: 1fr; }
+  }
+  .osm-pane {
+    border: 1px solid var(--border);
+    border-top: 3px solid var(--border-strong);
+    border-radius: var(--radius-sm);
+    background: #fff;
+    padding: 14px 16px;
+  }
+  .osm-pane.accent { border-top-color: var(--accent); }
+  .osm-pane.ok     { border-top-color: var(--ok); }
+  .osm-pane .pt {
+    font-weight: 700;
+    font-size: 14px;
+    color: var(--text);
+    margin-bottom: 2px;
+  }
+  .osm-pane .ps {
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--text-3);
+    margin-bottom: 9px;
+  }
+  .osm-pane ul {
+    list-style: disc;
+    margin: 0;
+    padding-left: 18px;
+    font-size: 13px;
+    color: var(--text-2);
+    line-height: 1.65;
+  }
+
+  .osm-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    align-items: stretch;
+    justify-content: center;
+    margin: 14px 0 0;
+  }
+  .osm-node {
+    border: 1px solid var(--border-strong);
+    border-radius: 8px;
+    background: #fff;
+    padding: 9px 11px;
+    min-width: 110px;
+    max-width: 148px;
+    text-align: center;
+  }
+  .osm-node .nn {
+    font-family: var(--mono);
+    font-size: 12px;
+    font-weight: 700;
+    color: var(--text);
+  }
+  .osm-node .ns {
+    font-size: 11px;
+    color: var(--text-2);
+    margin-top: 3px;
+    line-height: 1.4;
+  }
+  .osm-node.accent { border-top: 3px solid var(--accent); }
+  .osm-node.warn   { border-top: 3px solid var(--warn); }
+  .osm-node.ok     { border-top: 3px solid var(--ok); }
+  .osm-arrow {
+    display: flex;
+    align-items: center;
+    font-family: var(--mono);
+    font-size: 13px;
+    color: var(--text-3);
+    white-space: nowrap;
+  }
+
+  /* ---------- 共用控制列與計算指標格 ---------- */
+  .osm-ctrl-head {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    margin-bottom: 14px;
+  }
+  .osm-chk-label {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    font-size: 12.5px;
+    color: var(--text-2);
+    cursor: pointer;
+  }
+  .osm-chk-label input {
+    accent-color: var(--accent);
+  }
+
+  .osm-kpi-grid {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 9px;
+    margin: 12px 0 14px;
+  }
+  @media (max-width: 720px) {
+    .osm-kpi-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  }
+  .osm-kpi-card {
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    background: var(--bg-soft);
+    padding: 9px 11px;
+  }
+  .osm-kpi-card .kl {
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--text-3);
+    margin-bottom: 3px;
+  }
+  .osm-kpi-card .kv {
+    font-family: var(--mono);
+    font-size: 13.5px;
+    font-weight: 700;
+    color: var(--text);
+    line-height: 1.35;
+  }
+  .osm-kpi-card .kv.ok   { color: var(--ok); }
+  .osm-kpi-card .kv.warn { color: var(--warn); }
+  .osm-kpi-card .kv.bad  { color: var(--bad); }
+
+  .osm-knobs {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 11px 16px;
+    margin-bottom: 12px;
+  }
+  @media (max-width: 640px) {
+    .osm-knobs { grid-template-columns: 1fr; }
+  }
+  .osm-knob {
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+    font-size: 12.5px;
+    color: var(--text-2);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    background: var(--bg-soft);
+    padding: 9px 12px;
+  }
+  .osm-knob .kl {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    gap: 8px;
+  }
+  .osm-knob .kl strong {
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--accent);
+  }
+  .osm-knob input[type="range"] {
+    width: 100%;
+    accent-color: var(--accent);
+    cursor: pointer;
+  }
+  .osm-knob select {
+    width: 100%;
+    border: 1px solid var(--border-strong);
+    border-radius: 6px;
+    background: #fff;
+    padding: 6px 9px;
+    font-size: 13px;
+    color: var(--text);
+    cursor: pointer;
+  }
+
+  /* ---------- Demo 1：五階段順序重排拆解器 ---------- */
+  .osm-ord-list {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .osm-ord-list[hidden] { display: none; }
+  .osm-ord-item {
+    border: 1px solid var(--border-strong);
+    border-left: 4px solid var(--border-strong);
+    border-radius: var(--radius-sm);
+    background: #fff;
+    padding: 10px 12px;
+    transition: border-color .15s, background .15s;
+  }
+  .osm-ord-item.ok {
+    border-left-color: var(--ok);
+  }
+  .osm-ord-item.warn {
+    border-left-color: var(--warn);
+    background: var(--warn-soft);
+  }
+  .osm-ord-item.bad {
+    border-left-color: var(--bad);
+    background: var(--bad-soft);
+  }
+  .osm-ord-top {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    flex-wrap: wrap;
+  }
+  .osm-ord-title {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    font-size: 13.5px;
+    font-weight: 700;
+    color: var(--text);
+  }
+  .osm-ord-idx {
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--accent);
+    background: var(--accent-soft);
+    border: 1px solid var(--accent-line);
+    border-radius: 4px;
+    padding: 1px 6px;
+  }
+  .osm-ord-btns {
+    display: inline-flex;
+    gap: 5px;
+  }
+  .osm-move-btn {
+    font-family: var(--mono);
+    font-size: 11.5px;
+    padding: 3px 9px;
+    border: 1px solid var(--border-strong);
+    border-radius: 5px;
+    background: var(--bg);
+    color: var(--text-2);
+  }
+  .osm-move-btn:hover:not(:disabled) {
+    background: var(--bg-soft);
+    color: var(--text);
+  }
+  .osm-move-btn:disabled {
+    opacity: .35;
+    cursor: not-allowed;
+  }
+  .osm-ord-meta {
+    margin-top: 6px;
+    font-family: var(--mono);
+    font-size: 11.5px;
+    color: var(--text-2);
+  }
+  .osm-probe-pills {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-top: 7px;
+  }
+  .osm-pill {
+    font-family: var(--mono);
+    font-size: 11px;
+    padding: 2px 8px;
+    border-radius: 5px;
+    border: 1px solid var(--border-strong);
+    background: var(--bg-soft);
+    color: var(--text-2);
+  }
+  .osm-pill.ok {
+    background: var(--ok-soft);
+    border-color: var(--ok);
+    color: var(--ok);
+  }
+  .osm-pill.warn {
+    background: var(--warn-soft);
+    border-color: var(--warn);
+    color: var(--warn);
+  }
+  .osm-pill.bad {
+    background: var(--bad-soft);
+    border-color: var(--bad);
+    color: var(--bad);
+    font-weight: 600;
+  }
+  .osm-ord-note {
+    margin-top: 6px;
+    font-size: 12.5px;
+    color: var(--text-2);
+    line-height: 1.5;
+  }
+
+  /* ---------- Demo 2：SVG 畫布框 ---------- */
+  .osm-svg-box {
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    background: #fff;
+    padding: 8px 10px;
+    margin-top: 6px;
+  }
+
+  /* ---------- Demo 3：選型決策器輸出面板 ---------- */
+  .osm-dec-hero {
+    border: 1px solid var(--accent-line);
+    border-left: 4px solid var(--accent);
+    border-radius: var(--radius-sm);
+    background: var(--accent-soft);
+    padding: 12px 15px;
+    margin: 12px 0;
+  }
+  .osm-dec-hero.ok {
+    border-color: var(--ok);
+    background: var(--ok-soft);
+  }
+  .osm-dec-hero.warn {
+    border-color: var(--warn);
+    background: var(--warn-soft);
+  }
+  .osm-dec-tag {
+    font-family: var(--mono);
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: .06em;
+    text-transform: uppercase;
+    color: var(--accent);
+    margin-bottom: 3px;
+  }
+  .osm-dec-title {
+    font-size: 16px;
+    font-weight: 700;
+    color: var(--text);
+    margin-bottom: 4px;
+  }
+  .osm-dec-why {
+    font-size: 13.5px;
+    color: var(--text-2);
+    margin: 0;
+    line-height: 1.58;
+  }
+  .osm-dec-cols {
+    display: grid;
+    grid-template-columns: 1fr 1.15fr;
+    gap: 12px;
+    margin-top: 10px;
+  }
+  @media (max-width: 720px) {
+    .osm-dec-cols { grid-template-columns: 1fr; }
+  }
+  .osm-dec-box {
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    background: #fff;
+    padding: 11px 13px;
+  }
+  .osm-dec-box .bt {
+    font-family: var(--mono);
+    font-size: 11.5px;
+    font-weight: 700;
+    color: var(--text-2);
+    margin-bottom: 8px;
+  }
+  .osm-path-ul {
+    list-style: disc;
+    margin: 0;
+    padding-left: 18px;
+    font-size: 12.8px;
+    color: var(--text-2);
+    line-height: 1.62;
+  }
+  .osm-sql-pre {
+    margin: 0;
+    padding: 10px 12px;
+    font-size: 12px;
+    line-height: 1.55;
+    background: var(--code-bg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    overflow-x: auto;
+  }
+</style>
+
+<header class="hero">
+  <div class="eyebrow">Database Internals · 系統設計手冊</div>
+  <h1>線上 Schema 變更與零停機 Migration</h1>
+  <p class="lede">在每秒承受數千筆讀寫的線上資料表上改結構，真正的殺手往往不是 <code>ALTER TABLE</code> 本身跑得慢，而是一把等不到前序交易釋放的排他元資料鎖，加上滾動部署期間新舊版程式對同一張表的契約撕裂。</p>
+  <div class="meta">
+    <span class="tag">Metadata Lock Convoy</span>
+    <span class="tag">INSTANT / CONCURRENTLY</span>
+    <span class="tag">Expand &amp; Contract</span>
+    <span class="tag">Keyset Backfill &amp; Throttling</span>
+    <span class="tag">gh-ost vs pt-osc</span>
+  </div>
+</header>
+
+<section id="s1">
+  <div class="sec-head">
+    <span class="sec-num">01</span>
+    <h2>為什麼一句 10ms 的 ALTER 會癱瘓整座資料庫？</h2>
+  </div>
+  <p class="sec-sub">從 Metadata Lock 佇列護航效應與實體重寫代價出發，拆解 PostgreSQL 與 MySQL InnoDB 的 DDL 鎖行為。</p>
+  <p>在單機開發環境對幾千列的資料表下 <code>ALTER TABLE users ADD COLUMN ...</code>，毫秒間就能收工；但把同一句 SQL 放到每秒數千筆查詢的生產主庫，卻經常在三十秒內把應用端連線池全部卡死、觸發全站雪崩。許多工程師的第一反應是「因為大表搬移資料很慢」，但真實事故現場裡，<strong>就算是一句只需要 5 毫秒改完資料字典（Catalog）的輕量 DDL，照樣能癱瘓整座叢集</strong>。</p>
+
+  <p>在進入細節前先劃清知識邊界：資料列鎖、區間鎖（Gap / Next-Key Lock）與死鎖偵測機制由<a href="../database-locking-deadlock/index.html">資料庫鎖與死鎖</a>篇負責；服務實例的滾動更新與金絲雀流量調度由<a href="../deployment-strategies/index.html">部署與發佈策略</a>篇負責；跨實體節點的資料分片搬遷則由<a href="../data-sharding-in-practice/index.html">分片實戰與線上擴容</a>篇負責。本篇專注於<strong>單一邏輯資料庫內，如何在讀寫不中斷的前提下安全演進表結構與資料內容</strong>。</p>
+
+  <h3>頭號殺手：元資料鎖佇列護航效應（Lock Queue Convoy）</h3>
+  <p>無論是 PostgreSQL 的表級鎖（Table-level Lock）還是 MySQL Server 層的 <strong>Metadata Lock（MDL）</strong>，都必須保護「查詢執行期間表結構不會半路變形」這條不變量。因此，哪怕是最普通的快照讀 <code>SELECT</code>（不加任何列鎖），在執行期間都會持有一把最輕量的共享結構鎖——PostgreSQL 稱為 <code>ACCESS SHARE</code>，MySQL 稱為 <code>MDL_SHARED_READ</code>。</p>
+
+  <p>這把共享鎖平時與所有的 <code>SELECT</code>、<code>INSERT</code>、<code>UPDATE</code> 完全相容，唯獨與修改表定義所需的最高級排他鎖——PostgreSQL 的 <code>ACCESS EXCLUSIVE</code> 與 MySQL 的 <code>MDL_EXCLUSIVE</code>——<strong>正面互斥</strong>。更致命的是，鎖管理器的等待佇列為了防止排他鎖「餓死（Starvation）」，一旦有 <code>ALTER TABLE</code> 在佇列中排隊等鎖，<strong>後續新抵達的所有普通 <code>SELECT</code> 與 <code>INSERT</code> 都不能插隊，必須排在這句 <code>ALTER</code> 後面</strong>：</p>
+
+  <div class="osm-lane">
+    <div class="lh">時刻</div>
+    <div class="lh">慢查詢 Tx A</div>
+    <div class="lh">變更腳本 Tx B (DDL)</div>
+    <div class="lh">線上業務查詢 Tx C1..C500</div>
+
+    <div class="lt">t1</div>
+    <div class="lc act">報表慢查詢或未提交的 <code>idle in transaction</code>，持續握著 <code>MDL_SHARED_READ</code> / <code>ACCESS SHARE</code></div>
+    <div class="lc">尚未執行</div>
+    <div class="lc ok">同拿共享鎖，每秒數千筆正常讀寫</div>
+
+    <div class="lt">t2</div>
+    <div class="lc act">仍在執行中（已跑 15 秒，預計還需 45 秒）</div>
+    <div class="lc warn">送出 <code>ALTER TABLE</code>：請求排他鎖，被 Tx A 擋住，進入鎖佇列等待</div>
+    <div class="lc bad">新來的 <code>SELECT</code> 因佇列中有排他鎖申請，<strong>全數被擋在 Tx B 後方</strong></div>
+
+    <div class="lt">t3</div>
+    <div class="lc act">繼續慢慢掃描，對外頭的災難毫不知情</div>
+    <div class="lc warn">繼續死等 Tx A 結束</div>
+    <div class="lc bad">短短數秒堆積數百條等待執行緒，應用端 Connection Pool 耗盡、HTTP 502/504</div>
+
+    <div class="lt">t4</div>
+    <div class="lc">終於提交並釋放共享鎖（或被 DBA 手動強殺）</div>
+    <div class="lc ok">取得排他鎖，花 5ms 改完 Catalog 後釋放</div>
+    <div class="lc warn">瞬間湧入積壓請求，引發短暫 CPU 尖峰後才恢復</div>
+  </div>
+  <p class="cap">鎖佇列放大效應：把服務打掛的不是 t4 那 5 毫秒的 Catalog 變更，而是 t2 到 t4 之間「一筆慢交易卡住 DDL、DDL 反過來擋死全站普通查詢」的三方連鎖阻塞。</p>
+
+  <h3>第二重代價：全表實體重寫（Table Rewrite）vs 原地與瞬間演算法</h3>
+  <p>躲過鎖排隊只是第一關；第二關是<strong>這句 DDL 在拿到鎖之後到底要做多少實體 I/O</strong>。現代引擎把 DDL 分為三個量級：</p>
+  <ul>
+    <li><strong>瞬間元資料變更（Metadata-only / <code>INSTANT</code>）</strong>：只修改系統目錄或資料列版本表，不掃描也不改寫既有資料頁。PostgreSQL 11 起，<code>ADD COLUMN ... DEFAULT &lt;非揮發常數&gt;</code> 會將預設值存在 <code>pg_attribute.attmissingval</code>，讀取舊 Tuple 時由引擎動態補上，億級大表也能在數毫秒內收工（注意：若預設值是 <code>random()</code> 或 <code>gen_random_uuid()</code> 這類每次求值不同的揮發函式，仍會強制重寫全表）。MySQL 8.0.12 引入尾端加欄的 <code>ALGORITHM=INSTANT</code>，8.0.29 起更透過列版本號（最多累積 64 個版本）支援任意位置加減欄位。</li>
+    <li><strong>原地線上變更（<code>INPLACE</code> + Online DML Log）</strong>：需要在背景掃描資料頁（例如建立次級索引），但不建立整張新表；引擎在掃描期間將併發的業務 <code>INSERT/UPDATE/DELETE</code> 暫存在記憶體變更日誌（MySQL <code>innodb_online_alter_log_max_size</code>），掃描尾聲再追平並短暫升級排他鎖完成切換。</li>
+    <li><strong>全表實體重寫（Table Rewrite / <code>COPY</code>）</strong>：例如將主鍵從 <code>INT</code> 改為 <code>BIGINT</code>，每一列的實體 byte 佈局都改變，資料庫必須配置全新檔案把數億列逐一轉型重寫並重建所有索引——磁碟空間瞬間翻倍，且在原生 <code>ALTER</code> 下會長時間鎖死寫入（PostgreSQL 甚至全程握緊 <code>ACCESS EXCLUSIVE</code> 連讀一起封死）。</li>
+  </ul>
+
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>常見 DDL 操作</th>
+          <th>PostgreSQL (14+) 鎖與重寫行為</th>
+          <th>MySQL 8.0 InnoDB 演算法與鎖行為</th>
+          <th>線上直跑風險</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>新增可空欄位 / 常數預設值欄位</td>
+          <td class="hl">短暫 <code>ACCESS EXCLUSIVE</code>；僅改 Catalog，<strong>免重寫表</strong></td>
+          <td class="hl"><code>ALGORITHM=INSTANT</code>；僅改資料字典（頭尾短暫 MDL）</td>
+          <td>低（仍須設 <code>lock_timeout</code> 防排隊）</td>
+        </tr>
+        <tr>
+          <td>放寬字串長度<br><code>VARCHAR(64) &rarr; VARCHAR(128)</code></td>
+          <td>短暫 <code>ACCESS EXCLUSIVE</code>；共用 <code>varlena</code> 格式免重寫表（若被視圖或函式索引引用除外）</td>
+          <td><strong>陷阱！</strong><code>utf8mb4</code> 下 64 字元為 256B（2-byte 長度前綴）可 <code>INPLACE</code>；但 <code>VARCHAR(60) &rarr; VARCHAR(100)</code> 跨過 255B 邊界會退回 <code>COPY</code> 鎖表重寫</td>
+          <td>中（MySQL 必加 <code>ALGORITHM=INPLACE, LOCK=NONE</code> 斷言）</td>
+        </tr>
+        <tr>
+          <td>放大整數型別<br><code>INT &rarr; BIGINT</code></td>
+          <td>全程持有 <code>ACCESS EXCLUSIVE</code> <strong>重寫整張 Heap 與相關索引</strong></td>
+          <td><code>ALGORITHM=COPY</code>（鎖寫入全表拷貝重寫）</td>
+          <td>極高（億級表必停擺，須走 Expand/Contract 或影子表）</td>
+        </tr>
+        <tr>
+          <td>建立次級索引</td>
+          <td>一般 <code>CREATE INDEX</code> 拿 <code>SHARE</code> 擋寫入；加 <code>CONCURRENTLY</code> 降為 <code>SHARE UPDATE EXCLUSIVE</code> 不擋讀寫</td>
+          <td class="hl">預設 <code>ALGORITHM=INPLACE, LOCK=NONE</code> 背景建 B+Tree 並重放 Online Row Log</td>
+          <td>中（耗 I/O 與暫存空間，PG 失敗會留 <code>INVALID</code> 索引）</td>
+        </tr>
+        <tr>
+          <td>既有欄位直接加 <code>NOT NULL</code></td>
+          <td>直接 <code>SET NOT NULL</code> 需握 <code>ACCESS EXCLUSIVE</code> 全表掃描驗證；改走 <code>CHECK NOT VALID</code> 才免長鎖</td>
+          <td><code>ALGORITHM=INPLACE</code> 全表掃描檢查是否有 NULL（高併發易撐爆 Online Log）</td>
+          <td>高（大表嚴禁裸下 <code>SET NOT NULL</code>）</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="cap">同一個 SQL 子句在不同引擎與邊界條件下可能相差萬倍耗時；MySQL 建議顯式指定 <code>ALGORITHM=INSTANT</code> 或 <code>LOCK=NONE</code>，一旦引擎發現做不到就會立即報錯退回，而非默默退化成鎖表重寫。</p>
+
+  <div class="callout warn">
+    <div class="c-title"><span class="ic">陷阱</span>外層交易包裹多句 DDL 會把短鎖拖成長鎖</div>
+    <p>PostgreSQL 支援交易式 DDL（Transactional DDL）。許多 ORM Migration 框架預設把「瞬間加欄位」與「耗時資料轉換」包進同一個 <code>BEGIN ... COMMIT</code> 區塊——一旦第一句取得 <code>ACCESS EXCLUSIVE</code>，<strong>這把最高級排他鎖會一路握到整個交易 <code>COMMIT</code> 才釋放</strong>！在生產環境中，需要排他鎖的 Catalog 變更必須拆成獨立的極短交易單獨提交。</p>
+  </div>
+
+  <div class="oneliner">
+    <b>一句話答法</b>線上 DDL 有兩道生死線：進場時怕慢查詢卡住排他鎖引發 FIFO 佇列雪崩，進場後怕觸發全表實體重寫；前者靠鎖逾時快速放棄，後者靠瞬間元資料演算法、雙階段驗證或影子表繞開。
+  </div>
+</section>
+
+<section id="s2">
+  <div class="sec-head">
+    <span class="sec-num">02</span>
+    <h2>資料庫原生防護原語：lock_timeout、CONCURRENTLY 與 NOT VALID</h2>
+  </div>
+  <p class="sec-sub">在不引入外部工具的前提下，把排他鎖持有時間壓到毫秒級、把全表掃描降級為不擋讀寫的背景驗證。</p>
+  <p>在搬出沉重的外部遷移框架之前，現代關聯式資料庫其實內建了三把極其實用的安全手術刀。只要掌握它們的運作邊界，八成以上的日常加欄、建索引與補約束都能在毫秒級鎖視窗內安全落地。</p>
+
+  <h3>第一道防線：<code>lock_timeout</code> 快敗重試迴圈（絕不裸跑 DDL）</h3>
+  <p>既然第 1 節的雪崩源自「<code>ALTER</code> 卡在鎖佇列裡死等慢查詢」，最直接的解法就是<strong>嚴禁 DDL 在佇列裡久留</strong>。切記區分 <code>statement_timeout</code>（限制整句 SQL 總執行時間）與 <code>lock_timeout</code>（專管等鎖排隊時間）：我們只希望「搶不到鎖時在 1～2 秒內立刻放棄讓路」，若搶到鎖開始安全做事就不該誤殺。</p>
+
+  <pre><code>-- PostgreSQL：外層由腳本以指數退避重試 5~10 次，每次只允許排隊 1.5 秒
+BEGIN;
+  SET LOCAL lock_timeout = '1500ms';
+  ALTER TABLE orders ADD COLUMN phone_e164 VARCHAR(32);
+COMMIT;
+
+-- MySQL 8.0：鎖等待上限設為 2 秒，並強制斷言必須走 INSTANT 演算法
+SET SESSION lock_wait_timeout = 2;
+ALTER TABLE orders ADD COLUMN phone_e164 VARCHAR(32), ALGORITHM=INSTANT;</code></pre>
+
+  <p>一旦線上恰巧有慢查詢佔著共享鎖，<code>ALTER</code> 會在 1.5 秒後主動拋出鎖逾時錯誤退出佇列，積壓在它後方的業務請求瞬間恢復暢通；部署腳本休息數秒後再次嘗試，直到逮到沒有長查詢的空檔完成毫秒級寫入。<strong>寧可讓發佈流水線重試十次，也絕不讓線上請求陪葬排隊三秒。</strong></p>
+
+  <h3>第二道防線：<code>CREATE INDEX CONCURRENTLY</code> 的兩階段追趕</h3>
+  <p>在億級大表建立索引必然要讀取並排序全表資料。傳統 <code>CREATE INDEX</code> 持有 <code>SHARE</code> 鎖，掃描半小時就封鎖寫入半小時；加上 <code>CONCURRENTLY</code> 後，PostgreSQL 改拿與普通讀寫完全相容的 <code>SHARE UPDATE EXCLUSIVE</code>（僅與其他 DDL 或 <code>VACUUM FULL</code> 互斥），拆成三個內部交易分兩趟掃描完成：</p>
+
+  <pre class="mermaid">
+sequenceDiagram
+    participant D as DDL 工作階段
+    participant C as 系統目錄
+    participant W as 線上寫入交易
+    participant H as 資料表與索引
+    D->>C: 登記 INVALID 索引
+    Note over C,W: 等待舊寫入提交
+    W->>H: 新寫入同步維護新索引
+    D->>H: 第一趟基準快照掃描
+    Note over D,W: 等待期間開啟的交易結束
+    D->>H: 第二趟掃描補齊遺漏列
+    D->>C: 標記索引 VALID 可用
+</pre>
+  <p class="cap"><code>CONCURRENTLY</code> 不必鎖寫入的秘密：先讓新來的寫入主動雙寫新索引（HOT 鏈與狀態位同步），再靠第二趟快照掃描把「第一趟掃描前就已啟動、尚未提交」的那批邊界交易補齊。</p>
+
+  <div class="callout warn">
+    <div class="c-title"><span class="ic">陷阱</span><code>INVALID</code> 幽靈索引殘骸與交易限制</div>
+    <p><code>CREATE INDEX CONCURRENTLY</code> 有兩條硬鐵律：第一，因為它內部必須自己分段提交多筆交易以推進快照，<strong>絕對不能包在 <code>BEGIN ... COMMIT</code> 區塊內執行</strong>（多數 ORM Migration 需顯式宣告關閉外層交易，如 Rails 的 <code>disable_ddl_transaction!</code> 或 Flyway 的 non-transactional 設定）。第二，若建唯一索引時撞上重複資料、或中途遭遇死鎖與斷線，系統目錄會留下一顆標記為 <code>INVALID</code> 的半成品索引——<strong>查詢最佳化器完全不會用它加速讀取，但每一筆線上 <code>INSERT / UPDATE</code> 卻仍被迫持續寫入它</strong>！上線腳本失敗後務必巡檢 <code>pg_index.indisvalid = false</code>，並以 <code>DROP INDEX CONCURRENTLY</code> 清除（PostgreSQL 12 起亦可用 <code>REINDEX INDEX CONCURRENTLY</code> 原地修復）。</p>
+  </div>
+
+  <h3>第三道防線：<code>NOT VALID</code> 兩段式約束與免鎖轉正 <code>NOT NULL</code></h3>
+  <p>替大表補上外鍵（Foreign Key）或非空約束（<code>NOT NULL</code>）是另一個高頻踩雷點：直接執行 <code>ADD CONSTRAINT ... FOREIGN KEY</code> 會在子表與父表同時掛鎖並掃描全表；直接執行 <code>ALTER COLUMN ... SET NOT NULL</code> 則會握著最高級 <code>ACCESS EXCLUSIVE</code> 掃過每一頁確認沒有空值。</p>
+
+  <p>正確工程手法是把「攔截未來新髒資料」與「驗證歷史存量資料」徹底拆開：</p>
+  <pre><code>-- 步驟 1（毫秒級短鎖）：掛上 NOT VALID 檢查約束，新寫入立即受檢，但不掃描歷史舊列
+SET lock_timeout = '1500ms';
+ALTER TABLE orders
+  ADD CONSTRAINT chk_orders_phone_nn CHECK (phone_e164 IS NOT NULL) NOT VALID;
+
+-- 步驟 2（不擋讀寫）：只拿 SHARE UPDATE EXCLUSIVE 慢慢掃完全表，將約束標記為 VALID
+ALTER TABLE orders VALIDATE CONSTRAINT chk_orders_phone_nn;
+
+-- 步驟 3（PostgreSQL 12+ 毫秒級免重掃）：引擎見 chk_orders_phone_nn 已驗證通過，
+-- 直接證明全表無 NULL，跳過全表掃描瞬間轉正為欄位級 NOT NULL，隨後卸除臨時約束
+SET lock_timeout = '1500ms';
+ALTER TABLE orders ALTER COLUMN phone_e164 SET NOT NULL;
+ALTER TABLE orders DROP CONSTRAINT chk_orders_phone_nn;</code></pre>
+
+  <div class="oneliner">
+    <b>一句話答法</b>原生安全 DDL 的三板斧：所有排他鎖操作必掛 <code>lock_timeout</code> 退避重試，建索引用 <code>CONCURRENTLY</code> 並監控 <code>INVALID</code> 殘骸，加外鍵或 <code>NOT NULL</code> 一律先掛 <code>NOT VALID</code> 攔新寫入、再用低階鎖 <code>VALIDATE</code> 驗舊資料。
+  </div>
+</section>
+
+<section id="s3">
+  <div class="sec-head">
+    <span class="sec-num">03</span>
+    <h2>破壞性變更與雙版本並存：Expand / Contract 實戰</h2>
+  </div>
+  <p class="sec-sub">引擎層的不鎖表救不了應用層的 SQL 報錯——拆解欄位改名、拆分與非空約束的相容演進順序。</p>
+  <p>許多團隊學完 <code>ALGORITHM=INSTANT</code> 後，興沖沖地在線上執行 <code>ALTER TABLE users RENAME COLUMN phone TO phone_e164</code>——資料庫確實只花 3 毫秒就改完了，但下一秒監控警報全面炸裂：線上正在運行的數十台舊版應用程式實例（<var>v1</var>）發出的每一條 <code>SELECT phone</code> 與 <code>INSERT INTO users (phone)</code> 全部拋出 <code>Unknown column 'phone'</code>！</p>
+
+  <p><a href="../deployment-strategies/index.html">部署與發佈策略</a>篇從流量調度視角指出：滾動更新與金絲雀發佈期間，線上必然同時存在 <var>v1</var> 與 <var>v2</var> 兩代程式碼共用同一座資料庫。落實到資料庫 Schema 與 SQL 契約層面，任何「改名、拆分欄位、合併欄位、改變資料語意或收緊約束」的破壞性變更，都必須拆解成<strong>向後與向前雙向相容的多階段 Expand / Contract 序列</strong>，且藏有三個極易在面試與實戰漏掉的資料庫細節：</p>
+
+  <ul>
+    <li><strong>新增欄位期（Expand）嚴禁直接掛無預設值的 <code>NOT NULL</code></strong>：新欄位剛加進去時，<var>v1</var> 完全不知道它的存在；若直接標記 <code>NOT NULL</code> 且無 <code>DEFAULT</code>，<var>v1</var> 的每一筆 <code>INSERT</code> 都會因違反非空約束當場失敗。</li>
+    <li><strong>切讀停寫期（Cutover）的「舊欄 <code>NOT NULL</code> 反咬陷阱」</strong>：假設舊欄位 <code>phone</code> 原本就帶有 <code>NOT NULL</code> 約束。當演進走到後期、新版程式 <var>v3</var> 準備「停止雙寫舊欄、只寫新欄 <code>phone_e164</code>」時，如果忘了<strong>先解除舊欄 <code>phone</code> 的 <code>NOT NULL</code> 約束</strong>，<var>v3</var> 一上線就會因為沒填 <code>phone</code> 而全部寫入失敗！</li>
+    <li><strong>ORM 欄位快取與 <code>SELECT *</code> 防護</strong>：部分框架會在進程啟動時讀取系統表快取 Schema，若未宣告忽略即將廢棄的舊欄（如 Rails <code>ignored_columns</code>），直接執行 <code>DROP COLUMN</code> 仍會讓執行中的新版實例崩潰。MySQL 8.0.23 起可先下毫秒級的 <code>ALTER TABLE ... ALTER COLUMN phone SET INVISIBLE</code> 隱藏欄位觀察數日，確認零查詢引用後再真正刪除。</li>
+  </ul>
+
+  <h3>雙寫（Dual-Write）該寫在應用層還是資料庫 Trigger？</h3>
+  <p>在過渡期讓新舊欄位保持同步有兩種經典實作，兩者在「版本退場耦合」與「資料庫負載」上恰成互補：</p>
+
+  <div class="osm-split">
+    <div class="osm-pane accent">
+      <div class="pt">方案 A · 應用層雙寫（Application Dual-Write）</div>
+      <div class="ps">由新版程式 v2 同時寫入 old_col 與 new_col</div>
+      <ul>
+        <li><strong>優點</strong>：轉換邏輯（如電話國碼正規化）可用熟悉的應用語言撰寫並覆蓋完整單元測試；不消耗資料庫 CPU 解析觸發器。</li>
+        <li><strong>硬約束</strong>：只要線上還有任何一台 <var>v1</var> 實例存活（例如 Canary 僅放量 20%），<var>v1</var> 寫入的列其新欄仍是 <code>NULL</code>；因此<strong>最終一輪收尾 Backfill 必須在 <var>v1</var> 100% 下線後才能封口</strong>。</li>
+      </ul>
+    </div>
+    <div class="osm-pane ok">
+      <div class="pt">方案 B · 資料庫觸發器雙向鏡像（DB Trigger Sync）</div>
+      <div class="ps">BEFORE INSERT / UPDATE 自動互補新舊欄位</div>
+      <ul>
+        <li><strong>優點</strong>：在單筆交易內由引擎保證原子同步——哪怕 <var>v1</var> 只寫舊欄、或回滾後 <var>v1</var> 接手，Trigger 都會自動補齊另一欄，Backfill 可隨時開始且不會產生新空洞。</li>
+        <li><strong>代價</strong>：每筆寫入額外承受 Trigger 解譯開銷，複雜字串或跨表邏輯難以維護，且容易被開發者遺忘在資料庫內。</li>
+      </ul>
+    </div>
+  </div>
+  <p class="cap">選擇準則：欄位轉換邏輯複雜或寫入極高頻時優先走「應用層雙寫＋等 v1 全退場後封口回填」；多服務共用同一張表、難以同步升級所有寫入端時，用輕量 <code>BEFORE</code> Trigger 兜底最穩妥。</p>
+  <div class="demo" id="demo-expand-order">
+    <div class="demo-bar">
+      <span class="label">互動拆解器 · 欄位改名與非空約束演進順序實驗室</span>
+      <span class="label" style="text-transform:none;font-family:var(--sans);font-size:12px;color:var(--text-2)">上下調整六個變更動作的執行順序，即時拆解每個時間點的新舊版讀寫契約</span>
+    </div>
+    <div class="demo-body">
+      <div class="osm-ctrl-head">
+        <div class="seg" role="group" aria-label="演進順序預設情境">
+          <button type="button" data-ord-preset="canonical" aria-pressed="true">標準零停機順序</button>
+          <button type="button" data-ord-preset="early-nn" aria-pressed="false">誤區：過早鎖約束</button>
+          <button type="button" data-ord-preset="skip-backfill" aria-pressed="false">誤區：未回填先切讀</button>
+          <button type="button" data-ord-preset="early-drop" aria-pressed="false">誤區：過早刪舊欄</button>
+        </div>
+        <label class="osm-chk-label" for="ord-rollback-chk">
+          <input type="checkbox" id="ord-rollback-chk" checked>
+          <span>同時檢驗「發佈異常緊急退回前一版程式」是否掉資料或報錯</span>
+        </label>
+        <button type="button" class="btn" id="ord-reset-btn">重置標準順序</button>
+      </div>
+
+      <div class="osm-kpi-grid">
+        <div class="osm-kpi-card">
+          <div class="kl">讀寫探針結果</div>
+          <div class="kv" id="ord-kpi-safe">—</div>
+        </div>
+        <div class="osm-kpi-card">
+          <div class="kl">首個異常動作</div>
+          <div class="kv" id="ord-kpi-break">—</div>
+        </div>
+        <div class="osm-kpi-card">
+          <div class="kl">靜默漏寫／讀空值</div>
+          <div class="kv" id="ord-kpi-loss">—</div>
+        </div>
+        <div class="osm-kpi-card">
+          <div class="kl">緊急回滾保護</div>
+          <div class="kv" id="ord-kpi-rb">—</div>
+        </div>
+      </div>
+
+      <div class="osm-ord-list" id="ord-list" aria-live="polite"></div>
+
+      <div class="status-line" id="ord-status">載入演進計畫拆解器中…</div>
+      <div class="legend">
+        <span><i class="dot ns-ok"></i>新舊並存與回滾皆安全</span>
+        <span><i class="dot ns-lock"></i>可運行但回滾受限或有空值風險</span>
+        <span><i class="dot ns-bad"></i>SQL 報錯或寫入中斷</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="oneliner">
+    <b>一句話答法</b>欄位改名或拆分必須走「加可空新欄 &rarr; 部署雙寫與 Fallback 讀 &rarr; 等舊版全退場後分批回填 &rarr; 解舊欄 NOT NULL 並驗證新欄非空 &rarr; 切單寫新欄 &rarr; 觀察期後刪舊欄」，漏掉「先解舊欄 NOT NULL」是線上最隱蔽的翻車點。
+  </div>
+</section>
+
+<section id="s4">
+  <div class="sec-head">
+    <span class="sec-num">04</span>
+    <h2>億級大表 Backfill：主鍵游標分批與動態節流</h2>
+  </div>
+  <p class="sec-sub">把單筆毀滅性大交易拆成可觀測、可剎車的短交易微批次，守住 MVCC 垃圾回收與從庫複寫延遲預算。</p>
+  <p>當新欄位掛好、雙寫程式碼也全量上線後，接下來要把資料表裡既有的數千萬到數億筆歷史舊資料補齊（Backfill）。此時若直接執行一句看似無害的 <code>UPDATE orders SET phone_e164 = ... WHERE phone_e164 IS NULL;</code>，會在四個維度同時引爆生產事故：</p>
+
+  <ul>
+    <li><strong>列鎖覆蓋面失控</strong>：單筆長交易一路累積數千萬把排他列鎖直到提交才釋放，線上正常的訂單更新高機率撞鎖超時或形成環狀死鎖（見<a href="../database-locking-deadlock/index.html">資料庫鎖與死鎖</a>篇）。</li>
+    <li><strong>MVCC 版本膨脹與 Undo 塞爆</strong>：PostgreSQL 的每次 <code>UPDATE</code> 都會產生新 Tuple 並留下舊 Dead Tuple，長交易不提交會卡住全域最舊快照，令 <code>AUTOVACUUM</code> 無法清理垃圾；InnoDB 則會撐爆 Undo Log 拖垮快照讀性能（見<a href="../transaction-isolation-mvcc/index.html">交易隔離級別與 MVCC</a>篇）。</li>
+    <li><strong>主從複寫延遲（Replication Lag）尖峰</strong>：單筆巨型交易在提交瞬間傾倒數十 GB 的 WAL 或 Binlog，從庫回放執行緒被長交易獨佔，讀寫分離從庫瞬間落後數百秒（見<a href="../data-replication-basics/index.html">資料複製基礎</a>篇）。</li>
+    <li><strong>崩潰回滾災難</strong>：跑到第 99% 因逾時或 OOM 中斷時，資料庫必須逐列做 Undo Rollback，回滾耗費的磁碟 I/O 往往比正向寫入更久。</li>
+  </ul>
+
+  <h3>黃金範式：主鍵區間切批（Keyset Bounding）＋ 閉迴路節流</h3>
+  <p>工程上標準的 Backfill Worker 絕不使用 <code>LIMIT ... OFFSET</code>（深分頁會重掃前面數千萬筆索引，總複雜度退化為 <var>O(N&sup2;)</var>），而是沿著叢集主鍵（Clustered Primary Key）每次切一段固定寬度的 ID 區間獨立提交：</p>
+
+  <pre><code>-- 每次推進固定主鍵區間 (cursor, cursor + batch_size]，每批獨立交易提交
+UPDATE orders
+SET    phone_e164 = CONCAT('+886', SUBSTRING(phone, 2))
+WHERE  id &gt; :cursor
+  AND  id &lt;= :cursor + :batch_size
+  AND  phone_e164 IS NULL;</code></pre>
+
+  <div class="callout accent">
+    <div class="c-title"><span class="ic">關鍵</span>為什麼用 <code>id &lt;= :cursor + :batch_size</code> 封頂，而不是 <code>WHERE col IS NULL LIMIT 2000</code>？</div>
+    <p>假設資料表中間有一段連續兩千萬筆資料早已由雙寫填好非空值，而 <code>phone_e164</code> 上又還沒有索引。若寫成 <code>WHERE id &gt; :cursor AND phone_e164 IS NULL ORDER BY id LIMIT 2000</code>，資料庫為了湊滿 2,000 筆空值，會在<strong>單一交易內一口氣掃過兩千萬個主鍵頁</strong>，瞬間退化成慢查詢！用主鍵上下界把掃描範圍硬鎖在 <var>batch_size</var> 個 ID 內，哪怕這批只有 0 筆需要更新，單批 I/O 上限也永遠可預測。</p>
+  </div>
+
+  <div class="osm-row">
+    <div class="osm-node accent">
+      <div class="nn">1. 主鍵切片</div>
+      <div class="ns">(cursor, cursor+B]</div>
+    </div>
+    <span class="osm-arrow">▸</span>
+    <div class="osm-node">
+      <div class="nn">2. 短交易更新</div>
+      <div class="ns">獨立 COMMIT 釋鎖</div>
+    </div>
+    <span class="osm-arrow">▸</span>
+    <div class="osm-node">
+      <div class="nn">3. 日誌傳遞</div>
+      <div class="ns">WAL / Binlog 回放</div>
+    </div>
+    <span class="osm-arrow">▸</span>
+    <div class="osm-node warn">
+      <div class="nn">4. 健康度探針</div>
+      <div class="ns">查 Lag 與活躍執行緒</div>
+    </div>
+    <span class="osm-arrow">▸</span>
+    <div class="osm-node ok">
+      <div class="nn">5. 動態休眠</div>
+      <div class="ns">Sleep 或暫停讓路</div>
+    </div>
+  </div>
+  <p class="cap">閉迴路節流管線：Worker 每跑完幾批就讀取從庫複寫延遲與主庫 <code>Threads_running</code>，一旦逼近警戒水位立即拉長休眠或完全暫停，把 I/O 優先權讓給線上業務。</p>
+
+  <p>設總列數為 <var>N</var>、單批大小為 <var>B</var>、單批資料庫執行耗時為 <var>t_exec</var>、批次間固定休眠為 <var>t_sleep</var>，且從庫最大回放速率為 <var>C_rep</var>（列／秒）、線上業務自身寫入速率為 <var>W_app</var>，則有效推進吞吐率 <var>R_bf</var> 與總耗時需同時滿足：</p>
+
+  <div class="formula">R_bf = B / (t_exec + t_sleep) &nbsp;&nbsp;&amp;&nbsp;&nbsp; W_app + R_bf &lt; C_rep</div>
+
+  <p>只要 <var>W_app + R_bf &gt; C_rep</var>，超出從庫回放能力的差額就會逐秒累積成複寫延遲峰值；此時把 <var>B</var> 調小（壓低單批鎖持有毫秒數）並拉大 <var>t_sleep</var>，就是用「背景總遷移時長（數十分鐘至數小時）」換取「線上 P99 零抖動」。</p>
+  <div class="demo" id="demo-backfill-sim">
+    <div class="demo-bar">
+      <span class="label">互動參數掃描 · 大表 Backfill 與影子表節流試算器</span>
+      <span class="label" style="text-transform:none;font-family:var(--sans);font-size:12px;color:var(--text-2)">拖動滑桿觀察批次大小、休眠間隔與業務寫入量如何決定耗時與複寫延遲</span>
+    </div>
+    <div class="demo-body">
+      <div class="osm-ctrl-head">
+        <div class="seg" role="group" aria-label="資料回填與搬遷機制">
+          <button type="button" data-bf-mode="chunked" aria-pressed="true">原表分批 Backfill</button>
+          <button type="button" data-bf-mode="ptosc" aria-pressed="false">Trigger 影子表 (pt-osc)</button>
+          <button type="button" data-bf-mode="ghost" aria-pressed="false">Binlog 影子表 (gh-ost)</button>
+        </div>
+        <button type="button" class="btn" id="bf-reset-btn">重置參數</button>
+      </div>
+
+      <div class="osm-knobs">
+        <label class="osm-knob" for="bf-rows">
+          <span class="kl">資料表總列數 <strong id="bf-rows-val">60M 列</strong></span>
+          <input type="range" id="bf-rows" min="5" max="200" step="5" value="60">
+        </label>
+        <label class="osm-knob" for="bf-batch">
+          <span class="kl">單批大小 (batch_size) <strong id="bf-batch-val">2,500 列</strong></span>
+          <input type="range" id="bf-batch" min="500" max="50000" step="500" value="2500">
+        </label>
+        <label class="osm-knob" for="bf-sleep">
+          <span class="kl">批次休眠間隔 (sleep) <strong id="bf-sleep-val">40 ms</strong></span>
+          <input type="range" id="bf-sleep" min="0" max="300" step="10" value="40">
+        </label>
+        <label class="osm-knob" for="bf-qps">
+          <span class="kl">線上業務寫入速率 <strong id="bf-qps-val">2,200 筆/秒</strong></span>
+          <input type="range" id="bf-qps" min="200" max="8000" step="200" value="2200">
+        </label>
+      </div>
+
+      <div class="osm-kpi-grid">
+        <div class="osm-kpi-card">
+          <div class="kl">預估總耗時</div>
+          <div class="kv" id="bf-out-duration">—</div>
+        </div>
+        <div class="osm-kpi-card">
+          <div class="kl">單批鎖持有／交易耗時</div>
+          <div class="kv" id="bf-out-lock">—</div>
+        </div>
+        <div class="osm-kpi-card">
+          <div class="kl">從庫複寫延遲峰值</div>
+          <div class="kv" id="bf-out-lag">—</div>
+        </div>
+        <div class="osm-kpi-card">
+          <div class="kl">線上寫入 P99 衝擊</div>
+          <div class="kv" id="bf-out-p99">—</div>
+        </div>
+      </div>
+
+      <div class="osm-svg-box">
+        <svg id="bf-svg" viewBox="0 0 680 186" style="width:100%;height:auto" role="img" aria-label="從庫回放容量水位與複寫延遲曲線">
+          <title>從庫回放容量預算與遷移期間複寫延遲變化圖</title>
+        </svg>
+      </div>
+
+      <div class="status-line" id="bf-status">載入節流試算器中…</div>
+      <div class="legend">
+        <span><i class="dot ns-wait"></i>線上業務寫入負載</span>
+        <span><i class="dot ns-lock"></i>Trigger 同步放大／自動節流介入</span>
+        <span><i class="dot ns-ok"></i>安全水位（Lag &le; 2s）</span>
+        <span><i class="dot ns-bad"></i>超出從庫回放上限（Lag 持續堆積）</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="oneliner">
+    <b>一句話答法</b>大表回填永遠走「主鍵區間切片＋每批幾千列短交易提交＋監控從庫延遲動態 Sleep」；單批寧可抓 1,000～5,000 列跑兩小時，也絕不開五萬列大交易賭線上不死鎖。
+  </div>
+</section>
+
+<section id="s5">
+  <div class="sec-head">
+    <span class="sec-num">05</span>
+    <h2>影子表線上遷移工具：pt-online-schema-change vs gh-ost</h2>
+  </div>
+  <p class="sec-sub">當全表重寫無可避免時，如何靠「背景分批拷貝＋增量變更追趕＋原子換表」達成近乎零感知的線上重構。</p>
+  <p>當遇到「主鍵由 <code>INT</code> 升 <code>BIGINT</code>」、「調整叢集索引順序」、「轉移字元集 <code>utf8mb4</code>」或「回收數百 GB 刪除碎片」這類<strong>物理上無可避免必須重寫整張表</strong>的手術時，即便 MySQL 提供部分 <code>INPLACE</code> 支援，它也存在兩個致命硬傷：第一，引擎全速掃盤無法感知「從庫是不是已經延遲了三十秒」而自動踩剎車；第二，高寫入期間一旦增量緩衝區（<code>innodb_online_alter_log_max_size</code>）被塞滿，耗時兩小時的 DDL 會在最後一刻直接報錯作廢。</p>
+
+  <p>為了解決這道難題，業界發展出成熟的<strong>影子表（Shadow / Ghost Table）線上遷移架構</strong>：不在原表上動刀，而是先建一張套用好新結構的空表（毫秒級完成），接著在背景同時推進<strong>「存量分批拷貝」</strong>與<strong>「增量異動追趕」</strong>，等兩張表完全同步後，再用毫秒級的原子 <code>RENAME TABLE</code> 瞬間偷天換日。</p>
+
+  <h3>兩大流派對決：Trigger 同步觸發（pt-osc）vs Binlog 非同步串流（gh-ost）</h3>
+  <p>Percona 的 <code>pt-online-schema-change</code> 與 GitHub 開源的 <code>gh-ost</code> 走了截然不同的增量擷取路線，這決定了它們在高併發熱表上的生死表現：</p>
+
+  <svg viewBox="0 0 720 268" style="width:100%;height:auto" role="img" aria-label="pt-osc 觸發器同步寫入與 gh-ost Binlog 非同步串流架構對照">
+    <title>pt-online-schema-change 與 gh-ost 增量同步架構對照圖</title>
+    <defs>
+      <marker id="osm-arr-ink" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+        <path d="M 0 1 L 9 5 L 0 9 z" fill="#6b7078"/>
+      </marker>
+      <marker id="osm-arr-warn" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+        <path d="M 0 1 L 9 5 L 0 9 z" fill="#a3743e"/>
+      </marker>
+      <marker id="osm-arr-ok" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+        <path d="M 0 1 L 9 5 L 0 9 z" fill="#4d7d68"/>
+      </marker>
+    </defs>
+
+    <!-- Left Panel: pt-osc -->
+    <rect x="6" y="8" width="344" height="252" rx="9" fill="#fafaf9" stroke="#dedcd8"/>
+    <text x="22" y="31" font-family="var(--mono)" font-size="12" font-weight="700" fill="#a3743e">pt-osc · 業務交易內 Trigger 同步雙寫</text>
+
+    <rect x="22" y="48" width="96" height="46" rx="6" fill="#ffffff" stroke="#dedcd8"/>
+    <text x="70" y="68" text-anchor="middle" font-family="var(--mono)" font-size="11.5" font-weight="700" fill="#262a2f">線上寫入 Tx</text>
+    <text x="70" y="84" text-anchor="middle" font-family="var(--mono)" font-size="11" fill="#6b7078">INSERT/UPDATE</text>
+
+    <line x1="118" y1="71" x2="152" y2="71" stroke="#6b7078" stroke-width="1.5" marker-end="url(#osm-arr-ink)"/>
+
+    <!-- Transaction boundary box -->
+    <rect x="156" y="42" width="180" height="204" rx="7" fill="#f6f0e7" stroke="#a3743e" stroke-dasharray="4 3"/>
+    <text x="246" y="58" text-anchor="middle" font-family="var(--mono)" font-size="11" font-weight="700" fill="#a3743e">同一個資料庫交易與鎖週期</text>
+
+    <rect x="172" y="68" width="148" height="44" rx="6" fill="#ffffff" stroke="#dedcd8"/>
+    <text x="246" y="87" text-anchor="middle" font-family="var(--mono)" font-size="11.5" font-weight="700" fill="#262a2f">原表 orders</text>
+    <text x="246" y="103" text-anchor="middle" font-family="var(--mono)" font-size="11" fill="#a8554f">掛載 3 支 AFTER Trigger</text>
+
+    <line x1="214" y1="112" x2="214" y2="178" stroke="#a3743e" stroke-width="1.8" marker-end="url(#osm-arr-warn)"/>
+    <text x="206" y="148" text-anchor="end" font-family="var(--mono)" font-size="11" fill="#a3743e">同步觸發</text>
+
+    <line x1="282" y1="112" x2="282" y2="178" stroke="#6b7078" stroke-width="1.4" stroke-dasharray="3 3" marker-end="url(#osm-arr-ink)"/>
+    <text x="288" y="148" font-family="var(--mono)" font-size="11" fill="#6b7078">分批拷貝</text>
+
+    <rect x="172" y="182" width="148" height="48" rx="6" fill="#ffffff" stroke="#a3743e"/>
+    <text x="246" y="202" text-anchor="middle" font-family="var(--mono)" font-size="11.5" font-weight="700" fill="#262a2f">影子表 _orders_new</text>
+    <text x="246" y="219" text-anchor="middle" font-family="var(--mono)" font-size="11" fill="#6b7078">鎖競爭回傳至業務 Tx</text>
+
+    <!-- Right Panel: gh-ost -->
+    <rect x="370" y="8" width="344" height="252" rx="9" fill="#fafaf9" stroke="#dedcd8"/>
+    <text x="386" y="31" font-family="var(--mono)" font-size="12" font-weight="700" fill="#4d7d68">gh-ost · 零 Trigger + Binlog 非同步串流</text>
+
+    <rect x="386" y="54" width="92" height="46" rx="6" fill="#ffffff" stroke="#dedcd8"/>
+    <text x="432" y="74" text-anchor="middle" font-family="var(--mono)" font-size="11.5" font-weight="700" fill="#262a2f">線上寫入 Tx</text>
+    <text x="432" y="90" text-anchor="middle" font-family="var(--mono)" font-size="11" fill="#6b7078">原速提交</text>
+
+    <line x1="478" y1="77" x2="508" y2="77" stroke="#6b7078" stroke-width="1.5" marker-end="url(#osm-arr-ink)"/>
+
+    <rect x="512" y="54" width="186" height="46" rx="6" fill="#eef4f1" stroke="#4d7d68"/>
+    <text x="605" y="74" text-anchor="middle" font-family="var(--mono)" font-size="11.5" font-weight="700" fill="#262a2f">原表 orders（無 Trigger）</text>
+    <text x="605" y="90" text-anchor="middle" font-family="var(--mono)" font-size="11" fill="#4d7d68">正常寫出 ROW Binlog</text>
+
+    <line x1="558" y1="100" x2="468" y2="132" stroke="#4d7d68" stroke-width="1.6" marker-end="url(#osm-arr-ok)"/>
+    <text x="494" y="116" text-anchor="end" font-family="var(--mono)" font-size="11" fill="#4d7d68">偽裝從庫拉取</text>
+
+    <rect x="386" y="136" width="166" height="46" rx="6" fill="#eef2f7" stroke="#3f6188"/>
+    <text x="469" y="155" text-anchor="middle" font-family="var(--mono)" font-size="11.5" font-weight="700" fill="#262a2f">gh-ost 節流協調器</text>
+    <text x="469" y="171" text-anchor="middle" font-family="var(--mono)" font-size="11" fill="#3f6188">超標可連增量一併暫停</text>
+
+    <line x1="636" y1="100" x2="636" y2="196" stroke="#6b7078" stroke-width="1.4" stroke-dasharray="3 3" marker-end="url(#osm-arr-ink)"/>
+    <text x="642" y="152" font-family="var(--mono)" font-size="11" fill="#6b7078">分批讀取</text>
+
+    <line x1="490" y1="182" x2="554" y2="202" stroke="#4d7d68" stroke-width="1.6" marker-end="url(#osm-arr-ok)"/>
+
+    <rect x="536" y="200" width="162" height="46" rx="6" fill="#ffffff" stroke="#4d7d68"/>
+    <text x="617" y="219" text-anchor="middle" font-family="var(--mono)" font-size="11.5" font-weight="700" fill="#262a2f">影子表 _orders_gho</text>
+    <text x="617" y="235" text-anchor="middle" font-family="var(--mono)" font-size="11" fill="#6b7078">追平後原子 RENAME</text>
+  </svg>
+  <p class="cap">核心架構分水嶺：<code>pt-osc</code> 把影子表寫入塞進業務交易本身，尖峰時無法卸載 Trigger 成本；<code>gh-ost</code> 透過 ROW 格式 Binlog 把增量同步徹底移出業務熱路徑，緊急時能做到 100% 靜默暫停。</p>
+
+  <h3>為什麼 <code>gh-ost</code> 在高併發場景勝出？拆解三個工程細節</h3>
+  <ul>
+    <li><strong>真正意義上的「隨時緊急煞車（True Throttling）」</strong>：在 <code>pt-osc</code> 下，當主庫 CPU 飆到 95% 時按暫停，只能停下背景拷貝執行緒，原表上的三支 Trigger 依然在每一筆用戶下單時同步執行——想拔掉 Trigger 又得再拿一次排他 <code>MDL_EXCLUSIVE</code> 鎖並宣告遷移作廢。<code>gh-ost</code> 原表完全乾淨，只要停止消費 Binlog 與分批查詢，主庫負荷瞬間歸零，等流量洪峰過去再從斷點 Binlog 位點無縫續傳。</li>
+    <li><strong>可動態線上調參與預演驗證</strong>：<code>gh-ost</code> 內建 Unix Socket 控制介面，執行途中可隨時動態調整 <code>chunk-size</code> 與 <code>max-lag-millis</code>；甚至支援 <code>--test-on-replica</code>，直接在生產從庫完整跑完一次遷移與切換測試再停機校驗資料一致性。</li>
+    <li><strong>雙連線無縫原子 Cut-over</strong>：最後換表那一刻，如何確保「不會在鎖定原表與重命名之間漏掉最後幾筆 Binlog」？<code>gh-ost</code> 利用 MySQL 中 <code>RENAME TABLE</code> 優先權高於一般 <code>DML</code> 的特性：先由連線 A 執行 <code>LOCK TABLES orders WRITE</code> 擋住新寫入，再由連線 B 送出 <code>RENAME TABLE orders TO _orders_del, _orders_gho TO orders</code>（此時連線 B 排在連線 A 之後、但排在所有被擋的業務 DML 之前）；<code>gh-ost</code> 從 Binlog 讀到自己寫入的心跳標記，確認封鎖前最後一筆變更已套進 <code>_orders_gho</code> 後，連線 A 釋放鎖——連線 B 瞬間完成原子換表，業務端只感受到數十毫秒的微小停頓，零資料遺失。</li>
+  </ul>
+
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>比較維度</th>
+          <th>MySQL 原生 <code>INPLACE</code> DDL</th>
+          <th><code>pt-online-schema-change</code></th>
+          <th><code>gh-ost</code> (及 Vitess <code>vreplication</code>)</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>增量同步機制</td>
+          <td>引擎內部 Online DML Row Log</td>
+          <td>原表掛 3 支 <code>AFTER</code> Trigger 同步寫</td>
+          <td class="hl">偽裝從庫解析 <code>ROW</code> 格式 Binlog</td>
+        </tr>
+        <tr>
+          <td>業務寫入熱路徑開銷</td>
+          <td>低（記憶體追加日誌）</td>
+          <td>高（同交易解譯 Trigger + 雙倍列鎖）</td>
+          <td class="hl">極低（原表零 Trigger，完全解耦）</td>
+        </tr>
+        <tr>
+          <td>從庫延遲感知與暫停</td>
+          <td>無（全速執行，無法半路暫停）</td>
+          <td>僅能暫停分批拷貝，Trigger 無法停</td>
+          <td class="hl">雙向自動節流，可連同增量完全暫停</td>
+        </tr>
+        <tr>
+          <td>外鍵（Foreign Key）支援</td>
+          <td>支援（視操作而定）</td>
+          <td class="hl">支援（透過 <code>--alter-foreign-keys-method</code>）</td>
+          <td>嚴格受限（預設拒絕有子表外鍵參照的表）</td>
+        </tr>
+        <tr>
+          <td>額外磁碟與前置條件</td>
+          <td>視是否重建表而定</td>
+          <td>需 &gt; 1 倍原表可用磁碟空間</td>
+          <td>需 &gt; 1 倍磁碟空間 + 強制 <code>binlog_format=ROW</code></td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="cap">工具沒有絕對通吃：大型網路公司普遍移除實體外鍵約束，因此以 <code>gh-ost</code> 為首選；若遺留系統高度依賴跨表外鍵，則需評估 <code>pt-osc</code> 的 <code>rebuild_constraints</code> 模式或改走應用層分階段遷移。</p>
+
+  <div class="callout accent">
+    <div class="c-title"><span class="ic">延伸</span>PostgreSQL 生態系的對應工具：<code>pg_repack</code> 與 <code>pgroll</code></div>
+    <p>PostgreSQL 因為具備第 2 節介紹的 <code>CONCURRENTLY</code>、<code>attmissingval</code> 與兩段式約束，日常 DDL 對外部工具的依賴遠低於 MySQL。遇到真正需要重整膨脹表或改實體型別時，社群常用 <strong><code>pg_repack</code></strong>（透過輕量 Trigger 記錄增量至日誌表、背景建新 Heap 後短暫排他鎖交換檔案指標）；而新一代工具如 <strong><code>pgroll</code></strong> 則自動化管理多版本 Schema Views，讓新舊版應用程式連上不同 search_path 視圖各自讀寫，省去手工維護雙寫程式碼的負擔。</p>
+  </div>
+
+  <div class="oneliner">
+    <b>一句話答法</b>影子表工具把「鎖表重寫」轉化為「空表改結構＋背景拷貝＋增量追趕＋毫秒級原子 RENAME」；<code>gh-ost</code> 改讀 Binlog 拔除原表 Trigger，徹底解決了高併發下觸發器拖垮業務交易與無法真暫停的痛點。
+  </div>
+</section>
+
+<section id="s6">
+  <div class="sec-head">
+    <span class="sec-num">06</span>
+    <h2>線上變更選型決策器、生產 Runbook 與面試追問</h2>
+  </div>
+  <p class="sec-sub">綜合引擎能力、表熱度與發佈約束選出正確變更路徑，並盤點上線前後的防禦檢查表與高頻考題。</p>
+  <p>實務與系統設計面試中，「該用原生 Online DDL、兩段式約束、影子表工具還是五階段 Expand / Contract？」從來不是單選題，而是由<strong>資料庫引擎底層實作、變更是否破壞舊版 SQL 契約、表規模熱度與外鍵環境</strong>四個維度共同決定的決策樹。請透過下方決策器組合不同生產條件，觀察推導路徑與防護指令的變化：</p>
+
+  <div class="demo" id="demo-ddl-decision">
+    <div class="demo-bar">
+      <span class="label">互動決策器 · 線上 Schema 變更路徑與鎖防護推導</span>
+      <span class="label" style="text-transform:none;font-family:var(--sans);font-size:12px;color:var(--text-2)">設定四項生產環境條件，即時推導最佳執行策略、鎖視窗與防護 Runbook</span>
+    </div>
+    <div class="demo-body">
+      <div class="osm-knobs">
+        <label class="osm-knob" for="dec-engine">
+          <span class="kl">1 · 資料庫引擎</span>
+          <select id="dec-engine">
+            <option value="pg">PostgreSQL 14+</option>
+            <option value="mysql">MySQL 8.0 InnoDB</option>
+          </select>
+        </label>
+        <label class="osm-knob" for="dec-op">
+          <span class="kl">2 · 目標變更動作</span>
+          <select id="dec-op">
+            <option value="retype-int-bigint">實體型別升級（INT &rarr; BIGINT）</option>
+            <option value="add-col-const">新增欄位（可空或常數預設值）</option>
+            <option value="add-index">新增次級索引（Secondary Index）</option>
+            <option value="add-not-null">既有欄位收緊 NOT NULL 或外鍵</option>
+            <option value="rename-split">欄位改名或語意拆分</option>
+          </select>
+        </label>
+        <label class="osm-knob" for="dec-scale">
+          <span class="kl">3 · 資料表規模與熱度</span>
+          <select id="dec-scale">
+            <option value="hot-large">億級高併發熱表（&gt; 5,000 萬列）</option>
+            <option value="small-cold">中小型低頻表（&lt; 50 萬列）</option>
+          </select>
+        </label>
+        <label class="osm-knob" for="dec-deploy">
+          <span class="kl">4 · 部署型態與外鍵約束</span>
+          <select id="dec-deploy">
+            <option value="rolling-nofk">滾動／金絲雀並存（無外鍵參照）</option>
+            <option value="rolling-fk">滾動／金絲雀並存（含子表外鍵）</option>
+            <option value="maint-window">允許數十秒短暫停寫窗口</option>
+          </select>
+        </label>
+      </div>
+
+      <div class="osm-ctrl-head" style="margin-top:4px">
+        <button type="button" class="btn" id="dec-reset-btn">重置預設題組</button>
+      </div>
+
+      <div class="osm-dec-hero" id="dec-hero-box">
+        <div class="osm-dec-tag" id="dec-out-badge">建議路徑</div>
+        <div class="osm-dec-title" id="dec-out-pick">—</div>
+        <p class="osm-dec-why" id="dec-out-why">—</p>
+      </div>
+
+      <div class="osm-kpi-grid">
+        <div class="osm-kpi-card">
+          <div class="kl">最高鎖層級</div>
+          <div class="kv" id="dec-out-lock">—</div>
+        </div>
+        <div class="osm-kpi-card">
+          <div class="kl">全表重寫與空間</div>
+          <div class="kv" id="dec-out-rewrite">—</div>
+        </div>
+        <div class="osm-kpi-card">
+          <div class="kl">預估阻塞讀寫視窗</div>
+          <div class="kv" id="dec-out-window">—</div>
+        </div>
+        <div class="osm-kpi-card">
+          <div class="kl">不影響結論的維度</div>
+          <div class="kv" id="dec-out-ignored">—</div>
+        </div>
+      </div>
+
+      <div class="osm-dec-cols">
+        <div class="osm-dec-box">
+          <div class="bt">推導路徑與邊界依據</div>
+          <ul class="osm-path-ul" id="dec-path-list"></ul>
+        </div>
+        <div class="osm-dec-box">
+          <div class="bt">防護執行 Runbook / SQL 範本</div>
+          <pre class="osm-sql-pre"><code id="dec-sql-box"></code></pre>
+        </div>
+      </div>
+
+      <div class="status-line" id="dec-status">載入選型決策器中…</div>
+    </div>
+  </div>
+  <h3>生產環境變更前後標準防禦清單（Pre-flight &amp; Post-flight Checklist）</h3>
+  <div class="trap">
+    <span class="tn">上線前</span>
+    <div><strong>清查長交易與孤兒連線</strong>：執行前先查 <code>pg_stat_activity</code>（找出 <code>idle in transaction</code> 與長報表）或 MySQL <code>information_schema.innodb_trx</code>，並確認磁碟剩餘空間大於目標表總容量的 <var>1.5</var>～<var>2.2</var> 倍（含索引與暫存排序檔）。</div>
+  </div>
+  <div class="trap">
+    <span class="tn">上線中</span>
+    <div><strong>強制雙重保險絲</strong>：每一條需要排他鎖的 DDL 都必須搭配 <code>lock_timeout</code>（1～3 秒）與顯式演算法斷言（如 <code>ALGORITHM=INSTANT</code>）；所有背景 Backfill 與影子表工具都必須綁定從庫複寫延遲上限（如 Lag &gt; 2 秒自動暫停）。</div>
+  </div>
+  <div class="trap">
+    <span class="tn">上線後</span>
+    <div><strong>巡檢半成品殘骸與統計資訊</strong>：確認沒有遺留 <code>INVALID</code> 索引、未卸除的過渡期 Trigger 或未刪除的影子舊表（如 <code>_orders_old</code> 佔滿磁碟）；大面積資料回填後主動執行 <code>ANALYZE</code> 更新查詢最佳化器統計資訊（避免查詢計畫走歪，見<a href="../query-planning-explain/index.html">查詢計畫與 EXPLAIN</a>篇）。</div>
+  </div>
+
+  <h3>面試高頻追問 FAQ</h3>
+
+  <details class="faq" open>
+    <summary>
+      <span><span class="q">Q1 ·</span> PostgreSQL 核心訂單表的 <code>INT</code> 主鍵即將突破 21 億上限，如何在不停機前提下升級為 <code>BIGINT</code>？</span>
+      <span class="chev">▸</span>
+    </summary>
+    <div class="ans">
+      <p>絕對不能直接下 <code>ALTER TABLE orders ALTER COLUMN id TYPE BIGINT</code>，這會握著 <code>ACCESS EXCLUSIVE</code> 重寫數百 GB 的 Heap 與所有索引。標準零停機解法分五步：(1) <strong>Expand</strong>：毫秒級新增可空欄位 <code>id_big BIGINT</code>，並掛一支輕量 <code>BEFORE INSERT</code> Trigger 讓新寫入自動執行 <code>NEW.id_big := NEW.id</code>；(2) <strong>Backfill</strong>：用主鍵游標分批將歷史列的 <code>id</code> 填進 <code>id_big</code>；(3) <strong>平行建唯一索引與驗證非空</strong>：執行 <code>CREATE UNIQUE INDEX CONCURRENTLY idx_orders_id_big ON orders(id_big)</code>，並以 <code>CHECK (id_big IS NOT NULL) NOT VALID</code> + <code>VALIDATE CONSTRAINT</code> 完成非空證明；(4) <strong>毫秒級換主鍵</strong>：在 <code>SET LOCAL lock_timeout = '1500ms'</code> 保護的單一短交易內，將欄位改名對調並使用 <code>ALTER TABLE orders DROP CONSTRAINT orders_pkey, ADD CONSTRAINT orders_pkey PRIMARY KEY USING INDEX idx_orders_id_big</code>——直接把剛建好的唯一索引升級為主鍵，<strong>完全跳過全表重掃</strong>；(5) 將 Sequence 升為 <code>BIGINT</code>，待舊版程式退場後清理舊 <code>INT</code> 欄位。</p>
+    </div>
+  </details>
+
+  <details class="faq">
+    <summary>
+      <span><span class="q">Q2 ·</span> <code>gh-ost</code> 最後一步做 <code>RENAME TABLE</code> 切換時，若剛好有一條慢查詢在讀原表，會不會一樣引發鎖佇列雪崩？</span>
+      <span class="chev">▸</span>
+    </summary>
+    <div class="ans">
+      <p>如果無防護地死等，確實會！因為 <code>RENAME TABLE</code> 依然需要取得 <code>MDL_EXCLUSIVE</code>。<code>gh-ost</code> 之所以安全，是因為它內建了嚴格的 <code>--cut-over-lock-timeout-seconds</code>（預設僅 3 秒）與最大重試上限：一旦在切換瞬間被長查詢擋住超過 3 秒，<code>gh-ost</code> 會<strong>主動放棄該次 Cut-over 連線並釋放鎖請求</strong>，讓後方業務查詢立刻通行，自己則退回背景繼續追趕這幾秒產生的幾十筆 Binlog，等幾秒後再次嘗試切換，直到順利逮到無長查詢的毫秒空檔。</p>
+    </div>
+  </details>
+
+  <details class="faq">
+    <summary>
+      <span><span class="q">Q3 ·</span> 既然我們有主從架構，直接「先在從庫跑完 DDL、再做主從切換（Rolling Replica Upgrade）」不就不用影子表了嗎？</span>
+      <span class="chev">▸</span>
+    </summary>
+    <div class="ans">
+      <p>從庫輪流變更確實能把重寫 I/O 隔離在離線從庫上，在超大規模叢集中常與影子表搭配使用，但它有三個嚴格限制：(1) <strong>主從複寫格式相容性</strong>：在 <code>ROW</code> 格式 Binlog 下，主庫（舊結構）與從庫（新結構）只有在尾端加減欄等少數情況下能跨結構回放，若在中間插欄或修改不二進位相容的型別，複寫執行緒會直接斷裂；(2) <strong>主從切換本身是一次基礎設施級有感事件</strong>，切換瞬間連線重連、Buffer Pool 冷快取預熱都會造成延遲抖動；(3) <strong>應用層契約問題仍在</strong>：切換那一秒線上仍有新舊程式並存，破壞性改名或刪欄一樣必須遵循 Expand / Contract。</p>
+    </div>
+  </details>
+
+  <details class="faq">
+    <summary>
+      <span><span class="q">Q4 ·</span> MySQL 8.0 的 <code>ALGORITHM=INSTANT</code> 可以無限次對同一張表加減欄位嗎？</span>
+      <span class="chev">▸</span>
+    </summary>
+    <div class="ans">
+      <p>不行！MySQL 8.0.29+ 的任意位置加減欄位靠的是在系統表維護 <code>TOTAL_ROW_VERSIONS</code> 版本號（上限為 <strong>64 個版本</strong>）。每執行一次 <code>INSTANT</code> 加欄或刪欄就會消耗一個版本號；一旦累積滿 64 次，第 65 次 DDL 就會被迫退回重建整張表（可查 <code>information_schema.innodb_tables</code> 監控剩餘額度）。此外，含有 <code>FULLTEXT</code> 全文索引或使用 <code>ROW_FORMAT=COMPRESSED</code> 的資料表亦不支援 <code>INSTANT</code>。</p>
+    </div>
+  </details>
+
+  <div class="oneliner">
+    <b>一句話答法</b>零停機 Schema 變更的本質是把「一次性的鎖表＋契約突變」拆解為「受 <code>lock_timeout</code> 保護的毫秒級元資料變更 ＋ 節流分批的背景資料追趕 ＋ 雙向相容的多階段應用發佈」。
+  </div>
+</section>
