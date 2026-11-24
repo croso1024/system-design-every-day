@@ -1,0 +1,849 @@
+<!-- demo-archetype: B｜參數掃描（主，第 3 節）＋C｜並排對照（次，第 5 節） —
+     主 demo 讓讀者調整請求到達率、純查詢耗時、I/O 型態、連線池大小與資料庫核心數，即時重算單筆查詢競爭懲罰、最大吞吐倒 U 曲線、等待佇列深度與逾時拒絕率。選 B 是因為「Pool 開多大才對」的本質是排隊論與核心競爭的非線性參數轉折。
+     次 demo 將同一組含交易耗時、閒置思考間隔與狀態指令的用戶端工作負載，同時餵給 Session、Transaction、Statement 三種 Pooling 模式，並排算出後端連線需求、多工壓縮倍率與相容性判定。 -->
+<style>
+  /* 圖表 1：雙層連線池線性拓樸（節點與邊分離，見 style-guide §2） */
+  .dcp-arch-row {
+    display: flex; flex-wrap: wrap; gap: 10px;
+    align-items: stretch; justify-content: center;
+    margin: 14px 0 0;
+  }
+  .dcp-node {
+    border: 1px solid var(--border-strong); border-radius: 8px;
+    background: #fff; padding: 10px 13px;
+    min-width: 120px; max-width: 195px; text-align: center;
+  }
+  .dcp-node .nn { font-family: var(--mono); font-size: 12px; font-weight: 700; color: var(--text); }
+  .dcp-node .ns { font-size: 11.5px; color: var(--text-2); margin-top: 4px; line-height: 1.45; }
+  .dcp-node.accent { border-top: 3px solid var(--accent); }
+  .dcp-node.ok     { border-top: 3px solid var(--ok); }
+  .dcp-node.warn   { border-top: 3px solid var(--warn); }
+  .dcp-node.bad    { border-top: 3px solid var(--bad); }
+  .dcp-arrow {
+    display: flex; align-items: center;
+    font-family: var(--mono); font-size: 12.5px; color: var(--text-3);
+    white-space: nowrap;
+  }
+
+  /* 圖表 2：連線洩漏骨牌效應 Swimlane（純 CSS grid，不折行） */
+  .dcp-leak-lane {
+    display: grid; grid-template-columns: 52px repeat(4, minmax(0, 1fr)); gap: 1px;
+    background: var(--border); border: 1px solid var(--border);
+    border-radius: 8px; overflow: hidden; margin: 14px 0 0;
+  }
+  .dcp-leak-lane > div { background: #fff; padding: 8px 10px; font-size: 12px; line-height: 1.5; }
+  .dcp-leak-lane .lh {
+    background: var(--bg-soft); font-family: var(--mono); font-size: 11px;
+    font-weight: 700; color: var(--text-2);
+  }
+  .dcp-leak-lane .lt {
+    background: var(--bg-soft); font-family: var(--mono); font-size: 11px; color: var(--text-3);
+  }
+  .dcp-leak-lane .lc.act  { background: var(--accent-soft); }
+  .dcp-leak-lane .lc.warn { background: var(--warn-soft); }
+  .dcp-leak-lane .lc.ok   { background: var(--ok-soft); }
+  .dcp-leak-lane .lc.bad  { background: var(--bad-soft); }
+  @media (max-width: 720px) {
+    .dcp-leak-lane { grid-template-columns: 42px repeat(4, minmax(0, 1fr)); font-size: 11px; }
+    .dcp-leak-lane > div { padding: 6px 7px; }
+  }
+
+  /* Demo 共用控制項列與滑桿網格 */
+  .dcp-toolbar {
+    display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between;
+    gap: 10px; margin-bottom: 14px;
+  }
+  .dcp-toolbar-group {
+    display: flex; flex-wrap: wrap; align-items: center; gap: 8px;
+  }
+  .dcp-toolbar-lbl {
+    font-size: 12.5px; font-weight: 600; color: var(--text-2);
+  }
+  .dcp-knobs {
+    display: grid; grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 12px 18px; margin-bottom: 16px;
+  }
+  .dcp-knobs.tri {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+  @media (max-width: 680px) {
+    .dcp-knobs, .dcp-knobs.tri { grid-template-columns: 1fr; }
+  }
+  .dcp-knob {
+    display: flex; flex-direction: column; gap: 5px;
+    background: var(--bg-soft); border: 1px solid var(--border);
+    border-radius: var(--radius-sm); padding: 9px 12px;
+  }
+  .dcp-knob-top {
+    display: flex; align-items: baseline; justify-content: space-between; gap: 8px;
+  }
+  .dcp-knob-name { font-size: 12.5px; font-weight: 600; color: var(--text); }
+  .dcp-knob-val  { font-family: var(--mono); font-size: 12.5px; font-weight: 600; color: var(--accent); }
+  .dcp-knob input[type="range"] {
+    width: 100%; accent-color: var(--accent); cursor: pointer;
+  }
+  .dcp-knob-hint { font-size: 11px; color: var(--text-3); line-height: 1.35; }
+
+  /* Demo 1：倒 U 型容量曲線 SVG 畫布與六格計算讀數 */
+  .dcp-plot {
+    border: 1px solid var(--border); border-radius: var(--radius-sm);
+    background: #ffffff; padding: 10px 12px 6px; margin-bottom: 14px;
+  }
+  .dcp-plot svg { width: 100%; height: auto; display: block; }
+  .dcp-kpis {
+    display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px;
+  }
+  @media (max-width: 680px) {
+    .dcp-kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  }
+  .dcp-kpi {
+    border: 1px solid var(--border); border-top: 3px solid var(--border-strong);
+    border-radius: var(--radius-sm); background: #fff; padding: 10px 12px;
+  }
+  .dcp-kpi.ok     { border-top-color: var(--ok); background: var(--ok-soft); }
+  .dcp-kpi.warn   { border-top-color: var(--warn); background: var(--warn-soft); }
+  .dcp-kpi.bad    { border-top-color: var(--bad); background: var(--bad-soft); }
+  .dcp-kpi.accent { border-top-color: var(--accent); background: var(--accent-soft); }
+  .dcp-kpi-k { font-size: 11.5px; color: var(--text-2); margin-bottom: 3px; }
+  .dcp-kpi-v { font-family: var(--mono); font-size: 16px; font-weight: 700; color: var(--text); line-height: 1.25; }
+  .dcp-kpi-s { font-size: 11px; color: var(--text-2); margin-top: 3px; line-height: 1.35; }
+
+  /* Demo 2：三種 Pooling 模式並排對照卡 */
+  .dcp-cards {
+    display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px;
+  }
+  @media (max-width: 740px) {
+    .dcp-cards { grid-template-columns: 1fr; }
+  }
+  .dcp-card {
+    border: 1px solid var(--border-strong); border-top: 3px solid var(--border-strong);
+    border-radius: var(--radius-sm); background: #fff; padding: 13px 14px;
+    display: flex; flex-direction: column; gap: 9px;
+  }
+  .dcp-card.ok   { border-top-color: var(--ok); }
+  .dcp-card.warn { border-top-color: var(--warn); }
+  .dcp-card.bad  { border-top-color: var(--bad); }
+  .dcp-card-head {
+    display: flex; align-items: baseline; justify-content: space-between; gap: 6px;
+  }
+  .dcp-card-title { font-family: var(--mono); font-size: 13.5px; font-weight: 700; color: var(--text); }
+  .dcp-compat-tag {
+    font-family: var(--mono); font-size: 11px; padding: 2px 7px; border-radius: 999px;
+    border: 1px solid var(--border-strong); background: var(--bg-soft); color: var(--text-2);
+  }
+  .dcp-compat-tag.ok   { background: var(--ok-soft); border-color: var(--ok); color: var(--ok); }
+  .dcp-compat-tag.warn { background: var(--warn-soft); border-color: var(--warn); color: var(--warn); }
+  .dcp-compat-tag.bad  { background: var(--bad-soft); border-color: var(--bad); color: var(--bad); }
+  .dcp-big-num {
+    font-family: var(--mono); font-size: 21px; font-weight: 700; color: var(--text); line-height: 1.2;
+  }
+  .dcp-big-num small { font-size: 11.5px; font-weight: 400; color: var(--text-2); margin-left: 4px; }
+  .dcp-meter-track {
+    height: 8px; border-radius: 999px; background: var(--bg-soft);
+    border: 1px solid var(--border); overflow: hidden;
+  }
+  .dcp-meter-fill {
+    height: 100%; border-radius: 999px; background: var(--accent);
+    transition: width .16s ease;
+  }
+  .dcp-meter-fill.ok   { background: var(--ok); }
+  .dcp-meter-fill.warn { background: var(--warn); }
+  .dcp-meter-fill.bad  { background: var(--bad); }
+  .dcp-kv-list {
+    display: flex; flex-direction: column; gap: 5px;
+    border-top: 1px solid var(--border); padding-top: 8px; font-size: 12px;
+  }
+  .dcp-kv-item {
+    display: flex; justify-content: space-between; gap: 8px; color: var(--text-2);
+  }
+  .dcp-kv-item b { font-family: var(--mono); font-weight: 600; color: var(--text); }
+  .dcp-card-note {
+    font-size: 12px; color: var(--text-2); line-height: 1.5;
+    background: var(--bg-soft); border-radius: 6px; padding: 8px 9px; margin-top: auto;
+  }
+  [hidden] { display: none !important; }
+</style>
+
+<header class="hero">
+  <div class="eyebrow">Database Internals · 系統設計手冊</div>
+  <h1>資料庫連線池：為什麼連線昂貴，以及 Pool 開多大才對</h1>
+  <p class="lede">把連線池從 20 調大到 200，為什麼反而讓資料庫 CPU 衝上 100%、吞吐量腰斬？這份手冊從一條連線背後的網路交握與作業系統行程成本出發，推導連線池大小的倒 U 型轉折點、應用端連線池與 PgBouncer 的雙層分工，以及 Transaction Pooling 在協定層埋下的狀態相容性陷阱。</p>
+  <div class="meta">
+    <span class="tag">Connection Pool</span>
+    <span class="tag">PgBouncer</span>
+    <span class="tag">HikariCP</span>
+    <span class="tag">Multiplexing</span>
+    <span class="tag">Database Internals</span>
+  </div>
+</header>
+
+<section id="s1">
+  <div class="sec-head">
+    <span class="sec-num">01</span>
+    <h2>連線為什麼昂貴：從網路交握到後端行程模型</h2>
+  </div>
+  <p class="sec-sub">拆解每次新建連線背後的四層固定稅金，以及 PostgreSQL 一條連線一個行程的記憶體與快照代價。</p>
+  <p>在開發環境跑腳本時，「收到請求 → 連上資料庫 → 跑一條主鍵查詢 → 關掉連線」看起來再自然不過。但只要放到每秒上千次請求的線上服務，一條原本在 B+Tree 上只需 <strong>0.8 ms</strong> 就能命中的查詢，若每次都重新建連，端到端延遲往往直接暴漲 <strong>15 到 40 倍</strong>，同時把資料庫的 CPU 燒在跟 SQL 無關的前置工作上。</p>
+
+  <h3>新建一條資料庫連線，到底付了哪四筆稅？</h3>
+  <p>從應用程式呼叫 <code>connect()</code> 到真正能送出第一條 <code>SELECT</code>，中間必須依序跨過網路層、加密層、認證層與資料庫核心初始化四道關卡：</p>
+
+  <ol>
+    <li><strong>1. TCP 三向交握（1 RTT + 核心 Socket 配置）</strong>：同可用區（Same-AZ）約 0.3–0.8 ms，跨可用區（Cross-AZ）約 1–2 ms；雙方作業系統還得配置 socket buffer 與連線追蹤表項（conntrack）。</li>
+    <li><strong>2. TLS 交握（1–2 RTT + 非對稱密碼學運算）</strong>：雲端合規環境普遍強制加密連線，TLS 1.3 即使省到 1-RTT，ECDHE 金鑰交換與憑證簽章驗證仍會消耗可觀的雙方 CPU。</li>
+    <li><strong>3. 資料庫身分認證與雜湊迭代（1–2 RTT + 刻意增重的 CPU 成本）</strong>：PostgreSQL 預設採用的 <code>SCRAM-SHA-256</code> 為了防禦離線暴力破解，預設跑 <strong>4,096 次 SHA-256 迭代</strong>；MySQL 的 <code>caching_sha2_password</code> 若未命中快取也需走 RSA 公鑰交換。這意味著頻繁新建連線會直接把認證演算法變成資料庫的 CPU 熱點。</li>
+    <li><strong>4. 後端執行單元孵化與本地快取冷啟動</strong>：認證通過後，資料庫必須為這條連線分配獨立的行程或執行緒，並在第一次查詢時從系統表載入資料表與型別定義（Catalog Cache），還沒算業務查詢就先觸發數十次內部記憶體配置。</li>
+  </ol>
+
+  <pre class="mermaid">
+sequenceDiagram
+    participant A as App 執行緒
+    participant P as 連線池
+    participant M as Postmaster
+    participant B as Backend 行程
+    rect rgb(246, 240, 231)
+    Note over A,B: 無連線池：每次查詢重走建連全鏈路
+    A->>M: TCP SYN + TLS 1.3 交握
+    A->>M: SCRAM-SHA-256 認證往返
+    M->>B: fork() 新行程 + 初始化快取
+    A->>B: SELECT ... (0.8 ms)
+    B-->>A: 查詢結果 + 斷線回收
+    end
+    rect rgb(238, 244, 241)
+    Note over A,B: 有連線池：直接借用熱連線
+    A->>P: borrow() 記憶體內取連
+    A->>B: SELECT ... (0.8 ms)
+    B-->>A: 查詢結果
+    A->>P: release() 歸還待命
+    end
+  </pre>
+  <p class="cap">無連線池時，0.8 ms 的查詢前面墊了至少 3 次網路 RTT、密碼學雜湊與作業系統 fork()；連線池把上半段一次性攤提掉，熱路徑只剩純 SQL 往返。</p>
+
+  <h3>為什麼 PostgreSQL 對「連線數過多」比 MySQL 更敏感？</h3>
+  <p>不同關聯式資料庫對「一條連線」的底層執行模型截然不同，這直接決定了它們能承受的閒置與活躍連線上限：</p>
+
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>比較維度</th>
+          <th>PostgreSQL（Process-per-connection）</th>
+          <th>MySQL InnoDB（Thread-per-connection）</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><strong>執行單元</strong></td>
+          <td class="hl">每條連線由 <code>postmaster</code> <code>fork()</code> 出一個獨立 OS 行程</td>
+          <td>在單一 <code>mysqld</code> 行程內，每條連線對應一個 OS 執行緒</td>
+        </tr>
+        <tr>
+          <td><strong>單條連線常駐記憶體</strong></td>
+          <td class="hl">約 <strong>5–15 MB RSS</strong>（視觸碰過多少張表使 <code>relcache</code> / <code>catcache</code> 膨脹而定，另加獨立 <code>work_mem</code>）</td>
+          <td>約 <strong>256 KB–2 MB</strong>（執行緒堆疊 + 連線緩衝區，Catalog 與 Buffer Pool 全域共用）</td>
+        </tr>
+        <tr>
+          <td><strong>閒置連線的隱形成本</strong></td>
+          <td class="hl">極高：每次產生交易快照 <code>GetSnapshotData()</code> 都需掃描全體連線組成的 <code>ProcArray</code>，連線槽位越多快照鎖競爭越重</td>
+          <td>中低：閒置執行緒主要佔記憶體，但大量轉為活躍時仍會撞上內部 Mutex 與排程切換</td>
+        </tr>
+        <tr>
+          <td><strong>故障隔離性</strong></td>
+          <td>單一後端行程崩潰較易隔離，但若觸發共享記憶體保護仍會重啟實例</td>
+          <td>單一執行緒若發生記憶體越界，整個 <code>mysqld</code> 行程直接崩潰</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="cap">PostgreSQL 的一條連線就是一個真實作業系統行程與獨立系統表快取：開 1,000 條連線光空載就可能吃掉近 10 GB 記憶體，並拖慢全庫的 MVCC 快照取得。</p>
+
+  <div class="callout accent">
+    <div class="c-title"><span class="ic">關鍵</span>連線池省下的不只是「建連延遲」，更是「後端常駐足跡」</div>
+    <p>許多團隊以為只要應用端設了長連線（Keep-Alive），不反覆斷開重連就算解決問題。但在微服務架構下，真正壓垮資料庫的往往不是每秒新建幾條連線，而是數百個容器各自抱著幾十條「看似無害的長連線」不放，把資料庫推入記憶體耗盡與快照掃描退化的深淵。</p>
+  </div>
+
+  <div class="oneliner">
+    <b>一句話答法</b>新建資料庫連線需付出 TCP、TLS、密碼學認證（如 SCRAM-SHA-256）與後端行程或執行緒初始化四層固定成本；尤其 PostgreSQL 採用一連線一行程模型，連線過多不僅燒掉數 GB 獨立快取記憶體，還會放大 ProcArray 快照掃描與排程切換開銷。
+  </div>
+</section>
+
+<hr class="div">
+
+<section id="s2">
+  <div class="sec-head">
+    <span class="sec-num">02</span>
+    <h2>Pool 開多大才對：核心競爭、I/O 比值與倒 U 曲線</h2>
+  </div>
+  <p class="sec-sub">為什麼連線池不是越大越好？用排隊論與 Context Switch 物理學找出吞吐量的轉折點。</p>
+  <p>線上發生「等待資料庫連線逾時」告警時，最常見的反射動作就是把設定檔裡的 <code>maximumPoolSize</code> 從 <code>20</code> 改成 <code>200</code>。結果重新部署後，應用程式確實不再卡在本地連線池，但資料庫的 CPU 卻瞬間釘死在 100%，單筆 SQL 耗時從 4 ms 暴漲到 90 ms，整體系統每秒完成的交易數（TPS）反而<strong>跌剩不到原本的一半</strong>。</p>
+
+  <h3>為什麼活躍連線超過核心數後，吞吐量會出現「倒 U 型崩跌」？</h3>
+  <p>一顆 CPU 核心在同一奈秒只能執行一條指令流。當資料庫有 <var>C_cpu</var> 顆可用核心，卻同時湧入遠超核心數的活躍查詢行程時，系統不會變快，而是把算力浪費在三種內部摩擦（Retrograde Contention）上：</p>
+
+  <ul>
+    <li><strong>作業系統排程切換與 CPU 快取失溫</strong>：Linux 排程器被迫每幾毫秒就在上百個 <code>postgres</code> 行程間做 Context Switch。每次切換不僅耗費數微秒保存暫存器，更致命的是把前一個查詢剛預熱好的 L1/L2 指令與資料快取、TLB 頁表快取全部沖掉。</li>
+    <li><strong>資料庫內部輕量鎖（Spinlock / LWLock）自旋風暴</strong>：所有連線共享同一塊 Buffer Pool、WAL 寫入緩衝區與 Lock Manager 雜湊表。當 200 個行程同時爭搶同一個 Buffer Mapping 分區鎖或 WAL Insert Lock，沒搶到的行程會在 CPU 上空轉自旋（Spinning）或頻繁休眠喚醒，產生「越忙越做不了正事」的協調稅。</li>
+    <li><strong>磁碟佇列深度過載</strong>：即使底層是 NVMe SSD，超出控制器最佳並列度後的隨機讀取也只會拉長每次 Page Read 的尾端延遲（P99 Latency）。</li>
+  </ul>
+
+  <h3>怎麼估算最佳連線池大小？兩條經典公式與適用邊界</h3>
+  <p>從純計算與 I/O 等待的時間拆解出發，若單筆查詢在資料庫伺服器上平均花費純 CPU 時間 <var>T_cpu</var>，以及等待磁碟或同步複寫的阻塞時間 <var>T_io</var>，理論上能把 CPU 餵飽又不造成無謂排程競爭的同時活躍連線數 <var>N_opt</var> 為：</p>
+
+  <div class="formula">N_opt = core_count * (1 + T_io / T_cpu)</div>
+
+  <p>這也是為什麼 PostgreSQL 社群與 HikariCP 官方壓測最終收斂出那條著名的經驗公式：</p>
+
+  <div class="formula">connections = (core_count * 2) + effective_spindle_count</div>
+
+  <p>許多工程師第一次看到這條公式都會難以置信：<strong>一台 8 vCPU、掛載高速 SSD 的生產資料庫，最佳同時活躍連線數居然只有 16 到 24 條？</strong>關鍵在於現代資料庫有高達 95%–99% 的熱資料都命中記憶體內的 Shared Buffers（此時 <var>T_io</var> 趨近於 0），即使落盤到 NVMe SSD，單次讀取也僅 0.1–0.3 ms。<var>T_io / T_cpu</var> 的比值其實很小，因此略大於核心數 2 倍的連線數就足以在某個行程等待 I/O 的空檔把 CPU 填滿。</p>
+
+  <h3>排隊不會消失，但「在哪裡排隊」決定生死</h3>
+  <p>有人會問：「可是我的服務高峰期每秒有 3,000 個請求，池子只開 20 條怎麼夠用？」請把「併發請求數」與「連線池大小」脫鉤，用排隊論的 Little 定律算一筆帳：</p>
+
+  <div class="formula">L = λ * W</div>
+
+  <p>若單筆查詢耗時 <var>W</var> 為 <code>4 ms</code>（即 <code>0.004 秒</code>），那麼<strong>單條連線每秒就能順序跑完 250 筆查詢</strong>；20 條無競爭、火力全開的連線，理論最大吞吐高達 <code>20 * 250 = 5,000 QPS</code>！當瞬間突發流量超過 5,000 QPS 時，多出來的請求確實必須排隊，但你有兩個選擇：</p>
+  <ul>
+    <li><strong>正確做法（小連線池 + 應用端記憶體排隊）</strong>：讓那 20 條資料庫連線維持零競爭的極速（4 ms 跑完一筆），第 21 個請求在應用程式記憶體內的 Lock-free 佇列裡安靜等 1–2 ms 就拿到剛釋放的連線。</li>
+    <li><strong>災難做法（開 300 條連線把排隊塞進資料庫）</strong>：所有請求都立刻拿到連線衝進 DB，結果鎖競爭與快取失溫讓每筆查詢從 4 ms 退化到 80 ms，單機最大吞吐崩跌到只剩 1,200 QPS，全站雪崩。</li>
+  </ul>
+
+  <div class="callout warn">
+    <div class="c-title"><span class="ic">陷阱</span>在交易或持連期間呼叫外部 API，會直接摧毀上述公式</div>
+    <p>上述「20 條連線撐起數千 QPS」的前提，是借出連線後<strong>只做純資料庫操作就立刻歸還</strong>。若程式碼在 <code>@Transactional</code> 區塊內夾帶一個耗時 300 ms 的第三方支付 HTTP 呼叫或對象儲存上傳，單次持連時間瞬間從 4 ms 暴增 75 倍到 304 ms——這條連線在其中 300 ms 對資料庫毫無貢獻，卻死死霸佔一個槽位，20 條連線每秒最多只能處理 65 筆請求，連線池會在幾秒內被徹底抽乾。</p>
+  </div>
+
+  <div class="oneliner">
+    <b>一句話答法</b>連線池的作用不是「放大併發」，而是把進入資料庫的同時活躍查詢「限流」在 CPU 核心與 I/O 最有效率的甜蜜點（通常約為核心數的 2 到 3 倍），讓超額突發流量留在輕量的記憶體佇列排隊，避免資料庫陷入 Context Switch 與內部鎖自旋的倒 U 型吞吐崩跌。
+  </div>
+</section>
+
+<hr class="div">
+
+<section id="s3">
+  <div class="sec-head">
+    <span class="sec-num">03</span>
+    <h2>互動模擬：連線池容量、等待佇列與核心顛簸拐點</h2>
+  </div>
+  <p class="sec-sub">拖動請求到達率、查詢耗時、Pool 大小與資料庫核心數，即時觀察倒 U 型容量曲線與排隊延遲。</p>
+  <p>下面的模擬器把「請求到達率」「無競爭查詢耗時」「連線池大小」與「資料庫可用核心數」放進同一個排隊與核心競爭模型。試著先把到達率拉到 <strong>2,400 req/s</strong>，再把連線池從 <strong>10</strong> 一路拖向 <strong>160</strong>：你會親眼看到吞吐能力先爬升越過需求線，接著在超過甜蜜點後因鎖自旋與 Context Switch 懲罰而向下彎折，重新跌破需求線並引爆排隊逾時。</p>
+
+  <div class="demo" id="demo-pool-sizing">
+    <div class="demo-bar">
+      <span class="label">互動 · 連線池容量與倒 U 型吞吐模擬器</span>
+      <span class="label" style="text-transform:none;font-family:var(--sans);font-size:12px;color:var(--text-2)">拖動滑桿改變負載與 Pool 大小，觀察最佳甜蜜點與顛簸拐點</span>
+    </div>
+    <div class="demo-body">
+      <div class="dcp-toolbar">
+        <div class="dcp-toolbar-group">
+          <span class="dcp-toolbar-lbl">查詢負載型態</span>
+          <div class="seg" id="dcp-sz-seg" role="group" aria-label="查詢負載型態">
+            <button type="button" data-workload="ram" aria-pressed="true">熱快取 CPU 密集（Buffer Hit 99%）</button>
+            <button type="button" data-workload="ssd" aria-pressed="false">NVMe 混合 I/O（含磁碟讀取等待）</button>
+          </div>
+        </div>
+        <button type="button" class="btn" id="dcp-sz-reset">重置參數</button>
+      </div>
+
+      <div class="dcp-knobs">
+        <label class="dcp-knob" for="dcp-rps">
+          <span class="dcp-knob-top">
+            <span class="dcp-knob-name">請求到達率 λ</span>
+            <span class="dcp-knob-val" id="dcp-rps-val">1800 req/s</span>
+          </span>
+          <input type="range" id="dcp-rps" min="200" max="4000" step="100" value="1800">
+          <span class="dcp-knob-hint">應用層每秒湧入的查詢請求總量</span>
+        </label>
+
+        <label class="dcp-knob" for="dcp-qms">
+          <span class="dcp-knob-top">
+            <span class="dcp-knob-name">無競爭純查詢耗時</span>
+            <span class="dcp-knob-val" id="dcp-qms-val">6 ms</span>
+          </span>
+          <input type="range" id="dcp-qms" min="2" max="30" step="1" value="6">
+          <span class="dcp-knob-hint">零排程摩擦下單筆 SQL 的基準執行時間</span>
+        </label>
+
+        <label class="dcp-knob" for="dcp-pool">
+          <span class="dcp-knob-top">
+            <span class="dcp-knob-name">連線池上限 maxPoolSize</span>
+            <span class="dcp-knob-val" id="dcp-pool-val">20 條</span>
+          </span>
+          <input type="range" id="dcp-pool" min="4" max="160" step="2" value="20">
+          <span class="dcp-knob-hint">允許同時進入資料庫執行的最大連線槽位</span>
+        </label>
+
+        <label class="dcp-knob" for="dcp-cores">
+          <span class="dcp-knob-top">
+            <span class="dcp-knob-name">資料庫可用核心數</span>
+            <span class="dcp-knob-val" id="dcp-cores-val">8 vCPU</span>
+          </span>
+          <input type="range" id="dcp-cores" min="2" max="32" step="2" value="8">
+          <span class="dcp-knob-hint">決定排程並行上限與無競爭甜蜜點位置</span>
+        </label>
+      </div>
+
+      <div class="dcp-plot">
+        <svg id="dcp-curve-svg" viewBox="0 0 640 230" style="width:100%; height:auto" role="img" aria-labelledby="dcp-curve-title">
+          <title id="dcp-curve-title">連線池大小對最大吞吐能力之倒 U 型曲線圖</title>
+          <rect x="0" y="0" width="640" height="230" fill="#ffffff"></rect>
+          <g id="dcp-svg-grid"></g>
+          <line id="dcp-svg-demand" x1="56" y1="100" x2="616" y2="100" stroke="#a3743e" stroke-width="1.5" stroke-dasharray="5 4"></line>
+          <text id="dcp-svg-demand-lbl" x="612" y="94" text-anchor="end" font-family="JetBrains Mono, monospace" font-size="11" fill="#a3743e">需求 λ</text>
+          <line id="dcp-svg-opt-line" x1="120" y1="22" x2="120" y2="194" stroke="#4d7d68" stroke-width="1.2" stroke-dasharray="3 3"></line>
+          <path id="dcp-svg-curve" d="" fill="none" stroke="#3f6188" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"></path>
+          <circle id="dcp-svg-opt-dot" cx="120" cy="60" r="5" fill="#4d7d68" stroke="#ffffff" stroke-width="1.8"></circle>
+          <text id="dcp-svg-opt-lbl" x="126" y="34" font-family="JetBrains Mono, monospace" font-size="11" fill="#4d7d68">甜蜜點</text>
+          <circle id="dcp-svg-cur-dot" cx="140" cy="70" r="6.5" fill="#3f6188" stroke="#ffffff" stroke-width="2"></circle>
+          <text id="dcp-svg-cur-lbl" x="148" y="68" font-family="JetBrains Mono, monospace" font-size="11.5" font-weight="700" fill="#262a2f">目前配置</text>
+          <line x1="56" y1="194" x2="616" y2="194" stroke="#dedcd8" stroke-width="1.2"></line>
+          <line x1="56" y1="20" x2="56" y2="194" stroke="#dedcd8" stroke-width="1.2"></line>
+          <text x="336" y="222" text-anchor="middle" font-family="JetBrains Mono, monospace" font-size="11" fill="#6b7078">連線池大小 maxPoolSize（4 → 160 條）</text>
+        </svg>
+      </div>
+      <p class="cap">藍色實線為不同連線池大小下的最大服務吞吐（QPS），橘色虛線為目前請求到達率 λ；只有當藍線高於橘線時系統才不會持續積壓佇列。</p>
+
+      <div class="dcp-kpis">
+        <div class="dcp-kpi ok" id="dcp-kpi-opt-box">
+          <div class="dcp-kpi-k">理論甜蜜點 N_opt</div>
+          <div class="dcp-kpi-v" id="dcp-kpi-opt">18 條</div>
+          <div class="dcp-kpi-s" id="dcp-kpi-opt-sub">峰值吞吐可達 —</div>
+        </div>
+        <div class="dcp-kpi" id="dcp-kpi-eff-box">
+          <div class="dcp-kpi-k">競爭後單筆查詢耗時</div>
+          <div class="dcp-kpi-v" id="dcp-kpi-eff">6.2 ms</div>
+          <div class="dcp-kpi-s" id="dcp-kpi-eff-sub">排程與鎖摩擦 +0.2 ms</div>
+        </div>
+        <div class="dcp-kpi" id="dcp-kpi-cap-box">
+          <div class="dcp-kpi-k">目前池最大吞吐能力</div>
+          <div class="dcp-kpi-v" id="dcp-kpi-cap">3225 req/s</div>
+          <div class="dcp-kpi-s" id="dcp-kpi-cap-sub">核心飽和利用率 —</div>
+        </div>
+        <div class="dcp-kpi" id="dcp-kpi-wait-box">
+          <div class="dcp-kpi-k">取連排隊等待（平均）</div>
+          <div class="dcp-kpi-v" id="dcp-kpi-wait">0.8 ms</div>
+          <div class="dcp-kpi-s" id="dcp-kpi-wait-sub">記憶體等待佇列約 1 筆</div>
+        </div>
+        <div class="dcp-kpi" id="dcp-kpi-p99-box">
+          <div class="dcp-kpi-k">P99 端到端查詢延遲</div>
+          <div class="dcp-kpi-v" id="dcp-kpi-p99">14.5 ms</div>
+          <div class="dcp-kpi-s" id="dcp-kpi-p99-sub">取連等待 + 實際執行尾端</div>
+        </div>
+        <div class="dcp-kpi" id="dcp-kpi-drop-box">
+          <div class="dcp-kpi-k">connectionTimeout 拒絕</div>
+          <div class="dcp-kpi-v" id="dcp-kpi-drop">0 req/s</div>
+          <div class="dcp-kpi-s" id="dcp-kpi-drop-sub">有效完成吞吐 —</div>
+        </div>
+      </div>
+
+      <div class="status-line" id="dcp-sz-status">
+        載入模擬模型中…
+      </div>
+
+      <div class="legend">
+        <span><i class="dot ns-ok"></i>甜蜜平衡區（低競爭、佇列受控）</span>
+        <span><i class="dot ns-wait"></i>池偏小欠載（核心未吃滿但取連需排隊）</span>
+        <span><i class="dot ns-lock"></i>過度併發摩擦（Context Switch 吞噬延遲）</span>
+        <span><i class="dot ns-bad"></i>容量打穿或顛簸崩潰（觸發取連逾時拒絕）</span>
+      </div>
+    </div>
+  </div>
+</section>
+
+<hr class="div">
+
+<section id="s4">
+  <div class="sec-head">
+    <span class="sec-num">04</span>
+    <h2>雙層分工：應用端連線池與外部 Pooler（PgBouncer）</h2>
+  </div>
+  <p class="sec-sub">當微服務水平擴展把每台很小的本地池乘成上千條連線，外部多工器如何守住資料庫最後防線。</p>
+  <p>在單體架構時代，兩三台應用程式伺服器各自掛一個 <code>maximumPoolSize = 10</code> 的本地連線池（例如 JVM 的 HikariCP、Go 的 <code>sql.DB</code>、Node.js 的 <code>pg-pool</code>），資料庫總共只看到 20–30 條連線，天下太平。但當系統演進成 Kubernetes 微服務叢集，這套算術就會立刻破產。</p>
+
+  <h3>微服務乘法陷阱：每個 Pod 都很節制，加總卻把 DB 撐爆</h3>
+  <p>假設核心交易資料庫是 16 vCPU 的 PostgreSQL，依第 2 節公式，最佳同時活躍查詢約為 <code>32–40</code> 條，<code>max_connections</code> 設為 <code>200</code>。現在業務拆成 12 個微服務，大促期間自動擴容到每個服務 25 個 Pod（共 300 個 Pod）：</p>
+  <ul>
+    <li>就算你極度克制，把每個 Pod 的本地池縮到 <code>maxPoolSize = 8</code>，叢集對資料庫發起的常駐連線數仍是 <code>300 * 8 = 2,400</code> 條，直接撞破 <code>max_connections</code> 報出 <code>FATAL: sorry, too many clients already</code>。</li>
+    <li>反過來，如果你為了不撞上限而把每個 Pod 設成 <code>maxPoolSize = 1</code>，某個流量稍微傾斜的 Pod 只要同時進來 2 個請求就得排隊，而其他 299 個閒置 Pod 卻白白佔著連線不幹活——<strong>本地連線池無法跨行程共享閒置配額</strong>。</li>
+  </ul>
+  <p>（若是無狀態函式隨流量瞬間拉起上千個執行環境的極端連線風暴，以及託管式 RDS Proxy 的認證與權杖整合，詳見 <a href="../serverless-faas-deep-dive/index.html">Serverless / FaaS 篇</a>。）</p>
+
+  <div class="dcp-arch-row">
+    <div class="dcp-node">
+      <div class="nn">300 個 App Pods</div>
+      <div class="ns">各帶本地池 (HikariCP / sql.DB)<br>共 2,400 條前端長連線</div>
+    </div>
+    <span class="dcp-arrow">──TCP 借還──▸</span>
+    <div class="dcp-node accent">
+      <div class="nn">PgBouncer 層</div>
+      <div class="ns">事件驅動非同步多工器<br>每條前端連線僅佔 ~2 KB</div>
+    </div>
+    <span class="dcp-arrow">──收斂多工──▸</span>
+    <div class="dcp-node ok">
+      <div class="nn">PostgreSQL 主庫</div>
+      <div class="ns">default_pool_size = 36<br>維持零顛簸甜蜜點</div>
+    </div>
+  </div>
+  <p class="cap">外部 Pooler 扮演「連線漏斗」：對上承接數千條輕量前端連線，對下只維持數十條真正貼合資料庫 CPU 核心數的後端行程。</p>
+
+  <h3>既然有了 PgBouncer，應用程式還需要本地連線池嗎？</h3>
+  <p>答案是<strong>兩層都要留，因為它們解決的是完全不同層次的問題</strong>。若拔掉應用端本地池，改成每次查詢都對 PgBouncer 短連線新建與斷開，應用程式與 PgBouncer 之間依然要每筆查詢重跑一次 TCP 與 TLS 交握；留著本地池維持對 PgBouncer 的熱長連線，再由 PgBouncer 對後端資料庫做跨 Pod 多工，才是生產環境的標準雙層配置：</p>
+
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>職責維度</th>
+          <th>應用端連線池（HikariCP / pg-pool / sql.DB）</th>
+          <th>外部 Pooler（PgBouncer / Odyssey / ProxySQL）</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><strong>所在位置與視野</strong></td>
+          <td>嵌在單一應用程式行程內，只看得到該 Pod 自己的執行緒需求</td>
+          <td class="hl">獨立代理層，擁有全叢集所有服務與 Pod 的全域連線視野</td>
+        </tr>
+        <tr>
+          <td><strong>核心解決痛點</strong></td>
+          <td>省去 App 到代理層的建連 RTT、提供執行緒安全的阻塞借用佇列、追蹤未歸還連線的程式碼呼叫堆疊</td>
+          <td class="hl">把數千條大多數時間閒置的前端連線，多工壓縮成數十條後端 DB 實體連線，硬性保護 DB 記憶體與核心</td>
+        </tr>
+        <tr>
+          <td><strong>運維與容災附加能力</strong></td>
+          <td>健康探測（<code>SELECT 1</code> / JDBC <code>isValid</code>）、依 <code>maxLifetime</code> 平滑輪替老舊連線</td>
+          <td class="hl">支援 <code>PAUSE</code> / <code>RESUME</code> 與線上重指派目標主庫，在主從切換或極短暫重啟期間暫存前端請求而不立刻報錯</td>
+        </tr>
+        <tr>
+          <td><strong>典型代表工具</strong></td>
+          <td>Java HikariCP、Go <code>database/sql</code> + <code>pgxpool</code>、Rust <code>bb8</code> / <code>deadpool</code></td>
+          <td>PostgreSQL 生態：PgBouncer、Odyssey、PgCat；MySQL 生態：ProxySQL、Vitess VTGate</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="cap">本地池消滅「新建連線的網路延遲」，外部 Pooler 消滅「微服務實例數乘出來的後端行程膨脹」，兩者互不替代。</p>
+
+  <h3>外部 Pooler 擺在哪裡？三種部署拓樸的權衡</h3>
+  <ul>
+    <li><strong>獨立集中式代理叢集（Centralized Pooler Deployment）</strong>：最常見做法。多台無狀態 PgBouncer 掛在內部負載平衡器後，或由客戶端設定多組位址連線。優點是能在全域精確控管總後端連線上限（例如 3 台 PgBouncer 各配 <code>default_pool_size = 12</code>，主庫保證不超過 36 條）；缺點是多一跳網路 RTT（同可用區約 0.2–0.4 ms）。</li>
+    <li><strong>App Pod Sidecar 模式</strong>：每個業務 Pod 旁掛一個 PgBouncer 容器走 <code>localhost</code> Unix Domain Socket，零額外網路跳數，特別適合單 Pod 內有多個 worker 行程（如 Python Gunicorn / PHP-FPM）的語言；但因為每個 Pod 各自一顆 Sidecar，若 Pod 數極多仍可能讓各 Sidecar 至少保底 1 條連線而撐大總數。</li>
+    <li><strong>與資料庫同機部署（Co-located on DB Host）</strong>：直接跑在資料庫主機上透過 Unix Socket 連 <code>postgres</code>，全域配額最精準且省去後端網路棧開銷。需注意傳統 PgBouncer 為單執行緒事件迴圈（<code>libevent</code>），高 TLS 卸載或數萬 QPS 時單核會先滿載，實務上常開啟 <code>so_reuseport = 1</code> 啟動多個 PgBouncer 行程分攤單機負載，或採用原生多執行緒的 Odyssey / PgCat。</li>
+  </ul>
+
+  <div class="oneliner">
+    <b>一句話答法</b>應用端連線池負責省掉「單一容器內的建連開銷與執行緒排隊」，外部 Pooler（如 PgBouncer）則負責把「幾百個微服務容器乘出來的數千條閒置長連線」多工收斂成資料庫 CPU 最舒服的幾十條後端連線，兩者搭配才能同時兼顧微服務彈性擴縮與資料庫穩定性。
+  </div>
+</section>
+
+<hr class="div">
+
+<section id="s5">
+  <div class="sec-head">
+    <span class="sec-num">05</span>
+    <h2>Session、Transaction 與 Statement 三種 Pooling 模式</h2>
+  </div>
+  <p class="sec-sub">外部 Pooler 何時能把後端連線轉借別人？拆解多工壓縮率與 Prepared Statement、Session 變數的破壞邊界。</p>
+  <p>外部 Pooler 之所以能把 2,000 條前端連線壓縮成 30 條後端連線，秘密只有一個：<strong>趁前端不跑 SQL 的空檔，偷偷把後端連線拔下來借給別人用</strong>。但問題來了——關聯式資料庫的連線並不是純無狀態的 HTTP 管線，它身上掛著 Session 變數、預編譯語句（Prepared Statements）、暫存表與鎖。<strong>Pooler 在哪一個時間邊界切換連線，直接決定了你能拿到幾倍壓縮率，以及會弄壞哪些資料庫功能。</strong></p>
+
+  <h3>三種 Pooling 模式的借還邊界</h3>
+  <ol>
+    <li><strong>Session Pooling（工作階段級）</strong>：客戶端建立 TCP 連線時配發一條後端 <code>postgres</code> 連線，直到客戶端主動斷開 TCP 才收回。所有依賴連線狀態的功能 100% 正常運作；但<strong>當上游應用程式本身也開著長連線池時，Session 模式等於 1 對 1 死綁，多工壓縮率是 1.0x</strong>，只剩下幫忙擋 <code>max_connections</code> 排隊與省去後端建連的功能。</li>
+    <li><strong>Transaction Pooling（交易級，生產主力）</strong>：客戶端送出單條 Autocommit 語句或進入 <code>BEGIN</code> 時才指派後端連線；一旦收到 <code>COMMIT</code> 或 <code>ROLLBACK</code>，後端連線立刻歸還池中給下一個正在等待的 Pod。因為業務伺服器有 80%–95% 的時間花在解析請求、組裝物件與網路傳輸，Transaction 模式通常能輕鬆達成 <strong>5x 到 20x</strong> 的後端連線壓縮率。</li>
+    <li><strong>Statement Pooling（語句級）</strong>：每執行完單條 SQL 就立刻收回後端連線。只要應用程式送出跨語句的顯式交易（<code>BEGIN; UPDATE ...; COMMIT;</code>），PgBouncer 會直接報錯中止，因為前後兩條語句根本無法保證落在同一個後端行程上，實務上極少用於 OLTP 業務。</li>
+  </ol>
+
+  <h3>Transaction Pooling 弄壞了什麼？協定層狀態污染與解法</h3>
+  <p>切到 Transaction 模式後，同一條後端連線上一秒剛跑完租戶 A 的交易，下一毫秒就被借給租戶 B。凡是<strong>生命週期跨越 <code>COMMIT</code> 邊界</strong>的資料庫機制都會失靈甚至造成資安事故：</p>
+
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>SQL / 協定特性</th>
+          <th>Session</th>
+          <th>Transaction</th>
+          <th>Statement</th>
+          <th>Transaction 模式下的失敗症狀與標準解法</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><strong>顯式多語句交易</strong><br><code>BEGIN ... COMMIT</code></td>
+          <td>支援</td>
+          <td class="hl">支援</td>
+          <td>直接報錯</td>
+          <td>交易期間 PgBouncer 會鎖定同一條後端連線，直到提交或回滾才放手。</td>
+        </tr>
+        <tr>
+          <td><strong>Session 級參數與租戶變數</strong><br><code>SET time_zone</code> / <code>SET app.tenant_id</code></td>
+          <td>支援</td>
+          <td class="hl">危險（狀態殘留污染）</td>
+          <td>危險</td>
+          <td><strong>極高風險</strong>：租戶 A 執行 <code>SET app.tenant_id = 'A'</code> 後歸還連線，租戶 B 借到同一條連線時會讀到 A 的 Row-Level Security 資料！<strong>解法</strong>：一律改用 <code>SET LOCAL ...</code>，使設定只在當前交易有效、<code>COMMIT</code> 即自動還原。</td>
+        </tr>
+        <tr>
+          <td><strong>具名預編譯語句</strong><br>Protocol-level <code>Parse</code> / <code>PREPARE</code></td>
+          <td>支援</td>
+          <td class="hl">傳統壞掉；新版可代管</td>
+          <td>不支援</td>
+          <td>ORM / 驅動在連線 #3 註冊 <code>stmt_1</code>，下次交易換到連線 #7 執行就拋出 <code>prepared statement "stmt_1" does not exist</code>。<strong>解法</strong>：① 舊版關閉驅動伺服端預編譯（如 JDBC <code>prepareThreshold=0</code>、Go pgx <code>QueryExecModeSimpleProtocol</code>）；② <strong>PgBouncer 1.21+</strong> 起設定 <code>max_prepared_statements &gt; 0</code>，由代理層改寫名稱並在需要時自動向後端補發 <code>Parse</code>。</td>
+        </tr>
+        <tr>
+          <td><strong>Advisory Lock（諮詢鎖）</strong></td>
+          <td>全支援</td>
+          <td class="hl">僅限交易級鎖</td>
+          <td>不支援</td>
+          <td><code>pg_advisory_lock()</code> 綁在後端行程上，歸還連線後鎖不會釋放且無法由原客戶端解鎖；<strong>解法</strong>：改用隨交易結束自動釋放的 <code>pg_advisory_xact_lock()</code>。</td>
+        </tr>
+        <tr>
+          <td><strong>非同步推播與暫存表</strong><br><code>LISTEN / NOTIFY</code>、<code>TEMP TABLE</code></td>
+          <td>支援</td>
+          <td class="hl">不支援（需繞道）</td>
+          <td>不支援</td>
+          <td><code>LISTEN</code> 與需要跨交易存活的暫存表必須綁定專屬連線；實務上會在 PgBouncer 另開一個獨立的 Session 模式 Pool（或直連埠）專供長駐監聽與批次報表 Worker 使用。</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="cap">上線 Transaction Pooling 前的鐵律：全面清查 ORM 預設預編譯行為、把所有 SET 改為 SET LOCAL，並為 LISTEN/NOTIFY 留一條獨立的 Session 通道。</p>
+
+  <div class="demo" id="demo-pool-modes">
+    <div class="demo-bar">
+      <span class="label">互動 · 三種 Pooling 模式多工壓縮與相容性對照</span>
+      <span class="label" style="text-transform:none;font-family:var(--sans);font-size:12px;color:var(--text-2)">同一組客戶端行為同時餵給三種模式，對照後端連線需求與風險</span>
+    </div>
+    <div class="demo-body">
+      <div class="dcp-toolbar">
+        <div class="dcp-toolbar-group">
+          <span class="dcp-toolbar-lbl">應用程式 SQL 特徵</span>
+          <div class="seg" id="dcp-md-seg" role="group" aria-label="應用程式 SQL 特徵">
+            <button type="button" data-feature="clean" aria-pressed="true">標準多句交易 + SET LOCAL</button>
+            <button type="button" data-feature="prep" aria-pressed="false">含具名 Prepared Statement</button>
+            <button type="button" data-feature="session_var" aria-pressed="false">含 SET 租戶變數 / Session 鎖</button>
+            <button type="button" data-feature="autocommit" aria-pressed="false">純單句 Autocommit 查詢</button>
+          </div>
+        </div>
+        <button type="button" class="btn" id="dcp-md-reset">重置</button>
+      </div>
+
+      <div class="dcp-knobs tri">
+        <label class="dcp-knob" for="dcp-md-clients">
+          <span class="dcp-knob-top">
+            <span class="dcp-knob-name">前端常駐連線總數</span>
+            <span class="dcp-knob-val" id="dcp-md-clients-val">160 條</span>
+          </span>
+          <input type="range" id="dcp-md-clients" min="20" max="400" step="10" value="160">
+          <span class="dcp-knob-hint">所有微服務 Pod 對 PgBouncer 保持的長連線</span>
+        </label>
+
+        <label class="dcp-knob" for="dcp-md-txms">
+          <span class="dcp-knob-top">
+            <span class="dcp-knob-name">交易內純 SQL 耗時</span>
+            <span class="dcp-knob-val" id="dcp-md-txms-val">8 ms</span>
+          </span>
+          <input type="range" id="dcp-md-txms" min="2" max="40" step="1" value="8">
+          <span class="dcp-knob-hint">BEGIN 到 COMMIT 真正佔用後端 DB 的時間</span>
+        </label>
+
+        <label class="dcp-knob" for="dcp-md-thinkms">
+          <span class="dcp-knob-top">
+            <span class="dcp-knob-name">交易間應用端間隔</span>
+            <span class="dcp-knob-val" id="dcp-md-thinkms-val">72 ms</span>
+          </span>
+          <input type="range" id="dcp-md-thinkms" min="4" max="200" step="4" value="72">
+          <span class="dcp-knob-hint">商業邏輯、序列化與等待下筆請求的空檔</span>
+        </label>
+      </div>
+
+      <div class="dcp-cards">
+        <div class="dcp-card" id="dcp-card-ses">
+          <div class="dcp-card-head">
+            <span class="dcp-card-title">Session Mode</span>
+            <span class="dcp-compat-tag ok" id="dcp-tag-ses">全相容</span>
+          </div>
+          <div class="dcp-big-num" id="dcp-num-ses">160 條<small>後端連線</small></div>
+          <div class="dcp-meter-track"><div class="dcp-meter-fill warn" id="dcp-fill-ses" style="width:100%"></div></div>
+          <div class="dcp-kv-list">
+            <div class="dcp-kv-item"><span>多工壓縮比</span><b id="dcp-mux-ses">1.0x</b></div>
+            <div class="dcp-kv-item"><span>預估後端常駐 RSS</span><b id="dcp-mem-ses">1280 MB</b></div>
+            <div class="dcp-kv-item"><span>協定風險</span><b id="dcp-risk-ses">無狀態污染</b></div>
+          </div>
+          <div class="dcp-card-note" id="dcp-note-ses">前端長連不放手，後端就 1:1 佔用。</div>
+        </div>
+
+        <div class="dcp-card ok" id="dcp-card-tx">
+          <div class="dcp-card-head">
+            <span class="dcp-card-title">Transaction Mode</span>
+            <span class="dcp-compat-tag ok" id="dcp-tag-tx">推薦主力</span>
+          </div>
+          <div class="dcp-big-num" id="dcp-num-tx">22 條<small>後端連線</small></div>
+          <div class="dcp-meter-track"><div class="dcp-meter-fill ok" id="dcp-fill-tx" style="width:14%"></div></div>
+          <div class="dcp-kv-list">
+            <div class="dcp-kv-item"><span>多工壓縮比</span><b id="dcp-mux-tx">7.3x</b></div>
+            <div class="dcp-kv-item"><span>預估後端常駐 RSS</span><b id="dcp-mem-tx">176 MB</b></div>
+            <div class="dcp-kv-item"><span>協定風險</span><b id="dcp-risk-tx">安全隔離</b></div>
+          </div>
+          <div class="dcp-card-note" id="dcp-note-tx">COMMIT 後立即轉借其他 Pod，吃掉應用端空檔。</div>
+        </div>
+
+        <div class="dcp-card bad" id="dcp-card-st">
+          <div class="dcp-card-head">
+            <span class="dcp-card-title">Statement Mode</span>
+            <span class="dcp-compat-tag bad" id="dcp-tag-st">交易中斷</span>
+          </div>
+          <div class="dcp-big-num" id="dcp-num-st">不適用<small>多語句交易</small></div>
+          <div class="dcp-meter-track"><div class="dcp-meter-fill bad" id="dcp-fill-st" style="width:8%"></div></div>
+          <div class="dcp-kv-list">
+            <div class="dcp-kv-item"><span>多工壓縮比</span><b id="dcp-mux-st">—</b></div>
+            <div class="dcp-kv-item"><span>預估後端常駐 RSS</span><b id="dcp-mem-st">—</b></div>
+            <div class="dcp-kv-item"><span>協定風險</span><b id="dcp-risk-st">拒絕 BEGIN</b></div>
+          </div>
+          <div class="dcp-card-note" id="dcp-note-st">遇到多語句交易會直接報錯中止。</div>
+        </div>
+      </div>
+
+      <div class="status-line" id="dcp-md-status">
+        載入模式對照中…
+      </div>
+    </div>
+  </div>
+
+  <div class="oneliner">
+    <b>一句話答法</b>生產環境外部 Pooler 幾乎一律選 Transaction Pooling 以換取 5–20 倍的連線壓縮率，但上線前必須確保移除跨交易的 Session 變數（改用 SET LOCAL）、為具名 Prepared Statement 開啟代理層代管（PgBouncer 1.21+）或關閉驅動預編譯，並把 LISTEN/NOTIFY 分流到獨立 Session 池。
+  </div>
+</section>
+
+<hr class="div">
+
+<section id="s6">
+  <div class="sec-head">
+    <span class="sec-num">06</span>
+    <h2>逾時、閒置回收與連線洩漏的生產診斷</h2>
+  </div>
+  <p class="sec-sub">對齊 NAT 靜默斷線與 maxLifetime，並用三層可觀測性指標定位吃光連線池的殭屍交易。</p>
+  <p>把連線池大小與 Pooling 模式調對只完成了前半場；後半場的高頻生產事故，幾乎都出在<strong>逾時邊界沒對齊</strong>、<strong>雲端網路設備靜默砍斷閒置連線</strong>，以及<strong>單一慢路徑把整個池子的槽位洩漏光</strong>。</p>
+
+  <h3>四組關鍵生命週期參數與設定鐵律</h3>
+  <ul>
+    <li><strong>取連等待逾時（<code>connectionTimeout</code> / PgBouncer <code>query_wait_timeout</code>）</strong>：許多連線池預設高達 30 秒，這對線上 API 幾乎等於自殺——當資料庫短暫抖動時，上游 Web 容器的工作執行緒會全部卡死在等連線，拖垮連帶不查 DB 的健康檢查端點。線上微服務應壓低至 <strong>250 ms – 2,000 ms</strong> 快速失敗（Fail-fast）；至於上游收到逾時後如何避免無腦重試放大災情，請搭配 <a href="../timeout-retry-backoff/index.html">Timeout / Retry / Backoff 篇</a> 的退避與預算原則。</li>
+    <li><strong>固定池 vs 動態伸縮池（<code>minimumIdle</code> 與 <code>maximumPoolSize</code>）</strong>：直覺上設定 <code>minimumIdle = 2, maxPoolSize = 20</code> 看似省資源，但實際效果是「平時省下區區幾十 MB，流量突刺殺到的那一秒卻被迫同步跑 18 次 TCP + TLS + SCRAM 認證建連」，把尖峰延遲推得更高。除非是極低頻背景服務，核心線上服務建議<strong>固定池大小（<code>minimumIdle == maximumPoolSize</code>）</strong>。</li>
+    <li><strong>最大存活時間（<code>maxLifetime</code>）對齊 NAT / 防火牆靜默斷線</strong>：AWS NLB（預設 350 秒閒置逾時）、NAT Gateway 或企業防火牆會在連線無封包往返時悄悄清除狀態表，但<strong>不發送 TCP RST</strong>。若應用程式的 <code>maxLifetime</code> 設為 30 分鐘且沒開 TCP Keepalive，借出這條「半開死連線（Half-open Connection）」送出 SQL 時，作業系統會卡在無回應的封包重傳十幾秒才報錯。鐵律是讓 <code>maxLifetime</code> <strong>比沿途最短網路設備逾時少 30–60 秒</strong>，開啟定期探活（<code>keepaliveTime</code>），並加上 5%–10% 隨機抖動（Jitter）避免整池連線在同一秒集體到期重建。</li>
+    <li><strong>洩漏偵測與資料庫側最後保險絲</strong>：應用端開啟 <code>leakDetectionThreshold</code>（例如 5–10 秒未歸還即印出借用處 Stack Trace）；同時資料庫端<strong>務必設定</strong> <code>statement_timeout</code> 與 <code>idle_in_transaction_session_timeout</code>（例如 15–30 秒），防止掛掉的容器或忘記 <code>COMMIT</code> 的程式碼永遠霸佔後端連線。</li>
+  </ul>
+
+  <h3>骨牌效應剖析：一條「Idle in Transaction」如何癱瘓全站</h3>
+  <p>連線洩漏最陰險的地方在於：<strong>壞掉的往往只是一個冷門匯出功能，陪葬的卻是全站所有核心 API</strong>。而且卡在 <code>idle in transaction</code> 的連線不只是佔住一個池槽位——它還會同時釘死舊快照阻止垃圾回收（詳見 <a href="../transaction-isolation-mvcc/index.html">交易隔離級別與 MVCC 篇</a>），並持續握住已修改資料列上的排他鎖（詳見 <a href="../database-locking-deadlock/index.html">資料庫鎖與死鎖篇</a>）：</p>
+
+  <div class="dcp-leak-lane">
+    <div class="lh">時刻</div><div class="lh">慢路徑請求 A</div><div class="lh">正常快查詢 B</div><div class="lh">連線池 (上限 10)</div><div class="lh">PostgreSQL 後端</div>
+    <div class="lt">t1</div>
+    <div class="lc act">借出連線，執行 BEGIN 與 UPDATE</div><div class="lc">借出即還 (3 ms)</div><div class="lc">活躍 2 / 10</div><div class="lc">持鎖等待下條語句</div>
+    <div class="lt">t2</div>
+    <div class="lc bad">交易內同步呼叫慢外部 API (卡住 20s)</div><div class="lc">正常運作</div><div class="lc warn">A 類請求累積佔滿 10 / 10</div><div class="lc bad">10 條全處於 idle in transaction</div>
+    <div class="lt">t3</div>
+    <div class="lc bad">異常未走 finally 或持續阻塞</div><div class="lc bad">卡在 borrow() 滿 1s 拋出 Timeout</div><div class="lc bad">活躍 10 / 10，等待佇列暴增</div><div class="lc warn">CPU 居然 2% 閒置，卻進不來新查詢</div>
+    <div class="lt">t4</div>
+    <div class="lc">—</div><div class="lc ok">重新借到釋放的槽位，恢復 3 ms</div><div class="lc ok">殭屍連線斷開，補充乾淨連線</div><div class="lc ok">idle_in_transaction_session_timeout 斬斷回收</div>
+  </div>
+  <p class="cap">經典反直覺現場（t3）：資料庫 CPU 幾乎是 0%，應用程式卻全面報資料庫逾時——這幾乎百分之百是連線槽位被慢外部呼叫或鎖等待耗盡，而非 DB 算力不足。</p>
+
+  <h3>三層診斷指標：十秒定位「卡在哪一層」</h3>
+  <p>發生取連延遲告警時，依序對照這三組數字就能立刻鎖定根因：</p>
+  <ol>
+    <li><strong>應用端指標（如 HikariCP Metrics）</strong>：看 <code>connections_active</code> 是否貼齊 <code>max</code>、<code>connections_pending</code>（排隊執行緒數）是否飆升，以及 <code>connections_usage_seconds</code>（持連時間分佈）。若持連時間遠大於實際 SQL 耗時，代表應用程式借了連線卻在做非 DB 運算或忘記歸還。</li>
+    <li><strong>PgBouncer 管理埠（<code>SHOW POOLS;</code>）</strong>：觀察 <code>cl_waiting</code>（等待配發後端連線的客戶端數）、<code>maxwait</code>（最老等待秒數）與 <code>sv_active</code>（活躍後端數）。若 <code>sv_active</code> 已滿且 <code>cl_waiting &gt; 0</code>，問題在後端查詢變慢或後端池開太小。</li>
+    <li><strong>資料庫視圖（<code>pg_stat_activity</code>）</strong>：按 <code>state</code> 與 <code>wait_event_type</code> 分組。若大量處於 <code>active</code> 且等待 <code>Lock</code>，是鎖競爭；若大量處於 <code>idle in transaction</code>，立刻去抓業務程式碼的交易邊界洩漏。</li>
+  </ol>
+
+  <div class="callout warn">
+    <div class="c-title"><span class="ic">陷阱</span>把資料庫 CPU 低落誤判為「可以再調大連線池」</div>
+    <p>當上圖 <code>t3</code> 發生時（10 條連線全都因為等鎖或等外部 HTTP 而躺平，DB CPU 只有 2%），若不查 <code>pg_stat_activity</code> 就盲目把連線池調大 10 倍，只會製造出 100 條同樣卡住的殭屍交易，把連線洩漏升級成記憶體耗盡（OOM）與鎖表災難。</p>
+  </div>
+
+  <div class="oneliner">
+    <b>一句話答法</b>生產環境必須設短取連逾時（Fail-fast）、令 maxLifetime 短於網路設備 NAT 閒置回收時間，並在資料庫端強制配置 idle_in_transaction_session_timeout；排查「DB CPU 很低但應用狂報逾時」時，優先檢查持連時間與殭屍交易洩漏。
+  </div>
+</section>
+
+<hr class="div">
+
+<section id="s7">
+  <div class="sec-head">
+    <span class="sec-num">07</span>
+    <h2>實戰配置座標與高頻面試追問</h2>
+  </div>
+  <p class="sec-sub">從單體直連到微服務雙層池的調參檢核表，以及讀寫池隔離與常見事故秒答框架。</p>
+  <p>在系統設計面試或架構評審中，談資料庫連線池切忌只背誦單一數字，而要展現「從應用容器數、工作負載特徵一路推算到資料庫核心數」的端到端配置邏輯：</p>
+
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>部署場景</th>
+          <th>建議拓樸與模式</th>
+          <th>容量配額基準（以 16 vCPU PostgreSQL 為例）</th>
+          <th>必備防護與隔離設計</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><strong>少實例單體服務</strong><br>（2–4 台伺服器）</td>
+          <td>僅用應用端本地池直連 DB</td>
+          <td>每實例固定 <code>pool = 8–10</code>，總後端連線 <code>≤ 40</code></td>
+          <td><code>minimumIdle == maxPoolSize</code>；開啟 <code>maxLifetime</code> 與抖動、設定 <code>idle_in_transaction_session_timeout</code></td>
+        </tr>
+        <tr>
+          <td><strong>K8s 微服務叢集</strong><br>（50–500 個 Pod）</td>
+          <td class="hl">應用端小本地池 + 集中式 PgBouncer（Transaction Mode）</td>
+          <td class="hl">每 Pod 本地池 <code>4–8</code>；PgBouncer 前端承接上千條，後端 <code>default_pool_size = 32–40</code></td>
+          <td>全庫禁用跨交易 <code>SET</code>（改 <code>SET LOCAL</code>）；開啟 PgBouncer 1.21+ <code>max_prepared_statements</code></td>
+        </tr>
+        <tr>
+          <td><strong>OLTP 混雜慢報表 / 匯出</strong></td>
+          <td>依快慢路徑拆成兩個獨立 Pool（優先導向只讀副本）</td>
+          <td>核心交易池獨享 <code>30</code> 條短逾時槽位；慢報表池限制 <code>4–6</code> 條並設嚴格 <code>statement_timeout</code></td>
+          <td>以艙壁模式（參見 <a href="../circuit-breaker-bulkhead/index.html">Circuit Breaker 與 Bulkhead 篇</a>）防止慢查詢抽乾登入與結帳槽位</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="cap">架構評審黃金檢查點：「所有上游實例的最大連線總和」若超過資料庫核心數的 3–4 倍，就必須引入外部多工層或重新切分池配額。</p>
+
+  <h3>面試深水區：四題高頻連環追問</h3>
+
+  <details class="faq">
+    <summary><span><span class="q">Q1 ·</span> 大促前把微服務從 20 個 Pod 擴容到 120 個 Pod，結果流量還沒來資料庫就先掛了，發生什麼事？</span><span class="chev">▸</span></summary>
+    <div class="ans">
+      <p>這是典型的<strong>「連線乘法風暴」</strong>。若每個 Pod 啟動時預熱 <code>minimumIdle = 15</code> 條本地連線，120 個 Pod 同時拉起就會瞬間向資料庫發起 1,800 次 TLS + SCRAM 認證交握，並吃掉 1,800 個 <code>postgres</code> 行程槽位（耗費逾 15 GB RSS 記憶體且直接撞破 <code>max_connections</code>）。</p>
+      <p><strong>根治方式</strong>：在微服務與資料庫之間補上 PgBouncer（Transaction Pooling），讓 1,800 條前端長連停在每條僅佔 2 KB 的事件迴圈層，後端嚴格鎖定在核心數 2–3 倍（如 32–48 條）的真實資料庫連線。</p>
+    </div>
+  </details>
+
+  <details class="faq">
+    <summary><span><span class="q">Q2 ·</span> 導入 PgBouncer Transaction Mode 後，偶爾出現 <code>prepared statement "S_1" does not exist</code>，甚至發生租戶資料串門子？</span><span class="chev">▸</span></summary>
+    <div class="ans">
+      <p>兩者都是因為<strong>連線級狀態跨越了交易邊界</strong>。在 Transaction 模式下，客戶端第一筆交易可能在後端連線 #2 執行 <code>PREPARE S_1</code> 或 <code>SET app.current_tenant = '42'</code>，<code>COMMIT</code> 後連線 #2 被轉借給其他客戶端（導致別人繼承了租戶 42 的變數），而原客戶端下一筆交易被派到從未準備過 <code>S_1</code> 的連線 #9 就直接報錯。</p>
+      <p><strong>標準解法</strong>：① 所有會話變數一律改寫為交易結束即自動還原的 <code>SET LOCAL</code>；② 升級至 PgBouncer 1.21+ 並設定 <code>max_prepared_statements = 200</code> 由代理層維護客戶端與後端的語句映射表，或在舊版環境關閉驅動層的具名預編譯（如 JDBC <code>prepareThreshold=0</code>）。</p>
+    </div>
+  </details>
+
+  <details class="faq">
+    <summary><span><span class="q">Q3 ·</span> 為什麼報表匯出 API 跑 8 秒（QPS 只有 2），就能把耗時 2 ms 的核心下單 API（QPS 1,000）全部拖死？</span><span class="chev">▸</span></summary>
+    <div class="ans">
+      <p>依 Little 定律 <var>L = λ * W</var>：下單 API 雖然每秒 1,000 筆，但因耗時僅 <code>0.002 秒</code>，平均只佔用 <code>1000 * 0.002 = 2</code> 條連線；反觀報表 API 雖然每秒只有 2 筆，但每筆霸佔連線 <code>8 秒</code>，平均同時佔用 <code>2 * 8 = 16</code> 條連線！只要報表稍微併發到 3–4 筆，20 條的共用連線池就會被報表 100% 塞滿，所有 2 ms 就能跑完的下單請求全在門外排隊逾時。</p>
+      <p><strong>解法</strong>：在應用端與 PgBouncer 層建立<strong>雙連線池隔離（Bulkhead）</strong>，慢查詢走專屬小池（最好直接路由到 Read Replica），絕不與核心交易共用同一組連線槽位。</p>
+    </div>
+  </details>
+
+  <details class="faq">
+    <summary><span><span class="q">Q4 ·</span> 半夜低峰期過後每天早上第一批請求特別容易報 I/O 錯誤或卡住十幾秒，該查哪個參數？</span><span class="chev">▸</span></summary>
+    <div class="ans">
+      <p>查 <strong><code>maxLifetime</code>、<code>keepaliveTime</code> 與中間網路設備（NLB / NAT / 防火牆）閒置逾時的不一致</strong>。低峰期連線長時間無流量，中間設備在 350 秒時靜默丟棄了 TCP 狀態表，但應用程式連線池以為連線還活著（<code>maxLifetime</code> 設了 30 分鐘）。早高峰第一個請求借到半開死連線發送封包，直接陷入作業系統 TCP 重傳黑洞。將 <code>maxLifetime</code> 調短至低於網路設備逾時（例如 240–300 秒）並啟用定期探活即可根除。</p>
+    </div>
+  </details>
+
+  <div class="oneliner">
+    <b>全篇總結秒答</b>資料庫連線昂貴在建連交握與後端行程記憶體，Pool 開太小會排隊、開太大會因核心排程與鎖自旋陷入倒 U 型崩跌；用「核心數 2–3 倍」定錨後端活躍連線、以「本地池 + PgBouncer Transaction Mode」承接微服務水平擴展，再配齊 SET LOCAL、短取連逾時與殭屍交易自動斬斷，才是完整的生產級連線池架構。
+  </div>
+</section>

@@ -1,0 +1,643 @@
+<script>
+(function () {
+  "use strict";
+
+  /* (1) 常數與工作負載基準表 */
+  var CONN_TIMEOUT_MS = 500;
+  var POOL_MIN = 4;
+  var POOL_MAX = 160;
+  var POOL_STEP = 4;
+  var PG_RSS_PER_BACKEND_MB = 8.5;
+
+  var WORKLOAD_PROFILES = {
+    ram: { optMult: 2.0, spindle: 2, sigma: 0.010, label: "熱快取 CPU 密集" },
+    ssd: { optMult: 3.0, spindle: 2, sigma: 0.014, label: "NVMe 混合 I/O" }
+  };
+
+  var SIZING_DEFAULTS = {
+    arrivalRps: 1800,
+    baseQueryMs: 6,
+    poolSize: 20,
+    dbCores: 8,
+    workload: "ram"
+  };
+
+  var MODE_DEFAULTS = {
+    clientConns: 160,
+    txSqlMs: 8,
+    appThinkMs: 72,
+    feature: "clean"
+  };
+
+  /* (2) compute 純函式與 probe 斷言（無 DOM 依賴） */
+  function clampVal(v, lo, hi) {
+    var n = Number(v);
+    if (!Number.isFinite(n)) return lo;
+    return Math.min(hi, Math.max(lo, n));
+  }
+
+  function round1(v) {
+    return Math.round(v * 10) / 10;
+  }
+
+  function evalCapacityAtPool(n, cores, baseMs, prof) {
+    var optPool = Math.round(cores * prof.optMult + prof.spindle);
+    var denomSpan = Math.max(8, optPool * optPool - cores * cores);
+    var kappa = (1 - prof.sigma) / denomSpan;
+    var overCore = Math.max(0, n - cores);
+    var stretch = 1 + prof.sigma * Math.max(0, n - 1) + kappa * overCore * overCore;
+    var effMs = baseMs * stretch;
+    var capRps = (n * 1000) / effMs;
+    return {
+      optPool: optPool,
+      effMs: effMs,
+      penaltyMs: effMs - baseMs,
+      capRps: capRps
+    };
+  }
+
+  // @probe fn       computePoolSizing
+  // @probe baseline {"arrivalRps":1800,"baseQueryMs":6,"poolSize":20,"dbCores":8,"workload":"ram"}
+  // @probe sweep    {"arrivalRps":[400,3600],"baseQueryMs":[2,24],"poolSize":[6,140],"dbCores":[2,32],"workload":["ram","ssd"]}
+  function computePoolSizing(p) {
+    var arrival = clampVal(p.arrivalRps, 200, 4000);
+    var baseMs = clampVal(p.baseQueryMs, 2, 30);
+    var pool = Math.round(clampVal(p.poolSize, POOL_MIN, POOL_MAX));
+    var cores = Math.round(clampVal(p.dbCores, 2, 32));
+    var prof = WORKLOAD_PROFILES[p.workload] || WORKLOAD_PROFILES.ram;
+
+    var cur = evalCapacityAtPool(pool, cores, baseMs, prof);
+    var peak = evalCapacityAtPool(cur.optPool, cores, baseMs, prof);
+
+    var curve = [];
+    var maxCurveRps = peak.capRps;
+    for (var n = POOL_MIN; n <= POOL_MAX; n += POOL_STEP) {
+      var pt = evalCapacityAtPool(n, cores, baseMs, prof);
+      var rps = Math.round(pt.capRps);
+      if (rps > maxCurveRps) maxCurveRps = rps;
+      curve.push({ pool: n, capRps: rps });
+    }
+
+    var rho = arrival / Math.max(1, cur.capRps);
+    var queueWaitMs = 0;
+    var rejectedRps = 0;
+    var goodputRps = arrival;
+
+    if (rho < 1) {
+      var tailProb = Math.pow(rho, Math.sqrt(2 * (pool + 1)));
+      queueWaitMs = (cur.effMs / Math.max(0.04, pool * (1 - rho))) * tailProb;
+      if (queueWaitMs > CONN_TIMEOUT_MS) {
+        var spillFrac = Math.min(0.35, (queueWaitMs - CONN_TIMEOUT_MS) / (CONN_TIMEOUT_MS * 2));
+        rejectedRps = Math.round(arrival * spillFrac);
+        goodputRps = arrival - rejectedRps;
+        queueWaitMs = CONN_TIMEOUT_MS;
+      }
+    } else {
+      queueWaitMs = CONN_TIMEOUT_MS;
+      var sustainable = Math.floor(cur.capRps * 0.98);
+      goodputRps = Math.min(arrival, sustainable);
+      rejectedRps = Math.max(0, Math.round(arrival - goodputRps));
+    }
+
+    var queueDepth = Math.round((goodputRps * queueWaitMs) / 1000);
+    var p99LatencyMs = queueWaitMs * 1.65 + cur.effMs * (1.55 + 0.45 * Math.min(2.2, rho));
+    var utilPct = round1(Math.min(999, rho * 100));
+
+    var zone = "sweet";
+    if (rejectedRps > 0 && pool > cur.optPool + 6) {
+      zone = "thrash_collapse";
+    } else if (rejectedRps > 0 && pool <= cur.optPool + 6) {
+      zone = "undersized_overload";
+    } else if (pool > Math.round(cur.optPool * 1.45)) {
+      zone = "over_provisioned";
+    } else if (pool < Math.max(4, Math.round(cores * 1.15)) && rho > 0.72) {
+      zone = "pool_bottleneck";
+    }
+
+    return {
+      optimalPool: cur.optPool,
+      peakCapacityRps: Math.round(peak.capRps),
+      effectiveQueryMs: round1(cur.effMs),
+      contentionPenaltyMs: round1(cur.penaltyMs),
+      maxCapacityRps: Math.round(cur.capRps),
+      utilizationPct: utilPct,
+      queueWaitMs: round1(queueWaitMs),
+      queueDepth: queueDepth,
+      p99LatencyMs: round1(p99LatencyMs),
+      goodputRps: Math.round(goodputRps),
+      rejectedRps: rejectedRps,
+      plotCeilingRps: Math.max(4000, Math.ceil(Math.max(maxCurveRps, arrival) / 500) * 500),
+      zone: zone,
+      curve: curve
+    };
+  }
+
+  // @probe fn       computeModeComparison
+  // @probe baseline {"clientConns":160,"txSqlMs":8,"appThinkMs":72,"feature":"clean"}
+  // @probe sweep    {"clientConns":[40,360],"txSqlMs":[2,36],"appThinkMs":[8,180],"feature":["clean","prep","session_var","autocommit"]}
+  function computeModeComparison(p) {
+    var clients = Math.round(clampVal(p.clientConns, 20, 400));
+    var txMs = clampVal(p.txSqlMs, 2, 40);
+    var thinkMs = clampVal(p.appThinkMs, 4, 200);
+    var feat = String(p.feature || "clean");
+
+    var cycleMs = txMs + thinkMs;
+    var dutyRatio = txMs / cycleMs;
+    var dutyPct = round1(dutyRatio * 100);
+    var totalTxPerSec = Math.round((clients * 1000) / cycleMs);
+
+    var meanTxActive = clients * dutyRatio;
+    var burstBuffer = 1.65 * Math.sqrt(Math.max(0.5, meanTxActive * (1 - dutyRatio)));
+    var txConns = Math.max(2, Math.min(clients, Math.ceil(meanTxActive + burstBuffer)));
+    var savedConns = Math.max(0, clients - txConns);
+    var txMux = round1(clients / txConns);
+
+    var sessionMemMb = Math.round(clients * PG_RSS_PER_BACKEND_MB);
+    var txMemMb = Math.round(txConns * PG_RSS_PER_BACKEND_MB);
+    var savedMemMb = sessionMemMb - txMemMb;
+
+    var txState = "ok";
+    var txTag = "推薦主力";
+    var txRiskLabel = "狀態交易內隔離";
+    var stmtRemapPerSec = 0;
+    var leakProbPct = 0;
+
+    if (feat === "prep") {
+      txState = "warn";
+      txTag = "需代理代管";
+      stmtRemapPerSec = totalTxPerSec * 3;
+      txRiskLabel = "每秒 " + stmtRemapPerSec + " 次語句映射";
+    } else if (feat === "session_var") {
+      txState = "bad";
+      txTag = "狀態污染危險";
+      leakProbPct = round1((1 - 1 / Math.max(2, txConns)) * (1 - dutyRatio * 0.5) * 100);
+      txRiskLabel = "跨租戶串線率 ~" + leakProbPct + "%";
+    }
+
+    var stSupported = feat === "autocommit";
+    var stState = stSupported ? "ok" : "bad";
+    var stConns = 0;
+    var stMux = 0;
+    var stMemMb = 0;
+    var abortedTxPerSec = 0;
+
+    if (stSupported) {
+      var stmtDuty = dutyRatio * 0.86;
+      var meanSt = clients * stmtDuty;
+      stConns = Math.max(2, Math.min(clients, Math.ceil(meanSt + 1.5 * Math.sqrt(Math.max(0.4, meanSt * (1 - stmtDuty))))));
+      stMux = round1(clients / stConns);
+      stMemMb = Math.round(stConns * PG_RSS_PER_BACKEND_MB);
+    } else {
+      abortedTxPerSec = totalTxPerSec;
+    }
+
+    return {
+      dutyPct: dutyPct,
+      totalTxPerSec: totalTxPerSec,
+      txConns: txConns,
+      savedConns: savedConns,
+      txMux: txMux,
+      sessionMemMb: sessionMemMb,
+      txMemMb: txMemMb,
+      savedMemMb: savedMemMb,
+      txState: txState,
+      txTag: txTag,
+      txRiskLabel: txRiskLabel,
+      stmtRemapPerSec: stmtRemapPerSec,
+      leakProbPct: leakProbPct,
+      stSupported: stSupported,
+      stState: stState,
+      stConns: stConns,
+      stMux: stMux,
+      stMemMb: stMemMb,
+      abortedTxPerSec: abortedTxPerSec
+    };
+  }
+
+  /* (3) DOM 參照與執行期狀態 */
+  function el(id) {
+    return document.getElementById(id);
+  }
+
+  var sizingState = {
+    arrivalRps: SIZING_DEFAULTS.arrivalRps,
+    baseQueryMs: SIZING_DEFAULTS.baseQueryMs,
+    poolSize: SIZING_DEFAULTS.poolSize,
+    dbCores: SIZING_DEFAULTS.dbCores,
+    workload: SIZING_DEFAULTS.workload
+  };
+
+  var modeState = {
+    clientConns: MODE_DEFAULTS.clientConns,
+    txSqlMs: MODE_DEFAULTS.txSqlMs,
+    appThinkMs: MODE_DEFAULTS.appThinkMs,
+    feature: MODE_DEFAULTS.feature
+  };
+
+  var szDom = {
+    seg: el("dcp-sz-seg"),
+    reset: el("dcp-sz-reset"),
+    rps: el("dcp-rps"),
+    rpsVal: el("dcp-rps-val"),
+    qms: el("dcp-qms"),
+    qmsVal: el("dcp-qms-val"),
+    pool: el("dcp-pool"),
+    poolVal: el("dcp-pool-val"),
+    cores: el("dcp-cores"),
+    coresVal: el("dcp-cores-val"),
+    svgGrid: el("dcp-svg-grid"),
+    svgDemand: el("dcp-svg-demand"),
+    svgDemandLbl: el("dcp-svg-demand-lbl"),
+    svgOptLine: el("dcp-svg-opt-line"),
+    svgCurve: el("dcp-svg-curve"),
+    svgOptDot: el("dcp-svg-opt-dot"),
+    svgOptLbl: el("dcp-svg-opt-lbl"),
+    svgCurDot: el("dcp-svg-cur-dot"),
+    svgCurLbl: el("dcp-svg-cur-lbl"),
+    kpiOptBox: el("dcp-kpi-opt-box"),
+    kpiOpt: el("dcp-kpi-opt"),
+    kpiOptSub: el("dcp-kpi-opt-sub"),
+    kpiEffBox: el("dcp-kpi-eff-box"),
+    kpiEff: el("dcp-kpi-eff"),
+    kpiEffSub: el("dcp-kpi-eff-sub"),
+    kpiCapBox: el("dcp-kpi-cap-box"),
+    kpiCap: el("dcp-kpi-cap"),
+    kpiCapSub: el("dcp-kpi-cap-sub"),
+    kpiWaitBox: el("dcp-kpi-wait-box"),
+    kpiWait: el("dcp-kpi-wait"),
+    kpiWaitSub: el("dcp-kpi-wait-sub"),
+    kpiP99Box: el("dcp-kpi-p99-box"),
+    kpiP99: el("dcp-kpi-p99"),
+    kpiP99Sub: el("dcp-kpi-p99-sub"),
+    kpiDropBox: el("dcp-kpi-drop-box"),
+    kpiDrop: el("dcp-kpi-drop"),
+    kpiDropSub: el("dcp-kpi-drop-sub"),
+    status: el("dcp-sz-status")
+  };
+
+  var mdDom = {
+    seg: el("dcp-md-seg"),
+    reset: el("dcp-md-reset"),
+    clients: el("dcp-md-clients"),
+    clientsVal: el("dcp-md-clients-val"),
+    txms: el("dcp-md-txms"),
+    txmsVal: el("dcp-md-txms-val"),
+    thinkms: el("dcp-md-thinkms"),
+    thinkmsVal: el("dcp-md-thinkms-val"),
+    cardSes: el("dcp-card-ses"),
+    tagSes: el("dcp-tag-ses"),
+    numSes: el("dcp-num-ses"),
+    fillSes: el("dcp-fill-ses"),
+    muxSes: el("dcp-mux-ses"),
+    memSes: el("dcp-mem-ses"),
+    riskSes: el("dcp-risk-ses"),
+    noteSes: el("dcp-note-ses"),
+    cardTx: el("dcp-card-tx"),
+    tagTx: el("dcp-tag-tx"),
+    numTx: el("dcp-num-tx"),
+    fillTx: el("dcp-fill-tx"),
+    muxTx: el("dcp-mux-tx"),
+    memTx: el("dcp-mem-tx"),
+    riskTx: el("dcp-risk-tx"),
+    noteTx: el("dcp-note-tx"),
+    cardSt: el("dcp-card-st"),
+    tagSt: el("dcp-tag-st"),
+    numSt: el("dcp-num-st"),
+    fillSt: el("dcp-fill-st"),
+    muxSt: el("dcp-mux-st"),
+    memSt: el("dcp-mem-st"),
+    riskSt: el("dcp-risk-st"),
+    noteSt: el("dcp-note-st"),
+    status: el("dcp-md-status")
+  };
+
+  /* (4) render 純繪製函式（就地更新屬性與文字，不重建滑桿節點） */
+  var SVG_X0 = 56;
+  var SVG_X1 = 616;
+  var SVG_Y0 = 24;
+  var SVG_Y1 = 194;
+  var SVG_NS = "http://www.w3.org/2000/svg";
+
+  function poolToX(poolVal) {
+    var ratio = (poolVal - POOL_MIN) / (POOL_MAX - POOL_MIN);
+    return round1(SVG_X0 + Math.max(0, Math.min(1, ratio)) * (SVG_X1 - SVG_X0));
+  }
+
+  function rpsToY(rpsVal, ceiling) {
+    var ratio = rpsVal / Math.max(1, ceiling);
+    return round1(SVG_Y1 - Math.max(0, Math.min(1, ratio)) * (SVG_Y1 - SVG_Y0));
+  }
+
+  function syncToggleGroup(container, attrName, activeVal) {
+    if (!container) return;
+    var btns = container.querySelectorAll("button");
+    for (var i = 0; i < btns.length; i += 1) {
+      var v = btns[i].getAttribute(attrName);
+      btns[i].setAttribute("aria-pressed", v === activeVal ? "true" : "false");
+    }
+  }
+
+  function renderSizingSvg(res) {
+    if (!szDom.svgCurve) return;
+    var ceil = res.plotCeilingRps;
+
+    if (szDom.svgGrid) {
+      while (szDom.svgGrid.firstChild) {
+        szDom.svgGrid.removeChild(szDom.svgGrid.firstChild);
+      }
+      for (var step = 0; step <= 4; step += 1) {
+        var tickRps = Math.round((ceil / 4) * step);
+        var gy = rpsToY(tickRps, ceil);
+        if (step > 0) {
+          var gl = document.createElementNS(SVG_NS, "line");
+          gl.setAttribute("x1", String(SVG_X0));
+          gl.setAttribute("y1", String(gy));
+          gl.setAttribute("x2", String(SVG_X1));
+          gl.setAttribute("y2", String(gy));
+          gl.setAttribute("stroke", "#ecebe8");
+          gl.setAttribute("stroke-width", "1");
+          szDom.svgGrid.appendChild(gl);
+        }
+        var gt = document.createElementNS(SVG_NS, "text");
+        gt.setAttribute("x", String(SVG_X0 - 6));
+        gt.setAttribute("y", String(gy + 4));
+        gt.setAttribute("text-anchor", "end");
+        gt.setAttribute("font-family", "JetBrains Mono, monospace");
+        gt.setAttribute("font-size", "11");
+        gt.setAttribute("fill", "#9aa0a8");
+        gt.textContent = String(tickRps);
+        szDom.svgGrid.appendChild(gt);
+      }
+      var xTicks = [4, 40, 80, 120, 160];
+      for (var xi = 0; xi < xTicks.length; xi += 1) {
+        var xt = document.createElementNS(SVG_NS, "text");
+        xt.setAttribute("x", String(poolToX(xTicks[xi])));
+        xt.setAttribute("y", String(SVG_Y1 + 14));
+        xt.setAttribute("text-anchor", "middle");
+        xt.setAttribute("font-family", "JetBrains Mono, monospace");
+        xt.setAttribute("font-size", "11");
+        xt.setAttribute("fill", "#9aa0a8");
+        xt.textContent = String(xTicks[xi]);
+        szDom.svgGrid.appendChild(xt);
+      }
+    }
+
+    var dParts = [];
+    for (var i = 0; i < res.curve.length; i += 1) {
+      var pt = res.curve[i];
+      dParts.push((i === 0 ? "M" : "L") + poolToX(pt.pool) + " " + rpsToY(pt.capRps, ceil));
+    }
+    szDom.svgCurve.setAttribute("d", dParts.join(" "));
+
+    var demandY = rpsToY(sizingState.arrivalRps, ceil);
+    szDom.svgDemand.setAttribute("y1", String(demandY));
+    szDom.svgDemand.setAttribute("y2", String(demandY));
+    szDom.svgDemandLbl.setAttribute("y", String(Math.max(16, demandY - 5)));
+    szDom.svgDemandLbl.textContent = "到達率 λ = " + sizingState.arrivalRps + " req/s";
+
+    var optX = poolToX(res.optimalPool);
+    var optY = rpsToY(res.peakCapacityRps, ceil);
+    szDom.svgOptLine.setAttribute("x1", String(optX));
+    szDom.svgOptLine.setAttribute("x2", String(optX));
+    szDom.svgOptDot.setAttribute("cx", String(optX));
+    szDom.svgOptDot.setAttribute("cy", String(optY));
+    szDom.svgOptLbl.setAttribute("x", String(Math.min(520, optX + 7)));
+    szDom.svgOptLbl.setAttribute("y", String(Math.max(16, optY - 7)));
+    szDom.svgOptLbl.textContent = "甜蜜點 " + res.optimalPool + " 條 (" + res.peakCapacityRps + ")";
+
+    var curX = poolToX(sizingState.poolSize);
+    var curY = rpsToY(res.maxCapacityRps, ceil);
+    var curFill = res.rejectedRps > 0 ? "#a8554f" : (res.zone === "over_provisioned" ? "#a3743e" : "#3f6188");
+    szDom.svgCurDot.setAttribute("cx", String(curX));
+    szDom.svgCurDot.setAttribute("cy", String(curY));
+    szDom.svgCurDot.setAttribute("fill", curFill);
+    var lblLeft = curX > 470;
+    szDom.svgCurLbl.setAttribute("x", String(lblLeft ? curX - 9 : curX + 9));
+    szDom.svgCurLbl.setAttribute("y", String(Math.min(SVG_Y1 - 6, curY + 15)));
+    szDom.svgCurLbl.setAttribute("text-anchor", lblLeft ? "end" : "start");
+    szDom.svgCurLbl.textContent = "目前 " + sizingState.poolSize + " 條 → " + res.maxCapacityRps + " req/s";
+  }
+
+  function renderSizing() {
+    var res = computePoolSizing(sizingState);
+
+    syncToggleGroup(szDom.seg, "data-workload", sizingState.workload);
+    if (szDom.rpsVal) szDom.rpsVal.textContent = sizingState.arrivalRps + " req/s";
+    if (szDom.qmsVal) szDom.qmsVal.textContent = sizingState.baseQueryMs + " ms";
+    if (szDom.poolVal) szDom.poolVal.textContent = sizingState.poolSize + " 條";
+    if (szDom.coresVal) szDom.coresVal.textContent = sizingState.dbCores + " vCPU";
+
+    renderSizingSvg(res);
+
+    szDom.kpiOpt.textContent = res.optimalPool + " 條";
+    szDom.kpiOptSub.textContent = "峰值吞吐可達 " + res.peakCapacityRps + " req/s";
+
+    szDom.kpiEff.textContent = res.effectiveQueryMs + " ms";
+    szDom.kpiEffSub.textContent = "排程與鎖摩擦 +" + res.contentionPenaltyMs + " ms";
+    szDom.kpiEffBox.className = "dcp-kpi " + (res.contentionPenaltyMs > sizingState.baseQueryMs * 0.8 ? "bad" : (res.contentionPenaltyMs > sizingState.baseQueryMs * 0.35 ? "warn" : "ok"));
+
+    szDom.kpiCap.textContent = res.maxCapacityRps + " req/s";
+    szDom.kpiCapSub.textContent = "池容量負載比 " + res.utilizationPct + "%";
+    szDom.kpiCapBox.className = "dcp-kpi " + (res.utilizationPct >= 100 ? "bad" : (res.utilizationPct > 82 ? "warn" : "ok"));
+
+    szDom.kpiWait.textContent = res.queueWaitMs + " ms";
+    szDom.kpiWaitSub.textContent = "應用端等待佇列約 " + res.queueDepth + " 筆";
+    szDom.kpiWaitBox.className = "dcp-kpi " + (res.queueWaitMs >= 120 ? "bad" : (res.queueWaitMs > 15 ? "warn" : "ok"));
+
+    szDom.kpiP99.textContent = res.p99LatencyMs + " ms";
+    szDom.kpiP99Sub.textContent = "取連排隊 + 競爭後執行尾端";
+    szDom.kpiP99Box.className = "dcp-kpi " + (res.p99LatencyMs > 250 ? "bad" : (res.p99LatencyMs > 50 ? "warn" : "ok"));
+
+    szDom.kpiDrop.textContent = res.rejectedRps + " req/s";
+    szDom.kpiDropSub.textContent = "有效完成吞吐 " + res.goodputRps + " req/s";
+    szDom.kpiDropBox.className = "dcp-kpi " + (res.rejectedRps > 0 ? "bad" : "ok");
+
+    if (res.zone === "thrash_collapse") {
+      szDom.status.innerHTML = "<b>過度併發顛簸崩潰（Thrashing）：</b>連線池開到 " + sizingState.poolSize + " 條（遠超甜蜜點 " + res.optimalPool + " 條），Context Switch 與鎖自旋把單筆查詢從 " + sizingState.baseQueryMs + " ms 拖慢到 " + res.effectiveQueryMs + " ms，池吞吐跌剩 " + res.maxCapacityRps + " req/s，每秒有 " + res.rejectedRps + " 筆請求因取連逾時失敗。調小連線池反而能救活吞吐！";
+    } else if (res.zone === "undersized_overload") {
+      szDom.status.innerHTML = "<b>容量不足打穿：</b>目前到達率 " + sizingState.arrivalRps + " req/s 超出此池上限 " + res.maxCapacityRps + " req/s。" + (sizingState.poolSize < res.optimalPool ? "目前池子尚未達甜蜜點（" + res.optimalPool + " 條），可適度調大連線池；" : "即使在甜蜜點峰值（" + res.peakCapacityRps + " req/s）仍低於流量，必須優化 SQL 耗時、加快取或擴充資料庫核心。") ;
+    } else if (res.zone === "over_provisioned") {
+      szDom.status.innerHTML = "<b>過度配置摩擦區：</b>雖然目前流量尚未打穿容量，但 " + sizingState.poolSize + " 條連線已讓單筆 SQL 多付 +" + res.contentionPenaltyMs + " ms 排程摩擦，最大吞吐上限正沿倒 U 曲線下滑；一旦流量突刺將比甜蜜點（" + res.optimalPool + " 條）更早雪崩。";
+    } else if (res.zone === "pool_bottleneck") {
+      szDom.status.innerHTML = "<b>池槽位偏小排隊區：</b>資料庫共有 " + sizingState.dbCores + " 顆核心，但池子僅放行 " + sizingState.poolSize + " 條連線，請求在應用端佇列平均多等 " + res.queueWaitMs + " ms；將池調近甜蜜點 " + res.optimalPool + " 條即可釋放閒置算力。";
+    } else {
+      szDom.status.innerHTML = "<b>甜蜜平衡區：</b>連線池（" + sizingState.poolSize + " 條）貼近核心甜蜜點（" + res.optimalPool + " 條），單筆競爭摩擦僅 +" + res.contentionPenaltyMs + " ms，最大吞吐達 " + res.maxCapacityRps + " req/s，足以平順吸收突發請求。";
+    }
+  }
+
+  function renderModes() {
+    var m = computeModeComparison(modeState);
+    var sesConns = m.txConns + m.savedConns;
+
+    syncToggleGroup(mdDom.seg, "data-feature", modeState.feature);
+    if (mdDom.clientsVal) mdDom.clientsVal.textContent = modeState.clientConns + " 條";
+    if (mdDom.txmsVal) mdDom.txmsVal.textContent = modeState.txSqlMs + " ms";
+    if (mdDom.thinkmsVal) mdDom.thinkmsVal.textContent = modeState.appThinkMs + " ms";
+
+    mdDom.cardSes.className = "dcp-card " + (sesConns > 120 ? "warn" : "ok");
+    mdDom.tagSes.className = "dcp-compat-tag ok";
+    mdDom.tagSes.textContent = "全功能相容";
+    mdDom.numSes.innerHTML = sesConns + " 條<small>後端連線</small>";
+    mdDom.fillSes.className = "dcp-meter-fill " + (sesConns > 120 ? "warn" : "ok");
+    mdDom.fillSes.style.width = "100%";
+    mdDom.muxSes.textContent = "1.0x（無壓縮）";
+    mdDom.memSes.textContent = m.sessionMemMb + " MB";
+    mdDom.riskSes.textContent = "零狀態污染";
+    mdDom.noteSes.textContent = "每條前端長連死綁一個後端行程，空閒的 " + round1(100 - m.dutyPct) + "% 時間後端連線跟著發呆。";
+
+    var txPct = Math.max(4, Math.min(100, Math.round((m.txConns / Math.max(1, sesConns)) * 100)));
+    mdDom.cardTx.className = "dcp-card " + m.txState;
+    mdDom.tagTx.className = "dcp-compat-tag " + m.txState;
+    mdDom.tagTx.textContent = m.txTag;
+    mdDom.numTx.innerHTML = m.txConns + " 條<small>後端連線（省 " + m.savedConns + " 條）</small>";
+    mdDom.fillTx.className = "dcp-meter-fill " + m.txState;
+    mdDom.fillTx.style.width = txPct + "%";
+    mdDom.muxTx.textContent = m.txMux + "x";
+    mdDom.memTx.textContent = m.txMemMb + " MB（省 " + m.savedMemMb + " MB）";
+    mdDom.riskTx.textContent = m.txRiskLabel;
+
+    if (modeState.feature === "prep") {
+      mdDom.noteTx.textContent = "具名預編譯跨越交易邊界；須開啟 PgBouncer 1.21+ max_prepared_statements 代管或關閉驅動預編譯。";
+    } else if (modeState.feature === "session_var") {
+      mdDom.noteTx.textContent = "危險！COMMIT 歸還後 SET 變數與 Session 鎖仍留在後端行程上，下一個借用者會讀到殘留租戶狀態。";
+    } else {
+      mdDom.noteTx.textContent = "SQL 佔空比 " + m.dutyPct + "%，利用交易間空檔輪流服務全體 Pod，兼顧完整交易語義與高壓縮率。";
+    }
+
+    mdDom.cardSt.className = "dcp-card " + m.stState;
+    mdDom.tagSt.className = "dcp-compat-tag " + m.stState;
+    if (m.stSupported) {
+      var stPct = Math.max(4, Math.min(100, Math.round((m.stConns / Math.max(1, sesConns)) * 100)));
+      mdDom.tagSt.textContent = "單句可用";
+      mdDom.numSt.innerHTML = m.stConns + " 條<small>後端連線</small>";
+      mdDom.fillSt.className = "dcp-meter-fill ok";
+      mdDom.fillSt.style.width = stPct + "%";
+      mdDom.muxSt.textContent = m.stMux + "x";
+      mdDom.memSt.textContent = m.stMemMb + " MB";
+      mdDom.riskSt.textContent = "限純單句查詢";
+      mdDom.noteSt.textContent = "純 Autocommit 單句查詢可正常運作，但只要未來加入任何 BEGIN...COMMIT 就會立即報錯。";
+    } else {
+      mdDom.tagSt.textContent = "協定拒絕";
+      mdDom.numSt.innerHTML = "不支援<small>多語句狀態</small>";
+      mdDom.fillSt.className = "dcp-meter-fill bad";
+      mdDom.fillSt.style.width = "10%";
+      mdDom.muxSt.textContent = "不可用";
+      mdDom.memSt.textContent = "—";
+      mdDom.riskSt.textContent = "每秒中斷 " + m.abortedTxPerSec + " 筆交易";
+      mdDom.noteSt.textContent = "第一條語句執行完即強制收回連線，多語句交易與會話變數在協定層被直接拒絕中止。";
+    }
+
+    if (modeState.feature === "session_var") {
+      mdDom.status.innerHTML = "<b>診斷結論：</b>目前工作負載含跨交易 <code>SET</code> 或 Session 諮詢鎖，直接套用 Transaction Mode 有約 <b>" + m.leakProbPct + "%</b> 機率發生跨客戶端狀態污染；請先改寫為 <code>SET LOCAL</code> 與 <code>pg_advisory_xact_lock()</code>，即可安全省下 <b>" + m.savedConns + " 條</b>後端連線（約 " + m.savedMemMb + " MB RSS）。";
+    } else if (modeState.feature === "prep") {
+      mdDom.status.innerHTML = "<b>診斷結論：</b>全叢集每秒約 <b>" + m.totalTxPerSec + " 筆</b>交易，Transaction Mode 可將後端連線從 " + sesConns + " 條壓縮至 <b>" + m.txConns + " 條（" + m.txMux + "x）</b>；針對具名 Prepared Statement，請在 PgBouncer 1.21+ 設定 <code>max_prepared_statements &gt; 0</code> 代管每秒約 " + m.stmtRemapPerSec + " 次語句映射。";
+    } else {
+      mdDom.status.innerHTML = "<b>診斷結論：</b>每條前端連線僅 <b>" + m.dutyPct + "%</b> 時間真正在跑 SQL；Transaction Mode 把 " + sesConns + " 條長連線收斂為 <b>" + m.txConns + " 條</b>後端行程（多工壓縮比 <b>" + m.txMux + "x</b>），立即替資料庫省下約 <b>" + m.savedMemMb + " MB</b> 常駐記憶體。";
+    }
+  }
+
+  /* (5) 事件綁定與初始渲染 */
+  function targetButton(ev) {
+    var t = ev && ev.target;
+    var elem = t && t.nodeType === 1 ? t : (t ? t.parentElement : null);
+    return elem && elem.closest ? elem.closest("button") : null;
+  }
+
+  if (szDom.seg) {
+    szDom.seg.addEventListener("click", function (ev) {
+      var btn = targetButton(ev);
+      if (!btn) return;
+      var wl = btn.getAttribute("data-workload");
+      if (wl && WORKLOAD_PROFILES[wl]) {
+        sizingState.workload = wl;
+        renderSizing();
+      }
+    });
+  }
+
+  if (szDom.rps) {
+    szDom.rps.addEventListener("input", function () {
+      sizingState.arrivalRps = Number(szDom.rps.value);
+      renderSizing();
+    });
+  }
+  if (szDom.qms) {
+    szDom.qms.addEventListener("input", function () {
+      sizingState.baseQueryMs = Number(szDom.qms.value);
+      renderSizing();
+    });
+  }
+  if (szDom.pool) {
+    szDom.pool.addEventListener("input", function () {
+      sizingState.poolSize = Number(szDom.pool.value);
+      renderSizing();
+    });
+  }
+  if (szDom.cores) {
+    szDom.cores.addEventListener("input", function () {
+      sizingState.dbCores = Number(szDom.cores.value);
+      renderSizing();
+    });
+  }
+  if (szDom.reset) {
+    szDom.reset.addEventListener("click", function () {
+      sizingState.arrivalRps = SIZING_DEFAULTS.arrivalRps;
+      sizingState.baseQueryMs = SIZING_DEFAULTS.baseQueryMs;
+      sizingState.poolSize = SIZING_DEFAULTS.poolSize;
+      sizingState.dbCores = SIZING_DEFAULTS.dbCores;
+      sizingState.workload = SIZING_DEFAULTS.workload;
+      szDom.rps.value = String(sizingState.arrivalRps);
+      szDom.qms.value = String(sizingState.baseQueryMs);
+      szDom.pool.value = String(sizingState.poolSize);
+      szDom.cores.value = String(sizingState.dbCores);
+      renderSizing();
+    });
+  }
+
+  if (mdDom.seg) {
+    mdDom.seg.addEventListener("click", function (ev) {
+      var btn = targetButton(ev);
+      if (!btn) return;
+      var ft = btn.getAttribute("data-feature");
+      if (ft) {
+        modeState.feature = ft;
+        renderModes();
+      }
+    });
+  }
+
+  if (mdDom.clients) {
+    mdDom.clients.addEventListener("input", function () {
+      modeState.clientConns = Number(mdDom.clients.value);
+      renderModes();
+    });
+  }
+  if (mdDom.txms) {
+    mdDom.txms.addEventListener("input", function () {
+      modeState.txSqlMs = Number(mdDom.txms.value);
+      renderModes();
+    });
+  }
+  if (mdDom.thinkms) {
+    mdDom.thinkms.addEventListener("input", function () {
+      modeState.appThinkMs = Number(mdDom.thinkms.value);
+      renderModes();
+    });
+  }
+  if (mdDom.reset) {
+    mdDom.reset.addEventListener("click", function () {
+      modeState.clientConns = MODE_DEFAULTS.clientConns;
+      modeState.txSqlMs = MODE_DEFAULTS.txSqlMs;
+      modeState.appThinkMs = MODE_DEFAULTS.appThinkMs;
+      modeState.feature = MODE_DEFAULTS.feature;
+      mdDom.clients.value = String(modeState.clientConns);
+      mdDom.txms.value = String(modeState.txSqlMs);
+      mdDom.thinkms.value = String(modeState.appThinkMs);
+      renderModes();
+    });
+  }
+
+  renderSizing();
+  renderModes();
+})();
+</script>

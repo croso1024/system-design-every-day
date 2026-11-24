@@ -1,0 +1,2956 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>資料庫連線池 (Connection Pooling / PgBouncer) | System Design Every Day</title>
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect x='3' y='2' width='26' height='28' rx='6' fill='%23386f5a' stroke='%2374b59b' stroke-width='1.5'/%3E%3Crect x='3.8' y='2.8' width='24.4' height='23.5' rx='4.8' fill='%2352967c'/%3E%3Cpath d='M9 2.8V26.3' stroke='%2374b59b' stroke-width='1.5' stroke-opacity='.75'/%3E%3Cpath d='M7.5 28.1H25' stroke='%23e6f5ef' stroke-width='1.8' stroke-linecap='round'/%3E%3Cpath d='M14 14.5L21.5 10.2M14 14.5L21.5 18.8M21.5 10.2V18.8' stroke='%23dcf2e9' stroke-width='2.1' stroke-linecap='round'/%3E%3Ccircle cx='14' cy='14.5' r='2.9' fill='%23ffffff'/%3E%3Ccircle cx='21.5' cy='10.2' r='2.7' fill='%23f6e29c'/%3E%3Ccircle cx='21.5' cy='18.8' r='2.7' fill='%23ffffff'/%3E%3C/svg%3E">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@300;400;500;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+  <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+  <script>
+    mermaid.initialize({
+      startOnLoad: true,
+      theme: 'default',
+      securityLevel: 'loose'
+    });
+  </script>
+  <style>
+    /* 全站設計 token 的唯一來源。scripts/lib/books.js 會把「第一個 :root 區塊」原樣抽進首頁：
+       請保持單一區塊、區塊內不得出現 `}`；首頁領域色依賴 --accent / --ok / --warn。 */
+    :root {
+      --bg: #ffffff;
+      --bg-soft: #fafaf9;
+      --text: #262a2f;
+      --text-2: #6b7078;
+      --text-3: #9aa0a8;
+      --border: #ecebe8;
+      --border-strong: #dedcd8;
+      --code-bg: #f6f5f3;
+      --accent: #3f6188;
+      --accent-soft: #eef2f7;
+      --accent-line: #cdd9e6;
+      --ok: #4d7d68;
+      --ok-soft: #eef4f1;
+      --warn: #a3743e;
+      --warn-soft: #f6f0e7;
+      --bad: #a8554f;
+      --bad-soft: #f6ecea;
+      --radius: 10px;
+      --radius-sm: 7px;
+      --maxw: 760px;
+      --sans: "Noto Sans TC", system-ui, -apple-system, "Segoe UI", sans-serif;
+      --mono: "JetBrains Mono", "SFMono-Regular", Menlo, Consolas, monospace;
+    }
+
+    /* ---------- base reset ----------
+       等價於 Tailwind preflight 的最小重置（頁面不載入 Tailwind，utility class 不會生效）。
+       文章頁與各篇 demo CSS 都以這組基準值撰寫，改動會讓所有產物的間距、清單、按鈕外觀一起變動。
+       新增規則請一律寫在這個區塊之後，並使用 :root 的 token。 */
+    *, *::before, *::after {
+      box-sizing: border-box;
+      border: 0 solid var(--border);
+    }
+
+    html {
+      line-height: 1.5;
+      -webkit-text-size-adjust: 100%;
+      tab-size: 4;
+    }
+
+    h1, h2, h3, h4, h5, h6 {
+      margin: 0;
+      font-size: inherit;
+      font-weight: inherit;
+    }
+
+    p, blockquote, dl, dd, figure, pre, hr {
+      margin: 0;
+    }
+
+    hr {
+      height: 0;
+      color: inherit;
+      border-top-width: 1px;
+    }
+
+    a {
+      color: inherit;
+      text-decoration: inherit;
+    }
+
+    b, strong {
+      font-weight: bolder;
+    }
+
+    code, kbd, samp, pre {
+      font-family: var(--mono);
+      font-size: 1em;
+    }
+
+    small {
+      font-size: 80%;
+    }
+
+    sub, sup {
+      position: relative;
+      font-size: 75%;
+      line-height: 0;
+      vertical-align: baseline;
+    }
+    sub { bottom: -0.25em; }
+    sup { top: -0.5em; }
+
+    table {
+      border-collapse: collapse;
+      border-color: inherit;
+      text-indent: 0;
+    }
+
+    ol, ul, menu {
+      list-style: none;
+      margin: 0;
+      padding: 0;
+    }
+
+    img, svg, video, canvas, audio, iframe, embed, object {
+      display: block;
+      vertical-align: middle;
+    }
+
+    img, video {
+      max-width: 100%;
+      height: auto;
+    }
+
+    button, input, optgroup, select, textarea {
+      margin: 0;
+      padding: 0;
+      font: inherit;
+      line-height: inherit;
+      color: inherit;
+    }
+
+    button, select {
+      text-transform: none;
+    }
+
+    button, [type="button"], [type="reset"], [type="submit"] {
+      -webkit-appearance: button;
+      background-color: transparent;
+      background-image: none;
+    }
+
+    button, [role="button"] {
+      cursor: pointer;
+    }
+
+    :disabled {
+      cursor: default;
+    }
+
+    input::placeholder, textarea::placeholder {
+      opacity: 1;
+      color: var(--text-3);
+    }
+
+    textarea {
+      resize: vertical;
+    }
+
+    fieldset {
+      margin: 0;
+      padding: 0;
+    }
+
+    legend {
+      padding: 0;
+    }
+
+    summary {
+      display: list-item;
+    }
+
+    [hidden] {
+      display: none;
+    }
+
+    html {
+      scroll-behavior: smooth;
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      html {
+        scroll-behavior: auto;
+      }
+      * {
+        animation-duration: .001ms !important;
+        transition-duration: .001ms !important;
+      }
+    }
+
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font-family: var(--sans);
+      font-weight: 400;
+      font-size: 16px;
+      line-height: 1.78;
+      -webkit-font-smoothing: antialiased;
+      letter-spacing: .005em;
+    }
+
+    ::selection {
+      background: var(--accent-soft);
+    }
+
+    /* ---------- layout ---------- */
+    .wrap {
+      display: flex;
+      max-width: 1180px;
+      margin: 0 auto;
+      gap: 0;
+    }
+
+    .toc {
+      width: 248px;
+      flex: 0 0 248px;
+      position: sticky;
+      top: 0;
+      height: 100vh;
+      padding: 54px 22px 40px 28px;
+      overflow-y: auto;
+      border-right: 1px solid var(--border);
+      transition: width .2s ease, flex-basis .2s ease, padding .2s ease, opacity .15s ease, border-color .15s ease;
+    }
+
+    .toc-kicker {
+      font-family: var(--mono);
+      font-size: 11px;
+      letter-spacing: .14em;
+      text-transform: uppercase;
+      color: var(--text-3);
+      margin-bottom: 20px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+    }
+
+    /* desktop：側欄內收合鈕；≤920px 隱藏，改由 .toc-toggle accordion 控制 */
+    .toc-collapse {
+      display: none;
+      flex: 0 0 auto;
+      align-items: center;
+      justify-content: center;
+      width: 28px;
+      height: 28px;
+      padding: 0;
+      border: none;
+      background: none;
+      border-radius: 6px;
+      color: var(--text-2);
+      line-height: 1;
+      cursor: pointer;
+    }
+
+    .toc-collapse:hover {
+      color: var(--text);
+      background: var(--bg-soft);
+    }
+
+    .toc-collapse:focus-visible {
+      outline: 2px solid var(--accent);
+      outline-offset: 2px;
+    }
+
+    .toc-collapse svg {
+      display: block;
+    }
+
+    /* desktop：側欄收合後的展開鈕（預設隱藏） */
+    .toc-reopen {
+      display: none;
+      position: fixed;
+      top: 18px;
+      left: 18px;
+      z-index: 900;
+      align-items: center;
+      gap: 7px;
+      font-size: 12.5px;
+      line-height: 1;
+      color: var(--text-2);
+      background: var(--bg);
+      border: 1px solid var(--border-strong);
+      border-radius: 999px;
+      padding: 7px 13px 7px 11px;
+      box-shadow: 0 1px 3px rgba(0, 0, 0, .06), 0 4px 12px rgba(0, 0, 0, .04);
+      cursor: pointer;
+      transition: background .15s, border-color .15s, color .15s;
+    }
+
+    .toc-reopen:hover {
+      background: var(--bg-soft);
+      color: var(--text);
+      border-color: var(--text-3);
+    }
+
+    .toc-reopen svg {
+      flex: 0 0 auto;
+      display: block;
+    }
+
+    @media (min-width: 921px) {
+      .toc-collapse {
+        display: inline-flex;
+      }
+
+      body.toc-collapsed .toc {
+        width: 0;
+        flex-basis: 0;
+        padding: 0;
+        opacity: 0;
+        overflow: hidden;
+        border-right-color: transparent;
+        pointer-events: none;
+      }
+
+      body.toc-collapsed .toc-reopen {
+        display: inline-flex;
+      }
+    }
+
+    .toc-kicker a {
+      color: var(--text-3);
+      text-decoration: none;
+      border-bottom: none;
+      transition: color .15s;
+    }
+
+    .toc-kicker a:hover {
+      color: var(--text);
+    }
+
+    .toc-title {
+      font-size: 15px;
+      font-weight: 700;
+      line-height: 1.4;
+      margin: 0 0 12px;
+    }
+
+    .toc-actions {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 8px;
+      margin: 0 0 18px;
+    }
+
+    .read-toggle {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      font-family: var(--sans);
+      font-size: 12.5px;
+      line-height: 1.3;
+      color: var(--text-2);
+      background: var(--bg);
+      border: 1px solid var(--border-strong);
+      border-radius: 999px;
+      padding: 5px 12px 5px 10px;
+      cursor: pointer;
+      transition: background .15s, border-color .15s, color .15s;
+    }
+
+    .read-toggle:hover {
+      background: var(--bg-soft);
+      color: var(--text);
+      border-color: var(--text-3);
+    }
+
+    .read-toggle:focus-visible {
+      outline: 2px solid var(--accent);
+      outline-offset: 2px;
+    }
+
+    .read-toggle[aria-pressed="true"] {
+      background: var(--ok-soft);
+      border-color: var(--ok);
+      color: var(--ok);
+      font-weight: 600;
+    }
+
+    .read-toggle .read-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      border: 1.5px solid currentColor;
+      flex: 0 0 auto;
+    }
+
+    .read-toggle[aria-pressed="true"] .read-dot {
+      background: var(--ok);
+      border-color: var(--ok);
+    }
+
+    .article-foot {
+      margin-top: 56px;
+      padding-top: 24px;
+      border-top: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      flex-wrap: wrap;
+    }
+
+    .article-foot-left {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      flex-wrap: wrap;
+    }
+
+    .article-foot-hint {
+      font-size: 13.5px;
+      color: var(--text-2);
+    }
+
+    .read-toggle.read-toggle-lg {
+      font-size: 13.5px;
+      padding: 7px 16px 7px 13px;
+    }
+
+    .article-foot-back {
+      font-size: 13.5px;
+      color: var(--text-2);
+      border-bottom: 1px solid var(--border-strong);
+    }
+
+    .article-foot-back:hover {
+      color: var(--text);
+      border-color: var(--text);
+    }
+
+    .toc a {
+      display: flex;
+      gap: 10px;
+      align-items: baseline;
+      text-decoration: none;
+      color: var(--text-2);
+      font-size: 13.5px;
+      padding: 6px 10px;
+      border-radius: 6px;
+      line-height: 1.45;
+      transition: background .15s, color .15s;
+      border-bottom: none;
+    }
+
+    .toc a:hover {
+      background: var(--bg-soft);
+      color: var(--text);
+      border-bottom: none;
+    }
+
+    .toc a.active {
+      color: var(--accent);
+      background: var(--accent-soft);
+      font-weight: 500;
+      border-bottom: none;
+    }
+
+    .toc a .n {
+      font-family: var(--mono);
+      font-size: 11px;
+      color: var(--text-3);
+      flex: 0 0 18px;
+    }
+
+    .toc a.active .n {
+      color: var(--accent);
+    }
+
+    main {
+      flex: 1 1 auto;
+      min-width: 0;
+      padding: 0 40px;
+    }
+
+    .inner {
+      max-width: var(--maxw);
+      margin: 0 auto;
+      padding: 72px 0 140px;
+    }
+
+    /* ---------- hero ---------- */
+    .hero {
+      margin-bottom: 64px;
+    }
+
+    .hero .eyebrow {
+      font-family: var(--mono);
+      font-size: 12px;
+      letter-spacing: .16em;
+      text-transform: uppercase;
+      color: var(--accent);
+      margin-bottom: 18px;
+    }
+
+    .hero h1 {
+      font-size: 40px;
+      line-height: 1.18;
+      font-weight: 700;
+      margin: 0 0 18px;
+      letter-spacing: -.01em;
+    }
+
+    .hero .lede {
+      font-size: 18px;
+      line-height: 1.7;
+      color: var(--text-2);
+      font-weight: 300;
+      margin: 0;
+      max-width: 620px;
+    }
+
+    .hero .meta {
+      margin-top: 28px;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+
+    .tag {
+      font-family: var(--mono);
+      font-size: 12px;
+      color: var(--text-2);
+      border: 1px solid var(--border-strong);
+      padding: 4px 11px;
+      border-radius: 999px;
+      background: var(--bg-soft);
+    }
+
+    /* ---------- sections ---------- */
+    section {
+      padding-top: 30px;
+      scroll-margin-top: 24px;
+    }
+
+    .sec-head {
+      display: flex;
+      align-items: baseline;
+      gap: 14px;
+      margin: 0 0 8px;
+    }
+
+    .sec-num {
+      font-family: var(--mono);
+      font-size: 13px;
+      color: var(--text-3);
+      font-weight: 500;
+      padding-top: 6px;
+      flex: 0 0 auto;
+    }
+
+    h2 {
+      font-size: 27px;
+      font-weight: 700;
+      line-height: 1.3;
+      margin: 0;
+      letter-spacing: -.01em;
+    }
+
+    .sec-sub {
+      color: var(--text-2);
+      font-size: 15px;
+      margin: 2px 0 28px 0;
+      font-weight: 300;
+    }
+
+    h3 {
+      font-size: 18.5px;
+      font-weight: 700;
+      margin: 38px 0 12px;
+      line-height: 1.45;
+    }
+
+    h4 {
+      font-size: 15.5px;
+      font-weight: 700;
+      margin: 26px 0 8px;
+      color: var(--text);
+    }
+
+    p {
+      margin: 0 0 16px;
+    }
+
+    a {
+      color: var(--accent);
+      text-decoration: none;
+      border-bottom: 1px solid var(--accent-line);
+      transition: border-color .15s;
+    }
+
+    a:hover {
+      border-color: var(--accent);
+    }
+
+    strong {
+      font-weight: 700;
+    }
+
+    em {
+      font-style: normal;
+      background: var(--accent-soft);
+      padding: 0 4px;
+      border-radius: 4px;
+      font-weight: 500;
+      color: #2f4d6e;
+    }
+
+    hr.div {
+      border: none;
+      border-top: 1px solid var(--border);
+      margin: 46px 0;
+    }
+
+    ul, ol {
+      margin: 0 0 18px;
+      padding-left: 22px;
+    }
+
+    li {
+      margin: 7px 0;
+      padding-left: 4px;
+    }
+
+    code {
+      font-family: var(--mono);
+      font-size: .86em;
+      background: var(--code-bg);
+      padding: 2px 6px;
+      border-radius: 5px;
+      color: #43494f;
+    }
+
+    pre {
+      background: var(--code-bg);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 16px 18px;
+      overflow-x: auto;
+      margin: 0 0 20px;
+      line-height: 1.6;
+    }
+
+    pre code {
+      background: none;
+      padding: 0;
+      font-size: 13px;
+    }
+
+    /* ---------- math notation ---------- */
+    /* 行內數學變數，如 W、R、N。本站不載入 MathJax/KaTeX，請勿使用 $...$ 或 \[...\] LaTeX 分隔符。 */
+    var {
+      font-family: var(--mono);
+      font-style: normal;
+      font-weight: 500;
+      color: var(--accent);
+    }
+
+    /* 區塊數學公式，置中等寬呈現，記得將 > < & 轉義為 &gt; &lt; &amp;。 */
+    .formula {
+      font-family: var(--mono);
+      font-size: 15px;
+      text-align: center;
+      background: var(--bg-soft);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      padding: 14px 18px;
+      margin: 0 0 20px;
+      color: var(--text);
+      letter-spacing: .03em;
+      overflow-x: auto;
+    }
+
+    /* ---------- callouts ---------- */
+    .callout {
+      border: 1px solid var(--border);
+      border-left: 3px solid var(--border-strong);
+      background: var(--bg-soft);
+      border-radius: var(--radius-sm);
+      padding: 15px 18px;
+      margin: 0 0 22px;
+      font-size: 14.5px;
+    }
+
+    .callout .c-title {
+      font-weight: 700;
+      font-size: 13px;
+      letter-spacing: .02em;
+      margin-bottom: 5px;
+      display: flex;
+      gap: 7px;
+      align-items: center;
+    }
+
+    .callout p:last-child {
+      margin-bottom: 0;
+    }
+
+    .callout.accent {
+      border-left-color: var(--accent);
+      background: var(--accent-soft);
+    }
+
+    .callout.accent .c-title {
+      color: #2f4d6e;
+    }
+
+    .callout.warn {
+      border-left-color: var(--warn);
+      background: var(--warn-soft);
+    }
+
+    .callout.warn .c-title {
+      color: var(--warn);
+    }
+
+    .callout .ic {
+      font-family: var(--mono);
+      font-size: 11px;
+      border: 1px solid currentColor;
+      border-radius: 4px;
+      padding: 0 4px;
+      line-height: 1.5;
+      opacity: .8;
+    }
+
+    .oneliner {
+      border: 1px dashed var(--accent-line);
+      border-radius: var(--radius-sm);
+      padding: 13px 16px;
+      margin: 0 0 22px;
+      font-size: 14.5px;
+      background: #fbfcfd;
+    }
+
+    .oneliner b {
+      font-family: var(--mono);
+      font-size: 11px;
+      letter-spacing: .08em;
+      color: var(--accent);
+      display: block;
+      margin-bottom: 4px;
+      text-transform: uppercase;
+    }
+
+    /* ---------- tables ---------- */
+    .tbl-wrap {
+      overflow-x: auto;
+      margin: 0 0 24px;
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+    }
+
+    table {
+      border-collapse: collapse;
+      width: 100%;
+      font-size: 14px;
+      min-width: 520px;
+    }
+
+    th, td {
+      text-align: left;
+      padding: 11px 14px;
+      border-bottom: 1px solid var(--border);
+      vertical-align: top;
+    }
+
+    th {
+      font-weight: 700;
+      background: var(--bg-soft);
+      font-size: 12.5px;
+      letter-spacing: .02em;
+      color: var(--text-2);
+      position: sticky;
+      top: 0;
+    }
+
+    tr:last-child td {
+      border-bottom: none;
+    }
+
+    td.hl {
+      background: var(--accent-soft);
+    }
+
+    .cap {
+      font-size: 12.5px;
+      color: var(--text-3);
+      margin: 12px 0 26px;
+      font-family: var(--mono);
+    }
+
+    /* 圖與圖說的間距由 .cap 的 margin-top（12px）保證不重疊；緊鄰 .cap 的前一個元素預設不貢獻 margin-bottom，
+       讓全站間距一致。頁面以更高權重的選擇器替該元素設下邊距，或瀏覽器不支援 :has() 時，間距只會變鬆、不會重疊。 */
+    main :has(+ .cap) {
+      margin-bottom: 0;
+    }
+
+    /* ---------- interactive shell ---------- */
+    .demo {
+      border: 1px solid var(--border-strong);
+      border-radius: var(--radius);
+      background: var(--bg);
+      margin: 24px 0 26px;
+      overflow: hidden;
+    }
+
+    .demo-bar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      flex-wrap: wrap;
+      padding: 13px 16px;
+      border-bottom: 1px solid var(--border);
+      background: var(--bg-soft);
+    }
+
+    .demo-bar .label {
+      font-family: var(--mono);
+      font-size: 11px;
+      letter-spacing: .1em;
+      text-transform: uppercase;
+      color: var(--text-3);
+    }
+
+    .demo-body {
+      padding: 20px 18px;
+    }
+
+    .seg {
+      display: inline-flex;
+      border: 1px solid var(--border-strong);
+      border-radius: 999px;
+      overflow: hidden;
+      background: var(--bg);
+    }
+
+    .seg button {
+      border: none;
+      background: none;
+      font-family: var(--sans);
+      font-size: 12.5px;
+      color: var(--text-2);
+      padding: 6px 14px;
+      cursor: pointer;
+      transition: background .15s, color .15s;
+    }
+
+    .seg button:hover {
+      color: var(--text);
+    }
+
+    .seg button[aria-pressed="true"] {
+      background: var(--accent);
+      color: #fff;
+    }
+
+    .btn {
+      font-family: var(--sans);
+      font-size: 13px;
+      border: 1px solid var(--border-strong);
+      background: var(--bg);
+      color: var(--text);
+      padding: 7px 16px;
+      border-radius: 7px;
+      cursor: pointer;
+      transition: background .15s, border-color .15s;
+    }
+
+    .btn:hover {
+      background: var(--bg-soft);
+      border-color: var(--text-3);
+    }
+
+    .btn.primary {
+      background: var(--accent);
+      color: #fff;
+      border-color: var(--accent);
+    }
+
+    .btn.primary:hover {
+      background: #365578;
+    }
+
+    .btn:disabled {
+      opacity: .4;
+      cursor: not-allowed;
+    }
+
+    .btn:focus-visible, .seg button:focus-visible, .toc a:focus-visible, a:focus-visible,
+    summary:focus-visible {
+      outline: 2px solid var(--accent);
+      outline-offset: 2px;
+      border-radius: 4px;
+    }
+
+    .status-line {
+      font-size: 13.5px;
+      color: var(--text-2);
+      min-height: 42px;
+      margin-top: 14px;
+      background: var(--bg-soft);
+      border-radius: var(--radius-sm);
+      padding: 10px 13px;
+      border: 1px solid var(--border);
+    }
+
+    .status-line b {
+      color: var(--text);
+    }
+
+    .legend {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 14px;
+      font-size: 11.5px;
+      color: var(--text-2);
+      margin-top: 14px;
+      font-family: var(--mono);
+    }
+
+    .legend span {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .dot {
+      width: 9px;
+      height: 9px;
+      border-radius: 3px;
+      display: inline-block;
+      border: 1px solid rgba(0, 0, 0, .08);
+    }
+
+    /* node states used across diagrams */
+    .ns-idle {
+      background: #fff;
+      border-color: var(--border-strong);
+    }
+
+    .ns-lock {
+      background: var(--warn-soft);
+      border-color: var(--warn);
+    }
+
+    .ns-ok {
+      background: var(--ok-soft);
+      border-color: var(--ok);
+    }
+
+    .ns-bad {
+      background: var(--bad-soft);
+      border-color: var(--bad);
+    }
+
+    .ns-wait {
+      background: var(--accent-soft);
+      border-color: var(--accent);
+    }
+
+    /* FAQ */
+    details.faq {
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      margin-bottom: 10px;
+      background: #fff;
+      overflow: hidden;
+    }
+
+    details.faq summary {
+      cursor: pointer;
+      padding: 14px 16px;
+      font-weight: 600;
+      font-size: 14.5px;
+      list-style: none;
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      align-items: center;
+    }
+
+    details.faq summary::-webkit-details-marker {
+      display: none;
+    }
+
+    details.faq summary .q {
+      font-family: var(--mono);
+      font-size: 11px;
+      color: var(--accent);
+      flex: 0 0 auto;
+    }
+
+    details.faq summary .chev {
+      transition: transform .2s;
+      color: var(--text-3);
+      flex: 0 0 auto;
+      font-size: 13px;
+    }
+
+    details.faq[open] summary .chev {
+      transform: rotate(90deg);
+    }
+
+    details.faq .ans {
+      padding: 0 16px 16px;
+      font-size: 14px;
+      color: var(--text-2);
+    }
+
+    details.faq .ans p {
+      margin: 0 0 10px;
+    }
+
+    details.faq .ans p:last-child {
+      margin: 0;
+    }
+
+    .trap {
+      display: flex;
+      gap: 10px;
+      font-size: 14px;
+      margin: 9px 0;
+    }
+
+    .trap .tn {
+      font-family: var(--mono);
+      font-size: 11px;
+      color: var(--bad);
+      flex: 0 0 auto;
+      border: 1px solid var(--bad-soft);
+      background: var(--bad-soft);
+      border-radius: 4px;
+      padding: 1px 6px;
+      height: fit-content;
+      margin-top: 2px;
+    }
+
+    /* mobile responsive */
+    .toc-toggle {
+      display: none;
+    }
+
+    @media (max-width: 920px) {
+      .wrap {
+        flex-direction: column;
+      }
+      .toc {
+        position: static;
+        width: auto;
+        height: auto;
+        border-right: none;
+        border-bottom: 1px solid var(--border);
+        padding: 18px 22px;
+        transition: none;
+      }
+      .toc-title {
+        margin-bottom: 0;
+      }
+      .toc-actions {
+        margin: 10px 0 0;
+      }
+      .toc-kicker {
+        margin-bottom: 10px;
+      }
+      .toc-nav {
+        display: none;
+        margin-top: 16px;
+      }
+      .toc-nav.open {
+        display: block;
+      }
+      .toc-toggle {
+        display: inline-block;
+        margin-top: 0;
+      }
+      .toc-collapse,
+      .toc-reopen {
+        display: none !important;
+      }
+      main {
+        padding: 0 22px;
+      }
+      .inner {
+        padding: 40px 0 100px;
+      }
+      .hero h1 {
+        font-size: 31px;
+      }
+    }
+
+    @media print {
+      .toc-reopen { display: none !important; }
+    }
+
+    @media (max-width: 480px) {
+      body {
+        font-size: 15px;
+      }
+      .hero h1 {
+        font-size: 27px;
+      }
+      h2 {
+        font-size: 23px;
+      }
+      .demo-body {
+        padding: 16px 13px;
+      }
+    }
+  </style>
+</head>
+<body data-topic-id="database-connection-pooling">
+  <div class="wrap">
+    <!-- ===================== TOC SIDEBAR ===================== -->
+    <nav class="toc" id="toc-panel" aria-label="目錄">
+      <div class="toc-kicker">
+        <a href="../index.html">← 返回目錄</a>
+        <button class="toc-collapse" type="button" aria-expanded="true" aria-controls="toc-panel"
+                aria-label="收合目錄" title="收合目錄">
+          <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor"
+               stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M15 18l-6-6 6-6"/>
+          </svg>
+        </button>
+      </div>
+      <div class="toc-title">資料庫連線池 (Connection Pooling / PgBouncer)</div>
+      <div class="toc-actions">
+        <button class="read-toggle" type="button" data-read-toggle aria-pressed="false" title="切換本文已讀狀態">
+          <span class="read-dot" aria-hidden="true"></span>
+          <span class="read-label">標記為已讀</span>
+        </button>
+        <button class="btn toc-toggle" type="button" aria-expanded="false" aria-controls="toc-nav">目錄 ▾</button>
+      </div>
+      <div class="toc-nav" id="toc-nav">
+        <a href="#s1"><span class="n">01</span>連線為什麼昂貴：從網路交握到後端行程模型</a>
+        <a href="#s2"><span class="n">02</span>Pool 開多大才對：核心競爭、I/O 比值與倒 U 曲線</a>
+        <a href="#s3"><span class="n">03</span>互動模擬：連線池容量、等待佇列與核心顛簸拐點</a>
+        <a href="#s4"><span class="n">04</span>雙層分工：應用端連線池與外部 Pooler（PgBouncer）</a>
+        <a href="#s5"><span class="n">05</span>Session、Transaction 與 Statement 三種 Pooling 模式</a>
+        <a href="#s6"><span class="n">06</span>逾時、閒置回收與連線洩漏的生產診斷</a>
+        <a href="#s7"><span class="n">07</span>實戰配置座標與高頻面試追問</a>
+      </div>
+    </nav>
+    <button class="btn toc-reopen" type="button" aria-expanded="true" aria-controls="toc-panel"
+            aria-label="展開目錄" title="展開目錄">
+      <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor"
+           stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M9 18l6-6-6-6"/>
+      </svg>
+      <span>目錄</span>
+    </button>
+
+    <!-- ===================== MAIN CONTENT ===================== -->
+    <main>
+      <div class="inner">
+        <!-- demo-archetype: B｜參數掃描（主，第 3 節）＋C｜並排對照（次，第 5 節） —
+     主 demo 讓讀者調整請求到達率、純查詢耗時、I/O 型態、連線池大小與資料庫核心數，即時重算單筆查詢競爭懲罰、最大吞吐倒 U 曲線、等待佇列深度與逾時拒絕率。選 B 是因為「Pool 開多大才對」的本質是排隊論與核心競爭的非線性參數轉折。
+     次 demo 將同一組含交易耗時、閒置思考間隔與狀態指令的用戶端工作負載，同時餵給 Session、Transaction、Statement 三種 Pooling 模式，並排算出後端連線需求、多工壓縮倍率與相容性判定。 -->
+<style>
+  /* 圖表 1：雙層連線池線性拓樸（節點與邊分離，見 style-guide §2） */
+  .dcp-arch-row {
+    display: flex; flex-wrap: wrap; gap: 10px;
+    align-items: stretch; justify-content: center;
+    margin: 14px 0 0;
+  }
+  .dcp-node {
+    border: 1px solid var(--border-strong); border-radius: 8px;
+    background: #fff; padding: 10px 13px;
+    min-width: 120px; max-width: 195px; text-align: center;
+  }
+  .dcp-node .nn { font-family: var(--mono); font-size: 12px; font-weight: 700; color: var(--text); }
+  .dcp-node .ns { font-size: 11.5px; color: var(--text-2); margin-top: 4px; line-height: 1.45; }
+  .dcp-node.accent { border-top: 3px solid var(--accent); }
+  .dcp-node.ok     { border-top: 3px solid var(--ok); }
+  .dcp-node.warn   { border-top: 3px solid var(--warn); }
+  .dcp-node.bad    { border-top: 3px solid var(--bad); }
+  .dcp-arrow {
+    display: flex; align-items: center;
+    font-family: var(--mono); font-size: 12.5px; color: var(--text-3);
+    white-space: nowrap;
+  }
+
+  /* 圖表 2：連線洩漏骨牌效應 Swimlane（純 CSS grid，不折行） */
+  .dcp-leak-lane {
+    display: grid; grid-template-columns: 52px repeat(4, minmax(0, 1fr)); gap: 1px;
+    background: var(--border); border: 1px solid var(--border);
+    border-radius: 8px; overflow: hidden; margin: 14px 0 0;
+  }
+  .dcp-leak-lane > div { background: #fff; padding: 8px 10px; font-size: 12px; line-height: 1.5; }
+  .dcp-leak-lane .lh {
+    background: var(--bg-soft); font-family: var(--mono); font-size: 11px;
+    font-weight: 700; color: var(--text-2);
+  }
+  .dcp-leak-lane .lt {
+    background: var(--bg-soft); font-family: var(--mono); font-size: 11px; color: var(--text-3);
+  }
+  .dcp-leak-lane .lc.act  { background: var(--accent-soft); }
+  .dcp-leak-lane .lc.warn { background: var(--warn-soft); }
+  .dcp-leak-lane .lc.ok   { background: var(--ok-soft); }
+  .dcp-leak-lane .lc.bad  { background: var(--bad-soft); }
+  @media (max-width: 720px) {
+    .dcp-leak-lane { grid-template-columns: 42px repeat(4, minmax(0, 1fr)); font-size: 11px; }
+    .dcp-leak-lane > div { padding: 6px 7px; }
+  }
+
+  /* Demo 共用控制項列與滑桿網格 */
+  .dcp-toolbar {
+    display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between;
+    gap: 10px; margin-bottom: 14px;
+  }
+  .dcp-toolbar-group {
+    display: flex; flex-wrap: wrap; align-items: center; gap: 8px;
+  }
+  .dcp-toolbar-lbl {
+    font-size: 12.5px; font-weight: 600; color: var(--text-2);
+  }
+  .dcp-knobs {
+    display: grid; grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 12px 18px; margin-bottom: 16px;
+  }
+  .dcp-knobs.tri {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+  @media (max-width: 680px) {
+    .dcp-knobs, .dcp-knobs.tri { grid-template-columns: 1fr; }
+  }
+  .dcp-knob {
+    display: flex; flex-direction: column; gap: 5px;
+    background: var(--bg-soft); border: 1px solid var(--border);
+    border-radius: var(--radius-sm); padding: 9px 12px;
+  }
+  .dcp-knob-top {
+    display: flex; align-items: baseline; justify-content: space-between; gap: 8px;
+  }
+  .dcp-knob-name { font-size: 12.5px; font-weight: 600; color: var(--text); }
+  .dcp-knob-val  { font-family: var(--mono); font-size: 12.5px; font-weight: 600; color: var(--accent); }
+  .dcp-knob input[type="range"] {
+    width: 100%; accent-color: var(--accent); cursor: pointer;
+  }
+  .dcp-knob-hint { font-size: 11px; color: var(--text-3); line-height: 1.35; }
+
+  /* Demo 1：倒 U 型容量曲線 SVG 畫布與六格計算讀數 */
+  .dcp-plot {
+    border: 1px solid var(--border); border-radius: var(--radius-sm);
+    background: #ffffff; padding: 10px 12px 6px; margin-bottom: 14px;
+  }
+  .dcp-plot svg { width: 100%; height: auto; display: block; }
+  .dcp-kpis {
+    display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px;
+  }
+  @media (max-width: 680px) {
+    .dcp-kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  }
+  .dcp-kpi {
+    border: 1px solid var(--border); border-top: 3px solid var(--border-strong);
+    border-radius: var(--radius-sm); background: #fff; padding: 10px 12px;
+  }
+  .dcp-kpi.ok     { border-top-color: var(--ok); background: var(--ok-soft); }
+  .dcp-kpi.warn   { border-top-color: var(--warn); background: var(--warn-soft); }
+  .dcp-kpi.bad    { border-top-color: var(--bad); background: var(--bad-soft); }
+  .dcp-kpi.accent { border-top-color: var(--accent); background: var(--accent-soft); }
+  .dcp-kpi-k { font-size: 11.5px; color: var(--text-2); margin-bottom: 3px; }
+  .dcp-kpi-v { font-family: var(--mono); font-size: 16px; font-weight: 700; color: var(--text); line-height: 1.25; }
+  .dcp-kpi-s { font-size: 11px; color: var(--text-2); margin-top: 3px; line-height: 1.35; }
+
+  /* Demo 2：三種 Pooling 模式並排對照卡 */
+  .dcp-cards {
+    display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px;
+  }
+  @media (max-width: 740px) {
+    .dcp-cards { grid-template-columns: 1fr; }
+  }
+  .dcp-card {
+    border: 1px solid var(--border-strong); border-top: 3px solid var(--border-strong);
+    border-radius: var(--radius-sm); background: #fff; padding: 13px 14px;
+    display: flex; flex-direction: column; gap: 9px;
+  }
+  .dcp-card.ok   { border-top-color: var(--ok); }
+  .dcp-card.warn { border-top-color: var(--warn); }
+  .dcp-card.bad  { border-top-color: var(--bad); }
+  .dcp-card-head {
+    display: flex; align-items: baseline; justify-content: space-between; gap: 6px;
+  }
+  .dcp-card-title { font-family: var(--mono); font-size: 13.5px; font-weight: 700; color: var(--text); }
+  .dcp-compat-tag {
+    font-family: var(--mono); font-size: 11px; padding: 2px 7px; border-radius: 999px;
+    border: 1px solid var(--border-strong); background: var(--bg-soft); color: var(--text-2);
+  }
+  .dcp-compat-tag.ok   { background: var(--ok-soft); border-color: var(--ok); color: var(--ok); }
+  .dcp-compat-tag.warn { background: var(--warn-soft); border-color: var(--warn); color: var(--warn); }
+  .dcp-compat-tag.bad  { background: var(--bad-soft); border-color: var(--bad); color: var(--bad); }
+  .dcp-big-num {
+    font-family: var(--mono); font-size: 21px; font-weight: 700; color: var(--text); line-height: 1.2;
+  }
+  .dcp-big-num small { font-size: 11.5px; font-weight: 400; color: var(--text-2); margin-left: 4px; }
+  .dcp-meter-track {
+    height: 8px; border-radius: 999px; background: var(--bg-soft);
+    border: 1px solid var(--border); overflow: hidden;
+  }
+  .dcp-meter-fill {
+    height: 100%; border-radius: 999px; background: var(--accent);
+    transition: width .16s ease;
+  }
+  .dcp-meter-fill.ok   { background: var(--ok); }
+  .dcp-meter-fill.warn { background: var(--warn); }
+  .dcp-meter-fill.bad  { background: var(--bad); }
+  .dcp-kv-list {
+    display: flex; flex-direction: column; gap: 5px;
+    border-top: 1px solid var(--border); padding-top: 8px; font-size: 12px;
+  }
+  .dcp-kv-item {
+    display: flex; justify-content: space-between; gap: 8px; color: var(--text-2);
+  }
+  .dcp-kv-item b { font-family: var(--mono); font-weight: 600; color: var(--text); }
+  .dcp-card-note {
+    font-size: 12px; color: var(--text-2); line-height: 1.5;
+    background: var(--bg-soft); border-radius: 6px; padding: 8px 9px; margin-top: auto;
+  }
+  [hidden] { display: none !important; }
+</style>
+
+<header class="hero">
+  <div class="eyebrow">Database Internals · 系統設計手冊</div>
+  <h1>資料庫連線池：為什麼連線昂貴，以及 Pool 開多大才對</h1>
+  <p class="lede">把連線池從 20 調大到 200，為什麼反而讓資料庫 CPU 衝上 100%、吞吐量腰斬？這份手冊從一條連線背後的網路交握與作業系統行程成本出發，推導連線池大小的倒 U 型轉折點、應用端連線池與 PgBouncer 的雙層分工，以及 Transaction Pooling 在協定層埋下的狀態相容性陷阱。</p>
+  <div class="meta">
+    <span class="tag">Connection Pool</span>
+    <span class="tag">PgBouncer</span>
+    <span class="tag">HikariCP</span>
+    <span class="tag">Multiplexing</span>
+    <span class="tag">Database Internals</span>
+  </div>
+</header>
+
+<section id="s1">
+  <div class="sec-head">
+    <span class="sec-num">01</span>
+    <h2>連線為什麼昂貴：從網路交握到後端行程模型</h2>
+  </div>
+  <p class="sec-sub">拆解每次新建連線背後的四層固定稅金，以及 PostgreSQL 一條連線一個行程的記憶體與快照代價。</p>
+  <p>在開發環境跑腳本時，「收到請求 → 連上資料庫 → 跑一條主鍵查詢 → 關掉連線」看起來再自然不過。但只要放到每秒上千次請求的線上服務，一條原本在 B+Tree 上只需 <strong>0.8 ms</strong> 就能命中的查詢，若每次都重新建連，端到端延遲往往直接暴漲 <strong>15 到 40 倍</strong>，同時把資料庫的 CPU 燒在跟 SQL 無關的前置工作上。</p>
+
+  <h3>新建一條資料庫連線，到底付了哪四筆稅？</h3>
+  <p>從應用程式呼叫 <code>connect()</code> 到真正能送出第一條 <code>SELECT</code>，中間必須依序跨過網路層、加密層、認證層與資料庫核心初始化四道關卡：</p>
+
+  <ol>
+    <li><strong>1. TCP 三向交握（1 RTT + 核心 Socket 配置）</strong>：同可用區（Same-AZ）約 0.3–0.8 ms，跨可用區（Cross-AZ）約 1–2 ms；雙方作業系統還得配置 socket buffer 與連線追蹤表項（conntrack）。</li>
+    <li><strong>2. TLS 交握（1–2 RTT + 非對稱密碼學運算）</strong>：雲端合規環境普遍強制加密連線，TLS 1.3 即使省到 1-RTT，ECDHE 金鑰交換與憑證簽章驗證仍會消耗可觀的雙方 CPU。</li>
+    <li><strong>3. 資料庫身分認證與雜湊迭代（1–2 RTT + 刻意增重的 CPU 成本）</strong>：PostgreSQL 預設採用的 <code>SCRAM-SHA-256</code> 為了防禦離線暴力破解，預設跑 <strong>4,096 次 SHA-256 迭代</strong>；MySQL 的 <code>caching_sha2_password</code> 若未命中快取也需走 RSA 公鑰交換。這意味著頻繁新建連線會直接把認證演算法變成資料庫的 CPU 熱點。</li>
+    <li><strong>4. 後端執行單元孵化與本地快取冷啟動</strong>：認證通過後，資料庫必須為這條連線分配獨立的行程或執行緒，並在第一次查詢時從系統表載入資料表與型別定義（Catalog Cache），還沒算業務查詢就先觸發數十次內部記憶體配置。</li>
+  </ol>
+
+  <pre class="mermaid">
+sequenceDiagram
+    participant A as App 執行緒
+    participant P as 連線池
+    participant M as Postmaster
+    participant B as Backend 行程
+    rect rgb(246, 240, 231)
+    Note over A,B: 無連線池：每次查詢重走建連全鏈路
+    A->>M: TCP SYN + TLS 1.3 交握
+    A->>M: SCRAM-SHA-256 認證往返
+    M->>B: fork() 新行程 + 初始化快取
+    A->>B: SELECT ... (0.8 ms)
+    B-->>A: 查詢結果 + 斷線回收
+    end
+    rect rgb(238, 244, 241)
+    Note over A,B: 有連線池：直接借用熱連線
+    A->>P: borrow() 記憶體內取連
+    A->>B: SELECT ... (0.8 ms)
+    B-->>A: 查詢結果
+    A->>P: release() 歸還待命
+    end
+  </pre>
+  <p class="cap">無連線池時，0.8 ms 的查詢前面墊了至少 3 次網路 RTT、密碼學雜湊與作業系統 fork()；連線池把上半段一次性攤提掉，熱路徑只剩純 SQL 往返。</p>
+
+  <h3>為什麼 PostgreSQL 對「連線數過多」比 MySQL 更敏感？</h3>
+  <p>不同關聯式資料庫對「一條連線」的底層執行模型截然不同，這直接決定了它們能承受的閒置與活躍連線上限：</p>
+
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>比較維度</th>
+          <th>PostgreSQL（Process-per-connection）</th>
+          <th>MySQL InnoDB（Thread-per-connection）</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><strong>執行單元</strong></td>
+          <td class="hl">每條連線由 <code>postmaster</code> <code>fork()</code> 出一個獨立 OS 行程</td>
+          <td>在單一 <code>mysqld</code> 行程內，每條連線對應一個 OS 執行緒</td>
+        </tr>
+        <tr>
+          <td><strong>單條連線常駐記憶體</strong></td>
+          <td class="hl">約 <strong>5–15 MB RSS</strong>（視觸碰過多少張表使 <code>relcache</code> / <code>catcache</code> 膨脹而定，另加獨立 <code>work_mem</code>）</td>
+          <td>約 <strong>256 KB–2 MB</strong>（執行緒堆疊 + 連線緩衝區，Catalog 與 Buffer Pool 全域共用）</td>
+        </tr>
+        <tr>
+          <td><strong>閒置連線的隱形成本</strong></td>
+          <td class="hl">極高：每次產生交易快照 <code>GetSnapshotData()</code> 都需掃描全體連線組成的 <code>ProcArray</code>，連線槽位越多快照鎖競爭越重</td>
+          <td>中低：閒置執行緒主要佔記憶體，但大量轉為活躍時仍會撞上內部 Mutex 與排程切換</td>
+        </tr>
+        <tr>
+          <td><strong>故障隔離性</strong></td>
+          <td>單一後端行程崩潰較易隔離，但若觸發共享記憶體保護仍會重啟實例</td>
+          <td>單一執行緒若發生記憶體越界，整個 <code>mysqld</code> 行程直接崩潰</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="cap">PostgreSQL 的一條連線就是一個真實作業系統行程與獨立系統表快取：開 1,000 條連線光空載就可能吃掉近 10 GB 記憶體，並拖慢全庫的 MVCC 快照取得。</p>
+
+  <div class="callout accent">
+    <div class="c-title"><span class="ic">關鍵</span>連線池省下的不只是「建連延遲」，更是「後端常駐足跡」</div>
+    <p>許多團隊以為只要應用端設了長連線（Keep-Alive），不反覆斷開重連就算解決問題。但在微服務架構下，真正壓垮資料庫的往往不是每秒新建幾條連線，而是數百個容器各自抱著幾十條「看似無害的長連線」不放，把資料庫推入記憶體耗盡與快照掃描退化的深淵。</p>
+  </div>
+
+  <div class="oneliner">
+    <b>一句話答法</b>新建資料庫連線需付出 TCP、TLS、密碼學認證（如 SCRAM-SHA-256）與後端行程或執行緒初始化四層固定成本；尤其 PostgreSQL 採用一連線一行程模型，連線過多不僅燒掉數 GB 獨立快取記憶體，還會放大 ProcArray 快照掃描與排程切換開銷。
+  </div>
+</section>
+
+<hr class="div">
+
+<section id="s2">
+  <div class="sec-head">
+    <span class="sec-num">02</span>
+    <h2>Pool 開多大才對：核心競爭、I/O 比值與倒 U 曲線</h2>
+  </div>
+  <p class="sec-sub">為什麼連線池不是越大越好？用排隊論與 Context Switch 物理學找出吞吐量的轉折點。</p>
+  <p>線上發生「等待資料庫連線逾時」告警時，最常見的反射動作就是把設定檔裡的 <code>maximumPoolSize</code> 從 <code>20</code> 改成 <code>200</code>。結果重新部署後，應用程式確實不再卡在本地連線池，但資料庫的 CPU 卻瞬間釘死在 100%，單筆 SQL 耗時從 4 ms 暴漲到 90 ms，整體系統每秒完成的交易數（TPS）反而<strong>跌剩不到原本的一半</strong>。</p>
+
+  <h3>為什麼活躍連線超過核心數後，吞吐量會出現「倒 U 型崩跌」？</h3>
+  <p>一顆 CPU 核心在同一奈秒只能執行一條指令流。當資料庫有 <var>C_cpu</var> 顆可用核心，卻同時湧入遠超核心數的活躍查詢行程時，系統不會變快，而是把算力浪費在三種內部摩擦（Retrograde Contention）上：</p>
+
+  <ul>
+    <li><strong>作業系統排程切換與 CPU 快取失溫</strong>：Linux 排程器被迫每幾毫秒就在上百個 <code>postgres</code> 行程間做 Context Switch。每次切換不僅耗費數微秒保存暫存器，更致命的是把前一個查詢剛預熱好的 L1/L2 指令與資料快取、TLB 頁表快取全部沖掉。</li>
+    <li><strong>資料庫內部輕量鎖（Spinlock / LWLock）自旋風暴</strong>：所有連線共享同一塊 Buffer Pool、WAL 寫入緩衝區與 Lock Manager 雜湊表。當 200 個行程同時爭搶同一個 Buffer Mapping 分區鎖或 WAL Insert Lock，沒搶到的行程會在 CPU 上空轉自旋（Spinning）或頻繁休眠喚醒，產生「越忙越做不了正事」的協調稅。</li>
+    <li><strong>磁碟佇列深度過載</strong>：即使底層是 NVMe SSD，超出控制器最佳並列度後的隨機讀取也只會拉長每次 Page Read 的尾端延遲（P99 Latency）。</li>
+  </ul>
+
+  <h3>怎麼估算最佳連線池大小？兩條經典公式與適用邊界</h3>
+  <p>從純計算與 I/O 等待的時間拆解出發，若單筆查詢在資料庫伺服器上平均花費純 CPU 時間 <var>T_cpu</var>，以及等待磁碟或同步複寫的阻塞時間 <var>T_io</var>，理論上能把 CPU 餵飽又不造成無謂排程競爭的同時活躍連線數 <var>N_opt</var> 為：</p>
+
+  <div class="formula">N_opt = core_count * (1 + T_io / T_cpu)</div>
+
+  <p>這也是為什麼 PostgreSQL 社群與 HikariCP 官方壓測最終收斂出那條著名的經驗公式：</p>
+
+  <div class="formula">connections = (core_count * 2) + effective_spindle_count</div>
+
+  <p>許多工程師第一次看到這條公式都會難以置信：<strong>一台 8 vCPU、掛載高速 SSD 的生產資料庫，最佳同時活躍連線數居然只有 16 到 24 條？</strong>關鍵在於現代資料庫有高達 95%–99% 的熱資料都命中記憶體內的 Shared Buffers（此時 <var>T_io</var> 趨近於 0），即使落盤到 NVMe SSD，單次讀取也僅 0.1–0.3 ms。<var>T_io / T_cpu</var> 的比值其實很小，因此略大於核心數 2 倍的連線數就足以在某個行程等待 I/O 的空檔把 CPU 填滿。</p>
+
+  <h3>排隊不會消失，但「在哪裡排隊」決定生死</h3>
+  <p>有人會問：「可是我的服務高峰期每秒有 3,000 個請求，池子只開 20 條怎麼夠用？」請把「併發請求數」與「連線池大小」脫鉤，用排隊論的 Little 定律算一筆帳：</p>
+
+  <div class="formula">L = λ * W</div>
+
+  <p>若單筆查詢耗時 <var>W</var> 為 <code>4 ms</code>（即 <code>0.004 秒</code>），那麼<strong>單條連線每秒就能順序跑完 250 筆查詢</strong>；20 條無競爭、火力全開的連線，理論最大吞吐高達 <code>20 * 250 = 5,000 QPS</code>！當瞬間突發流量超過 5,000 QPS 時，多出來的請求確實必須排隊，但你有兩個選擇：</p>
+  <ul>
+    <li><strong>正確做法（小連線池 + 應用端記憶體排隊）</strong>：讓那 20 條資料庫連線維持零競爭的極速（4 ms 跑完一筆），第 21 個請求在應用程式記憶體內的 Lock-free 佇列裡安靜等 1–2 ms 就拿到剛釋放的連線。</li>
+    <li><strong>災難做法（開 300 條連線把排隊塞進資料庫）</strong>：所有請求都立刻拿到連線衝進 DB，結果鎖競爭與快取失溫讓每筆查詢從 4 ms 退化到 80 ms，單機最大吞吐崩跌到只剩 1,200 QPS，全站雪崩。</li>
+  </ul>
+
+  <div class="callout warn">
+    <div class="c-title"><span class="ic">陷阱</span>在交易或持連期間呼叫外部 API，會直接摧毀上述公式</div>
+    <p>上述「20 條連線撐起數千 QPS」的前提，是借出連線後<strong>只做純資料庫操作就立刻歸還</strong>。若程式碼在 <code>@Transactional</code> 區塊內夾帶一個耗時 300 ms 的第三方支付 HTTP 呼叫或對象儲存上傳，單次持連時間瞬間從 4 ms 暴增 75 倍到 304 ms——這條連線在其中 300 ms 對資料庫毫無貢獻，卻死死霸佔一個槽位，20 條連線每秒最多只能處理 65 筆請求，連線池會在幾秒內被徹底抽乾。</p>
+  </div>
+
+  <div class="oneliner">
+    <b>一句話答法</b>連線池的作用不是「放大併發」，而是把進入資料庫的同時活躍查詢「限流」在 CPU 核心與 I/O 最有效率的甜蜜點（通常約為核心數的 2 到 3 倍），讓超額突發流量留在輕量的記憶體佇列排隊，避免資料庫陷入 Context Switch 與內部鎖自旋的倒 U 型吞吐崩跌。
+  </div>
+</section>
+
+<hr class="div">
+
+<section id="s3">
+  <div class="sec-head">
+    <span class="sec-num">03</span>
+    <h2>互動模擬：連線池容量、等待佇列與核心顛簸拐點</h2>
+  </div>
+  <p class="sec-sub">拖動請求到達率、查詢耗時、Pool 大小與資料庫核心數，即時觀察倒 U 型容量曲線與排隊延遲。</p>
+  <p>下面的模擬器把「請求到達率」「無競爭查詢耗時」「連線池大小」與「資料庫可用核心數」放進同一個排隊與核心競爭模型。試著先把到達率拉到 <strong>2,400 req/s</strong>，再把連線池從 <strong>10</strong> 一路拖向 <strong>160</strong>：你會親眼看到吞吐能力先爬升越過需求線，接著在超過甜蜜點後因鎖自旋與 Context Switch 懲罰而向下彎折，重新跌破需求線並引爆排隊逾時。</p>
+
+  <div class="demo" id="demo-pool-sizing">
+    <div class="demo-bar">
+      <span class="label">互動 · 連線池容量與倒 U 型吞吐模擬器</span>
+      <span class="label" style="text-transform:none;font-family:var(--sans);font-size:12px;color:var(--text-2)">拖動滑桿改變負載與 Pool 大小，觀察最佳甜蜜點與顛簸拐點</span>
+    </div>
+    <div class="demo-body">
+      <div class="dcp-toolbar">
+        <div class="dcp-toolbar-group">
+          <span class="dcp-toolbar-lbl">查詢負載型態</span>
+          <div class="seg" id="dcp-sz-seg" role="group" aria-label="查詢負載型態">
+            <button type="button" data-workload="ram" aria-pressed="true">熱快取 CPU 密集（Buffer Hit 99%）</button>
+            <button type="button" data-workload="ssd" aria-pressed="false">NVMe 混合 I/O（含磁碟讀取等待）</button>
+          </div>
+        </div>
+        <button type="button" class="btn" id="dcp-sz-reset">重置參數</button>
+      </div>
+
+      <div class="dcp-knobs">
+        <label class="dcp-knob" for="dcp-rps">
+          <span class="dcp-knob-top">
+            <span class="dcp-knob-name">請求到達率 λ</span>
+            <span class="dcp-knob-val" id="dcp-rps-val">1800 req/s</span>
+          </span>
+          <input type="range" id="dcp-rps" min="200" max="4000" step="100" value="1800">
+          <span class="dcp-knob-hint">應用層每秒湧入的查詢請求總量</span>
+        </label>
+
+        <label class="dcp-knob" for="dcp-qms">
+          <span class="dcp-knob-top">
+            <span class="dcp-knob-name">無競爭純查詢耗時</span>
+            <span class="dcp-knob-val" id="dcp-qms-val">6 ms</span>
+          </span>
+          <input type="range" id="dcp-qms" min="2" max="30" step="1" value="6">
+          <span class="dcp-knob-hint">零排程摩擦下單筆 SQL 的基準執行時間</span>
+        </label>
+
+        <label class="dcp-knob" for="dcp-pool">
+          <span class="dcp-knob-top">
+            <span class="dcp-knob-name">連線池上限 maxPoolSize</span>
+            <span class="dcp-knob-val" id="dcp-pool-val">20 條</span>
+          </span>
+          <input type="range" id="dcp-pool" min="4" max="160" step="2" value="20">
+          <span class="dcp-knob-hint">允許同時進入資料庫執行的最大連線槽位</span>
+        </label>
+
+        <label class="dcp-knob" for="dcp-cores">
+          <span class="dcp-knob-top">
+            <span class="dcp-knob-name">資料庫可用核心數</span>
+            <span class="dcp-knob-val" id="dcp-cores-val">8 vCPU</span>
+          </span>
+          <input type="range" id="dcp-cores" min="2" max="32" step="2" value="8">
+          <span class="dcp-knob-hint">決定排程並行上限與無競爭甜蜜點位置</span>
+        </label>
+      </div>
+
+      <div class="dcp-plot">
+        <svg id="dcp-curve-svg" viewBox="0 0 640 230" style="width:100%; height:auto" role="img" aria-labelledby="dcp-curve-title">
+          <title id="dcp-curve-title">連線池大小對最大吞吐能力之倒 U 型曲線圖</title>
+          <rect x="0" y="0" width="640" height="230" fill="#ffffff"></rect>
+          <g id="dcp-svg-grid"></g>
+          <line id="dcp-svg-demand" x1="56" y1="100" x2="616" y2="100" stroke="#a3743e" stroke-width="1.5" stroke-dasharray="5 4"></line>
+          <text id="dcp-svg-demand-lbl" x="612" y="94" text-anchor="end" font-family="JetBrains Mono, monospace" font-size="11" fill="#a3743e">需求 λ</text>
+          <line id="dcp-svg-opt-line" x1="120" y1="22" x2="120" y2="194" stroke="#4d7d68" stroke-width="1.2" stroke-dasharray="3 3"></line>
+          <path id="dcp-svg-curve" d="" fill="none" stroke="#3f6188" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"></path>
+          <circle id="dcp-svg-opt-dot" cx="120" cy="60" r="5" fill="#4d7d68" stroke="#ffffff" stroke-width="1.8"></circle>
+          <text id="dcp-svg-opt-lbl" x="126" y="34" font-family="JetBrains Mono, monospace" font-size="11" fill="#4d7d68">甜蜜點</text>
+          <circle id="dcp-svg-cur-dot" cx="140" cy="70" r="6.5" fill="#3f6188" stroke="#ffffff" stroke-width="2"></circle>
+          <text id="dcp-svg-cur-lbl" x="148" y="68" font-family="JetBrains Mono, monospace" font-size="11.5" font-weight="700" fill="#262a2f">目前配置</text>
+          <line x1="56" y1="194" x2="616" y2="194" stroke="#dedcd8" stroke-width="1.2"></line>
+          <line x1="56" y1="20" x2="56" y2="194" stroke="#dedcd8" stroke-width="1.2"></line>
+          <text x="336" y="222" text-anchor="middle" font-family="JetBrains Mono, monospace" font-size="11" fill="#6b7078">連線池大小 maxPoolSize（4 → 160 條）</text>
+        </svg>
+      </div>
+      <p class="cap">藍色實線為不同連線池大小下的最大服務吞吐（QPS），橘色虛線為目前請求到達率 λ；只有當藍線高於橘線時系統才不會持續積壓佇列。</p>
+
+      <div class="dcp-kpis">
+        <div class="dcp-kpi ok" id="dcp-kpi-opt-box">
+          <div class="dcp-kpi-k">理論甜蜜點 N_opt</div>
+          <div class="dcp-kpi-v" id="dcp-kpi-opt">18 條</div>
+          <div class="dcp-kpi-s" id="dcp-kpi-opt-sub">峰值吞吐可達 —</div>
+        </div>
+        <div class="dcp-kpi" id="dcp-kpi-eff-box">
+          <div class="dcp-kpi-k">競爭後單筆查詢耗時</div>
+          <div class="dcp-kpi-v" id="dcp-kpi-eff">6.2 ms</div>
+          <div class="dcp-kpi-s" id="dcp-kpi-eff-sub">排程與鎖摩擦 +0.2 ms</div>
+        </div>
+        <div class="dcp-kpi" id="dcp-kpi-cap-box">
+          <div class="dcp-kpi-k">目前池最大吞吐能力</div>
+          <div class="dcp-kpi-v" id="dcp-kpi-cap">3225 req/s</div>
+          <div class="dcp-kpi-s" id="dcp-kpi-cap-sub">核心飽和利用率 —</div>
+        </div>
+        <div class="dcp-kpi" id="dcp-kpi-wait-box">
+          <div class="dcp-kpi-k">取連排隊等待（平均）</div>
+          <div class="dcp-kpi-v" id="dcp-kpi-wait">0.8 ms</div>
+          <div class="dcp-kpi-s" id="dcp-kpi-wait-sub">記憶體等待佇列約 1 筆</div>
+        </div>
+        <div class="dcp-kpi" id="dcp-kpi-p99-box">
+          <div class="dcp-kpi-k">P99 端到端查詢延遲</div>
+          <div class="dcp-kpi-v" id="dcp-kpi-p99">14.5 ms</div>
+          <div class="dcp-kpi-s" id="dcp-kpi-p99-sub">取連等待 + 實際執行尾端</div>
+        </div>
+        <div class="dcp-kpi" id="dcp-kpi-drop-box">
+          <div class="dcp-kpi-k">connectionTimeout 拒絕</div>
+          <div class="dcp-kpi-v" id="dcp-kpi-drop">0 req/s</div>
+          <div class="dcp-kpi-s" id="dcp-kpi-drop-sub">有效完成吞吐 —</div>
+        </div>
+      </div>
+
+      <div class="status-line" id="dcp-sz-status">
+        載入模擬模型中…
+      </div>
+
+      <div class="legend">
+        <span><i class="dot ns-ok"></i>甜蜜平衡區（低競爭、佇列受控）</span>
+        <span><i class="dot ns-wait"></i>池偏小欠載（核心未吃滿但取連需排隊）</span>
+        <span><i class="dot ns-lock"></i>過度併發摩擦（Context Switch 吞噬延遲）</span>
+        <span><i class="dot ns-bad"></i>容量打穿或顛簸崩潰（觸發取連逾時拒絕）</span>
+      </div>
+    </div>
+  </div>
+</section>
+
+<hr class="div">
+
+<section id="s4">
+  <div class="sec-head">
+    <span class="sec-num">04</span>
+    <h2>雙層分工：應用端連線池與外部 Pooler（PgBouncer）</h2>
+  </div>
+  <p class="sec-sub">當微服務水平擴展把每台很小的本地池乘成上千條連線，外部多工器如何守住資料庫最後防線。</p>
+  <p>在單體架構時代，兩三台應用程式伺服器各自掛一個 <code>maximumPoolSize = 10</code> 的本地連線池（例如 JVM 的 HikariCP、Go 的 <code>sql.DB</code>、Node.js 的 <code>pg-pool</code>），資料庫總共只看到 20–30 條連線，天下太平。但當系統演進成 Kubernetes 微服務叢集，這套算術就會立刻破產。</p>
+
+  <h3>微服務乘法陷阱：每個 Pod 都很節制，加總卻把 DB 撐爆</h3>
+  <p>假設核心交易資料庫是 16 vCPU 的 PostgreSQL，依第 2 節公式，最佳同時活躍查詢約為 <code>32–40</code> 條，<code>max_connections</code> 設為 <code>200</code>。現在業務拆成 12 個微服務，大促期間自動擴容到每個服務 25 個 Pod（共 300 個 Pod）：</p>
+  <ul>
+    <li>就算你極度克制，把每個 Pod 的本地池縮到 <code>maxPoolSize = 8</code>，叢集對資料庫發起的常駐連線數仍是 <code>300 * 8 = 2,400</code> 條，直接撞破 <code>max_connections</code> 報出 <code>FATAL: sorry, too many clients already</code>。</li>
+    <li>反過來，如果你為了不撞上限而把每個 Pod 設成 <code>maxPoolSize = 1</code>，某個流量稍微傾斜的 Pod 只要同時進來 2 個請求就得排隊，而其他 299 個閒置 Pod 卻白白佔著連線不幹活——<strong>本地連線池無法跨行程共享閒置配額</strong>。</li>
+  </ul>
+  <p>（若是無狀態函式隨流量瞬間拉起上千個執行環境的極端連線風暴，以及託管式 RDS Proxy 的認證與權杖整合，詳見 <a href="../serverless-faas-deep-dive/index.html">Serverless / FaaS 篇</a>。）</p>
+
+  <div class="dcp-arch-row">
+    <div class="dcp-node">
+      <div class="nn">300 個 App Pods</div>
+      <div class="ns">各帶本地池 (HikariCP / sql.DB)<br>共 2,400 條前端長連線</div>
+    </div>
+    <span class="dcp-arrow">──TCP 借還──▸</span>
+    <div class="dcp-node accent">
+      <div class="nn">PgBouncer 層</div>
+      <div class="ns">事件驅動非同步多工器<br>每條前端連線僅佔 ~2 KB</div>
+    </div>
+    <span class="dcp-arrow">──收斂多工──▸</span>
+    <div class="dcp-node ok">
+      <div class="nn">PostgreSQL 主庫</div>
+      <div class="ns">default_pool_size = 36<br>維持零顛簸甜蜜點</div>
+    </div>
+  </div>
+  <p class="cap">外部 Pooler 扮演「連線漏斗」：對上承接數千條輕量前端連線，對下只維持數十條真正貼合資料庫 CPU 核心數的後端行程。</p>
+
+  <h3>既然有了 PgBouncer，應用程式還需要本地連線池嗎？</h3>
+  <p>答案是<strong>兩層都要留，因為它們解決的是完全不同層次的問題</strong>。若拔掉應用端本地池，改成每次查詢都對 PgBouncer 短連線新建與斷開，應用程式與 PgBouncer 之間依然要每筆查詢重跑一次 TCP 與 TLS 交握；留著本地池維持對 PgBouncer 的熱長連線，再由 PgBouncer 對後端資料庫做跨 Pod 多工，才是生產環境的標準雙層配置：</p>
+
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>職責維度</th>
+          <th>應用端連線池（HikariCP / pg-pool / sql.DB）</th>
+          <th>外部 Pooler（PgBouncer / Odyssey / ProxySQL）</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><strong>所在位置與視野</strong></td>
+          <td>嵌在單一應用程式行程內，只看得到該 Pod 自己的執行緒需求</td>
+          <td class="hl">獨立代理層，擁有全叢集所有服務與 Pod 的全域連線視野</td>
+        </tr>
+        <tr>
+          <td><strong>核心解決痛點</strong></td>
+          <td>省去 App 到代理層的建連 RTT、提供執行緒安全的阻塞借用佇列、追蹤未歸還連線的程式碼呼叫堆疊</td>
+          <td class="hl">把數千條大多數時間閒置的前端連線，多工壓縮成數十條後端 DB 實體連線，硬性保護 DB 記憶體與核心</td>
+        </tr>
+        <tr>
+          <td><strong>運維與容災附加能力</strong></td>
+          <td>健康探測（<code>SELECT 1</code> / JDBC <code>isValid</code>）、依 <code>maxLifetime</code> 平滑輪替老舊連線</td>
+          <td class="hl">支援 <code>PAUSE</code> / <code>RESUME</code> 與線上重指派目標主庫，在主從切換或極短暫重啟期間暫存前端請求而不立刻報錯</td>
+        </tr>
+        <tr>
+          <td><strong>典型代表工具</strong></td>
+          <td>Java HikariCP、Go <code>database/sql</code> + <code>pgxpool</code>、Rust <code>bb8</code> / <code>deadpool</code></td>
+          <td>PostgreSQL 生態：PgBouncer、Odyssey、PgCat；MySQL 生態：ProxySQL、Vitess VTGate</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="cap">本地池消滅「新建連線的網路延遲」，外部 Pooler 消滅「微服務實例數乘出來的後端行程膨脹」，兩者互不替代。</p>
+
+  <h3>外部 Pooler 擺在哪裡？三種部署拓樸的權衡</h3>
+  <ul>
+    <li><strong>獨立集中式代理叢集（Centralized Pooler Deployment）</strong>：最常見做法。多台無狀態 PgBouncer 掛在內部負載平衡器後，或由客戶端設定多組位址連線。優點是能在全域精確控管總後端連線上限（例如 3 台 PgBouncer 各配 <code>default_pool_size = 12</code>，主庫保證不超過 36 條）；缺點是多一跳網路 RTT（同可用區約 0.2–0.4 ms）。</li>
+    <li><strong>App Pod Sidecar 模式</strong>：每個業務 Pod 旁掛一個 PgBouncer 容器走 <code>localhost</code> Unix Domain Socket，零額外網路跳數，特別適合單 Pod 內有多個 worker 行程（如 Python Gunicorn / PHP-FPM）的語言；但因為每個 Pod 各自一顆 Sidecar，若 Pod 數極多仍可能讓各 Sidecar 至少保底 1 條連線而撐大總數。</li>
+    <li><strong>與資料庫同機部署（Co-located on DB Host）</strong>：直接跑在資料庫主機上透過 Unix Socket 連 <code>postgres</code>，全域配額最精準且省去後端網路棧開銷。需注意傳統 PgBouncer 為單執行緒事件迴圈（<code>libevent</code>），高 TLS 卸載或數萬 QPS 時單核會先滿載，實務上常開啟 <code>so_reuseport = 1</code> 啟動多個 PgBouncer 行程分攤單機負載，或採用原生多執行緒的 Odyssey / PgCat。</li>
+  </ul>
+
+  <div class="oneliner">
+    <b>一句話答法</b>應用端連線池負責省掉「單一容器內的建連開銷與執行緒排隊」，外部 Pooler（如 PgBouncer）則負責把「幾百個微服務容器乘出來的數千條閒置長連線」多工收斂成資料庫 CPU 最舒服的幾十條後端連線，兩者搭配才能同時兼顧微服務彈性擴縮與資料庫穩定性。
+  </div>
+</section>
+
+<hr class="div">
+
+<section id="s5">
+  <div class="sec-head">
+    <span class="sec-num">05</span>
+    <h2>Session、Transaction 與 Statement 三種 Pooling 模式</h2>
+  </div>
+  <p class="sec-sub">外部 Pooler 何時能把後端連線轉借別人？拆解多工壓縮率與 Prepared Statement、Session 變數的破壞邊界。</p>
+  <p>外部 Pooler 之所以能把 2,000 條前端連線壓縮成 30 條後端連線，秘密只有一個：<strong>趁前端不跑 SQL 的空檔，偷偷把後端連線拔下來借給別人用</strong>。但問題來了——關聯式資料庫的連線並不是純無狀態的 HTTP 管線，它身上掛著 Session 變數、預編譯語句（Prepared Statements）、暫存表與鎖。<strong>Pooler 在哪一個時間邊界切換連線，直接決定了你能拿到幾倍壓縮率，以及會弄壞哪些資料庫功能。</strong></p>
+
+  <h3>三種 Pooling 模式的借還邊界</h3>
+  <ol>
+    <li><strong>Session Pooling（工作階段級）</strong>：客戶端建立 TCP 連線時配發一條後端 <code>postgres</code> 連線，直到客戶端主動斷開 TCP 才收回。所有依賴連線狀態的功能 100% 正常運作；但<strong>當上游應用程式本身也開著長連線池時，Session 模式等於 1 對 1 死綁，多工壓縮率是 1.0x</strong>，只剩下幫忙擋 <code>max_connections</code> 排隊與省去後端建連的功能。</li>
+    <li><strong>Transaction Pooling（交易級，生產主力）</strong>：客戶端送出單條 Autocommit 語句或進入 <code>BEGIN</code> 時才指派後端連線；一旦收到 <code>COMMIT</code> 或 <code>ROLLBACK</code>，後端連線立刻歸還池中給下一個正在等待的 Pod。因為業務伺服器有 80%–95% 的時間花在解析請求、組裝物件與網路傳輸，Transaction 模式通常能輕鬆達成 <strong>5x 到 20x</strong> 的後端連線壓縮率。</li>
+    <li><strong>Statement Pooling（語句級）</strong>：每執行完單條 SQL 就立刻收回後端連線。只要應用程式送出跨語句的顯式交易（<code>BEGIN; UPDATE ...; COMMIT;</code>），PgBouncer 會直接報錯中止，因為前後兩條語句根本無法保證落在同一個後端行程上，實務上極少用於 OLTP 業務。</li>
+  </ol>
+
+  <h3>Transaction Pooling 弄壞了什麼？協定層狀態污染與解法</h3>
+  <p>切到 Transaction 模式後，同一條後端連線上一秒剛跑完租戶 A 的交易，下一毫秒就被借給租戶 B。凡是<strong>生命週期跨越 <code>COMMIT</code> 邊界</strong>的資料庫機制都會失靈甚至造成資安事故：</p>
+
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>SQL / 協定特性</th>
+          <th>Session</th>
+          <th>Transaction</th>
+          <th>Statement</th>
+          <th>Transaction 模式下的失敗症狀與標準解法</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><strong>顯式多語句交易</strong><br><code>BEGIN ... COMMIT</code></td>
+          <td>支援</td>
+          <td class="hl">支援</td>
+          <td>直接報錯</td>
+          <td>交易期間 PgBouncer 會鎖定同一條後端連線，直到提交或回滾才放手。</td>
+        </tr>
+        <tr>
+          <td><strong>Session 級參數與租戶變數</strong><br><code>SET time_zone</code> / <code>SET app.tenant_id</code></td>
+          <td>支援</td>
+          <td class="hl">危險（狀態殘留污染）</td>
+          <td>危險</td>
+          <td><strong>極高風險</strong>：租戶 A 執行 <code>SET app.tenant_id = 'A'</code> 後歸還連線，租戶 B 借到同一條連線時會讀到 A 的 Row-Level Security 資料！<strong>解法</strong>：一律改用 <code>SET LOCAL ...</code>，使設定只在當前交易有效、<code>COMMIT</code> 即自動還原。</td>
+        </tr>
+        <tr>
+          <td><strong>具名預編譯語句</strong><br>Protocol-level <code>Parse</code> / <code>PREPARE</code></td>
+          <td>支援</td>
+          <td class="hl">傳統壞掉；新版可代管</td>
+          <td>不支援</td>
+          <td>ORM / 驅動在連線 #3 註冊 <code>stmt_1</code>，下次交易換到連線 #7 執行就拋出 <code>prepared statement "stmt_1" does not exist</code>。<strong>解法</strong>：① 舊版關閉驅動伺服端預編譯（如 JDBC <code>prepareThreshold=0</code>、Go pgx <code>QueryExecModeSimpleProtocol</code>）；② <strong>PgBouncer 1.21+</strong> 起設定 <code>max_prepared_statements &gt; 0</code>，由代理層改寫名稱並在需要時自動向後端補發 <code>Parse</code>。</td>
+        </tr>
+        <tr>
+          <td><strong>Advisory Lock（諮詢鎖）</strong></td>
+          <td>全支援</td>
+          <td class="hl">僅限交易級鎖</td>
+          <td>不支援</td>
+          <td><code>pg_advisory_lock()</code> 綁在後端行程上，歸還連線後鎖不會釋放且無法由原客戶端解鎖；<strong>解法</strong>：改用隨交易結束自動釋放的 <code>pg_advisory_xact_lock()</code>。</td>
+        </tr>
+        <tr>
+          <td><strong>非同步推播與暫存表</strong><br><code>LISTEN / NOTIFY</code>、<code>TEMP TABLE</code></td>
+          <td>支援</td>
+          <td class="hl">不支援（需繞道）</td>
+          <td>不支援</td>
+          <td><code>LISTEN</code> 與需要跨交易存活的暫存表必須綁定專屬連線；實務上會在 PgBouncer 另開一個獨立的 Session 模式 Pool（或直連埠）專供長駐監聽與批次報表 Worker 使用。</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="cap">上線 Transaction Pooling 前的鐵律：全面清查 ORM 預設預編譯行為、把所有 SET 改為 SET LOCAL，並為 LISTEN/NOTIFY 留一條獨立的 Session 通道。</p>
+
+  <div class="demo" id="demo-pool-modes">
+    <div class="demo-bar">
+      <span class="label">互動 · 三種 Pooling 模式多工壓縮與相容性對照</span>
+      <span class="label" style="text-transform:none;font-family:var(--sans);font-size:12px;color:var(--text-2)">同一組客戶端行為同時餵給三種模式，對照後端連線需求與風險</span>
+    </div>
+    <div class="demo-body">
+      <div class="dcp-toolbar">
+        <div class="dcp-toolbar-group">
+          <span class="dcp-toolbar-lbl">應用程式 SQL 特徵</span>
+          <div class="seg" id="dcp-md-seg" role="group" aria-label="應用程式 SQL 特徵">
+            <button type="button" data-feature="clean" aria-pressed="true">標準多句交易 + SET LOCAL</button>
+            <button type="button" data-feature="prep" aria-pressed="false">含具名 Prepared Statement</button>
+            <button type="button" data-feature="session_var" aria-pressed="false">含 SET 租戶變數 / Session 鎖</button>
+            <button type="button" data-feature="autocommit" aria-pressed="false">純單句 Autocommit 查詢</button>
+          </div>
+        </div>
+        <button type="button" class="btn" id="dcp-md-reset">重置</button>
+      </div>
+
+      <div class="dcp-knobs tri">
+        <label class="dcp-knob" for="dcp-md-clients">
+          <span class="dcp-knob-top">
+            <span class="dcp-knob-name">前端常駐連線總數</span>
+            <span class="dcp-knob-val" id="dcp-md-clients-val">160 條</span>
+          </span>
+          <input type="range" id="dcp-md-clients" min="20" max="400" step="10" value="160">
+          <span class="dcp-knob-hint">所有微服務 Pod 對 PgBouncer 保持的長連線</span>
+        </label>
+
+        <label class="dcp-knob" for="dcp-md-txms">
+          <span class="dcp-knob-top">
+            <span class="dcp-knob-name">交易內純 SQL 耗時</span>
+            <span class="dcp-knob-val" id="dcp-md-txms-val">8 ms</span>
+          </span>
+          <input type="range" id="dcp-md-txms" min="2" max="40" step="1" value="8">
+          <span class="dcp-knob-hint">BEGIN 到 COMMIT 真正佔用後端 DB 的時間</span>
+        </label>
+
+        <label class="dcp-knob" for="dcp-md-thinkms">
+          <span class="dcp-knob-top">
+            <span class="dcp-knob-name">交易間應用端間隔</span>
+            <span class="dcp-knob-val" id="dcp-md-thinkms-val">72 ms</span>
+          </span>
+          <input type="range" id="dcp-md-thinkms" min="4" max="200" step="4" value="72">
+          <span class="dcp-knob-hint">商業邏輯、序列化與等待下筆請求的空檔</span>
+        </label>
+      </div>
+
+      <div class="dcp-cards">
+        <div class="dcp-card" id="dcp-card-ses">
+          <div class="dcp-card-head">
+            <span class="dcp-card-title">Session Mode</span>
+            <span class="dcp-compat-tag ok" id="dcp-tag-ses">全相容</span>
+          </div>
+          <div class="dcp-big-num" id="dcp-num-ses">160 條<small>後端連線</small></div>
+          <div class="dcp-meter-track"><div class="dcp-meter-fill warn" id="dcp-fill-ses" style="width:100%"></div></div>
+          <div class="dcp-kv-list">
+            <div class="dcp-kv-item"><span>多工壓縮比</span><b id="dcp-mux-ses">1.0x</b></div>
+            <div class="dcp-kv-item"><span>預估後端常駐 RSS</span><b id="dcp-mem-ses">1280 MB</b></div>
+            <div class="dcp-kv-item"><span>協定風險</span><b id="dcp-risk-ses">無狀態污染</b></div>
+          </div>
+          <div class="dcp-card-note" id="dcp-note-ses">前端長連不放手，後端就 1:1 佔用。</div>
+        </div>
+
+        <div class="dcp-card ok" id="dcp-card-tx">
+          <div class="dcp-card-head">
+            <span class="dcp-card-title">Transaction Mode</span>
+            <span class="dcp-compat-tag ok" id="dcp-tag-tx">推薦主力</span>
+          </div>
+          <div class="dcp-big-num" id="dcp-num-tx">22 條<small>後端連線</small></div>
+          <div class="dcp-meter-track"><div class="dcp-meter-fill ok" id="dcp-fill-tx" style="width:14%"></div></div>
+          <div class="dcp-kv-list">
+            <div class="dcp-kv-item"><span>多工壓縮比</span><b id="dcp-mux-tx">7.3x</b></div>
+            <div class="dcp-kv-item"><span>預估後端常駐 RSS</span><b id="dcp-mem-tx">176 MB</b></div>
+            <div class="dcp-kv-item"><span>協定風險</span><b id="dcp-risk-tx">安全隔離</b></div>
+          </div>
+          <div class="dcp-card-note" id="dcp-note-tx">COMMIT 後立即轉借其他 Pod，吃掉應用端空檔。</div>
+        </div>
+
+        <div class="dcp-card bad" id="dcp-card-st">
+          <div class="dcp-card-head">
+            <span class="dcp-card-title">Statement Mode</span>
+            <span class="dcp-compat-tag bad" id="dcp-tag-st">交易中斷</span>
+          </div>
+          <div class="dcp-big-num" id="dcp-num-st">不適用<small>多語句交易</small></div>
+          <div class="dcp-meter-track"><div class="dcp-meter-fill bad" id="dcp-fill-st" style="width:8%"></div></div>
+          <div class="dcp-kv-list">
+            <div class="dcp-kv-item"><span>多工壓縮比</span><b id="dcp-mux-st">—</b></div>
+            <div class="dcp-kv-item"><span>預估後端常駐 RSS</span><b id="dcp-mem-st">—</b></div>
+            <div class="dcp-kv-item"><span>協定風險</span><b id="dcp-risk-st">拒絕 BEGIN</b></div>
+          </div>
+          <div class="dcp-card-note" id="dcp-note-st">遇到多語句交易會直接報錯中止。</div>
+        </div>
+      </div>
+
+      <div class="status-line" id="dcp-md-status">
+        載入模式對照中…
+      </div>
+    </div>
+  </div>
+
+  <div class="oneliner">
+    <b>一句話答法</b>生產環境外部 Pooler 幾乎一律選 Transaction Pooling 以換取 5–20 倍的連線壓縮率，但上線前必須確保移除跨交易的 Session 變數（改用 SET LOCAL）、為具名 Prepared Statement 開啟代理層代管（PgBouncer 1.21+）或關閉驅動預編譯，並把 LISTEN/NOTIFY 分流到獨立 Session 池。
+  </div>
+</section>
+
+<hr class="div">
+
+<section id="s6">
+  <div class="sec-head">
+    <span class="sec-num">06</span>
+    <h2>逾時、閒置回收與連線洩漏的生產診斷</h2>
+  </div>
+  <p class="sec-sub">對齊 NAT 靜默斷線與 maxLifetime，並用三層可觀測性指標定位吃光連線池的殭屍交易。</p>
+  <p>把連線池大小與 Pooling 模式調對只完成了前半場；後半場的高頻生產事故，幾乎都出在<strong>逾時邊界沒對齊</strong>、<strong>雲端網路設備靜默砍斷閒置連線</strong>，以及<strong>單一慢路徑把整個池子的槽位洩漏光</strong>。</p>
+
+  <h3>四組關鍵生命週期參數與設定鐵律</h3>
+  <ul>
+    <li><strong>取連等待逾時（<code>connectionTimeout</code> / PgBouncer <code>query_wait_timeout</code>）</strong>：許多連線池預設高達 30 秒，這對線上 API 幾乎等於自殺——當資料庫短暫抖動時，上游 Web 容器的工作執行緒會全部卡死在等連線，拖垮連帶不查 DB 的健康檢查端點。線上微服務應壓低至 <strong>250 ms – 2,000 ms</strong> 快速失敗（Fail-fast）；至於上游收到逾時後如何避免無腦重試放大災情，請搭配 <a href="../timeout-retry-backoff/index.html">Timeout / Retry / Backoff 篇</a> 的退避與預算原則。</li>
+    <li><strong>固定池 vs 動態伸縮池（<code>minimumIdle</code> 與 <code>maximumPoolSize</code>）</strong>：直覺上設定 <code>minimumIdle = 2, maxPoolSize = 20</code> 看似省資源，但實際效果是「平時省下區區幾十 MB，流量突刺殺到的那一秒卻被迫同步跑 18 次 TCP + TLS + SCRAM 認證建連」，把尖峰延遲推得更高。除非是極低頻背景服務，核心線上服務建議<strong>固定池大小（<code>minimumIdle == maximumPoolSize</code>）</strong>。</li>
+    <li><strong>最大存活時間（<code>maxLifetime</code>）對齊 NAT / 防火牆靜默斷線</strong>：AWS NLB（預設 350 秒閒置逾時）、NAT Gateway 或企業防火牆會在連線無封包往返時悄悄清除狀態表，但<strong>不發送 TCP RST</strong>。若應用程式的 <code>maxLifetime</code> 設為 30 分鐘且沒開 TCP Keepalive，借出這條「半開死連線（Half-open Connection）」送出 SQL 時，作業系統會卡在無回應的封包重傳十幾秒才報錯。鐵律是讓 <code>maxLifetime</code> <strong>比沿途最短網路設備逾時少 30–60 秒</strong>，開啟定期探活（<code>keepaliveTime</code>），並加上 5%–10% 隨機抖動（Jitter）避免整池連線在同一秒集體到期重建。</li>
+    <li><strong>洩漏偵測與資料庫側最後保險絲</strong>：應用端開啟 <code>leakDetectionThreshold</code>（例如 5–10 秒未歸還即印出借用處 Stack Trace）；同時資料庫端<strong>務必設定</strong> <code>statement_timeout</code> 與 <code>idle_in_transaction_session_timeout</code>（例如 15–30 秒），防止掛掉的容器或忘記 <code>COMMIT</code> 的程式碼永遠霸佔後端連線。</li>
+  </ul>
+
+  <h3>骨牌效應剖析：一條「Idle in Transaction」如何癱瘓全站</h3>
+  <p>連線洩漏最陰險的地方在於：<strong>壞掉的往往只是一個冷門匯出功能，陪葬的卻是全站所有核心 API</strong>。而且卡在 <code>idle in transaction</code> 的連線不只是佔住一個池槽位——它還會同時釘死舊快照阻止垃圾回收（詳見 <a href="../transaction-isolation-mvcc/index.html">交易隔離級別與 MVCC 篇</a>），並持續握住已修改資料列上的排他鎖（詳見 <a href="../database-locking-deadlock/index.html">資料庫鎖與死鎖篇</a>）：</p>
+
+  <div class="dcp-leak-lane">
+    <div class="lh">時刻</div><div class="lh">慢路徑請求 A</div><div class="lh">正常快查詢 B</div><div class="lh">連線池 (上限 10)</div><div class="lh">PostgreSQL 後端</div>
+    <div class="lt">t1</div>
+    <div class="lc act">借出連線，執行 BEGIN 與 UPDATE</div><div class="lc">借出即還 (3 ms)</div><div class="lc">活躍 2 / 10</div><div class="lc">持鎖等待下條語句</div>
+    <div class="lt">t2</div>
+    <div class="lc bad">交易內同步呼叫慢外部 API (卡住 20s)</div><div class="lc">正常運作</div><div class="lc warn">A 類請求累積佔滿 10 / 10</div><div class="lc bad">10 條全處於 idle in transaction</div>
+    <div class="lt">t3</div>
+    <div class="lc bad">異常未走 finally 或持續阻塞</div><div class="lc bad">卡在 borrow() 滿 1s 拋出 Timeout</div><div class="lc bad">活躍 10 / 10，等待佇列暴增</div><div class="lc warn">CPU 居然 2% 閒置，卻進不來新查詢</div>
+    <div class="lt">t4</div>
+    <div class="lc">—</div><div class="lc ok">重新借到釋放的槽位，恢復 3 ms</div><div class="lc ok">殭屍連線斷開，補充乾淨連線</div><div class="lc ok">idle_in_transaction_session_timeout 斬斷回收</div>
+  </div>
+  <p class="cap">經典反直覺現場（t3）：資料庫 CPU 幾乎是 0%，應用程式卻全面報資料庫逾時——這幾乎百分之百是連線槽位被慢外部呼叫或鎖等待耗盡，而非 DB 算力不足。</p>
+
+  <h3>三層診斷指標：十秒定位「卡在哪一層」</h3>
+  <p>發生取連延遲告警時，依序對照這三組數字就能立刻鎖定根因：</p>
+  <ol>
+    <li><strong>應用端指標（如 HikariCP Metrics）</strong>：看 <code>connections_active</code> 是否貼齊 <code>max</code>、<code>connections_pending</code>（排隊執行緒數）是否飆升，以及 <code>connections_usage_seconds</code>（持連時間分佈）。若持連時間遠大於實際 SQL 耗時，代表應用程式借了連線卻在做非 DB 運算或忘記歸還。</li>
+    <li><strong>PgBouncer 管理埠（<code>SHOW POOLS;</code>）</strong>：觀察 <code>cl_waiting</code>（等待配發後端連線的客戶端數）、<code>maxwait</code>（最老等待秒數）與 <code>sv_active</code>（活躍後端數）。若 <code>sv_active</code> 已滿且 <code>cl_waiting &gt; 0</code>，問題在後端查詢變慢或後端池開太小。</li>
+    <li><strong>資料庫視圖（<code>pg_stat_activity</code>）</strong>：按 <code>state</code> 與 <code>wait_event_type</code> 分組。若大量處於 <code>active</code> 且等待 <code>Lock</code>，是鎖競爭；若大量處於 <code>idle in transaction</code>，立刻去抓業務程式碼的交易邊界洩漏。</li>
+  </ol>
+
+  <div class="callout warn">
+    <div class="c-title"><span class="ic">陷阱</span>把資料庫 CPU 低落誤判為「可以再調大連線池」</div>
+    <p>當上圖 <code>t3</code> 發生時（10 條連線全都因為等鎖或等外部 HTTP 而躺平，DB CPU 只有 2%），若不查 <code>pg_stat_activity</code> 就盲目把連線池調大 10 倍，只會製造出 100 條同樣卡住的殭屍交易，把連線洩漏升級成記憶體耗盡（OOM）與鎖表災難。</p>
+  </div>
+
+  <div class="oneliner">
+    <b>一句話答法</b>生產環境必須設短取連逾時（Fail-fast）、令 maxLifetime 短於網路設備 NAT 閒置回收時間，並在資料庫端強制配置 idle_in_transaction_session_timeout；排查「DB CPU 很低但應用狂報逾時」時，優先檢查持連時間與殭屍交易洩漏。
+  </div>
+</section>
+
+<hr class="div">
+
+<section id="s7">
+  <div class="sec-head">
+    <span class="sec-num">07</span>
+    <h2>實戰配置座標與高頻面試追問</h2>
+  </div>
+  <p class="sec-sub">從單體直連到微服務雙層池的調參檢核表，以及讀寫池隔離與常見事故秒答框架。</p>
+  <p>在系統設計面試或架構評審中，談資料庫連線池切忌只背誦單一數字，而要展現「從應用容器數、工作負載特徵一路推算到資料庫核心數」的端到端配置邏輯：</p>
+
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>部署場景</th>
+          <th>建議拓樸與模式</th>
+          <th>容量配額基準（以 16 vCPU PostgreSQL 為例）</th>
+          <th>必備防護與隔離設計</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><strong>少實例單體服務</strong><br>（2–4 台伺服器）</td>
+          <td>僅用應用端本地池直連 DB</td>
+          <td>每實例固定 <code>pool = 8–10</code>，總後端連線 <code>≤ 40</code></td>
+          <td><code>minimumIdle == maxPoolSize</code>；開啟 <code>maxLifetime</code> 與抖動、設定 <code>idle_in_transaction_session_timeout</code></td>
+        </tr>
+        <tr>
+          <td><strong>K8s 微服務叢集</strong><br>（50–500 個 Pod）</td>
+          <td class="hl">應用端小本地池 + 集中式 PgBouncer（Transaction Mode）</td>
+          <td class="hl">每 Pod 本地池 <code>4–8</code>；PgBouncer 前端承接上千條，後端 <code>default_pool_size = 32–40</code></td>
+          <td>全庫禁用跨交易 <code>SET</code>（改 <code>SET LOCAL</code>）；開啟 PgBouncer 1.21+ <code>max_prepared_statements</code></td>
+        </tr>
+        <tr>
+          <td><strong>OLTP 混雜慢報表 / 匯出</strong></td>
+          <td>依快慢路徑拆成兩個獨立 Pool（優先導向只讀副本）</td>
+          <td>核心交易池獨享 <code>30</code> 條短逾時槽位；慢報表池限制 <code>4–6</code> 條並設嚴格 <code>statement_timeout</code></td>
+          <td>以艙壁模式（參見 <a href="../circuit-breaker-bulkhead/index.html">Circuit Breaker 與 Bulkhead 篇</a>）防止慢查詢抽乾登入與結帳槽位</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="cap">架構評審黃金檢查點：「所有上游實例的最大連線總和」若超過資料庫核心數的 3–4 倍，就必須引入外部多工層或重新切分池配額。</p>
+
+  <h3>面試深水區：四題高頻連環追問</h3>
+
+  <details class="faq">
+    <summary><span><span class="q">Q1 ·</span> 大促前把微服務從 20 個 Pod 擴容到 120 個 Pod，結果流量還沒來資料庫就先掛了，發生什麼事？</span><span class="chev">▸</span></summary>
+    <div class="ans">
+      <p>這是典型的<strong>「連線乘法風暴」</strong>。若每個 Pod 啟動時預熱 <code>minimumIdle = 15</code> 條本地連線，120 個 Pod 同時拉起就會瞬間向資料庫發起 1,800 次 TLS + SCRAM 認證交握，並吃掉 1,800 個 <code>postgres</code> 行程槽位（耗費逾 15 GB RSS 記憶體且直接撞破 <code>max_connections</code>）。</p>
+      <p><strong>根治方式</strong>：在微服務與資料庫之間補上 PgBouncer（Transaction Pooling），讓 1,800 條前端長連停在每條僅佔 2 KB 的事件迴圈層，後端嚴格鎖定在核心數 2–3 倍（如 32–48 條）的真實資料庫連線。</p>
+    </div>
+  </details>
+
+  <details class="faq">
+    <summary><span><span class="q">Q2 ·</span> 導入 PgBouncer Transaction Mode 後，偶爾出現 <code>prepared statement "S_1" does not exist</code>，甚至發生租戶資料串門子？</span><span class="chev">▸</span></summary>
+    <div class="ans">
+      <p>兩者都是因為<strong>連線級狀態跨越了交易邊界</strong>。在 Transaction 模式下，客戶端第一筆交易可能在後端連線 #2 執行 <code>PREPARE S_1</code> 或 <code>SET app.current_tenant = '42'</code>，<code>COMMIT</code> 後連線 #2 被轉借給其他客戶端（導致別人繼承了租戶 42 的變數），而原客戶端下一筆交易被派到從未準備過 <code>S_1</code> 的連線 #9 就直接報錯。</p>
+      <p><strong>標準解法</strong>：① 所有會話變數一律改寫為交易結束即自動還原的 <code>SET LOCAL</code>；② 升級至 PgBouncer 1.21+ 並設定 <code>max_prepared_statements = 200</code> 由代理層維護客戶端與後端的語句映射表，或在舊版環境關閉驅動層的具名預編譯（如 JDBC <code>prepareThreshold=0</code>）。</p>
+    </div>
+  </details>
+
+  <details class="faq">
+    <summary><span><span class="q">Q3 ·</span> 為什麼報表匯出 API 跑 8 秒（QPS 只有 2），就能把耗時 2 ms 的核心下單 API（QPS 1,000）全部拖死？</span><span class="chev">▸</span></summary>
+    <div class="ans">
+      <p>依 Little 定律 <var>L = λ * W</var>：下單 API 雖然每秒 1,000 筆，但因耗時僅 <code>0.002 秒</code>，平均只佔用 <code>1000 * 0.002 = 2</code> 條連線；反觀報表 API 雖然每秒只有 2 筆，但每筆霸佔連線 <code>8 秒</code>，平均同時佔用 <code>2 * 8 = 16</code> 條連線！只要報表稍微併發到 3–4 筆，20 條的共用連線池就會被報表 100% 塞滿，所有 2 ms 就能跑完的下單請求全在門外排隊逾時。</p>
+      <p><strong>解法</strong>：在應用端與 PgBouncer 層建立<strong>雙連線池隔離（Bulkhead）</strong>，慢查詢走專屬小池（最好直接路由到 Read Replica），絕不與核心交易共用同一組連線槽位。</p>
+    </div>
+  </details>
+
+  <details class="faq">
+    <summary><span><span class="q">Q4 ·</span> 半夜低峰期過後每天早上第一批請求特別容易報 I/O 錯誤或卡住十幾秒，該查哪個參數？</span><span class="chev">▸</span></summary>
+    <div class="ans">
+      <p>查 <strong><code>maxLifetime</code>、<code>keepaliveTime</code> 與中間網路設備（NLB / NAT / 防火牆）閒置逾時的不一致</strong>。低峰期連線長時間無流量，中間設備在 350 秒時靜默丟棄了 TCP 狀態表，但應用程式連線池以為連線還活著（<code>maxLifetime</code> 設了 30 分鐘）。早高峰第一個請求借到半開死連線發送封包，直接陷入作業系統 TCP 重傳黑洞。將 <code>maxLifetime</code> 調短至低於網路設備逾時（例如 240–300 秒）並啟用定期探活即可根除。</p>
+    </div>
+  </details>
+
+  <div class="oneliner">
+    <b>全篇總結秒答</b>資料庫連線昂貴在建連交握與後端行程記憶體，Pool 開太小會排隊、開太大會因核心排程與鎖自旋陷入倒 U 型崩跌；用「核心數 2–3 倍」定錨後端活躍連線、以「本地池 + PgBouncer Transaction Mode」承接微服務水平擴展，再配齊 SET LOCAL、短取連逾時與殭屍交易自動斬斷，才是完整的生產級連線池架構。
+  </div>
+</section>
+
+        <footer class="article-foot" aria-label="閱讀進度與導覽">
+          <div class="article-foot-left">
+            <button class="read-toggle read-toggle-lg" type="button" data-read-toggle aria-pressed="false">
+              <span class="read-dot" aria-hidden="true"></span>
+              <span class="read-label">標記為已讀</span>
+            </button>
+            <span class="article-foot-hint" data-read-hint>讀完本篇後可標記為已讀；進度只存在這個瀏覽器，首頁學習地圖會依此顯示。</span>
+          </div>
+          <a class="article-foot-back" href="../index.html">← 返回系統設計知識地圖</a>
+        </footer>
+      </div>
+    </main>
+  </div>
+
+  <script>
+    "use strict";
+    document.addEventListener("DOMContentLoaded", function () {
+      /* ===== TOC scrollspy, mobile accordion & desktop collapse ===== */
+      (function () {
+        var links = Array.prototype.slice.call(document.querySelectorAll(".toc-nav a"));
+        var map = {};
+        links.forEach(function (a) {
+          var href = a.getAttribute("href");
+          if (href && href.startsWith("#")) {
+            map[href.slice(1)] = a;
+          }
+        });
+        var secs = links.map(function (a) {
+          var href = a.getAttribute("href");
+          return href && href.startsWith("#") ? document.getElementById(href.slice(1)) : null;
+        }).filter(Boolean);
+
+        if (secs.length > 0 && typeof IntersectionObserver !== "undefined") {
+          var obs = new IntersectionObserver(function (entries) {
+            entries.forEach(function (e) {
+              if (e.isIntersecting) {
+                links.forEach(function (l) { l.classList.remove("active"); });
+                var act = map[e.target.id];
+                if (act) act.classList.add("active");
+              }
+            });
+          }, { rootMargin: "-20% 0px -70% 0px", threshold: 0 });
+          secs.forEach(function (s) { obs.observe(s); });
+        }
+
+        /* mobile：目錄 accordion（≤920px） */
+        var toggle = document.querySelector(".toc-toggle");
+        var nav = document.querySelector(".toc-nav");
+        if (toggle && nav) {
+          toggle.addEventListener("click", function () {
+            var open = nav.classList.toggle("open");
+            toggle.setAttribute("aria-expanded", open ? "true" : "false");
+          });
+          nav.addEventListener("click", function (e) {
+            if (e.target.closest("a") && window.innerWidth <= 920) {
+              nav.classList.remove("open");
+              toggle.setAttribute("aria-expanded", "false");
+            }
+          });
+        }
+
+        /* desktop：收合側欄（預設展開；不持久化） */
+        var collapseBtn = document.querySelector(".toc-collapse");
+        var reopenBtn = document.querySelector(".toc-reopen");
+        function setTocCollapsed(collapsed) {
+          document.body.classList.toggle("toc-collapsed", collapsed);
+          if (collapseBtn) collapseBtn.setAttribute("aria-expanded", collapsed ? "false" : "true");
+          if (reopenBtn) reopenBtn.setAttribute("aria-expanded", collapsed ? "false" : "true");
+          if (collapsed && reopenBtn) reopenBtn.focus();
+          else if (!collapsed && collapseBtn) collapseBtn.focus();
+        }
+        if (collapseBtn) {
+          collapseBtn.addEventListener("click", function () { setTocCollapsed(true); });
+        }
+        if (reopenBtn) {
+          reopenBtn.addEventListener("click", function () { setTocCollapsed(false); });
+        }
+
+        /* ===== 已讀狀態追蹤（localStorage + file:// fallback） =====
+           儲存格式（key、envelope、window.name 前綴）與 templates/home-learning-map.js 的同名函式共用，改動須兩邊同步。 */
+        var STORAGE_KEY = "sded.read.v1";
+        var WIN_PREFIX = "sded.read.v1:";
+        var topicId = document.body.getAttribute("data-topic-id") || "";
+        var readBtns = Array.prototype.slice.call(document.querySelectorAll("[data-read-toggle]"));
+        var readHint = document.querySelector("[data-read-hint]");
+
+        function parseEnvelope(raw) {
+          if (!raw || typeof raw !== "string") return null;
+          try {
+            var parsed = JSON.parse(raw);
+            if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+            if (parsed.v === 1 && parsed.items && typeof parsed.items === "object" && !Array.isArray(parsed.items)) {
+              return { updatedAt: Number(parsed.updatedAt) || 0, items: parsed.items };
+            }
+            return { updatedAt: 1, items: parsed };
+          } catch (e) {
+            return null;
+          }
+        }
+
+        function loadReadMap() {
+          var fromLs = null;
+          var fromWin = null;
+          try { fromLs = parseEnvelope(window.localStorage.getItem(STORAGE_KEY)); } catch (e) {}
+          if (window.location.protocol === "file:") {
+            try {
+              if (typeof window.name === "string" && window.name.indexOf(WIN_PREFIX) === 0) {
+                fromWin = parseEnvelope(window.name.slice(WIN_PREFIX.length));
+              }
+            } catch (e) {}
+          }
+          var chosen = fromLs;
+          if (fromWin && (!chosen || fromWin.updatedAt > chosen.updatedAt)) {
+            chosen = fromWin;
+            try {
+              window.localStorage.setItem(STORAGE_KEY, JSON.stringify({ v: 1, updatedAt: chosen.updatedAt, items: chosen.items }));
+            } catch (e) {}
+          } else if (chosen && window.location.protocol === "file:") {
+            try {
+              window.name = WIN_PREFIX + JSON.stringify({ v: 1, updatedAt: chosen.updatedAt, items: chosen.items });
+            } catch (e) {}
+          }
+          return chosen && chosen.items ? Object.assign({}, chosen.items) : {};
+        }
+
+        function saveReadMap(items) {
+          var env = JSON.stringify({ v: 1, updatedAt: Date.now(), items: items });
+          try { window.localStorage.setItem(STORAGE_KEY, env); } catch (e) {}
+          if (window.location.protocol === "file:") {
+            try { window.name = WIN_PREFIX + env; } catch (e) {}
+          }
+        }
+
+        function todayLocal() {
+          var d = new Date();
+          return d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0") + "-" + String(d.getDate()).padStart(2, "0");
+        }
+
+        function syncReadUi() {
+          if (!topicId || !readBtns.length) return;
+          var map = loadReadMap();
+          var val = map[topicId];
+          var isRead = Boolean(val);
+          var dateStr = typeof val === "string" && /^\d{4}-\d{2}-\d{2}$/.test(val) ? val : "";
+          readBtns.forEach(function (btn) {
+            btn.setAttribute("aria-pressed", isRead ? "true" : "false");
+            var label = btn.querySelector(".read-label");
+            if (label) {
+              label.textContent = isRead ? "✓ 已讀" : "標記為已讀";
+            }
+          });
+          if (readHint) {
+            readHint.textContent = isRead
+              ? ("已標記為已讀" + (dateStr ? "（" + dateStr + "）" : "") + "。進度只存在這個瀏覽器，首頁學習地圖會依此顯示。")
+              : "讀完本篇後可標記為已讀；進度只存在這個瀏覽器，首頁學習地圖會依此顯示。";
+          }
+        }
+
+        function toggleRead() {
+          if (!topicId) return;
+          var map = loadReadMap();
+          if (map[topicId]) {
+            delete map[topicId];
+          } else {
+            map[topicId] = todayLocal();
+          }
+          saveReadMap(map);
+          syncReadUi();
+        }
+
+        readBtns.forEach(function (btn) {
+          btn.addEventListener("click", toggleRead);
+        });
+        window.addEventListener("pageshow", syncReadUi);
+        window.addEventListener("storage", function (e) {
+          if (!e.key || e.key === STORAGE_KEY) syncReadUi();
+        });
+        syncReadUi();
+      })();
+    });
+  </script>
+
+  
+<script>
+(function () {
+  "use strict";
+
+  /* (1) 常數與工作負載基準表 */
+  var CONN_TIMEOUT_MS = 500;
+  var POOL_MIN = 4;
+  var POOL_MAX = 160;
+  var POOL_STEP = 4;
+  var PG_RSS_PER_BACKEND_MB = 8.5;
+
+  var WORKLOAD_PROFILES = {
+    ram: { optMult: 2.0, spindle: 2, sigma: 0.010, label: "熱快取 CPU 密集" },
+    ssd: { optMult: 3.0, spindle: 2, sigma: 0.014, label: "NVMe 混合 I/O" }
+  };
+
+  var SIZING_DEFAULTS = {
+    arrivalRps: 1800,
+    baseQueryMs: 6,
+    poolSize: 20,
+    dbCores: 8,
+    workload: "ram"
+  };
+
+  var MODE_DEFAULTS = {
+    clientConns: 160,
+    txSqlMs: 8,
+    appThinkMs: 72,
+    feature: "clean"
+  };
+
+  /* (2) compute 純函式與 probe 斷言（無 DOM 依賴） */
+  function clampVal(v, lo, hi) {
+    var n = Number(v);
+    if (!Number.isFinite(n)) return lo;
+    return Math.min(hi, Math.max(lo, n));
+  }
+
+  function round1(v) {
+    return Math.round(v * 10) / 10;
+  }
+
+  function evalCapacityAtPool(n, cores, baseMs, prof) {
+    var optPool = Math.round(cores * prof.optMult + prof.spindle);
+    var denomSpan = Math.max(8, optPool * optPool - cores * cores);
+    var kappa = (1 - prof.sigma) / denomSpan;
+    var overCore = Math.max(0, n - cores);
+    var stretch = 1 + prof.sigma * Math.max(0, n - 1) + kappa * overCore * overCore;
+    var effMs = baseMs * stretch;
+    var capRps = (n * 1000) / effMs;
+    return {
+      optPool: optPool,
+      effMs: effMs,
+      penaltyMs: effMs - baseMs,
+      capRps: capRps
+    };
+  }
+
+  // @probe fn       computePoolSizing
+  // @probe baseline {"arrivalRps":1800,"baseQueryMs":6,"poolSize":20,"dbCores":8,"workload":"ram"}
+  // @probe sweep    {"arrivalRps":[400,3600],"baseQueryMs":[2,24],"poolSize":[6,140],"dbCores":[2,32],"workload":["ram","ssd"]}
+  function computePoolSizing(p) {
+    var arrival = clampVal(p.arrivalRps, 200, 4000);
+    var baseMs = clampVal(p.baseQueryMs, 2, 30);
+    var pool = Math.round(clampVal(p.poolSize, POOL_MIN, POOL_MAX));
+    var cores = Math.round(clampVal(p.dbCores, 2, 32));
+    var prof = WORKLOAD_PROFILES[p.workload] || WORKLOAD_PROFILES.ram;
+
+    var cur = evalCapacityAtPool(pool, cores, baseMs, prof);
+    var peak = evalCapacityAtPool(cur.optPool, cores, baseMs, prof);
+
+    var curve = [];
+    var maxCurveRps = peak.capRps;
+    for (var n = POOL_MIN; n <= POOL_MAX; n += POOL_STEP) {
+      var pt = evalCapacityAtPool(n, cores, baseMs, prof);
+      var rps = Math.round(pt.capRps);
+      if (rps > maxCurveRps) maxCurveRps = rps;
+      curve.push({ pool: n, capRps: rps });
+    }
+
+    var rho = arrival / Math.max(1, cur.capRps);
+    var queueWaitMs = 0;
+    var rejectedRps = 0;
+    var goodputRps = arrival;
+
+    if (rho < 1) {
+      var tailProb = Math.pow(rho, Math.sqrt(2 * (pool + 1)));
+      queueWaitMs = (cur.effMs / Math.max(0.04, pool * (1 - rho))) * tailProb;
+      if (queueWaitMs > CONN_TIMEOUT_MS) {
+        var spillFrac = Math.min(0.35, (queueWaitMs - CONN_TIMEOUT_MS) / (CONN_TIMEOUT_MS * 2));
+        rejectedRps = Math.round(arrival * spillFrac);
+        goodputRps = arrival - rejectedRps;
+        queueWaitMs = CONN_TIMEOUT_MS;
+      }
+    } else {
+      queueWaitMs = CONN_TIMEOUT_MS;
+      var sustainable = Math.floor(cur.capRps * 0.98);
+      goodputRps = Math.min(arrival, sustainable);
+      rejectedRps = Math.max(0, Math.round(arrival - goodputRps));
+    }
+
+    var queueDepth = Math.round((goodputRps * queueWaitMs) / 1000);
+    var p99LatencyMs = queueWaitMs * 1.65 + cur.effMs * (1.55 + 0.45 * Math.min(2.2, rho));
+    var utilPct = round1(Math.min(999, rho * 100));
+
+    var zone = "sweet";
+    if (rejectedRps > 0 && pool > cur.optPool + 6) {
+      zone = "thrash_collapse";
+    } else if (rejectedRps > 0 && pool <= cur.optPool + 6) {
+      zone = "undersized_overload";
+    } else if (pool > Math.round(cur.optPool * 1.45)) {
+      zone = "over_provisioned";
+    } else if (pool < Math.max(4, Math.round(cores * 1.15)) && rho > 0.72) {
+      zone = "pool_bottleneck";
+    }
+
+    return {
+      optimalPool: cur.optPool,
+      peakCapacityRps: Math.round(peak.capRps),
+      effectiveQueryMs: round1(cur.effMs),
+      contentionPenaltyMs: round1(cur.penaltyMs),
+      maxCapacityRps: Math.round(cur.capRps),
+      utilizationPct: utilPct,
+      queueWaitMs: round1(queueWaitMs),
+      queueDepth: queueDepth,
+      p99LatencyMs: round1(p99LatencyMs),
+      goodputRps: Math.round(goodputRps),
+      rejectedRps: rejectedRps,
+      plotCeilingRps: Math.max(4000, Math.ceil(Math.max(maxCurveRps, arrival) / 500) * 500),
+      zone: zone,
+      curve: curve
+    };
+  }
+
+  // @probe fn       computeModeComparison
+  // @probe baseline {"clientConns":160,"txSqlMs":8,"appThinkMs":72,"feature":"clean"}
+  // @probe sweep    {"clientConns":[40,360],"txSqlMs":[2,36],"appThinkMs":[8,180],"feature":["clean","prep","session_var","autocommit"]}
+  function computeModeComparison(p) {
+    var clients = Math.round(clampVal(p.clientConns, 20, 400));
+    var txMs = clampVal(p.txSqlMs, 2, 40);
+    var thinkMs = clampVal(p.appThinkMs, 4, 200);
+    var feat = String(p.feature || "clean");
+
+    var cycleMs = txMs + thinkMs;
+    var dutyRatio = txMs / cycleMs;
+    var dutyPct = round1(dutyRatio * 100);
+    var totalTxPerSec = Math.round((clients * 1000) / cycleMs);
+
+    var meanTxActive = clients * dutyRatio;
+    var burstBuffer = 1.65 * Math.sqrt(Math.max(0.5, meanTxActive * (1 - dutyRatio)));
+    var txConns = Math.max(2, Math.min(clients, Math.ceil(meanTxActive + burstBuffer)));
+    var savedConns = Math.max(0, clients - txConns);
+    var txMux = round1(clients / txConns);
+
+    var sessionMemMb = Math.round(clients * PG_RSS_PER_BACKEND_MB);
+    var txMemMb = Math.round(txConns * PG_RSS_PER_BACKEND_MB);
+    var savedMemMb = sessionMemMb - txMemMb;
+
+    var txState = "ok";
+    var txTag = "推薦主力";
+    var txRiskLabel = "狀態交易內隔離";
+    var stmtRemapPerSec = 0;
+    var leakProbPct = 0;
+
+    if (feat === "prep") {
+      txState = "warn";
+      txTag = "需代理代管";
+      stmtRemapPerSec = totalTxPerSec * 3;
+      txRiskLabel = "每秒 " + stmtRemapPerSec + " 次語句映射";
+    } else if (feat === "session_var") {
+      txState = "bad";
+      txTag = "狀態污染危險";
+      leakProbPct = round1((1 - 1 / Math.max(2, txConns)) * (1 - dutyRatio * 0.5) * 100);
+      txRiskLabel = "跨租戶串線率 ~" + leakProbPct + "%";
+    }
+
+    var stSupported = feat === "autocommit";
+    var stState = stSupported ? "ok" : "bad";
+    var stConns = 0;
+    var stMux = 0;
+    var stMemMb = 0;
+    var abortedTxPerSec = 0;
+
+    if (stSupported) {
+      var stmtDuty = dutyRatio * 0.86;
+      var meanSt = clients * stmtDuty;
+      stConns = Math.max(2, Math.min(clients, Math.ceil(meanSt + 1.5 * Math.sqrt(Math.max(0.4, meanSt * (1 - stmtDuty))))));
+      stMux = round1(clients / stConns);
+      stMemMb = Math.round(stConns * PG_RSS_PER_BACKEND_MB);
+    } else {
+      abortedTxPerSec = totalTxPerSec;
+    }
+
+    return {
+      dutyPct: dutyPct,
+      totalTxPerSec: totalTxPerSec,
+      txConns: txConns,
+      savedConns: savedConns,
+      txMux: txMux,
+      sessionMemMb: sessionMemMb,
+      txMemMb: txMemMb,
+      savedMemMb: savedMemMb,
+      txState: txState,
+      txTag: txTag,
+      txRiskLabel: txRiskLabel,
+      stmtRemapPerSec: stmtRemapPerSec,
+      leakProbPct: leakProbPct,
+      stSupported: stSupported,
+      stState: stState,
+      stConns: stConns,
+      stMux: stMux,
+      stMemMb: stMemMb,
+      abortedTxPerSec: abortedTxPerSec
+    };
+  }
+
+  /* (3) DOM 參照與執行期狀態 */
+  function el(id) {
+    return document.getElementById(id);
+  }
+
+  var sizingState = {
+    arrivalRps: SIZING_DEFAULTS.arrivalRps,
+    baseQueryMs: SIZING_DEFAULTS.baseQueryMs,
+    poolSize: SIZING_DEFAULTS.poolSize,
+    dbCores: SIZING_DEFAULTS.dbCores,
+    workload: SIZING_DEFAULTS.workload
+  };
+
+  var modeState = {
+    clientConns: MODE_DEFAULTS.clientConns,
+    txSqlMs: MODE_DEFAULTS.txSqlMs,
+    appThinkMs: MODE_DEFAULTS.appThinkMs,
+    feature: MODE_DEFAULTS.feature
+  };
+
+  var szDom = {
+    seg: el("dcp-sz-seg"),
+    reset: el("dcp-sz-reset"),
+    rps: el("dcp-rps"),
+    rpsVal: el("dcp-rps-val"),
+    qms: el("dcp-qms"),
+    qmsVal: el("dcp-qms-val"),
+    pool: el("dcp-pool"),
+    poolVal: el("dcp-pool-val"),
+    cores: el("dcp-cores"),
+    coresVal: el("dcp-cores-val"),
+    svgGrid: el("dcp-svg-grid"),
+    svgDemand: el("dcp-svg-demand"),
+    svgDemandLbl: el("dcp-svg-demand-lbl"),
+    svgOptLine: el("dcp-svg-opt-line"),
+    svgCurve: el("dcp-svg-curve"),
+    svgOptDot: el("dcp-svg-opt-dot"),
+    svgOptLbl: el("dcp-svg-opt-lbl"),
+    svgCurDot: el("dcp-svg-cur-dot"),
+    svgCurLbl: el("dcp-svg-cur-lbl"),
+    kpiOptBox: el("dcp-kpi-opt-box"),
+    kpiOpt: el("dcp-kpi-opt"),
+    kpiOptSub: el("dcp-kpi-opt-sub"),
+    kpiEffBox: el("dcp-kpi-eff-box"),
+    kpiEff: el("dcp-kpi-eff"),
+    kpiEffSub: el("dcp-kpi-eff-sub"),
+    kpiCapBox: el("dcp-kpi-cap-box"),
+    kpiCap: el("dcp-kpi-cap"),
+    kpiCapSub: el("dcp-kpi-cap-sub"),
+    kpiWaitBox: el("dcp-kpi-wait-box"),
+    kpiWait: el("dcp-kpi-wait"),
+    kpiWaitSub: el("dcp-kpi-wait-sub"),
+    kpiP99Box: el("dcp-kpi-p99-box"),
+    kpiP99: el("dcp-kpi-p99"),
+    kpiP99Sub: el("dcp-kpi-p99-sub"),
+    kpiDropBox: el("dcp-kpi-drop-box"),
+    kpiDrop: el("dcp-kpi-drop"),
+    kpiDropSub: el("dcp-kpi-drop-sub"),
+    status: el("dcp-sz-status")
+  };
+
+  var mdDom = {
+    seg: el("dcp-md-seg"),
+    reset: el("dcp-md-reset"),
+    clients: el("dcp-md-clients"),
+    clientsVal: el("dcp-md-clients-val"),
+    txms: el("dcp-md-txms"),
+    txmsVal: el("dcp-md-txms-val"),
+    thinkms: el("dcp-md-thinkms"),
+    thinkmsVal: el("dcp-md-thinkms-val"),
+    cardSes: el("dcp-card-ses"),
+    tagSes: el("dcp-tag-ses"),
+    numSes: el("dcp-num-ses"),
+    fillSes: el("dcp-fill-ses"),
+    muxSes: el("dcp-mux-ses"),
+    memSes: el("dcp-mem-ses"),
+    riskSes: el("dcp-risk-ses"),
+    noteSes: el("dcp-note-ses"),
+    cardTx: el("dcp-card-tx"),
+    tagTx: el("dcp-tag-tx"),
+    numTx: el("dcp-num-tx"),
+    fillTx: el("dcp-fill-tx"),
+    muxTx: el("dcp-mux-tx"),
+    memTx: el("dcp-mem-tx"),
+    riskTx: el("dcp-risk-tx"),
+    noteTx: el("dcp-note-tx"),
+    cardSt: el("dcp-card-st"),
+    tagSt: el("dcp-tag-st"),
+    numSt: el("dcp-num-st"),
+    fillSt: el("dcp-fill-st"),
+    muxSt: el("dcp-mux-st"),
+    memSt: el("dcp-mem-st"),
+    riskSt: el("dcp-risk-st"),
+    noteSt: el("dcp-note-st"),
+    status: el("dcp-md-status")
+  };
+
+  /* (4) render 純繪製函式（就地更新屬性與文字，不重建滑桿節點） */
+  var SVG_X0 = 56;
+  var SVG_X1 = 616;
+  var SVG_Y0 = 24;
+  var SVG_Y1 = 194;
+  var SVG_NS = "http://www.w3.org/2000/svg";
+
+  function poolToX(poolVal) {
+    var ratio = (poolVal - POOL_MIN) / (POOL_MAX - POOL_MIN);
+    return round1(SVG_X0 + Math.max(0, Math.min(1, ratio)) * (SVG_X1 - SVG_X0));
+  }
+
+  function rpsToY(rpsVal, ceiling) {
+    var ratio = rpsVal / Math.max(1, ceiling);
+    return round1(SVG_Y1 - Math.max(0, Math.min(1, ratio)) * (SVG_Y1 - SVG_Y0));
+  }
+
+  function syncToggleGroup(container, attrName, activeVal) {
+    if (!container) return;
+    var btns = container.querySelectorAll("button");
+    for (var i = 0; i < btns.length; i += 1) {
+      var v = btns[i].getAttribute(attrName);
+      btns[i].setAttribute("aria-pressed", v === activeVal ? "true" : "false");
+    }
+  }
+
+  function renderSizingSvg(res) {
+    if (!szDom.svgCurve) return;
+    var ceil = res.plotCeilingRps;
+
+    if (szDom.svgGrid) {
+      while (szDom.svgGrid.firstChild) {
+        szDom.svgGrid.removeChild(szDom.svgGrid.firstChild);
+      }
+      for (var step = 0; step <= 4; step += 1) {
+        var tickRps = Math.round((ceil / 4) * step);
+        var gy = rpsToY(tickRps, ceil);
+        if (step > 0) {
+          var gl = document.createElementNS(SVG_NS, "line");
+          gl.setAttribute("x1", String(SVG_X0));
+          gl.setAttribute("y1", String(gy));
+          gl.setAttribute("x2", String(SVG_X1));
+          gl.setAttribute("y2", String(gy));
+          gl.setAttribute("stroke", "#ecebe8");
+          gl.setAttribute("stroke-width", "1");
+          szDom.svgGrid.appendChild(gl);
+        }
+        var gt = document.createElementNS(SVG_NS, "text");
+        gt.setAttribute("x", String(SVG_X0 - 6));
+        gt.setAttribute("y", String(gy + 4));
+        gt.setAttribute("text-anchor", "end");
+        gt.setAttribute("font-family", "JetBrains Mono, monospace");
+        gt.setAttribute("font-size", "11");
+        gt.setAttribute("fill", "#9aa0a8");
+        gt.textContent = String(tickRps);
+        szDom.svgGrid.appendChild(gt);
+      }
+      var xTicks = [4, 40, 80, 120, 160];
+      for (var xi = 0; xi < xTicks.length; xi += 1) {
+        var xt = document.createElementNS(SVG_NS, "text");
+        xt.setAttribute("x", String(poolToX(xTicks[xi])));
+        xt.setAttribute("y", String(SVG_Y1 + 14));
+        xt.setAttribute("text-anchor", "middle");
+        xt.setAttribute("font-family", "JetBrains Mono, monospace");
+        xt.setAttribute("font-size", "11");
+        xt.setAttribute("fill", "#9aa0a8");
+        xt.textContent = String(xTicks[xi]);
+        szDom.svgGrid.appendChild(xt);
+      }
+    }
+
+    var dParts = [];
+    for (var i = 0; i < res.curve.length; i += 1) {
+      var pt = res.curve[i];
+      dParts.push((i === 0 ? "M" : "L") + poolToX(pt.pool) + " " + rpsToY(pt.capRps, ceil));
+    }
+    szDom.svgCurve.setAttribute("d", dParts.join(" "));
+
+    var demandY = rpsToY(sizingState.arrivalRps, ceil);
+    szDom.svgDemand.setAttribute("y1", String(demandY));
+    szDom.svgDemand.setAttribute("y2", String(demandY));
+    szDom.svgDemandLbl.setAttribute("y", String(Math.max(16, demandY - 5)));
+    szDom.svgDemandLbl.textContent = "到達率 λ = " + sizingState.arrivalRps + " req/s";
+
+    var optX = poolToX(res.optimalPool);
+    var optY = rpsToY(res.peakCapacityRps, ceil);
+    szDom.svgOptLine.setAttribute("x1", String(optX));
+    szDom.svgOptLine.setAttribute("x2", String(optX));
+    szDom.svgOptDot.setAttribute("cx", String(optX));
+    szDom.svgOptDot.setAttribute("cy", String(optY));
+    szDom.svgOptLbl.setAttribute("x", String(Math.min(520, optX + 7)));
+    szDom.svgOptLbl.setAttribute("y", String(Math.max(16, optY - 7)));
+    szDom.svgOptLbl.textContent = "甜蜜點 " + res.optimalPool + " 條 (" + res.peakCapacityRps + ")";
+
+    var curX = poolToX(sizingState.poolSize);
+    var curY = rpsToY(res.maxCapacityRps, ceil);
+    var curFill = res.rejectedRps > 0 ? "#a8554f" : (res.zone === "over_provisioned" ? "#a3743e" : "#3f6188");
+    szDom.svgCurDot.setAttribute("cx", String(curX));
+    szDom.svgCurDot.setAttribute("cy", String(curY));
+    szDom.svgCurDot.setAttribute("fill", curFill);
+    var lblLeft = curX > 470;
+    szDom.svgCurLbl.setAttribute("x", String(lblLeft ? curX - 9 : curX + 9));
+    szDom.svgCurLbl.setAttribute("y", String(Math.min(SVG_Y1 - 6, curY + 15)));
+    szDom.svgCurLbl.setAttribute("text-anchor", lblLeft ? "end" : "start");
+    szDom.svgCurLbl.textContent = "目前 " + sizingState.poolSize + " 條 → " + res.maxCapacityRps + " req/s";
+  }
+
+  function renderSizing() {
+    var res = computePoolSizing(sizingState);
+
+    syncToggleGroup(szDom.seg, "data-workload", sizingState.workload);
+    if (szDom.rpsVal) szDom.rpsVal.textContent = sizingState.arrivalRps + " req/s";
+    if (szDom.qmsVal) szDom.qmsVal.textContent = sizingState.baseQueryMs + " ms";
+    if (szDom.poolVal) szDom.poolVal.textContent = sizingState.poolSize + " 條";
+    if (szDom.coresVal) szDom.coresVal.textContent = sizingState.dbCores + " vCPU";
+
+    renderSizingSvg(res);
+
+    szDom.kpiOpt.textContent = res.optimalPool + " 條";
+    szDom.kpiOptSub.textContent = "峰值吞吐可達 " + res.peakCapacityRps + " req/s";
+
+    szDom.kpiEff.textContent = res.effectiveQueryMs + " ms";
+    szDom.kpiEffSub.textContent = "排程與鎖摩擦 +" + res.contentionPenaltyMs + " ms";
+    szDom.kpiEffBox.className = "dcp-kpi " + (res.contentionPenaltyMs > sizingState.baseQueryMs * 0.8 ? "bad" : (res.contentionPenaltyMs > sizingState.baseQueryMs * 0.35 ? "warn" : "ok"));
+
+    szDom.kpiCap.textContent = res.maxCapacityRps + " req/s";
+    szDom.kpiCapSub.textContent = "池容量負載比 " + res.utilizationPct + "%";
+    szDom.kpiCapBox.className = "dcp-kpi " + (res.utilizationPct >= 100 ? "bad" : (res.utilizationPct > 82 ? "warn" : "ok"));
+
+    szDom.kpiWait.textContent = res.queueWaitMs + " ms";
+    szDom.kpiWaitSub.textContent = "應用端等待佇列約 " + res.queueDepth + " 筆";
+    szDom.kpiWaitBox.className = "dcp-kpi " + (res.queueWaitMs >= 120 ? "bad" : (res.queueWaitMs > 15 ? "warn" : "ok"));
+
+    szDom.kpiP99.textContent = res.p99LatencyMs + " ms";
+    szDom.kpiP99Sub.textContent = "取連排隊 + 競爭後執行尾端";
+    szDom.kpiP99Box.className = "dcp-kpi " + (res.p99LatencyMs > 250 ? "bad" : (res.p99LatencyMs > 50 ? "warn" : "ok"));
+
+    szDom.kpiDrop.textContent = res.rejectedRps + " req/s";
+    szDom.kpiDropSub.textContent = "有效完成吞吐 " + res.goodputRps + " req/s";
+    szDom.kpiDropBox.className = "dcp-kpi " + (res.rejectedRps > 0 ? "bad" : "ok");
+
+    if (res.zone === "thrash_collapse") {
+      szDom.status.innerHTML = "<b>過度併發顛簸崩潰（Thrashing）：</b>連線池開到 " + sizingState.poolSize + " 條（遠超甜蜜點 " + res.optimalPool + " 條），Context Switch 與鎖自旋把單筆查詢從 " + sizingState.baseQueryMs + " ms 拖慢到 " + res.effectiveQueryMs + " ms，池吞吐跌剩 " + res.maxCapacityRps + " req/s，每秒有 " + res.rejectedRps + " 筆請求因取連逾時失敗。調小連線池反而能救活吞吐！";
+    } else if (res.zone === "undersized_overload") {
+      szDom.status.innerHTML = "<b>容量不足打穿：</b>目前到達率 " + sizingState.arrivalRps + " req/s 超出此池上限 " + res.maxCapacityRps + " req/s。" + (sizingState.poolSize < res.optimalPool ? "目前池子尚未達甜蜜點（" + res.optimalPool + " 條），可適度調大連線池；" : "即使在甜蜜點峰值（" + res.peakCapacityRps + " req/s）仍低於流量，必須優化 SQL 耗時、加快取或擴充資料庫核心。") ;
+    } else if (res.zone === "over_provisioned") {
+      szDom.status.innerHTML = "<b>過度配置摩擦區：</b>雖然目前流量尚未打穿容量，但 " + sizingState.poolSize + " 條連線已讓單筆 SQL 多付 +" + res.contentionPenaltyMs + " ms 排程摩擦，最大吞吐上限正沿倒 U 曲線下滑；一旦流量突刺將比甜蜜點（" + res.optimalPool + " 條）更早雪崩。";
+    } else if (res.zone === "pool_bottleneck") {
+      szDom.status.innerHTML = "<b>池槽位偏小排隊區：</b>資料庫共有 " + sizingState.dbCores + " 顆核心，但池子僅放行 " + sizingState.poolSize + " 條連線，請求在應用端佇列平均多等 " + res.queueWaitMs + " ms；將池調近甜蜜點 " + res.optimalPool + " 條即可釋放閒置算力。";
+    } else {
+      szDom.status.innerHTML = "<b>甜蜜平衡區：</b>連線池（" + sizingState.poolSize + " 條）貼近核心甜蜜點（" + res.optimalPool + " 條），單筆競爭摩擦僅 +" + res.contentionPenaltyMs + " ms，最大吞吐達 " + res.maxCapacityRps + " req/s，足以平順吸收突發請求。";
+    }
+  }
+
+  function renderModes() {
+    var m = computeModeComparison(modeState);
+    var sesConns = m.txConns + m.savedConns;
+
+    syncToggleGroup(mdDom.seg, "data-feature", modeState.feature);
+    if (mdDom.clientsVal) mdDom.clientsVal.textContent = modeState.clientConns + " 條";
+    if (mdDom.txmsVal) mdDom.txmsVal.textContent = modeState.txSqlMs + " ms";
+    if (mdDom.thinkmsVal) mdDom.thinkmsVal.textContent = modeState.appThinkMs + " ms";
+
+    mdDom.cardSes.className = "dcp-card " + (sesConns > 120 ? "warn" : "ok");
+    mdDom.tagSes.className = "dcp-compat-tag ok";
+    mdDom.tagSes.textContent = "全功能相容";
+    mdDom.numSes.innerHTML = sesConns + " 條<small>後端連線</small>";
+    mdDom.fillSes.className = "dcp-meter-fill " + (sesConns > 120 ? "warn" : "ok");
+    mdDom.fillSes.style.width = "100%";
+    mdDom.muxSes.textContent = "1.0x（無壓縮）";
+    mdDom.memSes.textContent = m.sessionMemMb + " MB";
+    mdDom.riskSes.textContent = "零狀態污染";
+    mdDom.noteSes.textContent = "每條前端長連死綁一個後端行程，空閒的 " + round1(100 - m.dutyPct) + "% 時間後端連線跟著發呆。";
+
+    var txPct = Math.max(4, Math.min(100, Math.round((m.txConns / Math.max(1, sesConns)) * 100)));
+    mdDom.cardTx.className = "dcp-card " + m.txState;
+    mdDom.tagTx.className = "dcp-compat-tag " + m.txState;
+    mdDom.tagTx.textContent = m.txTag;
+    mdDom.numTx.innerHTML = m.txConns + " 條<small>後端連線（省 " + m.savedConns + " 條）</small>";
+    mdDom.fillTx.className = "dcp-meter-fill " + m.txState;
+    mdDom.fillTx.style.width = txPct + "%";
+    mdDom.muxTx.textContent = m.txMux + "x";
+    mdDom.memTx.textContent = m.txMemMb + " MB（省 " + m.savedMemMb + " MB）";
+    mdDom.riskTx.textContent = m.txRiskLabel;
+
+    if (modeState.feature === "prep") {
+      mdDom.noteTx.textContent = "具名預編譯跨越交易邊界；須開啟 PgBouncer 1.21+ max_prepared_statements 代管或關閉驅動預編譯。";
+    } else if (modeState.feature === "session_var") {
+      mdDom.noteTx.textContent = "危險！COMMIT 歸還後 SET 變數與 Session 鎖仍留在後端行程上，下一個借用者會讀到殘留租戶狀態。";
+    } else {
+      mdDom.noteTx.textContent = "SQL 佔空比 " + m.dutyPct + "%，利用交易間空檔輪流服務全體 Pod，兼顧完整交易語義與高壓縮率。";
+    }
+
+    mdDom.cardSt.className = "dcp-card " + m.stState;
+    mdDom.tagSt.className = "dcp-compat-tag " + m.stState;
+    if (m.stSupported) {
+      var stPct = Math.max(4, Math.min(100, Math.round((m.stConns / Math.max(1, sesConns)) * 100)));
+      mdDom.tagSt.textContent = "單句可用";
+      mdDom.numSt.innerHTML = m.stConns + " 條<small>後端連線</small>";
+      mdDom.fillSt.className = "dcp-meter-fill ok";
+      mdDom.fillSt.style.width = stPct + "%";
+      mdDom.muxSt.textContent = m.stMux + "x";
+      mdDom.memSt.textContent = m.stMemMb + " MB";
+      mdDom.riskSt.textContent = "限純單句查詢";
+      mdDom.noteSt.textContent = "純 Autocommit 單句查詢可正常運作，但只要未來加入任何 BEGIN...COMMIT 就會立即報錯。";
+    } else {
+      mdDom.tagSt.textContent = "協定拒絕";
+      mdDom.numSt.innerHTML = "不支援<small>多語句狀態</small>";
+      mdDom.fillSt.className = "dcp-meter-fill bad";
+      mdDom.fillSt.style.width = "10%";
+      mdDom.muxSt.textContent = "不可用";
+      mdDom.memSt.textContent = "—";
+      mdDom.riskSt.textContent = "每秒中斷 " + m.abortedTxPerSec + " 筆交易";
+      mdDom.noteSt.textContent = "第一條語句執行完即強制收回連線，多語句交易與會話變數在協定層被直接拒絕中止。";
+    }
+
+    if (modeState.feature === "session_var") {
+      mdDom.status.innerHTML = "<b>診斷結論：</b>目前工作負載含跨交易 <code>SET</code> 或 Session 諮詢鎖，直接套用 Transaction Mode 有約 <b>" + m.leakProbPct + "%</b> 機率發生跨客戶端狀態污染；請先改寫為 <code>SET LOCAL</code> 與 <code>pg_advisory_xact_lock()</code>，即可安全省下 <b>" + m.savedConns + " 條</b>後端連線（約 " + m.savedMemMb + " MB RSS）。";
+    } else if (modeState.feature === "prep") {
+      mdDom.status.innerHTML = "<b>診斷結論：</b>全叢集每秒約 <b>" + m.totalTxPerSec + " 筆</b>交易，Transaction Mode 可將後端連線從 " + sesConns + " 條壓縮至 <b>" + m.txConns + " 條（" + m.txMux + "x）</b>；針對具名 Prepared Statement，請在 PgBouncer 1.21+ 設定 <code>max_prepared_statements &gt; 0</code> 代管每秒約 " + m.stmtRemapPerSec + " 次語句映射。";
+    } else {
+      mdDom.status.innerHTML = "<b>診斷結論：</b>每條前端連線僅 <b>" + m.dutyPct + "%</b> 時間真正在跑 SQL；Transaction Mode 把 " + sesConns + " 條長連線收斂為 <b>" + m.txConns + " 條</b>後端行程（多工壓縮比 <b>" + m.txMux + "x</b>），立即替資料庫省下約 <b>" + m.savedMemMb + " MB</b> 常駐記憶體。";
+    }
+  }
+
+  /* (5) 事件綁定與初始渲染 */
+  function targetButton(ev) {
+    var t = ev && ev.target;
+    var elem = t && t.nodeType === 1 ? t : (t ? t.parentElement : null);
+    return elem && elem.closest ? elem.closest("button") : null;
+  }
+
+  if (szDom.seg) {
+    szDom.seg.addEventListener("click", function (ev) {
+      var btn = targetButton(ev);
+      if (!btn) return;
+      var wl = btn.getAttribute("data-workload");
+      if (wl && WORKLOAD_PROFILES[wl]) {
+        sizingState.workload = wl;
+        renderSizing();
+      }
+    });
+  }
+
+  if (szDom.rps) {
+    szDom.rps.addEventListener("input", function () {
+      sizingState.arrivalRps = Number(szDom.rps.value);
+      renderSizing();
+    });
+  }
+  if (szDom.qms) {
+    szDom.qms.addEventListener("input", function () {
+      sizingState.baseQueryMs = Number(szDom.qms.value);
+      renderSizing();
+    });
+  }
+  if (szDom.pool) {
+    szDom.pool.addEventListener("input", function () {
+      sizingState.poolSize = Number(szDom.pool.value);
+      renderSizing();
+    });
+  }
+  if (szDom.cores) {
+    szDom.cores.addEventListener("input", function () {
+      sizingState.dbCores = Number(szDom.cores.value);
+      renderSizing();
+    });
+  }
+  if (szDom.reset) {
+    szDom.reset.addEventListener("click", function () {
+      sizingState.arrivalRps = SIZING_DEFAULTS.arrivalRps;
+      sizingState.baseQueryMs = SIZING_DEFAULTS.baseQueryMs;
+      sizingState.poolSize = SIZING_DEFAULTS.poolSize;
+      sizingState.dbCores = SIZING_DEFAULTS.dbCores;
+      sizingState.workload = SIZING_DEFAULTS.workload;
+      szDom.rps.value = String(sizingState.arrivalRps);
+      szDom.qms.value = String(sizingState.baseQueryMs);
+      szDom.pool.value = String(sizingState.poolSize);
+      szDom.cores.value = String(sizingState.dbCores);
+      renderSizing();
+    });
+  }
+
+  if (mdDom.seg) {
+    mdDom.seg.addEventListener("click", function (ev) {
+      var btn = targetButton(ev);
+      if (!btn) return;
+      var ft = btn.getAttribute("data-feature");
+      if (ft) {
+        modeState.feature = ft;
+        renderModes();
+      }
+    });
+  }
+
+  if (mdDom.clients) {
+    mdDom.clients.addEventListener("input", function () {
+      modeState.clientConns = Number(mdDom.clients.value);
+      renderModes();
+    });
+  }
+  if (mdDom.txms) {
+    mdDom.txms.addEventListener("input", function () {
+      modeState.txSqlMs = Number(mdDom.txms.value);
+      renderModes();
+    });
+  }
+  if (mdDom.thinkms) {
+    mdDom.thinkms.addEventListener("input", function () {
+      modeState.appThinkMs = Number(mdDom.thinkms.value);
+      renderModes();
+    });
+  }
+  if (mdDom.reset) {
+    mdDom.reset.addEventListener("click", function () {
+      modeState.clientConns = MODE_DEFAULTS.clientConns;
+      modeState.txSqlMs = MODE_DEFAULTS.txSqlMs;
+      modeState.appThinkMs = MODE_DEFAULTS.appThinkMs;
+      modeState.feature = MODE_DEFAULTS.feature;
+      mdDom.clients.value = String(modeState.clientConns);
+      mdDom.txms.value = String(modeState.txSqlMs);
+      mdDom.thinkms.value = String(modeState.appThinkMs);
+      renderModes();
+    });
+  }
+
+  renderSizing();
+  renderModes();
+})();
+</script>
+
+
+<!-- 全螢幕檢視：切換按鈕、樣式與 F 鍵快捷鍵 -->
+<style>
+  .fs-toggle {
+    position: fixed;
+    top: 18px;
+    right: 18px;
+    z-index: 1000;
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    font-family: var(--sans);
+    font-size: 12.5px;
+    line-height: 1;
+    color: var(--text-2);
+    background: var(--bg);
+    border: 1px solid var(--border-strong);
+    border-radius: 999px;
+    padding: 7px 13px 7px 11px;
+    cursor: pointer;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, .06), 0 4px 12px rgba(0, 0, 0, .04);
+    transition: background .15s, border-color .15s, color .15s;
+  }
+
+  .fs-toggle:hover {
+    background: var(--bg-soft);
+    color: var(--text);
+    border-color: var(--text-3);
+  }
+
+  .fs-toggle:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+
+  .fs-toggle[aria-pressed="true"] {
+    background: var(--accent);
+    color: #fff;
+    border-color: var(--accent);
+  }
+
+  .fs-toggle .fs-ic {
+    flex: 0 0 auto;
+    display: block;
+  }
+
+  @media print {
+    .fs-toggle { display: none !important; }
+  }
+
+  @media (max-width: 480px) {
+    .fs-toggle { padding: 8px; }
+    .fs-toggle .fs-label { display: none; }
+  }
+</style>
+<button id="fs-toggle-btn" class="fs-toggle" type="button" aria-pressed="false"
+        aria-label="切換全螢幕檢視 (快捷鍵 F)" title="全螢幕檢視 (F)">
+  <svg class="fs-ic fs-ic-expand" viewBox="0 0 24 24" width="15" height="15" fill="none"
+       stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+    <path d="M8 3H5a2 2 0 0 0-2 2v3m18 0V5a2 2 0 0 0-2-2h-3m0 18h3a2 2 0 0 0 2-2v-3M3 16v3a2 2 0 0 0 2 2h3"/>
+  </svg>
+  <svg class="fs-ic fs-ic-compress" viewBox="0 0 24 24" width="15" height="15" fill="none"
+       stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="display:none">
+    <path d="M8 3v3a2 2 0 0 1-2 2H3m18 0h-3a2 2 0 0 1-2-2V3m0 18v-3a2 2 0 0 1 2-2h3M3 16h3a2 2 0 0 1 2 2v3"/>
+  </svg>
+  <span class="fs-label">全螢幕</span>
+</button>
+<script>
+  "use strict";
+  (function () {
+    var btn = document.getElementById("fs-toggle-btn");
+    if (!btn) return;
+    var docEl = document.documentElement;
+    var canFs = !!(docEl.requestFullscreen || docEl.webkitRequestFullscreen);
+    // 不支援 Fullscreen API (如 iPhone Safari) → 隱藏按鈕，避免壞掉的 UI
+    if (!canFs) { btn.style.display = "none"; return; }
+
+    var expandIc = btn.querySelector(".fs-ic-expand");
+    var compressIc = btn.querySelector(".fs-ic-compress");
+    var label = btn.querySelector(".fs-label");
+
+    function isFs() {
+      return !!(document.fullscreenElement || document.webkitFullscreenElement);
+    }
+    function enter() {
+      if (docEl.requestFullscreen) docEl.requestFullscreen();
+      else if (docEl.webkitRequestFullscreen) docEl.webkitRequestFullscreen();
+    }
+    function exit() {
+      if (document.exitFullscreen) document.exitFullscreen();
+      else if (document.webkitExitFullscreen) document.webkitExitFullscreen();
+    }
+    function toggle() { isFs() ? exit() : enter(); }
+    function sync() {
+      var on = isFs();
+      btn.setAttribute("aria-pressed", on ? "true" : "false");
+      if (label) label.textContent = on ? "離開全螢幕" : "全螢幕";
+      if (expandIc) expandIc.style.display = on ? "none" : "block";
+      if (compressIc) compressIc.style.display = on ? "block" : "none";
+    }
+
+    btn.addEventListener("click", toggle);
+    document.addEventListener("fullscreenchange", sync);
+    document.addEventListener("webkitfullscreenchange", sync);
+    document.addEventListener("keydown", function (e) {
+      if (e.key !== "f" && e.key !== "F") return;
+      if (e.metaKey || e.ctrlKey || e.altKey) return;
+      var t = e.target;
+      var tag = t && t.tagName ? t.tagName.toUpperCase() : "";
+      if (tag === "INPUT" || tag === "TEXTAREA" || (t && t.isContentEditable)) return;
+      e.preventDefault();
+      toggle();
+    });
+    sync();
+  })();
+</script>
+</body>
+</html>
