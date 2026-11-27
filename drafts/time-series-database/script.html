@@ -1,0 +1,666 @@
+<script>
+(function () {
+  "use strict";
+
+  /* (1) 常數與參數表 */
+  var GORILLA_PRESETS = {
+    steady: [
+      "1700000000,23.5",
+      "1700000060,23.5",
+      "1700000120,23.5",
+      "1700000180,23.75",
+      "1700000240,23.75",
+      "1700000300,23.75",
+      "1700000360,24.0",
+      "1700000420,24.0"
+    ].join("\n"),
+    jitter: [
+      "1700000000,23.512",
+      "1700000062,23.518",
+      "1700000119,23.541",
+      "1700000183,23.589",
+      "1700000238,23.604",
+      "1700000301,23.611",
+      "1700000364,23.627",
+      "1700000419,23.635"
+    ].join("\n"),
+    noisy: [
+      "1700000000,12.345678",
+      "1700000043,87.912304",
+      "1700000319,-4.118293",
+      "1700000337,154.77312",
+      "1700002910,0.0049182",
+      "1700002991,63.298174",
+      "1700006120,-91.44812",
+      "1700006155,41.882913"
+    ].join("\n")
+  };
+
+  var DEFAULT_CAPACITY = {
+    devices: 5000,
+    tagCardinality: 8,
+    intervalSec: 10,
+    rawRetentionDays: 14,
+    rollupDays: 365
+  };
+
+  var RAW_BYTES_PER_POINT = 16;
+  var GORILLA_BYTES_PER_POINT = 1.8;
+  var ROLLUP_INTERVAL_SEC = 300;
+  var ROLLUP_BYTES_PER_BUCKET = 14;
+  var BYTES_PER_ACTIVE_SERIES = 3200;
+
+  function toHex32(n) {
+    var u = n >>> 0;
+    var s = u.toString(16);
+    while (s.length < 8) s = "0" + s;
+    return s;
+  }
+
+  function float64ToWords(val) {
+    if (val === 0) {
+      return [1 / val === -Infinity ? 0x80000000 : 0, 0];
+    }
+    var sign = val < 0 ? 1 : 0;
+    var a = Math.abs(val);
+    if (!Number.isFinite(a)) {
+      if (isNaN(a)) return [0x7ff80000, 0];
+      return [(((sign ? 0x80000000 : 0) | 0x7ff00000) >>> 0), 0];
+    }
+    var e = Math.floor(Math.log(a) / Math.LN2);
+    var m = a / Math.pow(2, e);
+    while (m >= 2) { m /= 2; e += 1; }
+    while (m < 1 && e > -1022) { m *= 2; e -= 1; }
+    var be = e + 1023;
+    var frac;
+    if (be <= 0) {
+      frac = a / Math.pow(2, -1022);
+      be = 0;
+    } else {
+      frac = m - 1;
+    }
+    var scaled = frac * 1048576;
+    var hiFrac = Math.floor(scaled);
+    var lo = Math.round((scaled - hiFrac) * 4294967296);
+    if (lo >= 4294967296) {
+      lo -= 4294967296;
+      hiFrac += 1;
+      if (hiFrac >= 1048576) {
+        hiFrac = 0;
+        be += 1;
+      }
+    }
+    var hi = (((sign * 2048 + be) * 1048576) + hiFrac) >>> 0;
+    return [hi, lo >>> 0];
+  }
+
+  function countLeadingZeros64(hi, lo) {
+    var uHi = hi >>> 0;
+    var uLo = lo >>> 0;
+    if (uHi === 0 && uLo === 0) return 64;
+    var count = 0;
+    if (uHi !== 0) {
+      for (var b = 31; b >= 0; b -= 1) {
+        if (((uHi >>> b) & 1) !== 0) return count;
+        count += 1;
+      }
+      return 32;
+    }
+    count = 32;
+    for (var b2 = 31; b2 >= 0; b2 -= 1) {
+      if (((uLo >>> b2) & 1) !== 0) return count;
+      count += 1;
+    }
+    return 64;
+  }
+
+  function countTrailingZeros64(hi, lo) {
+    var uHi = hi >>> 0;
+    var uLo = lo >>> 0;
+    if (uHi === 0 && uLo === 0) return 64;
+    var count = 0;
+    if (uLo !== 0) {
+      for (var b = 0; b < 32; b += 1) {
+        if (((uLo >>> b) & 1) !== 0) return count;
+        count += 1;
+      }
+      return 32;
+    }
+    count = 32;
+    for (var b2 = 0; b2 < 32; b2 += 1) {
+      if (((uHi >>> b2) & 1) !== 0) return count;
+      count += 1;
+    }
+    return 64;
+  }
+
+  function parseSeriesLines(rawLines) {
+    var text = typeof rawLines === "string" ? rawLines : "";
+    var lines = text.split(/\r?\n/);
+    var out = [];
+    for (var i = 0; i < lines.length; i += 1) {
+      var trimmed = lines[i].trim();
+      if (!trimmed) continue;
+      var parts = trimmed.split(/[\s,;]+/);
+      if (parts.length < 2) continue;
+      var ts = parseFloat(parts[0]);
+      var val = parseFloat(parts[1]);
+      if (Number.isFinite(ts) && Number.isFinite(val)) {
+        out.push({ ts: Math.round(ts), val: val });
+      }
+    }
+    return out;
+  }
+
+  function classifyDoD(dod) {
+    if (dod === 0) return { prefix: "0", payloadBits: 0, totalBits: 1, tone: "ok" };
+    if (dod >= -63 && dod <= 64) return { prefix: "10", payloadBits: 7, totalBits: 9, tone: "wait" };
+    if (dod >= -255 && dod <= 256) return { prefix: "110", payloadBits: 9, totalBits: 12, tone: "warn" };
+    if (dod >= -2047 && dod <= 2048) return { prefix: "1110", payloadBits: 12, totalBits: 16, tone: "warn" };
+    return { prefix: "1111", payloadBits: 32, totalBits: 36, tone: "bad" };
+  }
+
+  /* (2) compute* 純函式 */
+  // @probe fn       computeGorilla
+  // @probe baseline {"rawLines":"1700000000,23.512\n1700000062,23.518\n1700000119,23.541\n1700000183,23.589\n1700000238,23.604\n1700000301,23.611\n1700000364,23.627\n1700000419,23.635","tsGranularitySec":1,"valDecimals":6}
+  // @probe sweep    {"rawLines":["1700000000,23.5\n1700000060,23.5\n1700000120,23.5\n1700000180,23.5\n1700000240,23.5\n1700000300,23.5","1700000000,12.345678\n1700000043,87.912304\n1700000319,-4.118293\n1700000337,154.77312\n1700002910,0.0049182\n1700002991,63.298174"],"tsGranularitySec":[1,60],"valDecimals":[0,6]}
+  function computeGorilla(p) {
+    var gran = Number(p.tsGranularitySec);
+    if (!Number.isFinite(gran) || gran < 1) gran = 1;
+    var dec = Number(p.valDecimals);
+    if (!Number.isFinite(dec) || dec < 0) dec = 6;
+    if (dec > 6) dec = 6;
+
+    var parsed = parseSeriesLines(p.rawLines);
+    var count = parsed.length;
+    if (count === 0) {
+      return {
+        pointCount: 0,
+        totalRawBits: 0,
+        totalCompressedBits: 0,
+        totalTsBits: 0,
+        totalValBits: 0,
+        avgBitsPerPoint: 0,
+        avgBytesPerPoint: 0,
+        steadyBitsPerPoint: 0,
+        compressionRatio: 0,
+        savingPct: 0,
+        dodZeroCount: 0,
+        xorZeroCount: 0,
+        ratioTone: "warn",
+        rows: [],
+        summaryText: "找不到有效資料列，請輸入「時間戳,數值」格式（至少 2 筆）。"
+      };
+    }
+
+    var scale = Math.pow(10, dec);
+    var rows = [];
+    var totalTsBits = 0;
+    var totalValBits = 0;
+    var dodZeroCount = 0;
+    var xorZeroCount = 0;
+
+    var prevTs = 0;
+    var prevDelta = 0;
+    var prevWords = [0, 0];
+    var prevLz = -1;
+    var prevTz = -1;
+
+    for (var i = 0; i < count; i += 1) {
+      var alignedTs = Math.round(parsed[i].ts / gran) * gran;
+      var qVal = dec >= 6 ? parsed[i].val : Math.round(parsed[i].val * scale) / scale;
+      var words = float64ToWords(qVal);
+
+      var delta = null;
+      var dod = null;
+      var tsBits = 0;
+      var dodLabel = "";
+      var dodTone = "wait";
+
+      var xorHex = "—";
+      var valBits = 0;
+      var xorLabel = "";
+      var xorTone = "wait";
+
+      if (i === 0) {
+        tsBits = 64;
+        dodLabel = "基準 64b";
+        dodTone = "wait";
+        valBits = 64;
+        xorLabel = "基準 64b";
+        xorTone = "wait";
+      } else {
+        delta = alignedTs - prevTs;
+        if (i === 1) {
+          tsBits = (delta >= 0 && delta <= 16383) ? 14 : 32;
+          dodLabel = "首差 " + tsBits + "b";
+          dodTone = tsBits === 14 ? "wait" : "warn";
+        } else {
+          dod = delta - prevDelta;
+          var cls = classifyDoD(dod);
+          tsBits = cls.totalBits;
+          dodLabel = cls.payloadBits === 0 ? "0 (1b)" : (cls.prefix + "+" + cls.payloadBits + "b=" + cls.totalBits + "b");
+          dodTone = cls.tone;
+          if (dod === 0) dodZeroCount += 1;
+        }
+
+        var xHi = (words[0] ^ prevWords[0]) >>> 0;
+        var xLo = (words[1] ^ prevWords[1]) >>> 0;
+        xorHex = toHex32(xHi) + toHex32(xLo);
+
+        if (xHi === 0 && xLo === 0) {
+          valBits = 1;
+          xorLabel = "0 (同值 1b)";
+          xorTone = "ok";
+          xorZeroCount += 1;
+        } else {
+          var rawLz = countLeadingZeros64(xHi, xLo);
+          var lz = rawLz > 31 ? 31 : rawLz;
+          var tz = countTrailingZeros64(xHi, xLo);
+          var meaningful = 64 - lz - tz;
+          if (meaningful < 1) meaningful = 1;
+
+          if (prevLz !== -1 && lz >= prevLz && tz >= prevTz) {
+            var reusedLen = 64 - prevLz - prevTz;
+            valBits = 2 + reusedLen;
+            xorLabel = "10 沿用(" + prevLz + "/" + prevTz + ")=" + valBits + "b";
+            xorTone = valBits <= 20 ? "ok" : "wait";
+          } else {
+            valBits = 13 + meaningful;
+            xorLabel = "11 新窗(" + lz + "/" + tz + ")=" + valBits + "b";
+            xorTone = valBits <= 28 ? "wait" : (valBits <= 48 ? "warn" : "bad");
+            prevLz = lz;
+            prevTz = tz;
+          }
+        }
+      }
+
+      totalTsBits += tsBits;
+      totalValBits += valBits;
+
+      rows.push({
+        index: i + 1,
+        alignedTs: alignedTs,
+        delta: delta,
+        dod: dod,
+        dodLabel: dodLabel,
+        dodTone: dodTone,
+        tsBits: tsBits,
+        qVal: qVal,
+        xorHex: xorHex,
+        xorLabel: xorLabel,
+        xorTone: xorTone,
+        valBits: valBits,
+        rowTotalBits: tsBits + valBits
+      });
+
+      if (i >= 1) prevDelta = delta;
+      prevTs = alignedTs;
+      prevWords = words;
+    }
+
+    var totalRawBits = count * 128;
+    var totalCompressedBits = totalTsBits + totalValBits;
+    var avgBitsPerPoint = Math.round((totalCompressedBits / count) * 10) / 10;
+    var avgBytesPerPoint = Math.round((avgBitsPerPoint / 8) * 100) / 100;
+    var steadyBitsPerPoint = count > 1
+      ? Math.round(((totalCompressedBits - 128) / (count - 1)) * 10) / 10
+      : 128;
+    var compressionRatio = totalCompressedBits > 0
+      ? Math.round((totalRawBits / totalCompressedBits) * 100) / 100
+      : 0;
+    var savingPct = totalRawBits > 0
+      ? Math.round(((totalRawBits - totalCompressedBits) / totalRawBits) * 1000) / 10
+      : 0;
+
+    var ratioTone = "bad";
+    if (savingPct >= 65) ratioTone = "ok";
+    else if (savingPct >= 35) ratioTone = "warn";
+
+    var summaryText = "共解析 " + count + " 筆點：未壓縮 " + totalRawBits + " bits → Gorilla 僅需 " +
+      totalCompressedBits + " bits（時間戳 " + totalTsBits + "b ＋ 數值 " + totalValBits +
+      "b），扣除首筆基準點後平均每點 " + steadyBitsPerPoint + " bits（" +
+      (Math.round((steadyBitsPerPoint / 8) * 100) / 100) + " B/pt）；其中 DoD=0 共 " +
+      dodZeroCount + " 筆、XOR=0 共 " + xorZeroCount + " 筆。";
+
+    return {
+      pointCount: count,
+      totalRawBits: totalRawBits,
+      totalCompressedBits: totalCompressedBits,
+      totalTsBits: totalTsBits,
+      totalValBits: totalValBits,
+      avgBitsPerPoint: avgBitsPerPoint,
+      avgBytesPerPoint: avgBytesPerPoint,
+      steadyBitsPerPoint: steadyBitsPerPoint,
+      compressionRatio: compressionRatio,
+      savingPct: savingPct,
+      dodZeroCount: dodZeroCount,
+      xorZeroCount: xorZeroCount,
+      ratioTone: ratioTone,
+      rows: rows,
+      summaryText: summaryText
+    };
+  }
+
+  // @probe fn       computeCapacity
+  // @probe baseline {"devices":5000,"tagCardinality":8,"intervalSec":10,"rawRetentionDays":14,"rollupDays":365}
+  // @probe sweep    {"devices":[100,50000],"tagCardinality":[1,50],"intervalSec":[1,300],"rawRetentionDays":[1,90],"rollupDays":[30,730]}
+  function computeCapacity(p) {
+    var devices = Math.max(1, Math.round(Number(p.devices) || 1));
+    var tagCard = Math.max(1, Math.round(Number(p.tagCardinality) || 1));
+    var intervalSec = Math.max(1, Math.round(Number(p.intervalSec) || 1));
+    var rawDays = Math.max(1, Math.round(Number(p.rawRetentionDays) || 1));
+    var rollupDays = Math.max(1, Math.round(Number(p.rollupDays) || 1));
+
+    var activeSeries = devices * tagCard;
+    var pointsPerSec = Math.round((activeSeries / intervalSec) * 10) / 10;
+    var indexMemMB = Math.round(((activeSeries * BYTES_PER_ACTIVE_SERIES) / (1024 * 1024)) * 10) / 10;
+
+    var rawPointsTotal = (activeSeries / intervalSec) * 86400 * rawDays;
+    var gbDiv = 1024 * 1024 * 1024;
+    var rawUncompressedGB = Math.round(((rawPointsTotal * RAW_BYTES_PER_POINT) / gbDiv) * 100) / 100;
+    var rawCompressedGB = Math.round(((rawPointsTotal * GORILLA_BYTES_PER_POINT) / gbDiv) * 100) / 100;
+
+    var rollupBucketsTotal = (activeSeries / ROLLUP_INTERVAL_SEC) * 86400 * rollupDays;
+    var rollupGB = Math.round(((rollupBucketsTotal * ROLLUP_BYTES_PER_BUCKET) / gbDiv) * 100) / 100;
+
+    var totalStorageGB = Math.round((rawCompressedGB + rollupGB) * 100) / 100;
+    var fullRawLongTermGB = ((activeSeries / intervalSec) * 86400 * rollupDays * RAW_BYTES_PER_POINT) / gbDiv;
+    var savingPct = fullRawLongTermGB > 0
+      ? Math.round(((fullRawLongTermGB - totalStorageGB) / fullRawLongTermGB) * 1000) / 10
+      : 0;
+    if (savingPct < 0) savingPct = 0;
+
+    var chunkHours = pointsPerSec >= 100000 ? 2 : (pointsPerSec >= 10000 ? 6 : 24);
+    var chunkCount = Math.ceil((rawDays * 24) / chunkHours);
+
+    var tierKey = "ok";
+    var tierLabel = "基數健康（單機倒排索引輕鬆承載）";
+    if (activeSeries >= 500000) {
+      tierKey = "bad";
+      tierLabel = "高基數警戒（須改欄式 Parquet 或水平分片）";
+    } else if (activeSeries >= 100000) {
+      tierKey = "warn";
+      tierLabel = "中度基數壓力（需控管 Tag 與限制 Series Churn）";
+    }
+
+    var maxBarGB = Math.max(rawUncompressedGB, rawCompressedGB, rollupGB, 0.01);
+    var rawBarPct = Math.max(2, Math.round((rawUncompressedGB / maxBarGB) * 1000) / 10);
+    var gorillaBarPct = Math.max(2, Math.round((rawCompressedGB / maxBarGB) * 1000) / 10);
+    var rollupBarPct = Math.max(2, Math.round((rollupGB / maxBarGB) * 1000) / 10);
+
+    var summaryText = "活躍序列 " + activeSeries.toLocaleString("en-US") + " 條、寫入 " +
+      pointsPerSec.toLocaleString("en-US") + " pts/s；熱層建議每 " + chunkHours +
+      " 小時切一塊（共 " + chunkCount + " 個 Chunk）。若全期留未壓縮原始點需 " +
+      (Math.round(fullRawLongTermGB * 10) / 10).toLocaleString("en-US") +
+      " GB，採熱層 Gorilla ＋ 溫冷層 5m Rollup 僅需 " + totalStorageGB.toLocaleString("en-US") +
+      " GB（節省 " + savingPct + "%）。";
+
+    return {
+      activeSeries: activeSeries,
+      pointsPerSec: pointsPerSec,
+      indexMemMB: indexMemMB,
+      rawUncompressedGB: rawUncompressedGB,
+      rawCompressedGB: rawCompressedGB,
+      rollupGB: rollupGB,
+      totalStorageGB: totalStorageGB,
+      savingPct: savingPct,
+      chunkHours: chunkHours,
+      chunkCount: chunkCount,
+      tierKey: tierKey,
+      tierLabel: tierLabel,
+      rawBarPct: rawBarPct,
+      gorillaBarPct: gorillaBarPct,
+      rollupBarPct: rollupBarPct,
+      summaryText: summaryText
+    };
+  }
+
+  /* (3) DOM 參照 */
+  function el(id) { return document.getElementById(id); }
+
+  var grDom = {
+    presets: el("gr-presets"),
+    resetBtn: el("gr-reset"),
+    input: el("gr-input"),
+    granularity: el("gr-granularity"),
+    decimals: el("gr-decimals"),
+    kpiRaw: el("gr-kpi-raw"),
+    kpiComp: el("gr-kpi-comp"),
+    kpiCompSub: el("gr-kpi-comp-sub"),
+    kpiBpp: el("gr-kpi-bpp"),
+    kpiBytes: el("gr-kpi-bytes"),
+    kpiCardRatio: el("gr-kpi-card-ratio"),
+    kpiRatio: el("gr-kpi-ratio"),
+    kpiSaved: el("gr-kpi-saved"),
+    tbody: el("gr-tbody"),
+    status: el("gr-status")
+  };
+
+  var capDom = {
+    tierBadge: el("cap-tier-badge"),
+    resetBtn: el("cap-reset"),
+    devices: el("cap-devices"),
+    devicesVal: el("cap-devices-val"),
+    tags: el("cap-tags"),
+    tagsVal: el("cap-tags-val"),
+    interval: el("cap-interval"),
+    intervalVal: el("cap-interval-val"),
+    rawDays: el("cap-raw-days"),
+    rawDaysVal: el("cap-raw-days-val"),
+    rollupDays: el("cap-rollup-days"),
+    rollupDaysVal: el("cap-rollup-days-val"),
+    cardSeries: el("cap-card-series"),
+    outSeries: el("cap-out-series"),
+    outRam: el("cap-out-ram"),
+    outRamSub: el("cap-out-ram-sub"),
+    outPps: el("cap-out-pps"),
+    outChunks: el("cap-out-chunks"),
+    outTotal: el("cap-out-total"),
+    outSaving: el("cap-out-saving"),
+    gbRaw: el("cap-gb-raw"),
+    fillRaw: el("cap-fill-raw"),
+    gbGorilla: el("cap-gb-gorilla"),
+    fillGorilla: el("cap-fill-gorilla"),
+    gbRollup: el("cap-gb-rollup"),
+    fillRollup: el("cap-fill-rollup"),
+    status: el("cap-status")
+  };
+
+  /* (4) render */
+  function formatNum(n) {
+    return Number(n).toLocaleString("en-US");
+  }
+
+  function formatStorage(gb) {
+    if (gb >= 1024) return (Math.round((gb / 1024) * 100) / 100).toLocaleString("en-US") + " TB";
+    return gb.toLocaleString("en-US") + " GB";
+  }
+
+  function formatMem(mb) {
+    if (mb >= 1024) return (Math.round((mb / 1024) * 100) / 100).toLocaleString("en-US") + " GB";
+    return mb.toLocaleString("en-US") + " MB";
+  }
+
+  function makeCell(text) {
+    var td = document.createElement("td");
+    td.textContent = text;
+    return td;
+  }
+
+  function makePillCell(text, tone) {
+    var td = document.createElement("td");
+    var span = document.createElement("span");
+    span.className = "ts-code-pill " + tone;
+    span.textContent = text;
+    td.appendChild(span);
+    return td;
+  }
+
+  function renderGorilla(state) {
+    if (!grDom.tbody) return;
+    grDom.kpiRaw.textContent = formatNum(state.totalRawBits) + " b";
+    grDom.kpiComp.textContent = formatNum(state.totalCompressedBits) + " b";
+    grDom.kpiCompSub.textContent = "ts " + formatNum(state.totalTsBits) + "b ＋ val " + formatNum(state.totalValBits) + "b";
+    grDom.kpiBpp.textContent = state.avgBitsPerPoint + " b/pt";
+    grDom.kpiBytes.textContent = "去首筆穩定均 " + state.steadyBitsPerPoint + " b/pt";
+    grDom.kpiRatio.textContent = state.compressionRatio + "x";
+    grDom.kpiSaved.textContent = "節省 " + state.savingPct + "% 空間";
+    grDom.kpiCardRatio.className = "ts-kpi-card " + state.ratioTone;
+    grDom.status.textContent = state.summaryText;
+
+    while (grDom.tbody.firstChild) grDom.tbody.removeChild(grDom.tbody.firstChild);
+    for (var i = 0; i < state.rows.length; i += 1) {
+      var r = state.rows[i];
+      var tr = document.createElement("tr");
+      tr.appendChild(makeCell(String(r.index)));
+      tr.appendChild(makeCell(String(r.alignedTs)));
+      var deltaStr = r.delta === null ? "—" : (r.dod === null ? "Δ=" + r.delta : "Δ=" + r.delta + " / D=" + r.dod);
+      tr.appendChild(makeCell(deltaStr));
+      tr.appendChild(makePillCell(r.dodLabel, r.dodTone));
+      tr.appendChild(makeCell(String(r.qVal)));
+      tr.appendChild(makeCell(r.xorHex));
+      tr.appendChild(makePillCell(r.xorLabel, r.xorTone));
+
+      var meterTd = document.createElement("td");
+      var wrap = document.createElement("div");
+      wrap.style.display = "flex";
+      wrap.style.alignItems = "center";
+      wrap.style.gap = "8px";
+
+      var meter = document.createElement("div");
+      meter.className = "ts-bit-meter";
+      var tsFill = document.createElement("div");
+      tsFill.className = "ts-bit-ts";
+      tsFill.style.width = Math.min(100, (r.tsBits / 128) * 100) + "%";
+      var valFill = document.createElement("div");
+      valFill.className = "ts-bit-val";
+      valFill.style.width = Math.min(100, (r.valBits / 128) * 100) + "%";
+      meter.appendChild(tsFill);
+      meter.appendChild(valFill);
+
+      var numSpan = document.createElement("span");
+      numSpan.textContent = r.rowTotalBits + "b";
+      wrap.appendChild(meter);
+      wrap.appendChild(numSpan);
+      meterTd.appendChild(wrap);
+      tr.appendChild(meterTd);
+
+      grDom.tbody.appendChild(tr);
+    }
+  }
+
+  function renderCapacity(state, uiInputs) {
+    if (!capDom.outSeries) return;
+    capDom.devicesVal.textContent = formatNum(uiInputs.devices);
+    capDom.tagsVal.textContent = formatNum(uiInputs.tagCardinality);
+    capDom.intervalVal.textContent = uiInputs.intervalSec + " s";
+    capDom.rawDaysVal.textContent = uiInputs.rawRetentionDays + " 天";
+    capDom.rollupDaysVal.textContent = uiInputs.rollupDays + " 天";
+
+    capDom.tierBadge.className = "ts-tier-badge " + state.tierKey;
+    capDom.tierBadge.textContent = state.tierLabel;
+    capDom.cardSeries.className = "ts-kpi-card " + state.tierKey;
+
+    capDom.outSeries.textContent = formatNum(state.activeSeries);
+    capDom.outRam.textContent = formatMem(state.indexMemMB);
+    capDom.outRamSub.textContent = "約 3.2 KB / 活躍 Series";
+    capDom.outPps.textContent = formatNum(state.pointsPerSec) + " pts/s";
+    capDom.outChunks.textContent = "每 " + state.chunkHours + "h 切塊，共 " + state.chunkCount + " 塊";
+    capDom.outTotal.textContent = formatStorage(state.totalStorageGB);
+    capDom.outSaving.textContent = "較全期未壓縮省 " + state.savingPct + "%";
+
+    capDom.gbRaw.textContent = formatStorage(state.rawUncompressedGB);
+    capDom.fillRaw.style.width = state.rawBarPct + "%";
+    capDom.gbGorilla.textContent = formatStorage(state.rawCompressedGB);
+    capDom.fillGorilla.style.width = state.gorillaBarPct + "%";
+    capDom.gbRollup.textContent = formatStorage(state.rollupGB);
+    capDom.fillRollup.style.width = state.rollupBarPct + "%";
+
+    capDom.status.textContent = state.summaryText;
+  }
+
+  /* (5) 事件綁定 */
+  function markPresetButton(key) {
+    if (!grDom.presets) return;
+    var btns = grDom.presets.querySelectorAll("button[data-preset]");
+    for (var i = 0; i < btns.length; i += 1) {
+      btns[i].setAttribute("aria-pressed", btns[i].getAttribute("data-preset") === key ? "true" : "false");
+    }
+  }
+
+  function updateGorilla() {
+    if (!grDom.input) return;
+    var state = computeGorilla({
+      rawLines: grDom.input.value,
+      tsGranularitySec: Number(grDom.granularity.value),
+      valDecimals: Number(grDom.decimals.value)
+    });
+    renderGorilla(state);
+  }
+
+  function loadGorillaPreset(key) {
+    if (!grDom.input) return;
+    grDom.input.value = GORILLA_PRESETS[key] || GORILLA_PRESETS.steady;
+    markPresetButton(key);
+    updateGorilla();
+  }
+
+  function updateCapacity() {
+    if (!capDom.devices) return;
+    var inputs = {
+      devices: Number(capDom.devices.value),
+      tagCardinality: Number(capDom.tags.value),
+      intervalSec: Number(capDom.interval.value),
+      rawRetentionDays: Number(capDom.rawDays.value),
+      rollupDays: Number(capDom.rollupDays.value)
+    };
+    var state = computeCapacity(inputs);
+    renderCapacity(state, inputs);
+  }
+
+  function resetCapacity() {
+    if (!capDom.devices) return;
+    capDom.devices.value = String(DEFAULT_CAPACITY.devices);
+    capDom.tags.value = String(DEFAULT_CAPACITY.tagCardinality);
+    capDom.interval.value = String(DEFAULT_CAPACITY.intervalSec);
+    capDom.rawDays.value = String(DEFAULT_CAPACITY.rawRetentionDays);
+    capDom.rollupDays.value = String(DEFAULT_CAPACITY.rollupDays);
+    updateCapacity();
+  }
+
+  if (grDom.presets) {
+    grDom.presets.addEventListener("click", function (e) {
+      var node = e.target && e.target.nodeType === 1 ? e.target : (e.target ? e.target.parentElement : null);
+      var btn = node ? node.closest("button[data-preset]") : null;
+      if (!btn) return;
+      loadGorillaPreset(btn.getAttribute("data-preset"));
+    });
+  }
+
+  if (grDom.input) {
+    grDom.input.addEventListener("input", function () {
+      markPresetButton("");
+      updateGorilla();
+    });
+  }
+  if (grDom.granularity) grDom.granularity.addEventListener("change", updateGorilla);
+  if (grDom.decimals) grDom.decimals.addEventListener("change", updateGorilla);
+  if (grDom.resetBtn) {
+    grDom.resetBtn.addEventListener("click", function () {
+      grDom.granularity.value = "1";
+      grDom.decimals.value = "6";
+      loadGorillaPreset("steady");
+    });
+  }
+
+  var capInputs = [capDom.devices, capDom.tags, capDom.interval, capDom.rawDays, capDom.rollupDays];
+  for (var ci = 0; ci < capInputs.length; ci += 1) {
+    if (capInputs[ci]) capInputs[ci].addEventListener("input", updateCapacity);
+  }
+  if (capDom.resetBtn) capDom.resetBtn.addEventListener("click", resetCapacity);
+
+  loadGorillaPreset("steady");
+  resetCapacity();
+})();
+</script>

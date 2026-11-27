@@ -1,0 +1,3147 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>時序資料庫 (Time-series Database) | System Design Every Day</title>
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect x='3' y='2' width='26' height='28' rx='6' fill='%23386f5a' stroke='%2374b59b' stroke-width='1.5'/%3E%3Crect x='3.8' y='2.8' width='24.4' height='23.5' rx='4.8' fill='%2352967c'/%3E%3Cpath d='M9 2.8V26.3' stroke='%2374b59b' stroke-width='1.5' stroke-opacity='.75'/%3E%3Cpath d='M7.5 28.1H25' stroke='%23e6f5ef' stroke-width='1.8' stroke-linecap='round'/%3E%3Cpath d='M14 14.5L21.5 10.2M14 14.5L21.5 18.8M21.5 10.2V18.8' stroke='%23dcf2e9' stroke-width='2.1' stroke-linecap='round'/%3E%3Ccircle cx='14' cy='14.5' r='2.9' fill='%23ffffff'/%3E%3Ccircle cx='21.5' cy='10.2' r='2.7' fill='%23f6e29c'/%3E%3Ccircle cx='21.5' cy='18.8' r='2.7' fill='%23ffffff'/%3E%3C/svg%3E">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@300;400;500;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+  <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+  <script>
+    mermaid.initialize({
+      startOnLoad: true,
+      theme: 'default',
+      securityLevel: 'loose'
+    });
+  </script>
+  <style>
+    /* 全站設計 token 的唯一來源。scripts/lib/books.js 會把「第一個 :root 區塊」原樣抽進首頁：
+       請保持單一區塊、區塊內不得出現 `}`；首頁領域色依賴 --accent / --ok / --warn。 */
+    :root {
+      --bg: #ffffff;
+      --bg-soft: #fafaf9;
+      --text: #262a2f;
+      --text-2: #6b7078;
+      --text-3: #9aa0a8;
+      --border: #ecebe8;
+      --border-strong: #dedcd8;
+      --code-bg: #f6f5f3;
+      --accent: #3f6188;
+      --accent-soft: #eef2f7;
+      --accent-line: #cdd9e6;
+      --ok: #4d7d68;
+      --ok-soft: #eef4f1;
+      --warn: #a3743e;
+      --warn-soft: #f6f0e7;
+      --bad: #a8554f;
+      --bad-soft: #f6ecea;
+      --radius: 10px;
+      --radius-sm: 7px;
+      --maxw: 760px;
+      --sans: "Noto Sans TC", system-ui, -apple-system, "Segoe UI", sans-serif;
+      --mono: "JetBrains Mono", "SFMono-Regular", Menlo, Consolas, monospace;
+    }
+
+    /* ---------- base reset ----------
+       等價於 Tailwind preflight 的最小重置（頁面不載入 Tailwind，utility class 不會生效）。
+       文章頁與各篇 demo CSS 都以這組基準值撰寫，改動會讓所有產物的間距、清單、按鈕外觀一起變動。
+       新增規則請一律寫在這個區塊之後，並使用 :root 的 token。 */
+    *, *::before, *::after {
+      box-sizing: border-box;
+      border: 0 solid var(--border);
+    }
+
+    html {
+      line-height: 1.5;
+      -webkit-text-size-adjust: 100%;
+      tab-size: 4;
+    }
+
+    h1, h2, h3, h4, h5, h6 {
+      margin: 0;
+      font-size: inherit;
+      font-weight: inherit;
+    }
+
+    p, blockquote, dl, dd, figure, pre, hr {
+      margin: 0;
+    }
+
+    hr {
+      height: 0;
+      color: inherit;
+      border-top-width: 1px;
+    }
+
+    a {
+      color: inherit;
+      text-decoration: inherit;
+    }
+
+    b, strong {
+      font-weight: bolder;
+    }
+
+    code, kbd, samp, pre {
+      font-family: var(--mono);
+      font-size: 1em;
+    }
+
+    small {
+      font-size: 80%;
+    }
+
+    sub, sup {
+      position: relative;
+      font-size: 75%;
+      line-height: 0;
+      vertical-align: baseline;
+    }
+    sub { bottom: -0.25em; }
+    sup { top: -0.5em; }
+
+    table {
+      border-collapse: collapse;
+      border-color: inherit;
+      text-indent: 0;
+    }
+
+    ol, ul, menu {
+      list-style: none;
+      margin: 0;
+      padding: 0;
+    }
+
+    img, svg, video, canvas, audio, iframe, embed, object {
+      display: block;
+      vertical-align: middle;
+    }
+
+    img, video {
+      max-width: 100%;
+      height: auto;
+    }
+
+    button, input, optgroup, select, textarea {
+      margin: 0;
+      padding: 0;
+      font: inherit;
+      line-height: inherit;
+      color: inherit;
+    }
+
+    button, select {
+      text-transform: none;
+    }
+
+    button, [type="button"], [type="reset"], [type="submit"] {
+      -webkit-appearance: button;
+      background-color: transparent;
+      background-image: none;
+    }
+
+    button, [role="button"] {
+      cursor: pointer;
+    }
+
+    :disabled {
+      cursor: default;
+    }
+
+    input::placeholder, textarea::placeholder {
+      opacity: 1;
+      color: var(--text-3);
+    }
+
+    textarea {
+      resize: vertical;
+    }
+
+    fieldset {
+      margin: 0;
+      padding: 0;
+    }
+
+    legend {
+      padding: 0;
+    }
+
+    summary {
+      display: list-item;
+    }
+
+    [hidden] {
+      display: none;
+    }
+
+    html {
+      scroll-behavior: smooth;
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      html {
+        scroll-behavior: auto;
+      }
+      * {
+        animation-duration: .001ms !important;
+        transition-duration: .001ms !important;
+      }
+    }
+
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font-family: var(--sans);
+      font-weight: 400;
+      font-size: 16px;
+      line-height: 1.78;
+      -webkit-font-smoothing: antialiased;
+      letter-spacing: .005em;
+    }
+
+    ::selection {
+      background: var(--accent-soft);
+    }
+
+    /* ---------- layout ---------- */
+    .wrap {
+      display: flex;
+      max-width: 1180px;
+      margin: 0 auto;
+      gap: 0;
+    }
+
+    .toc {
+      width: 248px;
+      flex: 0 0 248px;
+      position: sticky;
+      top: 0;
+      height: 100vh;
+      padding: 54px 22px 40px 28px;
+      overflow-y: auto;
+      border-right: 1px solid var(--border);
+      transition: width .2s ease, flex-basis .2s ease, padding .2s ease, opacity .15s ease, border-color .15s ease;
+    }
+
+    .toc-kicker {
+      font-family: var(--mono);
+      font-size: 11px;
+      letter-spacing: .14em;
+      text-transform: uppercase;
+      color: var(--text-3);
+      margin-bottom: 20px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+    }
+
+    /* desktop：側欄內收合鈕；≤920px 隱藏，改由 .toc-toggle accordion 控制 */
+    .toc-collapse {
+      display: none;
+      flex: 0 0 auto;
+      align-items: center;
+      justify-content: center;
+      width: 28px;
+      height: 28px;
+      padding: 0;
+      border: none;
+      background: none;
+      border-radius: 6px;
+      color: var(--text-2);
+      line-height: 1;
+      cursor: pointer;
+    }
+
+    .toc-collapse:hover {
+      color: var(--text);
+      background: var(--bg-soft);
+    }
+
+    .toc-collapse:focus-visible {
+      outline: 2px solid var(--accent);
+      outline-offset: 2px;
+    }
+
+    .toc-collapse svg {
+      display: block;
+    }
+
+    /* desktop：側欄收合後的展開鈕（預設隱藏） */
+    .toc-reopen {
+      display: none;
+      position: fixed;
+      top: 18px;
+      left: 18px;
+      z-index: 900;
+      align-items: center;
+      gap: 7px;
+      font-size: 12.5px;
+      line-height: 1;
+      color: var(--text-2);
+      background: var(--bg);
+      border: 1px solid var(--border-strong);
+      border-radius: 999px;
+      padding: 7px 13px 7px 11px;
+      box-shadow: 0 1px 3px rgba(0, 0, 0, .06), 0 4px 12px rgba(0, 0, 0, .04);
+      cursor: pointer;
+      transition: background .15s, border-color .15s, color .15s;
+    }
+
+    .toc-reopen:hover {
+      background: var(--bg-soft);
+      color: var(--text);
+      border-color: var(--text-3);
+    }
+
+    .toc-reopen svg {
+      flex: 0 0 auto;
+      display: block;
+    }
+
+    @media (min-width: 921px) {
+      .toc-collapse {
+        display: inline-flex;
+      }
+
+      body.toc-collapsed .toc {
+        width: 0;
+        flex-basis: 0;
+        padding: 0;
+        opacity: 0;
+        overflow: hidden;
+        border-right-color: transparent;
+        pointer-events: none;
+      }
+
+      body.toc-collapsed .toc-reopen {
+        display: inline-flex;
+      }
+    }
+
+    .toc-kicker a {
+      color: var(--text-3);
+      text-decoration: none;
+      border-bottom: none;
+      transition: color .15s;
+    }
+
+    .toc-kicker a:hover {
+      color: var(--text);
+    }
+
+    .toc-title {
+      font-size: 15px;
+      font-weight: 700;
+      line-height: 1.4;
+      margin: 0 0 12px;
+    }
+
+    .toc-actions {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 8px;
+      margin: 0 0 18px;
+    }
+
+    .read-toggle {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      font-family: var(--sans);
+      font-size: 12.5px;
+      line-height: 1.3;
+      color: var(--text-2);
+      background: var(--bg);
+      border: 1px solid var(--border-strong);
+      border-radius: 999px;
+      padding: 5px 12px 5px 10px;
+      cursor: pointer;
+      transition: background .15s, border-color .15s, color .15s;
+    }
+
+    .read-toggle:hover {
+      background: var(--bg-soft);
+      color: var(--text);
+      border-color: var(--text-3);
+    }
+
+    .read-toggle:focus-visible {
+      outline: 2px solid var(--accent);
+      outline-offset: 2px;
+    }
+
+    .read-toggle[aria-pressed="true"] {
+      background: var(--ok-soft);
+      border-color: var(--ok);
+      color: var(--ok);
+      font-weight: 600;
+    }
+
+    .read-toggle .read-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      border: 1.5px solid currentColor;
+      flex: 0 0 auto;
+    }
+
+    .read-toggle[aria-pressed="true"] .read-dot {
+      background: var(--ok);
+      border-color: var(--ok);
+    }
+
+    .article-foot {
+      margin-top: 56px;
+      padding-top: 24px;
+      border-top: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      flex-wrap: wrap;
+    }
+
+    .article-foot-left {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      flex-wrap: wrap;
+    }
+
+    .article-foot-hint {
+      font-size: 13.5px;
+      color: var(--text-2);
+    }
+
+    .read-toggle.read-toggle-lg {
+      font-size: 13.5px;
+      padding: 7px 16px 7px 13px;
+    }
+
+    .article-foot-back {
+      font-size: 13.5px;
+      color: var(--text-2);
+      border-bottom: 1px solid var(--border-strong);
+    }
+
+    .article-foot-back:hover {
+      color: var(--text);
+      border-color: var(--text);
+    }
+
+    .toc a {
+      display: flex;
+      gap: 10px;
+      align-items: baseline;
+      text-decoration: none;
+      color: var(--text-2);
+      font-size: 13.5px;
+      padding: 6px 10px;
+      border-radius: 6px;
+      line-height: 1.45;
+      transition: background .15s, color .15s;
+      border-bottom: none;
+    }
+
+    .toc a:hover {
+      background: var(--bg-soft);
+      color: var(--text);
+      border-bottom: none;
+    }
+
+    .toc a.active {
+      color: var(--accent);
+      background: var(--accent-soft);
+      font-weight: 500;
+      border-bottom: none;
+    }
+
+    .toc a .n {
+      font-family: var(--mono);
+      font-size: 11px;
+      color: var(--text-3);
+      flex: 0 0 18px;
+    }
+
+    .toc a.active .n {
+      color: var(--accent);
+    }
+
+    main {
+      flex: 1 1 auto;
+      min-width: 0;
+      padding: 0 40px;
+    }
+
+    .inner {
+      max-width: var(--maxw);
+      margin: 0 auto;
+      padding: 72px 0 140px;
+    }
+
+    /* ---------- hero ---------- */
+    .hero {
+      margin-bottom: 64px;
+    }
+
+    .hero .eyebrow {
+      font-family: var(--mono);
+      font-size: 12px;
+      letter-spacing: .16em;
+      text-transform: uppercase;
+      color: var(--accent);
+      margin-bottom: 18px;
+    }
+
+    .hero h1 {
+      font-size: 40px;
+      line-height: 1.18;
+      font-weight: 700;
+      margin: 0 0 18px;
+      letter-spacing: -.01em;
+    }
+
+    .hero .lede {
+      font-size: 18px;
+      line-height: 1.7;
+      color: var(--text-2);
+      font-weight: 300;
+      margin: 0;
+      max-width: 620px;
+    }
+
+    .hero .meta {
+      margin-top: 28px;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+
+    .tag {
+      font-family: var(--mono);
+      font-size: 12px;
+      color: var(--text-2);
+      border: 1px solid var(--border-strong);
+      padding: 4px 11px;
+      border-radius: 999px;
+      background: var(--bg-soft);
+    }
+
+    /* ---------- sections ---------- */
+    section {
+      padding-top: 30px;
+      scroll-margin-top: 24px;
+    }
+
+    .sec-head {
+      display: flex;
+      align-items: baseline;
+      gap: 14px;
+      margin: 0 0 8px;
+    }
+
+    .sec-num {
+      font-family: var(--mono);
+      font-size: 13px;
+      color: var(--text-3);
+      font-weight: 500;
+      padding-top: 6px;
+      flex: 0 0 auto;
+    }
+
+    h2 {
+      font-size: 27px;
+      font-weight: 700;
+      line-height: 1.3;
+      margin: 0;
+      letter-spacing: -.01em;
+    }
+
+    .sec-sub {
+      color: var(--text-2);
+      font-size: 15px;
+      margin: 2px 0 28px 0;
+      font-weight: 300;
+    }
+
+    h3 {
+      font-size: 18.5px;
+      font-weight: 700;
+      margin: 38px 0 12px;
+      line-height: 1.45;
+    }
+
+    h4 {
+      font-size: 15.5px;
+      font-weight: 700;
+      margin: 26px 0 8px;
+      color: var(--text);
+    }
+
+    p {
+      margin: 0 0 16px;
+    }
+
+    a {
+      color: var(--accent);
+      text-decoration: none;
+      border-bottom: 1px solid var(--accent-line);
+      transition: border-color .15s;
+    }
+
+    a:hover {
+      border-color: var(--accent);
+    }
+
+    strong {
+      font-weight: 700;
+    }
+
+    em {
+      font-style: normal;
+      background: var(--accent-soft);
+      padding: 0 4px;
+      border-radius: 4px;
+      font-weight: 500;
+      color: #2f4d6e;
+    }
+
+    hr.div {
+      border: none;
+      border-top: 1px solid var(--border);
+      margin: 46px 0;
+    }
+
+    ul, ol {
+      margin: 0 0 18px;
+      padding-left: 22px;
+    }
+
+    li {
+      margin: 7px 0;
+      padding-left: 4px;
+    }
+
+    code {
+      font-family: var(--mono);
+      font-size: .86em;
+      background: var(--code-bg);
+      padding: 2px 6px;
+      border-radius: 5px;
+      color: #43494f;
+    }
+
+    pre {
+      background: var(--code-bg);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 16px 18px;
+      overflow-x: auto;
+      margin: 0 0 20px;
+      line-height: 1.6;
+    }
+
+    pre code {
+      background: none;
+      padding: 0;
+      font-size: 13px;
+    }
+
+    /* ---------- math notation ---------- */
+    /* 行內數學變數，如 W、R、N。本站不載入 MathJax/KaTeX，請勿使用 $...$ 或 \[...\] LaTeX 分隔符。 */
+    var {
+      font-family: var(--mono);
+      font-style: normal;
+      font-weight: 500;
+      color: var(--accent);
+    }
+
+    /* 區塊數學公式，置中等寬呈現，記得將 > < & 轉義為 &gt; &lt; &amp;。 */
+    .formula {
+      font-family: var(--mono);
+      font-size: 15px;
+      text-align: center;
+      background: var(--bg-soft);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      padding: 14px 18px;
+      margin: 0 0 20px;
+      color: var(--text);
+      letter-spacing: .03em;
+      overflow-x: auto;
+    }
+
+    /* ---------- callouts ---------- */
+    .callout {
+      border: 1px solid var(--border);
+      border-left: 3px solid var(--border-strong);
+      background: var(--bg-soft);
+      border-radius: var(--radius-sm);
+      padding: 15px 18px;
+      margin: 0 0 22px;
+      font-size: 14.5px;
+    }
+
+    .callout .c-title {
+      font-weight: 700;
+      font-size: 13px;
+      letter-spacing: .02em;
+      margin-bottom: 5px;
+      display: flex;
+      gap: 7px;
+      align-items: center;
+    }
+
+    .callout p:last-child {
+      margin-bottom: 0;
+    }
+
+    .callout.accent {
+      border-left-color: var(--accent);
+      background: var(--accent-soft);
+    }
+
+    .callout.accent .c-title {
+      color: #2f4d6e;
+    }
+
+    .callout.warn {
+      border-left-color: var(--warn);
+      background: var(--warn-soft);
+    }
+
+    .callout.warn .c-title {
+      color: var(--warn);
+    }
+
+    .callout .ic {
+      font-family: var(--mono);
+      font-size: 11px;
+      border: 1px solid currentColor;
+      border-radius: 4px;
+      padding: 0 4px;
+      line-height: 1.5;
+      opacity: .8;
+    }
+
+    .oneliner {
+      border: 1px dashed var(--accent-line);
+      border-radius: var(--radius-sm);
+      padding: 13px 16px;
+      margin: 0 0 22px;
+      font-size: 14.5px;
+      background: #fbfcfd;
+    }
+
+    .oneliner b {
+      font-family: var(--mono);
+      font-size: 11px;
+      letter-spacing: .08em;
+      color: var(--accent);
+      display: block;
+      margin-bottom: 4px;
+      text-transform: uppercase;
+    }
+
+    /* ---------- tables ---------- */
+    .tbl-wrap {
+      overflow-x: auto;
+      margin: 0 0 24px;
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+    }
+
+    table {
+      border-collapse: collapse;
+      width: 100%;
+      font-size: 14px;
+      min-width: 520px;
+    }
+
+    th, td {
+      text-align: left;
+      padding: 11px 14px;
+      border-bottom: 1px solid var(--border);
+      vertical-align: top;
+    }
+
+    th {
+      font-weight: 700;
+      background: var(--bg-soft);
+      font-size: 12.5px;
+      letter-spacing: .02em;
+      color: var(--text-2);
+      position: sticky;
+      top: 0;
+    }
+
+    tr:last-child td {
+      border-bottom: none;
+    }
+
+    td.hl {
+      background: var(--accent-soft);
+    }
+
+    .cap {
+      font-size: 12.5px;
+      color: var(--text-3);
+      margin: 12px 0 26px;
+      font-family: var(--mono);
+    }
+
+    /* 圖與圖說的間距由 .cap 的 margin-top（12px）保證不重疊；緊鄰 .cap 的前一個元素預設不貢獻 margin-bottom，
+       讓全站間距一致。頁面以更高權重的選擇器替該元素設下邊距，或瀏覽器不支援 :has() 時，間距只會變鬆、不會重疊。 */
+    main :has(+ .cap) {
+      margin-bottom: 0;
+    }
+
+    /* ---------- interactive shell ---------- */
+    .demo {
+      border: 1px solid var(--border-strong);
+      border-radius: var(--radius);
+      background: var(--bg);
+      margin: 24px 0 26px;
+      overflow: hidden;
+    }
+
+    .demo-bar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      flex-wrap: wrap;
+      padding: 13px 16px;
+      border-bottom: 1px solid var(--border);
+      background: var(--bg-soft);
+    }
+
+    .demo-bar .label {
+      font-family: var(--mono);
+      font-size: 11px;
+      letter-spacing: .1em;
+      text-transform: uppercase;
+      color: var(--text-3);
+    }
+
+    .demo-body {
+      padding: 20px 18px;
+    }
+
+    .seg {
+      display: inline-flex;
+      border: 1px solid var(--border-strong);
+      border-radius: 999px;
+      overflow: hidden;
+      background: var(--bg);
+    }
+
+    .seg button {
+      border: none;
+      background: none;
+      font-family: var(--sans);
+      font-size: 12.5px;
+      color: var(--text-2);
+      padding: 6px 14px;
+      cursor: pointer;
+      transition: background .15s, color .15s;
+    }
+
+    .seg button:hover {
+      color: var(--text);
+    }
+
+    .seg button[aria-pressed="true"] {
+      background: var(--accent);
+      color: #fff;
+    }
+
+    .btn {
+      font-family: var(--sans);
+      font-size: 13px;
+      border: 1px solid var(--border-strong);
+      background: var(--bg);
+      color: var(--text);
+      padding: 7px 16px;
+      border-radius: 7px;
+      cursor: pointer;
+      transition: background .15s, border-color .15s;
+    }
+
+    .btn:hover {
+      background: var(--bg-soft);
+      border-color: var(--text-3);
+    }
+
+    .btn.primary {
+      background: var(--accent);
+      color: #fff;
+      border-color: var(--accent);
+    }
+
+    .btn.primary:hover {
+      background: #365578;
+    }
+
+    .btn:disabled {
+      opacity: .4;
+      cursor: not-allowed;
+    }
+
+    .btn:focus-visible, .seg button:focus-visible, .toc a:focus-visible, a:focus-visible,
+    summary:focus-visible {
+      outline: 2px solid var(--accent);
+      outline-offset: 2px;
+      border-radius: 4px;
+    }
+
+    .status-line {
+      font-size: 13.5px;
+      color: var(--text-2);
+      min-height: 42px;
+      margin-top: 14px;
+      background: var(--bg-soft);
+      border-radius: var(--radius-sm);
+      padding: 10px 13px;
+      border: 1px solid var(--border);
+    }
+
+    .status-line b {
+      color: var(--text);
+    }
+
+    .legend {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 14px;
+      font-size: 11.5px;
+      color: var(--text-2);
+      margin-top: 14px;
+      font-family: var(--mono);
+    }
+
+    .legend span {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .dot {
+      width: 9px;
+      height: 9px;
+      border-radius: 3px;
+      display: inline-block;
+      border: 1px solid rgba(0, 0, 0, .08);
+    }
+
+    /* node states used across diagrams */
+    .ns-idle {
+      background: #fff;
+      border-color: var(--border-strong);
+    }
+
+    .ns-lock {
+      background: var(--warn-soft);
+      border-color: var(--warn);
+    }
+
+    .ns-ok {
+      background: var(--ok-soft);
+      border-color: var(--ok);
+    }
+
+    .ns-bad {
+      background: var(--bad-soft);
+      border-color: var(--bad);
+    }
+
+    .ns-wait {
+      background: var(--accent-soft);
+      border-color: var(--accent);
+    }
+
+    /* FAQ */
+    details.faq {
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      margin-bottom: 10px;
+      background: #fff;
+      overflow: hidden;
+    }
+
+    details.faq summary {
+      cursor: pointer;
+      padding: 14px 16px;
+      font-weight: 600;
+      font-size: 14.5px;
+      list-style: none;
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      align-items: center;
+    }
+
+    details.faq summary::-webkit-details-marker {
+      display: none;
+    }
+
+    details.faq summary .q {
+      font-family: var(--mono);
+      font-size: 11px;
+      color: var(--accent);
+      flex: 0 0 auto;
+    }
+
+    details.faq summary .chev {
+      transition: transform .2s;
+      color: var(--text-3);
+      flex: 0 0 auto;
+      font-size: 13px;
+    }
+
+    details.faq[open] summary .chev {
+      transform: rotate(90deg);
+    }
+
+    details.faq .ans {
+      padding: 0 16px 16px;
+      font-size: 14px;
+      color: var(--text-2);
+    }
+
+    details.faq .ans p {
+      margin: 0 0 10px;
+    }
+
+    details.faq .ans p:last-child {
+      margin: 0;
+    }
+
+    .trap {
+      display: flex;
+      gap: 10px;
+      font-size: 14px;
+      margin: 9px 0;
+    }
+
+    .trap .tn {
+      font-family: var(--mono);
+      font-size: 11px;
+      color: var(--bad);
+      flex: 0 0 auto;
+      border: 1px solid var(--bad-soft);
+      background: var(--bad-soft);
+      border-radius: 4px;
+      padding: 1px 6px;
+      height: fit-content;
+      margin-top: 2px;
+    }
+
+    /* mobile responsive */
+    .toc-toggle {
+      display: none;
+    }
+
+    @media (max-width: 920px) {
+      .wrap {
+        flex-direction: column;
+      }
+      .toc {
+        position: static;
+        width: auto;
+        height: auto;
+        border-right: none;
+        border-bottom: 1px solid var(--border);
+        padding: 18px 22px;
+        transition: none;
+      }
+      .toc-title {
+        margin-bottom: 0;
+      }
+      .toc-actions {
+        margin: 10px 0 0;
+      }
+      .toc-kicker {
+        margin-bottom: 10px;
+      }
+      .toc-nav {
+        display: none;
+        margin-top: 16px;
+      }
+      .toc-nav.open {
+        display: block;
+      }
+      .toc-toggle {
+        display: inline-block;
+        margin-top: 0;
+      }
+      .toc-collapse,
+      .toc-reopen {
+        display: none !important;
+      }
+      main {
+        padding: 0 22px;
+      }
+      .inner {
+        padding: 40px 0 100px;
+      }
+      .hero h1 {
+        font-size: 31px;
+      }
+    }
+
+    @media print {
+      .toc-reopen { display: none !important; }
+    }
+
+    @media (max-width: 480px) {
+      body {
+        font-size: 15px;
+      }
+      .hero h1 {
+        font-size: 27px;
+      }
+      h2 {
+        font-size: 23px;
+      }
+      .demo-body {
+        padding: 16px 13px;
+      }
+    }
+  </style>
+</head>
+<body data-topic-id="time-series-database">
+  <div class="wrap">
+    <!-- ===================== TOC SIDEBAR ===================== -->
+    <nav class="toc" id="toc-panel" aria-label="目錄">
+      <div class="toc-kicker">
+        <a href="../index.html">← 返回目錄</a>
+        <button class="toc-collapse" type="button" aria-expanded="true" aria-controls="toc-panel"
+                aria-label="收合目錄" title="收合目錄">
+          <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor"
+               stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M15 18l-6-6 6-6"/>
+          </svg>
+        </button>
+      </div>
+      <div class="toc-title">時序資料庫 (Time-series Database)</div>
+      <div class="toc-actions">
+        <button class="read-toggle" type="button" data-read-toggle aria-pressed="false" title="切換本文已讀狀態">
+          <span class="read-dot" aria-hidden="true"></span>
+          <span class="read-label">標記為已讀</span>
+        </button>
+        <button class="btn toc-toggle" type="button" aria-expanded="false" aria-controls="toc-nav">目錄 ▾</button>
+      </div>
+      <div class="toc-nav" id="toc-nav">
+        <a href="#s1"><span class="n">01</span>總覽與定位：為何時序資料值得專屬儲存</a>
+        <a href="#s2"><span class="n">02</span>時序資料模型：Measurement、Tag、Field 與 Series</a>
+        <a href="#s3"><span class="n">03</span>儲存引擎與時間分區：Chunk、LSM 與整塊淘汰</a>
+        <a href="#s4"><span class="n">04</span>壓縮演算法：Delta-of-Delta 與浮點數 XOR</a>
+        <a href="#s5"><span class="n">05</span>查詢模式、降採樣與保留策略</a>
+        <a href="#s6"><span class="n">06</span>高基數陷阱與儲存容量規劃</a>
+        <a href="#s7"><span class="n">07</span>技術選型對照：TimescaleDB、InfluxDB、Timestream 與原生存儲</a>
+        <a href="#s8"><span class="n">08</span>面試實戰：高頻考題與架構答法</a>
+      </div>
+    </nav>
+    <button class="btn toc-reopen" type="button" aria-expanded="true" aria-controls="toc-panel"
+            aria-label="展開目錄" title="展開目錄">
+      <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor"
+           stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M9 18l6-6-6-6"/>
+      </svg>
+      <span>目錄</span>
+    </button>
+
+    <!-- ===================== MAIN CONTENT ===================== -->
+    <main>
+      <div class="inner">
+        <!-- demo-archetype: F｜拆解器（主，第 4 節）＋B｜參數掃描（次，第 6 節） — 讀者可編輯時間戳與數值序列並調整時間粒度與小數位量化，逐筆拆解 Gorilla Delta-of-Delta 與 IEEE 754 XOR 位元編碼與壓縮率；另可調整裝置數、Tag 組合、取樣間隔與保留天數，即時估算活躍 Series、索引記憶體與分層儲存量。選 F 是因為時序壓縮的威力藏在位元層級，逐筆攤開編碼才能直觀看見為何能省下九成空間。 -->
+
+<style>
+/* --- Static diagrams --- */
+.ts-split {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  margin: 14px 0 0;
+}
+.ts-split-col {
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  background: var(--bg);
+  padding: 14px 16px;
+}
+.ts-split-col.rdbms { border-top: 3px solid var(--warn); }
+.ts-split-col.tsdb  { border-top: 3px solid var(--ok); }
+.ts-split-col h4 {
+  margin: 0 0 8px;
+  font-size: 13px;
+  font-family: var(--mono);
+  color: var(--text);
+}
+.ts-split-col ul {
+  margin: 0;
+  padding-left: 16px;
+  font-size: 13px;
+  color: var(--text-2);
+  line-height: 1.65;
+}
+.ts-split-col li + li { margin-top: 4px; }
+@media (max-width: 680px) {
+  .ts-split { grid-template-columns: 1fr; }
+}
+
+.ts-stack {
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  background: var(--bg-soft);
+  padding: 12px;
+  margin: 14px 0 0;
+}
+.ts-stack-lvl {
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+  padding: 10px 12px;
+  margin-top: 8px;
+}
+.ts-stack-lvl:first-child { margin-top: 0; }
+.ts-stack-lvl.accent { border-left: 3px solid var(--accent); background: var(--accent-soft); }
+.ts-stack-lvl.ok     { border-left: 3px solid var(--ok); background: var(--ok-soft); }
+.ts-stack-lvl.warn   { border-left: 3px solid var(--warn); background: var(--warn-soft); }
+.ts-stack-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 8px;
+  font-family: var(--mono);
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--text);
+}
+.ts-stack-note {
+  font-size: 12px;
+  color: var(--text-2);
+  margin-top: 4px;
+  line-height: 1.5;
+}
+
+.ts-svg-wrap {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg);
+  padding: 12px;
+  margin: 14px 0 0;
+}
+.ts-svg-wrap svg {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+
+/* --- Demo 1: Gorilla Bit Decomposer --- */
+.ts-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+.ts-editor-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.35fr) minmax(0, 1fr);
+  gap: 12px;
+  margin-bottom: 14px;
+}
+@media (max-width: 700px) {
+  .ts-editor-grid { grid-template-columns: 1fr; }
+}
+.ts-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.ts-field label {
+  font-family: var(--mono);
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--text-2);
+}
+.ts-textarea {
+  width: 100%;
+  min-height: 148px;
+  padding: 10px 12px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.55;
+  resize: vertical;
+  box-sizing: border-box;
+}
+.ts-textarea:focus,
+.ts-select:focus {
+  outline: 2px solid var(--accent-line);
+  border-color: var(--accent);
+}
+.ts-opt-panel {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  justify-content: space-between;
+}
+.ts-select {
+  width: 100%;
+  padding: 7px 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 12px;
+}
+.ts-hint {
+  font-size: 11px;
+  color: var(--text-2);
+  line-height: 1.5;
+  margin: 0;
+}
+.ts-kpi-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+  margin-bottom: 12px;
+}
+@media (max-width: 680px) {
+  .ts-kpi-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+.ts-kpi-card {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+  padding: 10px 12px;
+}
+.ts-kpi-card.ok   { border-color: var(--ok); background: var(--ok-soft); }
+.ts-kpi-card.warn { border-color: var(--warn); background: var(--warn-soft); }
+.ts-kpi-card.bad  { border-color: var(--bad); background: var(--bad-soft); }
+.ts-kpi-label {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text-2);
+}
+.ts-kpi-val {
+  font-family: var(--mono);
+  font-size: 18px;
+  font-weight: 700;
+  color: var(--text);
+  margin-top: 3px;
+}
+.ts-kpi-sub {
+  font-size: 11px;
+  color: var(--text-2);
+  margin-top: 2px;
+}
+.ts-bit-table-wrap {
+  overflow-x: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+}
+.ts-bit-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-family: var(--mono);
+  font-size: 11px;
+  white-space: nowrap;
+}
+.ts-bit-table th,
+.ts-bit-table td {
+  padding: 7px 9px;
+  border-bottom: 1px solid var(--border);
+  text-align: left;
+}
+.ts-bit-table th {
+  background: var(--bg-soft);
+  color: var(--text-2);
+  font-weight: 700;
+}
+.ts-bit-table tr:last-child td { border-bottom: none; }
+.ts-code-pill {
+  display: inline-block;
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-size: 11px;
+  border: 1px solid var(--border-strong);
+  background: var(--code-bg);
+  color: var(--text);
+}
+.ts-code-pill.ok   { background: var(--ok-soft); border-color: var(--ok); color: var(--ok); }
+.ts-code-pill.warn { background: var(--warn-soft); border-color: var(--warn); color: var(--warn); }
+.ts-code-pill.bad  { background: var(--bad-soft); border-color: var(--bad); color: var(--bad); }
+.ts-code-pill.wait { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); }
+.ts-bit-meter {
+  display: flex;
+  width: 108px;
+  height: 10px;
+  border-radius: 4px;
+  overflow: hidden;
+  background: var(--code-bg);
+  border: 1px solid var(--border);
+}
+.ts-bit-ts  { background: var(--accent); height: 100%; }
+.ts-bit-val { background: var(--ok); height: 100%; }
+
+/* --- Demo 2: Cardinality & Capacity Sweep --- */
+.ts-slider-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  margin-bottom: 14px;
+}
+@media (max-width: 680px) {
+  .ts-slider-grid { grid-template-columns: 1fr; }
+}
+.ts-slider-card {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+  padding: 10px 12px;
+}
+.ts-slider-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  font-size: 12px;
+  margin-bottom: 6px;
+}
+.ts-slider-head label {
+  font-weight: 600;
+  color: var(--text);
+}
+.ts-slider-val {
+  font-family: var(--mono);
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--accent);
+}
+.ts-slider-card input[type="range"] {
+  width: 100%;
+  accent-color: var(--accent);
+}
+.ts-storage-list {
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+  padding: 12px 14px;
+  margin-bottom: 12px;
+}
+.ts-storage-item {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.ts-storage-head {
+  display: flex;
+  justify-content: space-between;
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--text);
+}
+.ts-meter-track {
+  width: 100%;
+  height: 10px;
+  border-radius: 5px;
+  background: var(--code-bg);
+  border: 1px solid var(--border);
+  overflow: hidden;
+}
+.ts-meter-fill {
+  height: 100%;
+  border-radius: 5px;
+  transition: width 140ms ease;
+}
+.ts-meter-fill.raw     { background: var(--warn); }
+.ts-meter-fill.gorilla { background: var(--accent); }
+.ts-meter-fill.rollup  { background: var(--ok); }
+.ts-tier-badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-family: var(--mono);
+  font-size: 11px;
+  font-weight: 700;
+  border: 1px solid var(--border-strong);
+}
+.ts-tier-badge.ok   { background: var(--ok-soft); border-color: var(--ok); color: var(--ok); }
+.ts-tier-badge.warn { background: var(--warn-soft); border-color: var(--warn); color: var(--warn); }
+.ts-tier-badge.bad  { background: var(--bad-soft); border-color: var(--bad); color: var(--bad); }
+.ts-empty-note[hidden] { display: none; }
+</style>
+
+<section id="s1">
+  <div class="sec-head">
+    <span class="sec-num">01</span>
+    <h2>總覽與定位：為何時序資料值得專屬儲存</h2>
+  </div>
+  <p class="sec-sub">從只增不改、依時間查詢、整塊淘汰三個負載特徵，看透時序資料庫與通用關聯式資料庫的結構分歧。</p>
+  <p>幾乎所有系統裡都有一類資料跟訂單或會員資料長得完全不同：伺服器每秒吐出的 CPU 使用率、十萬台 IoT 感測器每 10 秒上報的溫度與電流、交易所每毫秒成交的逐筆行情、或是 API 閘道記錄的延遲指標。把它們直接塞進傳統關聯式資料庫（RDBMS）的單張 B-Tree 資料表，初期看來一切正常，直到寫入量衝上每秒十萬點、保留期拉長到三個月，磁碟 I/O、索引體積與清理任務就會同時崩潰。</p>
+
+  <p>時序資料庫（Time-series Database, TSDB）之所以獨立成為一種儲存類別，並不是因為它發明了全新的數學，而是因為它把<strong>三個在一般 OLTP 場景不敢做的假設</strong>寫進了底層儲存結構裡：</p>
+
+  <ul>
+    <li><strong>99% 以上是只增不改（Append-Only）</strong>：新資料點幾乎總是附帶當前時間戳一路往後追加，極少隨機回頭 <code>UPDATE</code> 單一歷史紀錄。</li>
+    <li><strong>讀取強依賴時間區間（Time-Range Locality）</strong>：查詢幾乎永遠帶上 <code>WHERE ts BETWEEN t1 AND t2</code>，而且絕大多數請求集中在「最近幾小時到幾天」的熱區，並伴隨時間窗口聚合（例如每 5 分鐘取平均或 P99）。</li>
+    <li><strong>淘汰是整批按時間過期（Bulk Expiry）</strong>：資料通常依合規或成本策略整段保留（如 30 天原始精度、1 年彙總），不會隨機刪除某幾天零散的列。</li>
+  </ul>
+
+  <div class="ts-split">
+    <div class="ts-split-col rdbms">
+      <h4>通用 B-Tree RDBMS（未針對時序特化）</h4>
+      <ul>
+        <li><strong>寫入放大</strong>：複合索引（如 <code>(device_id, ts)</code>）讓每筆寫入隨機散落到不同葉節點，頻繁觸發 Page Split 與髒頁回寫。</li>
+        <li><strong>儲存膨脹</strong>：以列（Row）為單位存 64-bit 時間戳與浮點數，每列外加 Tuple Header 與 MVCC 版本欄位，一筆點常吃掉 40–80 bytes。</li>
+        <li><strong>刪除風暴</strong>：用 <code>DELETE WHERE ts &lt; ...</code> 清理過期資料會寫爆 WAL、產生大量死元組（Dead Tuples）並引發漫長 VACUUM。</li>
+      </ul>
+    </div>
+    <div class="ts-split-col tsdb">
+      <h4>專屬 TSDB 儲存引擎</h4>
+      <ul>
+        <li><strong>循序寫入</strong>：先寫 WAL 與記憶體 Head Block，滿窗後依時間序列排好序一次 Flush 成不可變的欄式檔案（Chunk / TSM）。</li>
+        <li><strong>極致壓縮</strong>：同條序列相鄰點的時間間隔幾乎固定、數值緩慢變化，套用 Delta-of-Delta 與 XOR 可壓到約 <strong>1.37–2 bytes / 點</strong>。</li>
+        <li><strong>O(1) 淘汰</strong>：資料物理上按時間切塊，過期直接 <code>DROP</code> 整個分區檔案，幾乎零寫入放大、無碎片。</li>
+      </ul>
+    </div>
+  </div>
+  <p class="cap">核心差異不在查詢語法，而在物理佈局：RDBMS 為「隨機單筆 CRUD」優化，TSDB 把「時間順序 + 不可變分塊」換成十倍以上的寫入吞吐與壓縮率。</p>
+
+  <div class="callout accent">
+    <div class="c-title"><span class="ic">關鍵</span>不要為了「有 timestamp 欄位」就引入 TSDB</div>
+    <p>訂單表、審計日誌也有 <code>created_at</code>，但它們往往需要與商品、使用者表做 ACID 交易與複雜 JOIN，且寫入量遠低於感測器與監控指標。唯有當「高頻追加、時間窗聚合、定期批次淘汰、極致壓縮成本」成為瓶頸時，專屬 TSDB 才展現價值；具體的選型分界會在第 7 節拆解。</p>
+  </div>
+
+  <div class="oneliner">
+    <b>一句話答法</b>TSDB 用「只增不改、按時間分塊、同序列欄式壓縮」三個特化假設，消除了傳統 B-Tree 在高頻時序寫入下的隨機 I/O、空間膨脹與刪除碎片問題。
+  </div>
+</section>
+
+<section id="s2">
+  <div class="sec-head">
+    <span class="sec-num">02</span>
+    <h2>時序資料模型：Measurement、Tag、Field 與 Series</h2>
+  </div>
+  <p class="sec-sub">拆解一筆時序資料點的四個核心欄位，以及為什麼「放進 Tag 還是 Field」會直接決定系統會不會 OOM。</p>
+  <p>無論底層實作是 InfluxDB、Prometheus、TimescaleDB 還是 Amazon Timestream，時序資料在邏輯上都圍繞同一個四元結構展開。以下是一筆常見的 Influx Line Protocol 寫入範例：</p>
+
+  <pre><code>factory_sensor,region=tw-north,device_id=dev-042,line=A temp=23.5,humidity=61.2,voltage=3.31 1700000060000000000</code></pre>
+
+  <div class="ts-stack">
+    <div class="ts-stack-lvl">
+      <div class="ts-stack-head"><span>1. Measurement（量測指標 / 資料表）</span><span>例：factory_sensor</span></div>
+      <div class="ts-stack-note">描述「量測的是哪一類現象」（如 <code>cpu_usage</code>、<code>factory_sensor</code>），概念上最接近關聯式資料庫的資料表名或寬欄儲存的 Table。</div>
+    </div>
+    <div class="ts-stack-lvl accent">
+      <div class="ts-stack-head"><span>2. Tag Set（標籤鍵值對 — 建立倒排索引）</span><span>例：region=tw-north, device_id=dev-042, line=A</span></div>
+      <div class="ts-stack-note">描述資料點「從哪裡來」的維度中繼資料（字串型別）。<strong>會被放進倒排索引（Inverted Index）</strong>，用來做 <code>WHERE</code> 過濾與 <code>GROUP BY</code> 分群。</div>
+    </div>
+    <div class="ts-stack-lvl ok">
+      <div class="ts-stack-head"><span>3. Series Key（序列鍵 = Measurement + 排序後的 Tag Set）</span><span>唯一決定一條時間序列</span></div>
+      <div class="ts-stack-note">同一組 <code>Measurement + Tag Set</code> 定義出一條獨立的時間線（Series）。儲存引擎會把同一個 Series 的資料點排在一起壓縮，因此 Series 總數直接決定索引與記憶體開銷。</div>
+    </div>
+    <div class="ts-stack-lvl warn">
+      <div class="ts-stack-head"><span>4. Timestamp + Field Set（時間戳 ＋ 觀測數值 — 不建索引）</span><span>例：ts=1700000060, temp=23.5, humidity=61.2</span></div>
+      <div class="ts-stack-note">Field 是真正隨時間變化的量測值（浮點、整數、布林），<strong>不建立倒排索引</strong>，因此不會增加 Series 數量，但也不適合拿來做高速等值過濾（<code>WHERE temp = 23.5</code> 需要掃描區間）。</div>
+    </div>
+  </div>
+  <p class="cap">時序模型的關鍵分水嶺在「Tag vs Field」：Measurement 加上整組 Tag 的笛卡兒積決定 Series 總數，而每條 Series 內部只剩純粹按時間遞增的 (Timestamp, Field) 陣列。</p>
+
+  <p>這個分層其實和「寬欄儲存（Wide-Column Store）篇」裡談的 <strong>Partition Key 與 Clustering Key</strong> 模型高度呼應：在寬欄語境下，<code>(Series Key, Time Bucket)</code> 扮演定位磁碟分區的 Partition Key，而 <code>Timestamp</code> 則是分區內嚴格排序的 Clustering Key，確保讀取同一台裝置一段時間的紀錄時只需要一次循序磁碟掃描。至於監控領域中 Counter、Gauge、Histogram 等指標型別與觀測面語意，則由「可觀測性基礎（Observability Fundamentals）篇」展開，本篇專注於底層儲存與索引如何承載這些序列。</p>
+
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>比較面向</th>
+          <th>Tag（維度標籤）</th>
+          <th>Field（量測數值）</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>資料型別</td>
+          <td>字串（String）</td>
+          <td>Float64 / Int64 / Boolean / String</td>
+        </tr>
+        <tr>
+          <td>是否建立索引</td>
+          <td class="hl">是（倒排索引，常駐記憶體或快取）</td>
+          <td>否（僅按 Series 與時間循序掃描）</td>
+        </tr>
+        <tr>
+          <td>對 Series 基數的影響</td>
+          <td class="hl">每個新值組合都會誕生一條新 Series</td>
+          <td>零影響（只增加既有 Series 內的點數）</td>
+        </tr>
+        <tr>
+          <td>常見範例</td>
+          <td><code>region</code>、<code>env</code>、<code>host</code>、<code>sensor_type</code></td>
+          <td><code>cpu_pct</code>、<code>temp_c</code>、<code>latency_ms</code>、<code>err_msg</code></td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="cap">設計 Schema 時的黃金檢核：會拿來 <code>GROUP BY</code> 且可能取值有限的維度放 Tag；連續數值、高變動 ID 或非結構化字串一律放 Field。</p>
+
+  <div class="callout warn">
+    <div class="c-title"><span class="ic">陷阱</span>把 request_id、user_id 或 trace_id 塞進 Tag</div>
+    <p>只要將任何無上限增長的識別碼放進 Tag，每筆請求就會在資料庫裡永久（至少在該時間分區過期前）創造一條只有 1 個資料點的孤兒 Series。這不只讓倒排索引在幾小時內吃光記憶體引發 OOM，還會讓壓縮演算法完全失效——一條只有 1 個點的序列無從計算相鄰時間差與 XOR，空間瞬間暴增 10 倍以上。</p>
+  </div>
+
+  <div class="oneliner">
+    <b>一句話答法</b><code>Measurement + Tag Set</code> 唯一確定一條 Series 並進入倒排索引，<code>Field</code> 承載不建索引的數值；把高基數欄位誤放 Tag 會同時摧毀索引記憶體與序列壓縮率。
+  </div>
+</section>
+
+<section id="s3">
+  <div class="sec-head">
+    <span class="sec-num">03</span>
+    <h2>儲存引擎與時間分區：Chunk、LSM 與整塊淘汰</h2>
+  </div>
+  <p class="sec-sub">寫入路徑如何從 WAL 與記憶體區塊封裝成不可變的時間分區 Chunk，讓資料過期從掃表刪除變成 O(1) 卸載。</p>
+  <p>為了扛住每秒數十萬到數百萬筆點的寫入，主流時序資料庫幾乎都採用 <strong>LSM-Tree（Log-Structured Merge-Tree）的時序特化變體</strong>，例如 InfluxDB 的 TSM（Time-Structured Merge Tree）、Prometheus 的 TSDB Block，或是 TimescaleDB 的 Hypertable Chunk。它們的核心理念一致：把隨機寫入轉化為循序追加，並且在物理磁碟上以<strong>固定時間窗口</strong>（例如每 2 小時、1 天或 7 天）切成各自獨立的 Chunk。</p>
+
+  <pre class="mermaid">
+flowchart LR
+    W[寫入請求] --> WAL[WAL 追加日誌]
+    WAL --> HEAD[記憶體 Head Block]
+    HEAD -->|滿窗 / 達容量| CHUNK[不可變 Time Chunk]
+    CHUNK -->|背景合併| COMP[壓實 TSM / Parquet]
+    COMP -->|超過保留期| DROP[O(1) 卸載檔案]
+  </pre>
+  <p class="cap">寫入先落 WAL 保久再進記憶體 Head Block 緩衝；一旦超過時間窗口就整塊凍結為不可變檔案，過期時直接移除整份檔案而非逐列 DELETE。</p>
+
+  <h3>為什麼時間分區 Chunk 是壓縮與淘汰的雙重前提</h3>
+  <p>在單一記憶體 Head Block 裡，資料點會先依 <code>Series ID</code> 分組暫存；當這個時間窗（例如 2 小時）結束，儲存引擎把每條 Series 過去 2 小時的點各自連續排放，分欄存成「Timestamp 陣列」與「Field 陣列」，再分別做時間戳與數值壓縮，最後連同該區塊的索引一併寫成<strong>唯讀不可變檔案（Immutable Block / Chunk）</strong>。</p>
+
+  <div class="ts-svg-wrap">
+    <svg viewBox="0 0 720 210" style="width:100%; height:auto" role="img" aria-label="時間分區 Chunk 與熱溫冷分層生命週期">
+      <title>時間分區 Chunk 與熱溫冷分層生命週期</title>
+      <defs>
+        <marker id="ts-arr" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+          <path d="M 0 1 L 10 5 L 0 9 z" fill="#9aa0a8" />
+        </marker>
+      </defs>
+      <rect x="0" y="0" width="720" height="210" fill="#ffffff" />
+
+      <!-- Time axis -->
+      <line x1="28" y1="34" x2="690" y2="34" stroke="#dedcd8" stroke-width="1.5" marker-end="url(#ts-arr)" />
+      <text x="28" y="22" font-family="var(--mono)" font-size="11" fill="#6b7078">過去（舊資料）</text>
+      <text x="612" y="22" font-family="var(--mono)" font-size="11" fill="#6b7078">現在（最新寫入）</text>
+
+      <!-- Expired Chunk -->
+      <rect x="28" y="54" width="128" height="96" rx="8" fill="#f6ecea" stroke="#a8554f" stroke-width="1.5" stroke-dasharray="5 3" />
+      <text x="92" y="76" text-anchor="middle" font-family="var(--mono)" font-size="11" font-weight="700" fill="#a8554f">Chunk T-31d</text>
+      <text x="92" y="96" text-anchor="middle" font-family="var(--mono)" font-size="11" fill="#6b7078">已超過 Retention</text>
+      <text x="92" y="116" text-anchor="middle" font-family="var(--mono)" font-size="11" fill="#a8554f">DROP 整塊卸載</text>
+      <text x="92" y="136" text-anchor="middle" font-family="var(--mono)" font-size="11" fill="#9aa0a8">O(1) unlink</text>
+
+      <!-- Cold / Warm Chunk -->
+      <rect x="176" y="54" width="160" height="96" rx="8" fill="#eef4f1" stroke="#4d7d68" stroke-width="1.5" />
+      <text x="256" y="76" text-anchor="middle" font-family="var(--mono)" font-size="11" font-weight="700" fill="#4d7d68">Chunk T-14d ~ T-2d</text>
+      <text x="256" y="96" text-anchor="middle" font-family="var(--mono)" font-size="11" fill="#262a2f">溫／冷層（已壓實）</text>
+      <text x="256" y="116" text-anchor="middle" font-family="var(--mono)" font-size="11" fill="#6b7078">欄式壓縮 / Parquet</text>
+      <text x="256" y="136" text-anchor="middle" font-family="var(--mono)" font-size="11" fill="#4d7d68">物件儲存 / 低成本磁碟</text>
+
+      <!-- Sealed Recent Chunk -->
+      <rect x="356" y="54" width="160" height="96" rx="8" fill="#eef2f7" stroke="#3f6188" stroke-width="1.5" />
+      <text x="436" y="76" text-anchor="middle" font-family="var(--mono)" font-size="11" font-weight="700" fill="#3f6188">Chunk T-1d</text>
+      <text x="436" y="96" text-anchor="middle" font-family="var(--mono)" font-size="11" fill="#262a2f">已封存不可變 Chunk</text>
+      <text x="436" y="116" text-anchor="middle" font-family="var(--mono)" font-size="11" fill="#6b7078">Gorilla DoD + XOR</text>
+      <text x="436" y="136" text-anchor="middle" font-family="var(--mono)" font-size="11" fill="#3f6188">本機 NVMe SSD</text>
+
+      <!-- Hot Head Block -->
+      <rect x="536" y="54" width="156" height="96" rx="8" fill="#f6f0e7" stroke="#a3743e" stroke-width="1.8" />
+      <text x="614" y="76" text-anchor="middle" font-family="var(--mono)" font-size="11" font-weight="700" fill="#a3743e">Active Head Block</text>
+      <text x="614" y="96" text-anchor="middle" font-family="var(--mono)" font-size="11" fill="#262a2f">熱層（記憶體可寫）</text>
+      <text x="614" y="116" text-anchor="middle" font-family="var(--mono)" font-size="11" fill="#6b7078">接收最新 append</text>
+      <text x="614" y="136" text-anchor="middle" font-family="var(--mono)" font-size="11" fill="#a3743e">配 WAL 防當機遺失</text>
+
+      <!-- Flow arrows between chunks -->
+      <line x1="536" y1="102" x2="520" y2="102" stroke="#9aa0a8" stroke-width="1.4" marker-end="url(#ts-arr)" />
+      <line x1="356" y1="102" x2="340" y2="102" stroke="#9aa0a8" stroke-width="1.4" marker-end="url(#ts-arr)" />
+      <line x1="176" y1="102" x2="160" y2="102" stroke="#9aa0a8" stroke-width="1.4" marker-end="url(#ts-arr)" />
+
+      <!-- Footer note inside svg -->
+      <text x="28" y="182" font-family="var(--mono)" font-size="11" fill="#6b7078">Chunk 大小設計原則：熱層最新 1–2 個 Chunk 的索引必須能完全放進 RAM，否則寫入會退化成隨機磁碟 I/O。</text>
+    </svg>
+  </div>
+  <p class="cap">按時間切塊讓查詢引擎可用 Chunk 的 [min_ts, max_ts] 做 Partition Pruning（直接跳過不重疊的區塊），同時讓過期清理退化為移除目錄與檔案。</p>
+
+  <p><strong>Chunk 時間寬度該切多寬？</strong>這是實務調校的第一道折衷（例如 TimescaleDB 的 <code>chunk_time_interval</code> 或 InfluxDB 的 Shard Group Duration）：</p>
+  <ul>
+    <li><strong>切太寬（如一個 Chunk 存 30 天）</strong>：活躍索引膨脹超過 RAM，寫入時 B-Tree 或倒排索引發生大量 Page Fault；而且過期淘汰時必須等整整 30 天後才能一起釋放空間。</li>
+    <li><strong>切太窄（如每 10 分鐘切一塊）</strong>：掃描一週資料要開啟上千個檔案與索引，Query Planner 與檔案描述符開銷暴增，且每塊太短導致同序列點數不足、壓縮率下滑。</li>
+    <li><strong>經驗法則</strong>：讓最近 1 個活躍 Chunk（含索引）的體積維持在可用記憶體的 <strong>15%–25%</strong> 以內；高吞吐場景常切 2 小時到 1 天，中低吞吐切 1 天到 7 天。</li>
+  </ul>
+
+  <div class="callout accent">
+    <div class="c-title"><span class="ic">關鍵</span>亂序與遲到寫入（Out-of-Order Writes）會打破不可變假設</div>
+    <p>如果一台離線三天的邊緣裝置突然重連，把三天前的歷史數據一口氣灌進來，這些點的時間戳會落在早已封存壓縮的歷史 Chunk 裡。引擎必須先把它們收進專門的 Out-of-Order 緩衝區，事後再觸發昂貴的 Re-compaction 解壓、重排、重新壓縮整塊檔案。因此像 Prometheus 預設會設定 <code>out_of_order_time_window</code> 上限，超出就直接拒絕或分流；上游裝置端如何做 Store-and-forward 與限速補傳，請見「IoT Telemetry 寫入管線與離線補傳篇」。</p>
+  </div>
+
+  <div class="oneliner">
+    <b>一句話答法</b>TSDB 以 WAL ＋ 記憶體 Head Block 吸收高併發寫入，按固定時間窗封存成不可變 Chunk，把查詢裁剪與資料過期都壓成區塊層級的操作。
+  </div>
+</section>
+
+<section id="s4">
+  <div class="sec-head">
+    <span class="sec-num">04</span>
+    <h2>壓縮演算法：Delta-of-Delta 與浮點數 XOR</h2>
+  </div>
+  <p class="sec-sub">深入 Gorilla 論文的位元級壓縮規則，動手拆解時間戳與浮點數如何從 128 bits 壓縮到十幾個 bit。</p>
+  <p>未經壓縮的一筆時序資料點由一個 64-bit 時間戳與一個 64-bit IEEE 754 浮點數組成，共佔 <strong>128 bits（16 bytes）</strong>。Meta（Facebook）在 2015 年發表的 <strong>Gorilla 論文</strong>證明：只要把同一條 Series 的點連續排在一起，針對時間戳與數值各自利用相鄰相關性，就能把實際儲存成本壓低到平均約 <strong>1.37 bytes / 點</strong>——這套位元編碼後來成為 Prometheus、InfluxDB、TimescaleDB 等幾乎所有現代 TSDB 的壓縮基石。</p>
+
+  <h3>1. 時間戳壓縮：Delta-of-Delta（二階差分）</h3>
+  <p>感測器與監控採集器多半按固定週期上報（例如每 60 秒一次），即使有微小的網路或排程抖動，相鄰兩筆時間差 <var>Δt</var> 也幾乎相等。因此一階差分還留著常數 <code>60</code>，但再取一次二階差分 <var>D</var> 就會趨近於 <code>0</code>：</p>
+
+  <div class="formula">D = (t[n] - t[n-1]) - (t[n-1] - t[n-2])</div>
+
+  <p>Gorilla 依據 <var>D</var> 的大小選擇不同長度的變長位元前綴（類似霍夫曼編碼的固定前綴碼）：</p>
+
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>二階差分 <var>D</var> 的範圍</th>
+          <th>控制前綴</th>
+          <th>酬載位元數</th>
+          <th>總共佔用</th>
+          <th>典型觸發場景</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><var>D</var> = 0</td>
+          <td><code>0</code></td>
+          <td>0 bits</td>
+          <td class="hl">1 bit</td>
+          <td>完全準時的週期採集（佔真實流量 90% 以上）</td>
+        </tr>
+        <tr>
+          <td>-63 &le; <var>D</var> &le; 64</td>
+          <td><code>10</code></td>
+          <td>7 bits</td>
+          <td>9 bits</td>
+          <td>輕微 GC 停頓或幾秒內的網路抖動</td>
+        </tr>
+        <tr>
+          <td>-255 &le; <var>D</var> &le; 256</td>
+          <td><code>110</code></td>
+          <td>9 bits</td>
+          <td>12 bits</td>
+          <td>數分鐘等級的短暫延遲</td>
+        </tr>
+        <tr>
+          <td>-2047 &le; <var>D</var> &le; 2048</td>
+          <td><code>1110</code></td>
+          <td>12 bits</td>
+          <td>16 bits</td>
+          <td>較大幅度的採樣間隔變動</td>
+        </tr>
+        <tr>
+          <td>其餘範圍</td>
+          <td><code>1111</code></td>
+          <td>32 bits</td>
+          <td>36 bits</td>
+          <td>斷線重連或跨度極大的異常跳躍</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="cap">當採樣節奏穩定時，原本 64 bits 的時間戳被壓縮到只剩 1 bit；但只要時間戳帶入無意義的毫秒隨機雜訊，<var>D</var> 就會掉出 0 而多花 8–15 bits。</p>
+
+  <h3>2. 數值壓縮：IEEE 754 Float64 XOR</h3>
+  <p>相鄰兩筆量測值（例如溫度 <code>23.5</code> 與 <code>23.6</code>）轉成 64-bit IEEE 754 二進位後，符號位、11-bit 指數位與高段尾數位往往完全相同。把它們做按位元互斥或（XOR）後，頭尾會出現大量連續的 <code>0</code>，中間只剩一小段真正改變的有意義位元（Meaningful Bits）：</p>
+
+  <div class="formula">XOR[n] = bits64(v[n]) ^ bits64(v[n-1])</div>
+
+  <ul>
+    <li><strong>XOR = 0（數值沒變）</strong>：只寫 1 個控制位元 <code>0</code>（總計 <strong>1 bit</strong>）。</li>
+    <li><strong>XOR &ne; 0 且前導零與尾隨零都落進前一次的視窗內</strong>：寫 2 個控制位元 <code>10</code>，接著只輸出前一個視窗寬度的有意義位元，省去重寫視窗頭尾資訊。</li>
+    <li><strong>XOR &ne; 0 且超出既有視窗</strong>：寫 <code>11</code> ＋ 5 bits（前導零數，上限 31）＋ 6 bits（有意義位元長度減 1）＋ 實際有意義位元。</li>
+  </ul>
+  <div class="demo" id="demo-gorilla">
+    <div class="demo-bar">
+      <span class="label">互動 · Gorilla 位元壓縮拆解器</span>
+      <span class="label" style="text-transform:none;font-family:var(--sans);font-size:12px;color:var(--text-2)">直接編輯時間戳與數值序列，逐筆看懂 DoD 與 XOR 位元數</span>
+    </div>
+    <div class="demo-body">
+      <div class="ts-toolbar">
+        <div class="seg" id="gr-presets" role="group" aria-label="資料序列範例">
+          <button type="button" data-preset="steady" aria-pressed="true">穩定感測器</button>
+          <button type="button" data-preset="jitter" aria-pressed="false">網路抖動＋緩變</button>
+          <button type="button" data-preset="noisy" aria-pressed="false">劇烈雜訊</button>
+        </div>
+        <button type="button" class="btn" id="gr-reset">重置</button>
+      </div>
+
+      <div class="ts-editor-grid">
+        <div class="ts-field">
+          <label for="gr-input">輸入序列（每行一筆：Unix 秒級時間戳, 浮點數值）</label>
+          <textarea class="ts-textarea" id="gr-input" spellcheck="false"></textarea>
+        </div>
+        <div class="ts-opt-panel">
+          <div class="ts-field">
+            <label for="gr-granularity">時間戳對齊粒度（模擬降精度對齊）</label>
+            <select class="ts-select" id="gr-granularity">
+              <option value="1" selected>1 秒（原始時間戳，不對齊）</option>
+              <option value="5">5 秒對齊（吸收小幅網路抖動）</option>
+              <option value="10">10 秒對齊</option>
+              <option value="60">60 秒對齊（對齊採樣週期）</option>
+            </select>
+          </div>
+          <div class="ts-field">
+            <label for="gr-decimals">數值小數位量化（截去無意義尾數雜訊）</label>
+            <select class="ts-select" id="gr-decimals">
+              <option value="6" selected>原始浮點數（不截斷）</option>
+              <option value="2">保留 2 位小數</option>
+              <option value="1">保留 1 位小數</option>
+              <option value="0">取整數（0 位小數）</option>
+            </select>
+          </div>
+          <p class="ts-hint">試著切換「網路抖動」後把時間戳對齊調到 60 秒，或把浮點數截到 1 位小數，觀察 DoD 與 XOR 位元數如何瞬間收斂。</p>
+        </div>
+      </div>
+
+      <div class="ts-kpi-grid">
+        <div class="ts-kpi-card">
+          <div class="ts-kpi-label">未壓縮原始大小</div>
+          <div class="ts-kpi-val" id="gr-kpi-raw">—</div>
+          <div class="ts-kpi-sub">每點 128 bits（16 B）</div>
+        </div>
+        <div class="ts-kpi-card">
+          <div class="ts-kpi-label">Gorilla 壓縮後</div>
+          <div class="ts-kpi-val" id="gr-kpi-comp">—</div>
+          <div class="ts-kpi-sub" id="gr-kpi-comp-sub">含首筆基準點</div>
+        </div>
+        <div class="ts-kpi-card">
+          <div class="ts-kpi-label">平均每點成本</div>
+          <div class="ts-kpi-val" id="gr-kpi-bpp">—</div>
+          <div class="ts-kpi-sub" id="gr-kpi-bytes">—</div>
+        </div>
+        <div class="ts-kpi-card" id="gr-kpi-card-ratio">
+          <div class="ts-kpi-label">壓縮率 / 節省</div>
+          <div class="ts-kpi-val" id="gr-kpi-ratio">—</div>
+          <div class="ts-kpi-sub" id="gr-kpi-saved">—</div>
+        </div>
+      </div>
+
+      <div class="ts-bit-table-wrap">
+        <table class="ts-bit-table">
+          <thead>
+            <tr>
+              <th>#</th>
+              <th>對齊後 ts</th>
+              <th>Δt / DoD</th>
+              <th>DoD 編碼</th>
+              <th>量化後 v</th>
+              <th>IEEE-754 XOR (hex)</th>
+              <th>XOR 編碼 (L/T)</th>
+              <th>本筆 bits（對比 128b）</th>
+            </tr>
+          </thead>
+          <tbody id="gr-tbody"></tbody>
+        </table>
+      </div>
+
+      <div class="legend" style="margin-top:10px">
+        <span><i class="dot ns-wait"></i>時間戳 DoD 位元</span>
+        <span><i class="dot ns-ok"></i>數值 XOR 位元</span>
+        <span><i class="dot ns-idle"></i>省下的空間（相對於 128 bits）</span>
+      </div>
+
+      <div class="status-line" id="gr-status">等待解析輸入序列。</div>
+    </div>
+  </div>
+
+  <div class="callout warn">
+    <div class="c-title"><span class="ic">陷阱</span>浮點數尾數噪音是 XOR 壓縮的隱形殺手</div>
+    <p>即使肉眼看起來只差 <code>0.00001</code>，二進位 IEEE 754 的低位尾數卻可能全面翻轉，導致 XOR 的尾隨零瞬間歸零、每筆數值退化成 50–64 bits。實務上在感測器端或寫入管線中，依物理儀器真實精度做四捨五入（或把時間戳對齊到合理粒度），常常就能在不損失業務精度的前提下讓硬碟成本直接腰斬。</p>
+  </div>
+
+  <div class="oneliner">
+    <b>一句話答法</b>Gorilla 靠「時間戳二階差分」把規律採樣壓成 1 bit，再靠「浮點數 XOR 前導/尾隨零視窗」消去緩變數值的重複位元；前提是同序列連續存放且避免無意義的時間抖動與尾數噪音。
+  </div>
+</section>
+
+<section id="s5">
+  <div class="sec-head">
+    <span class="sec-num">05</span>
+    <h2>查詢模式、降採樣與保留策略</h2>
+  </div>
+  <p class="sec-sub">時間窗口聚合、Continuous Aggregates 與熱溫冷分層如何同時滿足「秒級近況」與「年度趨勢」查詢。</p>
+  <p>把資料高效寫進去只是上半場，下半場的挑戰在於「查詢跨越的時間尺度差異極大」。儀表板首頁要看「過去 15 分鐘每秒 CPU」，而容量規劃報表要畫「過去一年每天的溫度趨勢」——兩者差了 <strong>35,000 倍</strong> 的資料點數。如果拿一年份的秒級原始點現場掃描聚合，單一查詢就能拖垮整座叢集。</p>
+
+  <h3>1. 降採樣（Downsampling）與預先聚合（Continuous Aggregates）</h3>
+  <p>解法是把「時間精度」和「保留天數」解耦：原始高頻資料只留短期，背景排程（或串流計算）持續將原始資料滾動聚合為較粗粒度的 <strong>Rollup Table</strong>（例如 1 分鐘、5 分鐘、1 小時桶），並長期保存：</p>
+
+  <ul>
+    <li><strong>熱層（Hot，例 7–14 天）</strong>：保留完整原始精度（如 10 秒級）於本機 NVMe SSD，支撐告警與根因細查。</li>
+    <li><strong>溫層（Warm，例 30–90 天）</strong>：以 5 分鐘為時間桶降採樣，每桶存 <code>min</code>、<code>max</code>、<code>sum</code>、<code>count</code>（外加必要時的直方圖或 P99 Sketch）。</li>
+    <li><strong>冷層（Cold，例 1–5 年）</strong>：以 1 小時或 1 天降採樣後轉存至低成本物件儲存（S3 / GCS 上的 Parquet 檔），供長期趨勢與稽核查詢。</li>
+  </ul>
+
+  <pre class="mermaid">
+sequenceDiagram
+    participant U as 儀表板查詢
+    participant R as Query Router
+    participant H as 熱層 Raw Chunk
+    participant A as 預聚合 Rollup 表
+    U->>R: 查詢近 6 小時（秒級）
+    R->>H: 僅掃描最近 Chunk
+    H-->>R: 回傳高解析度點
+    R-->>U: 毫秒級繪圖
+    U->>R: 查詢過去 90 天趨勢
+    R->>A: 改寫查詢至 5m Rollup
+    A-->>R: 掃描少量預聚合桶
+    R-->>U: 亞秒級回傳趨勢
+  </pre>
+  <p class="cap">Query Router 依時間跨度自動分流（例如 TimescaleDB 的 Real-Time Continuous Aggregates 或 M3DB / VictoriaMetrics 的 Downsampling Rule），避免長區間報表把熱層 SSD 掃爆。</p>
+
+  <h3>2. 保留策略（Retention Policy）的執行成本</h3>
+  <p>因為底層已經依時間切成獨立的 Chunk（見第 3 節），保留策略的實作極度單純：背景任務定期檢查哪些 Chunk 的 <code>max_ts</code> 已早於 <code>now - retention_window</code>，直接將整塊檔案從中繼資料摘除並交由作業系統 unlink。相比傳統資料庫逐列刪除所引發的鎖競爭與 I/O 尖峰，時間分區淘汰幾乎不影響線上寫入延遲。</p>
+
+  <div class="callout warn">
+    <div class="c-title"><span class="ic">陷阱</span>千萬別對「平均值的平均值」做二次聚合</div>
+    <p>把每 5 分鐘的 <code>avg</code> 存進 Rollup 表後，若事後想算「1 小時平均」而直接對 12 個 5 分鐘 <code>avg</code> 再取一次 <code>AVG()</code>，只要各桶內的樣本數不均（例如某幾分鐘斷線掉點），結果就會出現數學偏差。正確作法是在 Rollup 表中儲存可加性統計量 <code>sum</code> 與 <code>count</code>，跨桶彙總時一律用 <code>SUM(sum) / SUM(count)</code>；同理，若需要觀測尖峰不能只留平均，必須同時記錄 <code>max</code> 或可合併的 Percentile Sketch（如 t-digest / DDSketch）。</p>
+  </div>
+
+  <div class="oneliner">
+    <b>一句話答法</b>用「熱層原始點 ＋ 背景預聚合 Rollup ＋ 整塊 Drop 保留策略」換取近即時細查與跨年趨勢並存，且 Rollup 務必存 <code>sum</code> 與 <code>count</code> 而非裸 <code>avg</code>。
+  </div>
+</section>
+
+<section id="s6">
+  <div class="sec-head">
+    <span class="sec-num">06</span>
+    <h2>高基數陷阱與儲存容量規劃</h2>
+  </div>
+  <p class="sec-sub">倒排索引如何隨 Series 數量膨脹，以及在設計初期如何量化索引記憶體、寫入吞吐與分層儲存成本。</p>
+  <p>在時序資料庫的運維事故裡，<strong>第一大殺手不是寫入吞吐量，而是高基數（High Cardinality）</strong>。同樣是每秒寫入 10 萬個資料點：「1,000 台裝置每台每秒寫 100 點」與「1,000 萬條短命 Series 每條每 100 秒寫 1 點」對磁碟頻寬需求差不多，但後者往往會直接把資料庫打到 OOM 崩潰。</p>
+
+  <h3>1. 倒排索引如何隨基數膨脹</h3>
+  <p>為了讓 <code>WHERE region = 'tw-north' AND env = 'prod'</code> 在毫秒內找到所有符合條件的時間線，傳統 TSDB（如 InfluxDB TSM、Prometheus TSDB）在記憶體裡維護一張<strong>倒排索引（Inverted Index）</strong>：把每個 <code>tag_key=tag_value</code> 映射到一組排序後的 <code>Series ID</code> 集合（常以 Roaring Bitmap 壓縮），同時還有一張 Series Metadata 表維護每條活躍序列的 Head Chunk 緩衝區。</p>
+
+  <div class="formula">Series 總數 = ∏ (各個 Tag 實際出現的不重複取值組合數)</div>
+
+  <p>一旦某個 Tag 帶有高變動性（例如 Kubernetes 頻繁重建的 <code>pod_uid</code>、每次連線不同的 <code>session_id</code>），不只 Series 總數呈乘法放大，還會引發 <strong>Series Churn（序列流失）</strong>：舊序列不再寫入卻仍佔據該時間分區內的索引條目直到 Chunk 過期，同時新序列源源不絕地強制配置新的記憶體緩衝、增加倒排表交集計算成本與 Compaction 寫入放大。關於監控系統端如何治理指標標籤與排查高基數爆炸，請見「可觀測性基礎（Observability Fundamentals）篇」。</p>
+
+  <h3>2. 現代欄式架構如何緩解基數上限</h3>
+  <p>新一代架構（如 InfluxDB 3.0 基於 Apache Arrow / DataFusion / Parquet，或 TimescaleDB 的 Columnar Compression）試圖打破傳統記憶體倒排索引的天花板：不再把所有 Tag 組合硬塞進常駐 RAM 的全域 Series Index，而是將資料按時間與少量分區鍵寫成物件儲存上的 <strong>Parquet 欄式檔案</strong>，靠欄位統計值（Min/Max Zone Map）、Bloom Filter 與向量化掃描在查詢時裁剪資料塊。它的取捨是：<strong>高基數上限大幅放寬、冷儲存成本大降，但高併發超低延遲（&lt; 5ms）的即時點查往往不如全記憶體倒排索引</strong>。</p>
+  <div class="demo" id="demo-capacity">
+    <div class="demo-bar">
+      <span class="label">互動 · 基數與分層儲存容量試算器</span>
+      <span class="label" style="text-transform:none;font-family:var(--sans);font-size:12px;color:var(--text-2)">拖動參數，即時估算活躍 Series、索引記憶體與分層磁碟成本</span>
+    </div>
+    <div class="demo-body">
+      <div class="ts-toolbar">
+        <span class="ts-tier-badge ok" id="cap-tier-badge">基數健康</span>
+        <button type="button" class="btn" id="cap-reset">重置預設</button>
+      </div>
+
+      <div class="ts-slider-grid">
+        <div class="ts-slider-card">
+          <div class="ts-slider-head">
+            <label for="cap-devices">線上裝置 / 主機數</label>
+            <span class="ts-slider-val" id="cap-devices-val">5,000</span>
+          </div>
+          <input type="range" id="cap-devices" min="100" max="50000" step="100" value="5000" />
+        </div>
+
+        <div class="ts-slider-card">
+          <div class="ts-slider-head">
+            <label for="cap-tags">每台裝置 Tag 組合數（指標 × 維度）</label>
+            <span class="ts-slider-val" id="cap-tags-val">8</span>
+          </div>
+          <input type="range" id="cap-tags" min="1" max="50" step="1" value="8" />
+        </div>
+
+        <div class="ts-slider-card">
+          <div class="ts-slider-head">
+            <label for="cap-interval">取樣間隔（秒）</label>
+            <span class="ts-slider-val" id="cap-interval-val">10 s</span>
+          </div>
+          <input type="range" id="cap-interval" min="1" max="300" step="1" value="10" />
+        </div>
+
+        <div class="ts-slider-card">
+          <div class="ts-slider-head">
+            <label for="cap-raw-days">熱層原始精度保留天數</label>
+            <span class="ts-slider-val" id="cap-raw-days-val">14 天</span>
+          </div>
+          <input type="range" id="cap-raw-days" min="1" max="90" step="1" value="14" />
+        </div>
+
+        <div class="ts-slider-card" style="grid-column: 1 / -1;">
+          <div class="ts-slider-head">
+            <label for="cap-rollup-days">溫冷層 5 分鐘降採樣保留天數（含 min / max / sum / count）</label>
+            <span class="ts-slider-val" id="cap-rollup-days-val">365 天</span>
+          </div>
+          <input type="range" id="cap-rollup-days" min="30" max="730" step="5" value="365" />
+        </div>
+      </div>
+
+      <div class="ts-kpi-grid">
+        <div class="ts-kpi-card" id="cap-card-series">
+          <div class="ts-kpi-label">活躍 Series 總數</div>
+          <div class="ts-kpi-val" id="cap-out-series">—</div>
+          <div class="ts-kpi-sub">裝置數 × Tag 組合</div>
+        </div>
+        <div class="ts-kpi-card">
+          <div class="ts-kpi-label">預估倒排索引 RAM</div>
+          <div class="ts-kpi-val" id="cap-out-ram">—</div>
+          <div class="ts-kpi-sub" id="cap-out-ram-sub">含 Head Chunk 緩衝</div>
+        </div>
+        <div class="ts-kpi-card">
+          <div class="ts-kpi-label">寫入吞吐 / Chunk 數</div>
+          <div class="ts-kpi-val" id="cap-out-pps">—</div>
+          <div class="ts-kpi-sub" id="cap-out-chunks">—</div>
+        </div>
+        <div class="ts-kpi-card">
+          <div class="ts-kpi-label">分層總磁碟用量</div>
+          <div class="ts-kpi-val" id="cap-out-total">—</div>
+          <div class="ts-kpi-sub" id="cap-out-saving">—</div>
+        </div>
+      </div>
+
+      <div class="ts-storage-list">
+        <div class="ts-storage-item">
+          <div class="ts-storage-head">
+            <span>若不壓縮（16 B/pt 原始保留期）</span>
+            <span id="cap-gb-raw">—</span>
+          </div>
+          <div class="ts-meter-track"><div class="ts-meter-fill raw" id="cap-fill-raw" style="width:100%"></div></div>
+        </div>
+        <div class="ts-storage-item">
+          <div class="ts-storage-head">
+            <span>熱層 Gorilla 壓縮後（~1.8 B/pt 含索引與中繼資料）</span>
+            <span id="cap-gb-gorilla">—</span>
+          </div>
+          <div class="ts-meter-track"><div class="ts-meter-fill gorilla" id="cap-fill-gorilla" style="width:15%"></div></div>
+        </div>
+        <div class="ts-storage-item">
+          <div class="ts-storage-head">
+            <span>溫冷層 5m Rollup 壓縮儲存</span>
+            <span id="cap-gb-rollup">—</span>
+          </div>
+          <div class="ts-meter-track"><div class="ts-meter-fill rollup" id="cap-fill-rollup" style="width:10%"></div></div>
+        </div>
+      </div>
+
+      <div class="status-line" id="cap-status">拖動上方滑桿試算儲存與索引壓力。</div>
+    </div>
+  </div>
+
+  <div class="oneliner">
+    <b>一句話答法</b>估算 TSDB 容量時先算 Series 基數決定索引 RAM（每條約數 KB 級開銷），再依「點數/秒 × 保留天數 × 壓縮位元組」切出熱層與 Rollup 分層磁碟預算。
+  </div>
+</section>
+
+<section id="s7">
+  <div class="sec-head">
+    <span class="sec-num">07</span>
+    <h2>技術選型對照：TimescaleDB、InfluxDB、Timestream 與原生存儲</h2>
+  </div>
+  <p class="sec-sub">橫向比較主流時序資料庫的架構取捨，並界定何時只用一般關聯式資料庫加時間分區就已足夠。</p>
+  <p>市面上的時序儲存方案走出了三條截然不同的架構路線：在成熟關聯式資料庫上加掛時序擴充、從零打造的專屬時序引擎、以及全託管 Serverless 服務。選型的核心不是誰的基準測試跑分最高，而是<strong>你需不需要和業務表 JOIN、寫入基數有多高、以及團隊能承受多少維運複雜度</strong>。</p>
+
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>方案</th>
+          <th>底層儲存架構</th>
+          <th>查詢語言與 JOIN 能力</th>
+          <th>高基數與壓縮特性</th>
+          <th>最適合的場景</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><strong>PostgreSQL ＋ 原生時間分區</strong></td>
+          <td>Declarative Range Partitioning + B-Tree / BRIN</td>
+          <td class="hl">完整 SQL 與 ACID 交易、任意 JOIN</td>
+          <td>無原生 Gorilla 壓縮；依賴 TOAST / 分區 Drop</td>
+          <td>中小寫入量（&lt; 5K–10K pts/s）、強關聯業務資料</td>
+        </tr>
+        <tr>
+          <td><strong>TimescaleDB</strong></td>
+          <td>PostgreSQL 擴充：Hypertable Chunk + 欄式壓縮（DoD / Gorilla）</td>
+          <td class="hl">完整 PostgreSQL 生態 + Continuous Aggregates</td>
+          <td>冷 Chunk 轉欄式壓縮可達 90%+；索引受限於 PG B-Tree</td>
+          <td>需要標準 SQL、與業務表 JOIN、保留 PG 維運工具鏈</td>
+        </tr>
+        <tr>
+          <td><strong>InfluxDB</strong>（v2 TSM / v3 Parquet）</td>
+          <td>v2：TSM + 倒排索引；v3：Apache Arrow + DataFusion + Parquet</td>
+          <td>InfluxQL / Flux（v2）或 SQL + InfluxQL（v3）；弱跨表 JOIN</td>
+          <td class="hl">v2 受限於記憶體基數上限；v3 改用 Parquet 大幅放寬基數</td>
+          <td>超高吞吐監控與 IoT 指標、純時序分析與低成本物件儲存</td>
+        </tr>
+        <tr>
+          <td><strong>Amazon Timestream</strong></td>
+          <td>全託管 Serverless：Memory Store（熱）自動移轉 Magnetic Store（冷）</td>
+          <td>SQL 子集（專注時間窗與插值函數）；不適合複雜業務 JOIN</td>
+          <td>免容量規劃、按寫入與掃描量計費；高頻小查詢成本需留意</td>
+          <td>AWS 生態、不想自管叢集與分層壓實的 IoT／遙測管線</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="cap">實務選型對照：TimescaleDB 勝在「不離開 PostgreSQL 生態」，InfluxDB 3.0 勝在「物件儲存＋高基數吞吐」，Amazon Timestream 勝在「零維運自動熱冷分層」。</p>
+
+  <h3>什麼時候「一般關聯式資料庫 ＋ 時間分區」就夠用？</h3>
+  <p>系統設計裡最常見的過度設計之一，就是在只有幾百台裝置、每秒不到一千筆寫入的專案裡多養一座獨立 TSDB 叢集。只要同時滿足下列四個條件，直接用 <strong>PostgreSQL 宣告式時間分區（<code>PARTITION BY RANGE (ts)</code>）搭配 <code>BRIN</code> 索引</strong>（Block Range Index，體積只有 B-Tree 的不到 1%）與排程 <code>DROP TABLE</code> 分區，往往是最穩、最省成本的解法：</p>
+  <ol>
+    <li><strong>寫入量在單機可輕鬆吸收的區間</strong>：持續寫入低於約 5,000–10,000 rows/s（批次 <code>COPY</code> 或 multi-row <code>INSERT</code> 下甚至更高），尚未觸及磁碟 IOPS 天花板。</li>
+    <li><strong>必須與既有業務表做即時 JOIN 或跨表 ACID 交易</strong>：例如計費系統要把用量事件直接對齊客戶方案表，跨庫同步反而徒增資料一致性難題。</li>
+    <li><strong>查詢與保留規模溫和</strong>：原始資料總量在數百 GB 以內，沒有數億條高基數 Series 或極端壓縮（&gt; 90%）的硬性成本壓力。</li>
+    <li><strong>團隊精簡</strong>：現有備份、監控、權限與災難復原流程全都建在既有關聯式資料庫上，不值得為單一功能承擔第二套資料庫的維運與故障排查風險。</li>
+  </ol>
+
+  <div class="callout accent">
+    <div class="c-title"><span class="ic">關鍵</span>演進路徑：別一上來就推翻整個資料庫棧</div>
+    <p>若專案目前已在用 PostgreSQL，最平滑的演進階梯是：<strong>單表 ＋ 複合索引 → 原生按天時間分區 ＋ BRIN 索引 → 啟用 TimescaleDB 欄式壓縮與 Continuous Aggregates → 當吞吐或基數跨越單機 / SQL 邊界時，再將純遙測資料拆出至 InfluxDB 3.0、VictoriaMetrics 或 Amazon Timestream</strong>。</p>
+  </div>
+
+  <div class="oneliner">
+    <b>一句話答法</b>強關聯與中低吞吐先用 PG 時間分區或 TimescaleDB；超高寫入、極致壓縮與高基數分析選 InfluxDB 3.0；追求零維運且深耕 AWS 則選 Amazon Timestream。
+  </div>
+</section>
+
+<section id="s8">
+  <div class="sec-head">
+    <span class="sec-num">08</span>
+    <h2>面試實戰：高頻考題與架構答法</h2>
+  </div>
+  <p class="sec-sub">面對「十億筆監控／IoT 資料怎麼存」的追問時，直接切中寫入放大、壓縮、基數與補傳痛點的回答框架。</p>
+  <p>在 System Design 面試裡，無論題目是「設計百萬台 IoT 裝置監控平台」、「設計分散式指標告警系統」還是「設計高頻行情儲存」，考官幾乎都會沿著下面四個追問驗證你是否真的懂 TSDB 的底層機制：</p>
+
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>高頻面試問題</th>
+          <th>考官真正想聽的關鍵答點</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><strong>1. 為什麼不直接用 MySQL / PostgreSQL 存十億筆感測器資料？</strong></td>
+          <td>點出三個物理瓶頸：<strong>(a)</strong> 複合 B-Tree 索引在高併發隨機插入時會引發嚴重 Page Split 與寫入放大；<strong>(b)</strong> 列式儲存缺乏同序列 Delta-of-Delta ＋ XOR 壓縮，空間膨脹 8–10 倍；<strong>(c)</strong> <code>DELETE WHERE ts &lt; ...</code> 會觸發 WAL 爆量與 VACUUM 碎片。同時補一句「若寫入量低於數千 pts/s 且要 JOIN 業務表，PG 時間分區 ＋ BRIN 就夠用」，展現不盲目炫技的工程判斷。</td>
+        </tr>
+        <tr>
+          <td><strong>2. 裝置數十萬台，Schema 設計怎麼避免系統 OOM？</strong></td>
+          <td>明確切分 <strong>Tag（低基數維度，進倒排索引）</strong> 與 <strong>Field（高變動數值／高基數 ID，不建索引）</strong>。提醒面試官估算 <code>Series 總數 = 各 Tag 組合乘積</code>，禁止把 <code>request_id</code>、<code>session_id</code> 或無限成長的錯誤訊息放進 Tag；若業務確需高基數維度查詢，改採 Parquet 欄式架構（如 InfluxDB 3.0）或把追蹤事件分流至 Log / Trace 系統。</td>
+        </tr>
+        <tr>
+          <td><strong>3. 產品要同時看「過去 1 小時秒級」與「過去 1 年趨勢」，怎麼兼顧延遲與成本？</strong></td>
+          <td>提出<strong>分層保留 ＋ Continuous Aggregates</strong>：熱層 NVMe 留 7–14 天原始點供秒級細查；背景排程滾動產生 5 分鐘與 1 小時 Rollup 存進溫冷層（物件儲存 Parquet）；關鍵細節是 Rollup 必須存 <code>sum</code>、<code>count</code>、<code>min</code>、<code>max</code>（需要百分位數就存 Sketch），絕不對 <code>avg</code> 做二次平均。</td>
+        </tr>
+        <tr>
+          <td><strong>4. 離線裝置三天後同時重連補傳歷史數據，儲存層會發生什麼事？</strong></td>
+          <td>指出<strong>亂序寫入（Out-of-Order Writes）</strong>會撞進已封存的歷史不可變 Chunk，引發昂貴的 Re-compaction 與壓縮率下降，同時造成瞬時寫入尖峰。儲存層應設定 <code>out_of_order_time_window</code> 邊界並把超窗資料導入獨立補錄路徑（Backfill Pipeline），上游則靠限速與抖動平滑流量（詳見「IoT Telemetry 寫入管線與離線補傳篇」）。</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="cap">面試回答 TSDB 題目時，把「寫入路徑 → 壓縮模型 → 基數上限 → 分層淘汰」四條主軸串起來，並主動給出回退到關聯式資料庫的邊界，就能拉開與背誦產品清單的差距。</p>
+
+  <div class="oneliner">
+    <b>一句話答法</b>面對時序儲存設計題，先量化「每秒點數 × 活躍 Series 基數 × 保留跨度」，再用時間分區 Chunk、Gorilla 壓縮、預聚合 Rollup 與基數治理四根柱子收斂架構。
+  </div>
+</section>
+
+        <footer class="article-foot" aria-label="閱讀進度與導覽">
+          <div class="article-foot-left">
+            <button class="read-toggle read-toggle-lg" type="button" data-read-toggle aria-pressed="false">
+              <span class="read-dot" aria-hidden="true"></span>
+              <span class="read-label">標記為已讀</span>
+            </button>
+            <span class="article-foot-hint" data-read-hint>讀完本篇後可標記為已讀；進度只存在這個瀏覽器，首頁學習地圖會依此顯示。</span>
+          </div>
+          <a class="article-foot-back" href="../index.html">← 返回系統設計知識地圖</a>
+        </footer>
+      </div>
+    </main>
+  </div>
+
+  <script>
+    "use strict";
+    document.addEventListener("DOMContentLoaded", function () {
+      /* ===== TOC scrollspy, mobile accordion & desktop collapse ===== */
+      (function () {
+        var links = Array.prototype.slice.call(document.querySelectorAll(".toc-nav a"));
+        var map = {};
+        links.forEach(function (a) {
+          var href = a.getAttribute("href");
+          if (href && href.startsWith("#")) {
+            map[href.slice(1)] = a;
+          }
+        });
+        var secs = links.map(function (a) {
+          var href = a.getAttribute("href");
+          return href && href.startsWith("#") ? document.getElementById(href.slice(1)) : null;
+        }).filter(Boolean);
+
+        if (secs.length > 0 && typeof IntersectionObserver !== "undefined") {
+          var obs = new IntersectionObserver(function (entries) {
+            entries.forEach(function (e) {
+              if (e.isIntersecting) {
+                links.forEach(function (l) { l.classList.remove("active"); });
+                var act = map[e.target.id];
+                if (act) act.classList.add("active");
+              }
+            });
+          }, { rootMargin: "-20% 0px -70% 0px", threshold: 0 });
+          secs.forEach(function (s) { obs.observe(s); });
+        }
+
+        /* mobile：目錄 accordion（≤920px） */
+        var toggle = document.querySelector(".toc-toggle");
+        var nav = document.querySelector(".toc-nav");
+        if (toggle && nav) {
+          toggle.addEventListener("click", function () {
+            var open = nav.classList.toggle("open");
+            toggle.setAttribute("aria-expanded", open ? "true" : "false");
+          });
+          nav.addEventListener("click", function (e) {
+            if (e.target.closest("a") && window.innerWidth <= 920) {
+              nav.classList.remove("open");
+              toggle.setAttribute("aria-expanded", "false");
+            }
+          });
+        }
+
+        /* desktop：收合側欄（預設展開；不持久化） */
+        var collapseBtn = document.querySelector(".toc-collapse");
+        var reopenBtn = document.querySelector(".toc-reopen");
+        function setTocCollapsed(collapsed) {
+          document.body.classList.toggle("toc-collapsed", collapsed);
+          if (collapseBtn) collapseBtn.setAttribute("aria-expanded", collapsed ? "false" : "true");
+          if (reopenBtn) reopenBtn.setAttribute("aria-expanded", collapsed ? "false" : "true");
+          if (collapsed && reopenBtn) reopenBtn.focus();
+          else if (!collapsed && collapseBtn) collapseBtn.focus();
+        }
+        if (collapseBtn) {
+          collapseBtn.addEventListener("click", function () { setTocCollapsed(true); });
+        }
+        if (reopenBtn) {
+          reopenBtn.addEventListener("click", function () { setTocCollapsed(false); });
+        }
+
+        /* ===== 已讀狀態追蹤（localStorage + file:// fallback） =====
+           儲存格式（key、envelope、window.name 前綴）與 templates/home-learning-map.js 的同名函式共用，改動須兩邊同步。 */
+        var STORAGE_KEY = "sded.read.v1";
+        var WIN_PREFIX = "sded.read.v1:";
+        var topicId = document.body.getAttribute("data-topic-id") || "";
+        var readBtns = Array.prototype.slice.call(document.querySelectorAll("[data-read-toggle]"));
+        var readHint = document.querySelector("[data-read-hint]");
+
+        function parseEnvelope(raw) {
+          if (!raw || typeof raw !== "string") return null;
+          try {
+            var parsed = JSON.parse(raw);
+            if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+            if (parsed.v === 1 && parsed.items && typeof parsed.items === "object" && !Array.isArray(parsed.items)) {
+              return { updatedAt: Number(parsed.updatedAt) || 0, items: parsed.items };
+            }
+            return { updatedAt: 1, items: parsed };
+          } catch (e) {
+            return null;
+          }
+        }
+
+        function loadReadMap() {
+          var fromLs = null;
+          var fromWin = null;
+          try { fromLs = parseEnvelope(window.localStorage.getItem(STORAGE_KEY)); } catch (e) {}
+          if (window.location.protocol === "file:") {
+            try {
+              if (typeof window.name === "string" && window.name.indexOf(WIN_PREFIX) === 0) {
+                fromWin = parseEnvelope(window.name.slice(WIN_PREFIX.length));
+              }
+            } catch (e) {}
+          }
+          var chosen = fromLs;
+          if (fromWin && (!chosen || fromWin.updatedAt > chosen.updatedAt)) {
+            chosen = fromWin;
+            try {
+              window.localStorage.setItem(STORAGE_KEY, JSON.stringify({ v: 1, updatedAt: chosen.updatedAt, items: chosen.items }));
+            } catch (e) {}
+          } else if (chosen && window.location.protocol === "file:") {
+            try {
+              window.name = WIN_PREFIX + JSON.stringify({ v: 1, updatedAt: chosen.updatedAt, items: chosen.items });
+            } catch (e) {}
+          }
+          return chosen && chosen.items ? Object.assign({}, chosen.items) : {};
+        }
+
+        function saveReadMap(items) {
+          var env = JSON.stringify({ v: 1, updatedAt: Date.now(), items: items });
+          try { window.localStorage.setItem(STORAGE_KEY, env); } catch (e) {}
+          if (window.location.protocol === "file:") {
+            try { window.name = WIN_PREFIX + env; } catch (e) {}
+          }
+        }
+
+        function todayLocal() {
+          var d = new Date();
+          return d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0") + "-" + String(d.getDate()).padStart(2, "0");
+        }
+
+        function syncReadUi() {
+          if (!topicId || !readBtns.length) return;
+          var map = loadReadMap();
+          var val = map[topicId];
+          var isRead = Boolean(val);
+          var dateStr = typeof val === "string" && /^\d{4}-\d{2}-\d{2}$/.test(val) ? val : "";
+          readBtns.forEach(function (btn) {
+            btn.setAttribute("aria-pressed", isRead ? "true" : "false");
+            var label = btn.querySelector(".read-label");
+            if (label) {
+              label.textContent = isRead ? "✓ 已讀" : "標記為已讀";
+            }
+          });
+          if (readHint) {
+            readHint.textContent = isRead
+              ? ("已標記為已讀" + (dateStr ? "（" + dateStr + "）" : "") + "。進度只存在這個瀏覽器，首頁學習地圖會依此顯示。")
+              : "讀完本篇後可標記為已讀；進度只存在這個瀏覽器，首頁學習地圖會依此顯示。";
+          }
+        }
+
+        function toggleRead() {
+          if (!topicId) return;
+          var map = loadReadMap();
+          if (map[topicId]) {
+            delete map[topicId];
+          } else {
+            map[topicId] = todayLocal();
+          }
+          saveReadMap(map);
+          syncReadUi();
+        }
+
+        readBtns.forEach(function (btn) {
+          btn.addEventListener("click", toggleRead);
+        });
+        window.addEventListener("pageshow", syncReadUi);
+        window.addEventListener("storage", function (e) {
+          if (!e.key || e.key === STORAGE_KEY) syncReadUi();
+        });
+        syncReadUi();
+      })();
+    });
+  </script>
+
+  
+<script>
+(function () {
+  "use strict";
+
+  /* (1) 常數與參數表 */
+  var GORILLA_PRESETS = {
+    steady: [
+      "1700000000,23.5",
+      "1700000060,23.5",
+      "1700000120,23.5",
+      "1700000180,23.75",
+      "1700000240,23.75",
+      "1700000300,23.75",
+      "1700000360,24.0",
+      "1700000420,24.0"
+    ].join("\n"),
+    jitter: [
+      "1700000000,23.512",
+      "1700000062,23.518",
+      "1700000119,23.541",
+      "1700000183,23.589",
+      "1700000238,23.604",
+      "1700000301,23.611",
+      "1700000364,23.627",
+      "1700000419,23.635"
+    ].join("\n"),
+    noisy: [
+      "1700000000,12.345678",
+      "1700000043,87.912304",
+      "1700000319,-4.118293",
+      "1700000337,154.77312",
+      "1700002910,0.0049182",
+      "1700002991,63.298174",
+      "1700006120,-91.44812",
+      "1700006155,41.882913"
+    ].join("\n")
+  };
+
+  var DEFAULT_CAPACITY = {
+    devices: 5000,
+    tagCardinality: 8,
+    intervalSec: 10,
+    rawRetentionDays: 14,
+    rollupDays: 365
+  };
+
+  var RAW_BYTES_PER_POINT = 16;
+  var GORILLA_BYTES_PER_POINT = 1.8;
+  var ROLLUP_INTERVAL_SEC = 300;
+  var ROLLUP_BYTES_PER_BUCKET = 14;
+  var BYTES_PER_ACTIVE_SERIES = 3200;
+
+  function toHex32(n) {
+    var u = n >>> 0;
+    var s = u.toString(16);
+    while (s.length < 8) s = "0" + s;
+    return s;
+  }
+
+  function float64ToWords(val) {
+    if (val === 0) {
+      return [1 / val === -Infinity ? 0x80000000 : 0, 0];
+    }
+    var sign = val < 0 ? 1 : 0;
+    var a = Math.abs(val);
+    if (!Number.isFinite(a)) {
+      if (isNaN(a)) return [0x7ff80000, 0];
+      return [(((sign ? 0x80000000 : 0) | 0x7ff00000) >>> 0), 0];
+    }
+    var e = Math.floor(Math.log(a) / Math.LN2);
+    var m = a / Math.pow(2, e);
+    while (m >= 2) { m /= 2; e += 1; }
+    while (m < 1 && e > -1022) { m *= 2; e -= 1; }
+    var be = e + 1023;
+    var frac;
+    if (be <= 0) {
+      frac = a / Math.pow(2, -1022);
+      be = 0;
+    } else {
+      frac = m - 1;
+    }
+    var scaled = frac * 1048576;
+    var hiFrac = Math.floor(scaled);
+    var lo = Math.round((scaled - hiFrac) * 4294967296);
+    if (lo >= 4294967296) {
+      lo -= 4294967296;
+      hiFrac += 1;
+      if (hiFrac >= 1048576) {
+        hiFrac = 0;
+        be += 1;
+      }
+    }
+    var hi = (((sign * 2048 + be) * 1048576) + hiFrac) >>> 0;
+    return [hi, lo >>> 0];
+  }
+
+  function countLeadingZeros64(hi, lo) {
+    var uHi = hi >>> 0;
+    var uLo = lo >>> 0;
+    if (uHi === 0 && uLo === 0) return 64;
+    var count = 0;
+    if (uHi !== 0) {
+      for (var b = 31; b >= 0; b -= 1) {
+        if (((uHi >>> b) & 1) !== 0) return count;
+        count += 1;
+      }
+      return 32;
+    }
+    count = 32;
+    for (var b2 = 31; b2 >= 0; b2 -= 1) {
+      if (((uLo >>> b2) & 1) !== 0) return count;
+      count += 1;
+    }
+    return 64;
+  }
+
+  function countTrailingZeros64(hi, lo) {
+    var uHi = hi >>> 0;
+    var uLo = lo >>> 0;
+    if (uHi === 0 && uLo === 0) return 64;
+    var count = 0;
+    if (uLo !== 0) {
+      for (var b = 0; b < 32; b += 1) {
+        if (((uLo >>> b) & 1) !== 0) return count;
+        count += 1;
+      }
+      return 32;
+    }
+    count = 32;
+    for (var b2 = 0; b2 < 32; b2 += 1) {
+      if (((uHi >>> b2) & 1) !== 0) return count;
+      count += 1;
+    }
+    return 64;
+  }
+
+  function parseSeriesLines(rawLines) {
+    var text = typeof rawLines === "string" ? rawLines : "";
+    var lines = text.split(/\r?\n/);
+    var out = [];
+    for (var i = 0; i < lines.length; i += 1) {
+      var trimmed = lines[i].trim();
+      if (!trimmed) continue;
+      var parts = trimmed.split(/[\s,;]+/);
+      if (parts.length < 2) continue;
+      var ts = parseFloat(parts[0]);
+      var val = parseFloat(parts[1]);
+      if (Number.isFinite(ts) && Number.isFinite(val)) {
+        out.push({ ts: Math.round(ts), val: val });
+      }
+    }
+    return out;
+  }
+
+  function classifyDoD(dod) {
+    if (dod === 0) return { prefix: "0", payloadBits: 0, totalBits: 1, tone: "ok" };
+    if (dod >= -63 && dod <= 64) return { prefix: "10", payloadBits: 7, totalBits: 9, tone: "wait" };
+    if (dod >= -255 && dod <= 256) return { prefix: "110", payloadBits: 9, totalBits: 12, tone: "warn" };
+    if (dod >= -2047 && dod <= 2048) return { prefix: "1110", payloadBits: 12, totalBits: 16, tone: "warn" };
+    return { prefix: "1111", payloadBits: 32, totalBits: 36, tone: "bad" };
+  }
+
+  /* (2) compute* 純函式 */
+  // @probe fn       computeGorilla
+  // @probe baseline {"rawLines":"1700000000,23.512\n1700000062,23.518\n1700000119,23.541\n1700000183,23.589\n1700000238,23.604\n1700000301,23.611\n1700000364,23.627\n1700000419,23.635","tsGranularitySec":1,"valDecimals":6}
+  // @probe sweep    {"rawLines":["1700000000,23.5\n1700000060,23.5\n1700000120,23.5\n1700000180,23.5\n1700000240,23.5\n1700000300,23.5","1700000000,12.345678\n1700000043,87.912304\n1700000319,-4.118293\n1700000337,154.77312\n1700002910,0.0049182\n1700002991,63.298174"],"tsGranularitySec":[1,60],"valDecimals":[0,6]}
+  function computeGorilla(p) {
+    var gran = Number(p.tsGranularitySec);
+    if (!Number.isFinite(gran) || gran < 1) gran = 1;
+    var dec = Number(p.valDecimals);
+    if (!Number.isFinite(dec) || dec < 0) dec = 6;
+    if (dec > 6) dec = 6;
+
+    var parsed = parseSeriesLines(p.rawLines);
+    var count = parsed.length;
+    if (count === 0) {
+      return {
+        pointCount: 0,
+        totalRawBits: 0,
+        totalCompressedBits: 0,
+        totalTsBits: 0,
+        totalValBits: 0,
+        avgBitsPerPoint: 0,
+        avgBytesPerPoint: 0,
+        steadyBitsPerPoint: 0,
+        compressionRatio: 0,
+        savingPct: 0,
+        dodZeroCount: 0,
+        xorZeroCount: 0,
+        ratioTone: "warn",
+        rows: [],
+        summaryText: "找不到有效資料列，請輸入「時間戳,數值」格式（至少 2 筆）。"
+      };
+    }
+
+    var scale = Math.pow(10, dec);
+    var rows = [];
+    var totalTsBits = 0;
+    var totalValBits = 0;
+    var dodZeroCount = 0;
+    var xorZeroCount = 0;
+
+    var prevTs = 0;
+    var prevDelta = 0;
+    var prevWords = [0, 0];
+    var prevLz = -1;
+    var prevTz = -1;
+
+    for (var i = 0; i < count; i += 1) {
+      var alignedTs = Math.round(parsed[i].ts / gran) * gran;
+      var qVal = dec >= 6 ? parsed[i].val : Math.round(parsed[i].val * scale) / scale;
+      var words = float64ToWords(qVal);
+
+      var delta = null;
+      var dod = null;
+      var tsBits = 0;
+      var dodLabel = "";
+      var dodTone = "wait";
+
+      var xorHex = "—";
+      var valBits = 0;
+      var xorLabel = "";
+      var xorTone = "wait";
+
+      if (i === 0) {
+        tsBits = 64;
+        dodLabel = "基準 64b";
+        dodTone = "wait";
+        valBits = 64;
+        xorLabel = "基準 64b";
+        xorTone = "wait";
+      } else {
+        delta = alignedTs - prevTs;
+        if (i === 1) {
+          tsBits = (delta >= 0 && delta <= 16383) ? 14 : 32;
+          dodLabel = "首差 " + tsBits + "b";
+          dodTone = tsBits === 14 ? "wait" : "warn";
+        } else {
+          dod = delta - prevDelta;
+          var cls = classifyDoD(dod);
+          tsBits = cls.totalBits;
+          dodLabel = cls.payloadBits === 0 ? "0 (1b)" : (cls.prefix + "+" + cls.payloadBits + "b=" + cls.totalBits + "b");
+          dodTone = cls.tone;
+          if (dod === 0) dodZeroCount += 1;
+        }
+
+        var xHi = (words[0] ^ prevWords[0]) >>> 0;
+        var xLo = (words[1] ^ prevWords[1]) >>> 0;
+        xorHex = toHex32(xHi) + toHex32(xLo);
+
+        if (xHi === 0 && xLo === 0) {
+          valBits = 1;
+          xorLabel = "0 (同值 1b)";
+          xorTone = "ok";
+          xorZeroCount += 1;
+        } else {
+          var rawLz = countLeadingZeros64(xHi, xLo);
+          var lz = rawLz > 31 ? 31 : rawLz;
+          var tz = countTrailingZeros64(xHi, xLo);
+          var meaningful = 64 - lz - tz;
+          if (meaningful < 1) meaningful = 1;
+
+          if (prevLz !== -1 && lz >= prevLz && tz >= prevTz) {
+            var reusedLen = 64 - prevLz - prevTz;
+            valBits = 2 + reusedLen;
+            xorLabel = "10 沿用(" + prevLz + "/" + prevTz + ")=" + valBits + "b";
+            xorTone = valBits <= 20 ? "ok" : "wait";
+          } else {
+            valBits = 13 + meaningful;
+            xorLabel = "11 新窗(" + lz + "/" + tz + ")=" + valBits + "b";
+            xorTone = valBits <= 28 ? "wait" : (valBits <= 48 ? "warn" : "bad");
+            prevLz = lz;
+            prevTz = tz;
+          }
+        }
+      }
+
+      totalTsBits += tsBits;
+      totalValBits += valBits;
+
+      rows.push({
+        index: i + 1,
+        alignedTs: alignedTs,
+        delta: delta,
+        dod: dod,
+        dodLabel: dodLabel,
+        dodTone: dodTone,
+        tsBits: tsBits,
+        qVal: qVal,
+        xorHex: xorHex,
+        xorLabel: xorLabel,
+        xorTone: xorTone,
+        valBits: valBits,
+        rowTotalBits: tsBits + valBits
+      });
+
+      if (i >= 1) prevDelta = delta;
+      prevTs = alignedTs;
+      prevWords = words;
+    }
+
+    var totalRawBits = count * 128;
+    var totalCompressedBits = totalTsBits + totalValBits;
+    var avgBitsPerPoint = Math.round((totalCompressedBits / count) * 10) / 10;
+    var avgBytesPerPoint = Math.round((avgBitsPerPoint / 8) * 100) / 100;
+    var steadyBitsPerPoint = count > 1
+      ? Math.round(((totalCompressedBits - 128) / (count - 1)) * 10) / 10
+      : 128;
+    var compressionRatio = totalCompressedBits > 0
+      ? Math.round((totalRawBits / totalCompressedBits) * 100) / 100
+      : 0;
+    var savingPct = totalRawBits > 0
+      ? Math.round(((totalRawBits - totalCompressedBits) / totalRawBits) * 1000) / 10
+      : 0;
+
+    var ratioTone = "bad";
+    if (savingPct >= 65) ratioTone = "ok";
+    else if (savingPct >= 35) ratioTone = "warn";
+
+    var summaryText = "共解析 " + count + " 筆點：未壓縮 " + totalRawBits + " bits → Gorilla 僅需 " +
+      totalCompressedBits + " bits（時間戳 " + totalTsBits + "b ＋ 數值 " + totalValBits +
+      "b），扣除首筆基準點後平均每點 " + steadyBitsPerPoint + " bits（" +
+      (Math.round((steadyBitsPerPoint / 8) * 100) / 100) + " B/pt）；其中 DoD=0 共 " +
+      dodZeroCount + " 筆、XOR=0 共 " + xorZeroCount + " 筆。";
+
+    return {
+      pointCount: count,
+      totalRawBits: totalRawBits,
+      totalCompressedBits: totalCompressedBits,
+      totalTsBits: totalTsBits,
+      totalValBits: totalValBits,
+      avgBitsPerPoint: avgBitsPerPoint,
+      avgBytesPerPoint: avgBytesPerPoint,
+      steadyBitsPerPoint: steadyBitsPerPoint,
+      compressionRatio: compressionRatio,
+      savingPct: savingPct,
+      dodZeroCount: dodZeroCount,
+      xorZeroCount: xorZeroCount,
+      ratioTone: ratioTone,
+      rows: rows,
+      summaryText: summaryText
+    };
+  }
+
+  // @probe fn       computeCapacity
+  // @probe baseline {"devices":5000,"tagCardinality":8,"intervalSec":10,"rawRetentionDays":14,"rollupDays":365}
+  // @probe sweep    {"devices":[100,50000],"tagCardinality":[1,50],"intervalSec":[1,300],"rawRetentionDays":[1,90],"rollupDays":[30,730]}
+  function computeCapacity(p) {
+    var devices = Math.max(1, Math.round(Number(p.devices) || 1));
+    var tagCard = Math.max(1, Math.round(Number(p.tagCardinality) || 1));
+    var intervalSec = Math.max(1, Math.round(Number(p.intervalSec) || 1));
+    var rawDays = Math.max(1, Math.round(Number(p.rawRetentionDays) || 1));
+    var rollupDays = Math.max(1, Math.round(Number(p.rollupDays) || 1));
+
+    var activeSeries = devices * tagCard;
+    var pointsPerSec = Math.round((activeSeries / intervalSec) * 10) / 10;
+    var indexMemMB = Math.round(((activeSeries * BYTES_PER_ACTIVE_SERIES) / (1024 * 1024)) * 10) / 10;
+
+    var rawPointsTotal = (activeSeries / intervalSec) * 86400 * rawDays;
+    var gbDiv = 1024 * 1024 * 1024;
+    var rawUncompressedGB = Math.round(((rawPointsTotal * RAW_BYTES_PER_POINT) / gbDiv) * 100) / 100;
+    var rawCompressedGB = Math.round(((rawPointsTotal * GORILLA_BYTES_PER_POINT) / gbDiv) * 100) / 100;
+
+    var rollupBucketsTotal = (activeSeries / ROLLUP_INTERVAL_SEC) * 86400 * rollupDays;
+    var rollupGB = Math.round(((rollupBucketsTotal * ROLLUP_BYTES_PER_BUCKET) / gbDiv) * 100) / 100;
+
+    var totalStorageGB = Math.round((rawCompressedGB + rollupGB) * 100) / 100;
+    var fullRawLongTermGB = ((activeSeries / intervalSec) * 86400 * rollupDays * RAW_BYTES_PER_POINT) / gbDiv;
+    var savingPct = fullRawLongTermGB > 0
+      ? Math.round(((fullRawLongTermGB - totalStorageGB) / fullRawLongTermGB) * 1000) / 10
+      : 0;
+    if (savingPct < 0) savingPct = 0;
+
+    var chunkHours = pointsPerSec >= 100000 ? 2 : (pointsPerSec >= 10000 ? 6 : 24);
+    var chunkCount = Math.ceil((rawDays * 24) / chunkHours);
+
+    var tierKey = "ok";
+    var tierLabel = "基數健康（單機倒排索引輕鬆承載）";
+    if (activeSeries >= 500000) {
+      tierKey = "bad";
+      tierLabel = "高基數警戒（須改欄式 Parquet 或水平分片）";
+    } else if (activeSeries >= 100000) {
+      tierKey = "warn";
+      tierLabel = "中度基數壓力（需控管 Tag 與限制 Series Churn）";
+    }
+
+    var maxBarGB = Math.max(rawUncompressedGB, rawCompressedGB, rollupGB, 0.01);
+    var rawBarPct = Math.max(2, Math.round((rawUncompressedGB / maxBarGB) * 1000) / 10);
+    var gorillaBarPct = Math.max(2, Math.round((rawCompressedGB / maxBarGB) * 1000) / 10);
+    var rollupBarPct = Math.max(2, Math.round((rollupGB / maxBarGB) * 1000) / 10);
+
+    var summaryText = "活躍序列 " + activeSeries.toLocaleString("en-US") + " 條、寫入 " +
+      pointsPerSec.toLocaleString("en-US") + " pts/s；熱層建議每 " + chunkHours +
+      " 小時切一塊（共 " + chunkCount + " 個 Chunk）。若全期留未壓縮原始點需 " +
+      (Math.round(fullRawLongTermGB * 10) / 10).toLocaleString("en-US") +
+      " GB，採熱層 Gorilla ＋ 溫冷層 5m Rollup 僅需 " + totalStorageGB.toLocaleString("en-US") +
+      " GB（節省 " + savingPct + "%）。";
+
+    return {
+      activeSeries: activeSeries,
+      pointsPerSec: pointsPerSec,
+      indexMemMB: indexMemMB,
+      rawUncompressedGB: rawUncompressedGB,
+      rawCompressedGB: rawCompressedGB,
+      rollupGB: rollupGB,
+      totalStorageGB: totalStorageGB,
+      savingPct: savingPct,
+      chunkHours: chunkHours,
+      chunkCount: chunkCount,
+      tierKey: tierKey,
+      tierLabel: tierLabel,
+      rawBarPct: rawBarPct,
+      gorillaBarPct: gorillaBarPct,
+      rollupBarPct: rollupBarPct,
+      summaryText: summaryText
+    };
+  }
+
+  /* (3) DOM 參照 */
+  function el(id) { return document.getElementById(id); }
+
+  var grDom = {
+    presets: el("gr-presets"),
+    resetBtn: el("gr-reset"),
+    input: el("gr-input"),
+    granularity: el("gr-granularity"),
+    decimals: el("gr-decimals"),
+    kpiRaw: el("gr-kpi-raw"),
+    kpiComp: el("gr-kpi-comp"),
+    kpiCompSub: el("gr-kpi-comp-sub"),
+    kpiBpp: el("gr-kpi-bpp"),
+    kpiBytes: el("gr-kpi-bytes"),
+    kpiCardRatio: el("gr-kpi-card-ratio"),
+    kpiRatio: el("gr-kpi-ratio"),
+    kpiSaved: el("gr-kpi-saved"),
+    tbody: el("gr-tbody"),
+    status: el("gr-status")
+  };
+
+  var capDom = {
+    tierBadge: el("cap-tier-badge"),
+    resetBtn: el("cap-reset"),
+    devices: el("cap-devices"),
+    devicesVal: el("cap-devices-val"),
+    tags: el("cap-tags"),
+    tagsVal: el("cap-tags-val"),
+    interval: el("cap-interval"),
+    intervalVal: el("cap-interval-val"),
+    rawDays: el("cap-raw-days"),
+    rawDaysVal: el("cap-raw-days-val"),
+    rollupDays: el("cap-rollup-days"),
+    rollupDaysVal: el("cap-rollup-days-val"),
+    cardSeries: el("cap-card-series"),
+    outSeries: el("cap-out-series"),
+    outRam: el("cap-out-ram"),
+    outRamSub: el("cap-out-ram-sub"),
+    outPps: el("cap-out-pps"),
+    outChunks: el("cap-out-chunks"),
+    outTotal: el("cap-out-total"),
+    outSaving: el("cap-out-saving"),
+    gbRaw: el("cap-gb-raw"),
+    fillRaw: el("cap-fill-raw"),
+    gbGorilla: el("cap-gb-gorilla"),
+    fillGorilla: el("cap-fill-gorilla"),
+    gbRollup: el("cap-gb-rollup"),
+    fillRollup: el("cap-fill-rollup"),
+    status: el("cap-status")
+  };
+
+  /* (4) render */
+  function formatNum(n) {
+    return Number(n).toLocaleString("en-US");
+  }
+
+  function formatStorage(gb) {
+    if (gb >= 1024) return (Math.round((gb / 1024) * 100) / 100).toLocaleString("en-US") + " TB";
+    return gb.toLocaleString("en-US") + " GB";
+  }
+
+  function formatMem(mb) {
+    if (mb >= 1024) return (Math.round((mb / 1024) * 100) / 100).toLocaleString("en-US") + " GB";
+    return mb.toLocaleString("en-US") + " MB";
+  }
+
+  function makeCell(text) {
+    var td = document.createElement("td");
+    td.textContent = text;
+    return td;
+  }
+
+  function makePillCell(text, tone) {
+    var td = document.createElement("td");
+    var span = document.createElement("span");
+    span.className = "ts-code-pill " + tone;
+    span.textContent = text;
+    td.appendChild(span);
+    return td;
+  }
+
+  function renderGorilla(state) {
+    if (!grDom.tbody) return;
+    grDom.kpiRaw.textContent = formatNum(state.totalRawBits) + " b";
+    grDom.kpiComp.textContent = formatNum(state.totalCompressedBits) + " b";
+    grDom.kpiCompSub.textContent = "ts " + formatNum(state.totalTsBits) + "b ＋ val " + formatNum(state.totalValBits) + "b";
+    grDom.kpiBpp.textContent = state.avgBitsPerPoint + " b/pt";
+    grDom.kpiBytes.textContent = "去首筆穩定均 " + state.steadyBitsPerPoint + " b/pt";
+    grDom.kpiRatio.textContent = state.compressionRatio + "x";
+    grDom.kpiSaved.textContent = "節省 " + state.savingPct + "% 空間";
+    grDom.kpiCardRatio.className = "ts-kpi-card " + state.ratioTone;
+    grDom.status.textContent = state.summaryText;
+
+    while (grDom.tbody.firstChild) grDom.tbody.removeChild(grDom.tbody.firstChild);
+    for (var i = 0; i < state.rows.length; i += 1) {
+      var r = state.rows[i];
+      var tr = document.createElement("tr");
+      tr.appendChild(makeCell(String(r.index)));
+      tr.appendChild(makeCell(String(r.alignedTs)));
+      var deltaStr = r.delta === null ? "—" : (r.dod === null ? "Δ=" + r.delta : "Δ=" + r.delta + " / D=" + r.dod);
+      tr.appendChild(makeCell(deltaStr));
+      tr.appendChild(makePillCell(r.dodLabel, r.dodTone));
+      tr.appendChild(makeCell(String(r.qVal)));
+      tr.appendChild(makeCell(r.xorHex));
+      tr.appendChild(makePillCell(r.xorLabel, r.xorTone));
+
+      var meterTd = document.createElement("td");
+      var wrap = document.createElement("div");
+      wrap.style.display = "flex";
+      wrap.style.alignItems = "center";
+      wrap.style.gap = "8px";
+
+      var meter = document.createElement("div");
+      meter.className = "ts-bit-meter";
+      var tsFill = document.createElement("div");
+      tsFill.className = "ts-bit-ts";
+      tsFill.style.width = Math.min(100, (r.tsBits / 128) * 100) + "%";
+      var valFill = document.createElement("div");
+      valFill.className = "ts-bit-val";
+      valFill.style.width = Math.min(100, (r.valBits / 128) * 100) + "%";
+      meter.appendChild(tsFill);
+      meter.appendChild(valFill);
+
+      var numSpan = document.createElement("span");
+      numSpan.textContent = r.rowTotalBits + "b";
+      wrap.appendChild(meter);
+      wrap.appendChild(numSpan);
+      meterTd.appendChild(wrap);
+      tr.appendChild(meterTd);
+
+      grDom.tbody.appendChild(tr);
+    }
+  }
+
+  function renderCapacity(state, uiInputs) {
+    if (!capDom.outSeries) return;
+    capDom.devicesVal.textContent = formatNum(uiInputs.devices);
+    capDom.tagsVal.textContent = formatNum(uiInputs.tagCardinality);
+    capDom.intervalVal.textContent = uiInputs.intervalSec + " s";
+    capDom.rawDaysVal.textContent = uiInputs.rawRetentionDays + " 天";
+    capDom.rollupDaysVal.textContent = uiInputs.rollupDays + " 天";
+
+    capDom.tierBadge.className = "ts-tier-badge " + state.tierKey;
+    capDom.tierBadge.textContent = state.tierLabel;
+    capDom.cardSeries.className = "ts-kpi-card " + state.tierKey;
+
+    capDom.outSeries.textContent = formatNum(state.activeSeries);
+    capDom.outRam.textContent = formatMem(state.indexMemMB);
+    capDom.outRamSub.textContent = "約 3.2 KB / 活躍 Series";
+    capDom.outPps.textContent = formatNum(state.pointsPerSec) + " pts/s";
+    capDom.outChunks.textContent = "每 " + state.chunkHours + "h 切塊，共 " + state.chunkCount + " 塊";
+    capDom.outTotal.textContent = formatStorage(state.totalStorageGB);
+    capDom.outSaving.textContent = "較全期未壓縮省 " + state.savingPct + "%";
+
+    capDom.gbRaw.textContent = formatStorage(state.rawUncompressedGB);
+    capDom.fillRaw.style.width = state.rawBarPct + "%";
+    capDom.gbGorilla.textContent = formatStorage(state.rawCompressedGB);
+    capDom.fillGorilla.style.width = state.gorillaBarPct + "%";
+    capDom.gbRollup.textContent = formatStorage(state.rollupGB);
+    capDom.fillRollup.style.width = state.rollupBarPct + "%";
+
+    capDom.status.textContent = state.summaryText;
+  }
+
+  /* (5) 事件綁定 */
+  function markPresetButton(key) {
+    if (!grDom.presets) return;
+    var btns = grDom.presets.querySelectorAll("button[data-preset]");
+    for (var i = 0; i < btns.length; i += 1) {
+      btns[i].setAttribute("aria-pressed", btns[i].getAttribute("data-preset") === key ? "true" : "false");
+    }
+  }
+
+  function updateGorilla() {
+    if (!grDom.input) return;
+    var state = computeGorilla({
+      rawLines: grDom.input.value,
+      tsGranularitySec: Number(grDom.granularity.value),
+      valDecimals: Number(grDom.decimals.value)
+    });
+    renderGorilla(state);
+  }
+
+  function loadGorillaPreset(key) {
+    if (!grDom.input) return;
+    grDom.input.value = GORILLA_PRESETS[key] || GORILLA_PRESETS.steady;
+    markPresetButton(key);
+    updateGorilla();
+  }
+
+  function updateCapacity() {
+    if (!capDom.devices) return;
+    var inputs = {
+      devices: Number(capDom.devices.value),
+      tagCardinality: Number(capDom.tags.value),
+      intervalSec: Number(capDom.interval.value),
+      rawRetentionDays: Number(capDom.rawDays.value),
+      rollupDays: Number(capDom.rollupDays.value)
+    };
+    var state = computeCapacity(inputs);
+    renderCapacity(state, inputs);
+  }
+
+  function resetCapacity() {
+    if (!capDom.devices) return;
+    capDom.devices.value = String(DEFAULT_CAPACITY.devices);
+    capDom.tags.value = String(DEFAULT_CAPACITY.tagCardinality);
+    capDom.interval.value = String(DEFAULT_CAPACITY.intervalSec);
+    capDom.rawDays.value = String(DEFAULT_CAPACITY.rawRetentionDays);
+    capDom.rollupDays.value = String(DEFAULT_CAPACITY.rollupDays);
+    updateCapacity();
+  }
+
+  if (grDom.presets) {
+    grDom.presets.addEventListener("click", function (e) {
+      var node = e.target && e.target.nodeType === 1 ? e.target : (e.target ? e.target.parentElement : null);
+      var btn = node ? node.closest("button[data-preset]") : null;
+      if (!btn) return;
+      loadGorillaPreset(btn.getAttribute("data-preset"));
+    });
+  }
+
+  if (grDom.input) {
+    grDom.input.addEventListener("input", function () {
+      markPresetButton("");
+      updateGorilla();
+    });
+  }
+  if (grDom.granularity) grDom.granularity.addEventListener("change", updateGorilla);
+  if (grDom.decimals) grDom.decimals.addEventListener("change", updateGorilla);
+  if (grDom.resetBtn) {
+    grDom.resetBtn.addEventListener("click", function () {
+      grDom.granularity.value = "1";
+      grDom.decimals.value = "6";
+      loadGorillaPreset("steady");
+    });
+  }
+
+  var capInputs = [capDom.devices, capDom.tags, capDom.interval, capDom.rawDays, capDom.rollupDays];
+  for (var ci = 0; ci < capInputs.length; ci += 1) {
+    if (capInputs[ci]) capInputs[ci].addEventListener("input", updateCapacity);
+  }
+  if (capDom.resetBtn) capDom.resetBtn.addEventListener("click", resetCapacity);
+
+  loadGorillaPreset("steady");
+  resetCapacity();
+})();
+</script>
+
+
+<!-- 全螢幕檢視：切換按鈕、樣式與 F 鍵快捷鍵 -->
+<style>
+  .fs-toggle {
+    position: fixed;
+    top: 18px;
+    right: 18px;
+    z-index: 1000;
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    font-family: var(--sans);
+    font-size: 12.5px;
+    line-height: 1;
+    color: var(--text-2);
+    background: var(--bg);
+    border: 1px solid var(--border-strong);
+    border-radius: 999px;
+    padding: 7px 13px 7px 11px;
+    cursor: pointer;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, .06), 0 4px 12px rgba(0, 0, 0, .04);
+    transition: background .15s, border-color .15s, color .15s;
+  }
+
+  .fs-toggle:hover {
+    background: var(--bg-soft);
+    color: var(--text);
+    border-color: var(--text-3);
+  }
+
+  .fs-toggle:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+
+  .fs-toggle[aria-pressed="true"] {
+    background: var(--accent);
+    color: #fff;
+    border-color: var(--accent);
+  }
+
+  .fs-toggle .fs-ic {
+    flex: 0 0 auto;
+    display: block;
+  }
+
+  @media print {
+    .fs-toggle { display: none !important; }
+  }
+
+  @media (max-width: 480px) {
+    .fs-toggle { padding: 8px; }
+    .fs-toggle .fs-label { display: none; }
+  }
+</style>
+<button id="fs-toggle-btn" class="fs-toggle" type="button" aria-pressed="false"
+        aria-label="切換全螢幕檢視 (快捷鍵 F)" title="全螢幕檢視 (F)">
+  <svg class="fs-ic fs-ic-expand" viewBox="0 0 24 24" width="15" height="15" fill="none"
+       stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+    <path d="M8 3H5a2 2 0 0 0-2 2v3m18 0V5a2 2 0 0 0-2-2h-3m0 18h3a2 2 0 0 0 2-2v-3M3 16v3a2 2 0 0 0 2 2h3"/>
+  </svg>
+  <svg class="fs-ic fs-ic-compress" viewBox="0 0 24 24" width="15" height="15" fill="none"
+       stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="display:none">
+    <path d="M8 3v3a2 2 0 0 1-2 2H3m18 0h-3a2 2 0 0 1-2-2V3m0 18v-3a2 2 0 0 1 2-2h3M3 16h3a2 2 0 0 1 2 2v3"/>
+  </svg>
+  <span class="fs-label">全螢幕</span>
+</button>
+<script>
+  "use strict";
+  (function () {
+    var btn = document.getElementById("fs-toggle-btn");
+    if (!btn) return;
+    var docEl = document.documentElement;
+    var canFs = !!(docEl.requestFullscreen || docEl.webkitRequestFullscreen);
+    // 不支援 Fullscreen API (如 iPhone Safari) → 隱藏按鈕，避免壞掉的 UI
+    if (!canFs) { btn.style.display = "none"; return; }
+
+    var expandIc = btn.querySelector(".fs-ic-expand");
+    var compressIc = btn.querySelector(".fs-ic-compress");
+    var label = btn.querySelector(".fs-label");
+
+    function isFs() {
+      return !!(document.fullscreenElement || document.webkitFullscreenElement);
+    }
+    function enter() {
+      if (docEl.requestFullscreen) docEl.requestFullscreen();
+      else if (docEl.webkitRequestFullscreen) docEl.webkitRequestFullscreen();
+    }
+    function exit() {
+      if (document.exitFullscreen) document.exitFullscreen();
+      else if (document.webkitExitFullscreen) document.webkitExitFullscreen();
+    }
+    function toggle() { isFs() ? exit() : enter(); }
+    function sync() {
+      var on = isFs();
+      btn.setAttribute("aria-pressed", on ? "true" : "false");
+      if (label) label.textContent = on ? "離開全螢幕" : "全螢幕";
+      if (expandIc) expandIc.style.display = on ? "none" : "block";
+      if (compressIc) compressIc.style.display = on ? "block" : "none";
+    }
+
+    btn.addEventListener("click", toggle);
+    document.addEventListener("fullscreenchange", sync);
+    document.addEventListener("webkitfullscreenchange", sync);
+    document.addEventListener("keydown", function (e) {
+      if (e.key !== "f" && e.key !== "F") return;
+      if (e.metaKey || e.ctrlKey || e.altKey) return;
+      var t = e.target;
+      var tag = t && t.tagName ? t.tagName.toUpperCase() : "";
+      if (tag === "INPUT" || tag === "TEXTAREA" || (t && t.isContentEditable)) return;
+      e.preventDefault();
+      toggle();
+    });
+    sync();
+  })();
+</script>
+</body>
+</html>
